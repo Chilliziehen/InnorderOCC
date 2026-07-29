@@ -94,8 +94,14 @@ header, update the readable tag and digest together, then run
 
 ## Service Boundaries
 
-All published ports bind to `127.0.0.1`, and containers communicate over the
-internal `backend` network. Core owns application migration startup; Compose
-does not run a competing migration process. Default host ports are Core `8080`,
-AI `3100`, OPA `8181`, PostgreSQL `5432`, Kafka `9092`, Redis `6379`, MinIO API
-`9000`, and MinIO console `9001`.
+Application and infrastructure containers communicate exclusively over the
+internal `backend` network. A non-root `host-gateway` is the only service also
+attached to the `host-access` bridge and the only service that publishes ports.
+It receives no secrets or volumes and forwards loopback traffic to the internal
+service endpoints. All published ports bind to `127.0.0.1`; they are not exposed
+to the LAN.
+
+Core owns application migration startup; Compose does not run a competing
+migration process. Default host ports are Core `8080`, AI `3100`, OPA `8181`,
+PostgreSQL `5432`, Kafka `9092`, Redis `6379`, MinIO API `9000`, and MinIO
+console `9001`.

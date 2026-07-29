@@ -5,7 +5,7 @@ COPY gradlew settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY gradle ./gradle
 COPY services/core ./services/core
 COPY database/migrations ./database/migrations
-RUN chmod +x gradlew \
+RUN --mount=type=cache,target=/root/.gradle,sharing=locked chmod +x gradlew \
     && ./gradlew :services:core:bootJar --no-daemon \
     && find services/core/build/libs -maxdepth 1 -name 'core-*.jar' ! -name '*-plain.jar' -exec cp {} /workspace/app.jar \;
 

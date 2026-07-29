@@ -47,7 +47,7 @@ management:
 
 # Flyway creates the schema; Flowable owns and upgrades its internal tables.
 flowable:
-  database-schema: ${FLOWABLE_DATABASE_SCHEMA:flowable}
+  database-schema: flowable
   database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
 
 occ:

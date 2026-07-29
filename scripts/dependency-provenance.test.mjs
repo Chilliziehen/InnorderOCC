@@ -9,6 +9,17 @@ test("package lock resolves remote artifacts only from the official npm registry
   assert.deepEqual(findNonRegistryArtifacts(lock), []);
 });
 
+test("Gradle plugin resolution prefers Maven Central and falls back to the Plugin Portal", async () => {
+  const settings = await readFile(new URL("../settings.gradle.kts", import.meta.url), "utf8");
+  const pluginRepositories = settings.slice(settings.indexOf("pluginManagement"), settings.indexOf("plugins {"));
+  const repositoryBlock = pluginRepositories.match(/repositories\s*\{([^}]*)\}/u);
+  assert.ok(repositoryBlock, "pluginManagement must declare repositories");
+  assert.deepEqual(repositoryBlock[1].trim().split(/\r?\n/u).map((line) => line.trim()), [
+    "mavenCentral()",
+    "gradlePluginPortal()",
+  ]);
+});
+
 test("rejects every non-registry remote resolved form", () => {
   const resolvedValues = [
     "git+https://github.com/example/project.git",

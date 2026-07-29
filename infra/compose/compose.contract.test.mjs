@@ -70,7 +70,8 @@ test("local and Compose AI runtimes use port 3100", () => {
   assert.match(aiDockerfile, /EXPOSE 3100/u);
   assert.match(aiDockerfile, /localhost:3100\/health/u);
   assert.equal(compose.services.ai.environment.PORT, 3100);
-  assert.ok(compose.services.ai.ports.includes("127.0.0.1:${AI_PORT:-3100}:3100"));
+  assert.equal(compose.services.ai.ports, undefined);
+  assert.ok(compose.services["host-gateway"].ports.includes("127.0.0.1:${AI_PORT:-3100}:3100"));
   assert.ok(compose.services.ai.healthcheck.test.join(" ").includes("localhost:3100/health"));
   assert.equal(compose.services.core.environment.AI_BASE_URL, "http://ai:3100");
 });
@@ -88,6 +89,18 @@ function parseDockerfile(path) {
   const ast = DockerfileParser.parse(read(path));
   assert.ok(ast.getInstructions().length > 0, `${path} must parse into instructions`);
   return ast;
+}
+
+function assertCoreBootJarUsesGradleCache(ast) {
+  const bootJarRuns = ast.getInstructions().filter((instruction) =>
+    instruction.getKeyword() === "RUN" && instruction.getArgumentsContent()?.includes(":services:core:bootJar"));
+  assert.equal(bootJarRuns.length, 1, "core Dockerfile must have exactly one bootJar RUN");
+  assert.deepEqual(bootJarRuns[0].getFlags().map((flag) => [flag.getName(), flag.getValue()]), [
+    ["mount", "type=cache,target=/root/.gradle,sharing=locked"],
+  ], "core bootJar RUN must use the locked Gradle cache mount");
+  assert.match(bootJarRuns[0].getArgumentsContent(),
+    /^chmod \+x gradlew\s+&& \.\/gradlew :services:core:bootJar --no-daemon\b/u,
+    "core bootJar RUN must chmod and invoke Gradle in the mounted instruction");
 }
 
 function assertPinnedFroms(ast, path) {
@@ -153,6 +166,7 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.deepEqual(Object.keys(compose.services).sort(), [
     "ai",
     "core",
+    "host-gateway",
     "kafka",
     "minio",
     "minio-init",
@@ -162,12 +176,18 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
     "redis",
   ]);
   assert.equal(compose.networks.backend.internal, true);
+  assert.equal(compose.networks["host-access"].internal, undefined);
 
   for (const [name, service] of Object.entries(compose.services)) {
     if (!["minio-init", "minio-volume-init"].includes(name)) {
       assert.ok(service.healthcheck?.test, `${name} must have a healthcheck`);
     }
-    assert.ok(service.networks?.includes("backend"), `${name} must use backend`);
+    if (name === "host-gateway") {
+      assert.deepEqual(service.networks, ["backend", "host-access"]);
+    } else {
+      assert.deepEqual(service.networks, ["backend"], `${name} must remain backend-only`);
+      assert.equal(service.ports, undefined, `${name} must not publish ports directly`);
+    }
     if (service.image) {
       assert.match(service.image, /:[^@\s]+@sha256:[a-f0-9]{64}$/u, `${name} image must pin tag and digest`);
       assert.equal(service.image, expectedImages[name], `${name} image digest must be registry-verified`);
@@ -176,6 +196,25 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
       assert.match(String(port), /^127\.0\.0\.1:/u, `${name} port must be loopback-bound`);
     }
   }
+
+  const gateway = compose.services["host-gateway"];
+  assert.ok(gateway.build);
+  assert.deepEqual(gateway.ports, [
+    "127.0.0.1:${POSTGRES_PORT:-5432}:5432",
+    "127.0.0.1:${KAFKA_PORT:-9092}:9092",
+    "127.0.0.1:${REDIS_PORT:-6379}:6379",
+    "127.0.0.1:${MINIO_API_PORT:-9000}:9000",
+    "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001",
+    "127.0.0.1:${OPA_PORT:-8181}:8181",
+    "127.0.0.1:${AI_PORT:-3100}:3100",
+    "127.0.0.1:${CORE_PORT:-8080}:8080",
+  ]);
+  assert.equal(gateway.read_only, true);
+  assert.deepEqual(gateway.cap_drop, ["ALL"]);
+  assert.deepEqual(gateway.security_opt, ["no-new-privileges:true"]);
+  assert.equal(gateway.user, "node");
+  assert.deepEqual(gateway.secrets ?? [], []);
+  assert.equal(gateway.depends_on, undefined, "gateway routes must start independently of backend health");
 
   assert.equal(compose.services.opa.image, undefined);
   assert.ok(compose.services.core.build);
@@ -194,6 +233,7 @@ test("Compose wiring follows application config and completion gates", () => {
   const core = compose.services.core;
   const ai = compose.services.ai;
   assert.ok(compose.services.postgres.healthcheck.test.join(" ").includes("-h 127.0.0.1"));
+  assert.match(compose.services.kafka.healthcheck.test.join(" "), /--bootstrap-server localhost:29092\b/u);
 
   assert.deepEqual(Object.keys(core.environment).sort(), [
     "AI_BASE_URL",
@@ -347,8 +387,9 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
 test("Dockerfile AST enforces pinned stages, lifecycle ordering, users, and entrypoints", () => {
   const ai = parseDockerfile("services/ai/Dockerfile");
   const core = parseDockerfile("services/core/Dockerfile");
+  const gateway = parseDockerfile("infra/compose/gateway.Dockerfile");
   const opa = parseDockerfile("infra/compose/opa.Dockerfile");
-  for (const [path, ast] of [["services/ai/Dockerfile", ai], ["services/core/Dockerfile", core], ["infra/compose/opa.Dockerfile", opa]]) {
+  for (const [path, ast] of [["services/ai/Dockerfile", ai], ["services/core/Dockerfile", core], ["infra/compose/gateway.Dockerfile", gateway], ["infra/compose/opa.Dockerfile", opa]]) {
     assertPinnedFroms(ast, path);
     assert.ok(ast.getHEALTHCHECKs().length > 0 || path.includes("opa.Dockerfile"));
   }
@@ -359,6 +400,9 @@ test("Dockerfile AST enforces pinned stages, lifecycle ordering, users, and entr
   assert.deepEqual(core.getFROMs().map((from) => from.getImage()), [
     "eclipse-temurin:21.0.8_9-jdk-jammy@sha256:adb9b2d15adf1833d9dae0bdc1cff61ef5a804dc58dfbfb34269f32432b2e5dc",
     "eclipse-temurin:21.0.8_9-jre-jammy@sha256:db1689535962d757a5adabf57387584ed543d38c0b9d1fe870123ea362ad73b0",
+  ]);
+  assert.deepEqual(gateway.getFROMs().map((from) => from.getImage()), [
+    "node:22.17.1-bookworm-slim@sha256:2fa754a9ba4d7adbd2a51d182eaabbe355c82b673624035a38c0d42b08724854",
   ]);
   assert.deepEqual(opa.getFROMs().map((from) => from.getImage()), [
     "openpolicyagent/opa:1.5.1-static@sha256:72c5186ef74bc7a88faf88204109476be41cdc392ff1de722f7d8ecb08f18c4d",
@@ -372,7 +416,8 @@ test("Dockerfile AST enforces pinned stages, lifecycle ordering, users, and entr
   const explicitBuildIndex = aiInstructions.findIndex((instruction) => instruction.getKeyword() === "RUN" && instruction.getArgumentsContent()?.includes("npm run build --workspace @innorder/contracts") && instruction.getArgumentsContent()?.includes("npm run build --workspace @innorder/ai-service"));
   const pruneIndex = aiInstructions.findIndex((instruction) => instruction.getKeyword() === "RUN" && instruction.getArgumentsContent()?.includes("npm prune --omit=dev"));
   const runtimeIndex = aiInstructions.indexOf(ai.getFROMs()[1]);
-  assert.ok(ciIndex >= 0 && ciIndex < contractsSourceIndex && ciIndex < aiSourceIndex);
+  assert.ok(contractsSourceIndex >= 0 && contractsSourceIndex < ciIndex);
+  assert.ok(aiSourceIndex >= 0 && aiSourceIndex < ciIndex);
   assert.match(aiInstructions[ciIndex].getArgumentsContent(), /npm ci\b[\s\S]*--ignore-scripts/u);
   assert.ok(explicitBuildIndex > contractsSourceIndex && explicitBuildIndex > aiSourceIndex);
   assert.ok(pruneIndex >= explicitBuildIndex && pruneIndex < runtimeIndex);
@@ -383,10 +428,20 @@ test("Dockerfile AST enforces pinned stages, lifecycle ordering, users, and entr
   assert.deepEqual(ai.getENTRYPOINTs().at(-1).getJSONStrings().map((arg) => arg.getJSONValue()), ["node", "services/ai/dist/server.js"]);
 
   assert.equal(core.getFROMs()[1].getBuildStage(), "runtime");
+  const splitCoreBuild = DockerfileParser.parse(`
+RUN --mount=type=cache,target=/root/.gradle,sharing=locked chmod +x gradlew
+RUN ./gradlew :services:core:bootJar --no-daemon
+`);
+  assert.throws(() => assertCoreBootJarUsesGradleCache(splitCoreBuild), /core bootJar RUN must use the locked Gradle cache mount/u);
+  assertCoreBootJarUsesGradleCache(core);
   assert.equal(core.getInstructions().filter((instruction) => instruction.getKeyword() === "USER").at(-1).getArgumentsContent(), "10001");
   assert.deepEqual(core.getENTRYPOINTs().at(-1).getJSONStrings().map((arg) => arg.getJSONValue()), ["java", "-jar", "/app/app.jar"]);
   assert.ok(core.getHEALTHCHECKs().at(-1).getArgumentsContent().includes("http://localhost:8080/actuator/health/readiness"));
   assert.ok(!core.getHEALTHCHECKs().at(-1).getArgumentsContent().includes("http://localhost:8080/actuator/health\""));
+
+  assert.equal(gateway.getInstructions().filter((instruction) => instruction.getKeyword() === "USER").at(-1).getArgumentsContent(), "node");
+  assert.deepEqual(gateway.getENTRYPOINTs().at(-1).getJSONStrings().map((arg) => arg.getJSONValue()), ["node", "/app/gateway.mjs"]);
+  assert.ok(gateway.getHEALTHCHECKs().at(-1).getArgumentsContent().includes("http://localhost:18000/health"));
   assert.equal(opa.getInstructions().filter((instruction) => instruction.getKeyword() === "USER").at(-1).getArgumentsContent(), "10001");
 });
 

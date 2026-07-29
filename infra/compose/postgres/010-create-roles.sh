@@ -64,6 +64,8 @@ SELECT format(
 )
 \gexec
 
+ALTER ROLE innorder_runtime SET search_path TO flowable, pg_catalog;
+
 REVOKE ALL ON DATABASE :"database_name" FROM PUBLIC;
 GRANT CONNECT, TEMPORARY, CREATE ON DATABASE :"database_name" TO innorder_flyway;
 GRANT CONNECT ON DATABASE :"database_name" TO innorder_runtime;

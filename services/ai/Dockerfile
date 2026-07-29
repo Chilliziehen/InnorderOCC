@@ -4,9 +4,9 @@ WORKDIR /workspace
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/contracts/package.json packages/contracts/tsconfig.json ./packages/contracts/
 COPY services/ai/package.json services/ai/tsconfig.json ./services/ai/
-RUN npm ci --ignore-scripts --include-workspace-root --workspace @innorder/contracts --workspace @innorder/ai-service
 COPY packages/contracts/src ./packages/contracts/src
 COPY services/ai/src ./services/ai/src
+RUN npm ci --ignore-scripts --include-workspace-root --workspace @innorder/contracts --workspace @innorder/ai-service
 RUN npm run build --workspace @innorder/contracts \
     && npm run build --workspace @innorder/ai-service \
     && npm prune --omit=dev --ignore-scripts

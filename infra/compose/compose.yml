@@ -7,8 +7,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-innorder_occ}
       POSTGRES_USER: innorder_admin
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/010-create-roles.sh:/docker-entrypoint-initdb.d/010-create-roles.sh:ro
@@ -43,12 +41,10 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-    ports:
-      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
       interval: 10s
       timeout: 10s
       retries: 20
@@ -59,8 +55,6 @@ services:
   redis:
     image: redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
     command: ["/bin/sh", "-ec", "exec redis-server --appendonly yes --requirepass \"$$(cat /run/secrets/redis_password)\""]
-    ports:
-      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     secrets:
@@ -94,9 +88,6 @@ services:
     depends_on:
       minio-volume-init:
         condition: service_completed_successfully
-    ports:
-      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
-      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     secrets:
@@ -141,8 +132,6 @@ services:
       context: ../..
       dockerfile: infra/compose/opa.Dockerfile
     command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=error", "/policies"]
-    ports:
-      - "127.0.0.1:${OPA_PORT:-8181}:8181"
     volumes:
       - ../../policies/opa:/policies:ro
     healthcheck:
@@ -164,8 +153,6 @@ services:
       LOG_LEVEL: ${AI_LOG_LEVEL:-info}
       PORT: 3100
       npm_package_version: ${APP_VERSION:-0.1.0}
-    ports:
-      - "127.0.0.1:${AI_PORT:-3100}:3100"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s
@@ -204,8 +191,6 @@ services:
         target: occ.object-storage.access-key
       - source: minio_app_password
         target: occ.object-storage.secret-key
-    ports:
-      - "127.0.0.1:${CORE_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -218,6 +203,32 @@ services:
     networks: [backend]
     restart: unless-stopped
 
+  host-gateway:
+    build:
+      context: ../..
+      dockerfile: infra/compose/gateway.Dockerfile
+    user: node
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "127.0.0.1:${OPA_PORT:-8181}:8181"
+      - "127.0.0.1:${AI_PORT:-3100}:3100"
+      - "127.0.0.1:${CORE_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:18000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks: [backend, host-access]
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   kafka-data:
@@ -227,6 +238,8 @@ volumes:
 networks:
   backend:
     internal: true
+  host-access:
+    driver: bridge
 
 secrets:
   postgres_admin_password:

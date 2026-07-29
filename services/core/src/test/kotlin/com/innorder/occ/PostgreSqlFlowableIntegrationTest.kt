@@ -12,6 +12,7 @@ import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
+import org.springframework.test.annotation.DirtiesContext
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
@@ -21,6 +22,7 @@ import java.util.UUID
 
 @SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PostgreSqlFlowableIntegrationTest(
     @param:Autowired private val jdbcTemplate: JdbcTemplate,
     @param:Autowired private val repositoryService: RepositoryService,
@@ -94,7 +96,7 @@ class PostgreSqlFlowableIntegrationTest(
             "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = ('ai.' || ?)::regclass AND a.attnum = 1",
             String::class.java,
             indexName,
-        )).isEqualTo("vector(7)")
+        )).endsWith("vector(7)")
         assertThat(jdbcTemplate.queryForObject(
             "SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam WHERE c.oid = ('ai.' || ?)::regclass",
             String::class.java,
@@ -194,6 +196,7 @@ class PostgreSqlFlowableIntegrationTest(
             registry.add("spring.flyway.user") { "innorder_flyway" }
             registry.add("spring.flyway.password") { "flyway-test-only" }
             registry.add("flowable.database-schema") { "flowable" }
+            registry.add("occ.status-probes.external-enabled") { "false" }
         }
     }
 }

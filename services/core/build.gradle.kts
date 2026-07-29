@@ -7,6 +7,7 @@ plugins {
 
 group = rootProject.group
 version = rootProject.version
+extra["testcontainers.version"] = "1.21.4"
 
 java {
     toolchain {

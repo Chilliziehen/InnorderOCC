@@ -1,4 +1,5 @@
 CREATE ROLE innorder_runtime LOGIN PASSWORD 'runtime-test-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE innorder_runtime SET search_path TO flowable, pg_catalog;
 CREATE ROLE innorder_flyway LOGIN PASSWORD 'flyway-test-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT innorder_runtime TO innorder_flyway;
 REVOKE ALL ON DATABASE innorder_occ FROM PUBLIC;

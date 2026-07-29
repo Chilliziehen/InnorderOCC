@@ -14,3 +14,5 @@ BEGIN
     END IF;
 END
 $runtime_role$;
+
+ALTER ROLE innorder_runtime SET search_path TO flowable, pg_catalog;
