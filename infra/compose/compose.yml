@@ -1,0 +1,247 @@
+name: innorder-occ
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-innorder_occ}
+      POSTGRES_USER: innorder_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/010-create-roles.sh:/docker-entrypoint-initdb.d/010-create-roles.sh:ro
+    secrets:
+      - source: postgres_admin_password
+        target: postgres_admin_password
+      - source: postgres_flyway_password
+        target: postgres_flyway_password
+      - source: postgres_runtime_password
+        target: postgres_runtime_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbded567ce3895622ed
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:29093,INTERNAL://:29092,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    networks: [backend]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    command: ["/bin/sh", "-ec", "exec redis-server --appendonly yes --requirepass \"$$(cat /run/secrets/redis_password)\""]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    secrets:
+      - source: redis_password
+        target: redis_password
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$(cat /run/secrets/redis_password)\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+    restart: unless-stopped
+
+  minio-volume-init:
+    image: alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c
+    user: "0:0"
+    command: ["/bin/sh", "-ec", "chown -R 10001:10001 /data"]
+    volumes:
+      - minio-data:/data
+    networks: [backend]
+    restart: "no"
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    user: "10001:10001"
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      HOME: /tmp
+    depends_on:
+      minio-volume-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    secrets:
+      - source: minio_root_user
+        target: minio_root_user
+      - source: minio_root_password
+        target: minio_root_password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    entrypoint: ["/bin/sh"]
+    command: ["/config/init.sh"]
+    environment:
+      MINIO_BUCKET: ${OBJECT_STORAGE_BUCKET:-innorder-occ}
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./minio/init.sh:/config/init.sh:ro
+    secrets:
+      - source: minio_root_user
+        target: minio_root_user
+      - source: minio_root_password
+        target: minio_root_password
+      - source: minio_app_user
+        target: minio_app_user
+      - source: minio_app_password
+        target: minio_app_password
+    networks: [backend]
+    restart: "no"
+
+  opa:
+    build:
+      context: ../..
+      dockerfile: infra/compose/opa.Dockerfile
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=error", "/policies"]
+    ports:
+      - "127.0.0.1:${OPA_PORT:-8181}:8181"
+    volumes:
+      - ../../policies/opa:/policies:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8181/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks: [backend]
+    restart: unless-stopped
+
+  ai:
+    build:
+      context: ../..
+      dockerfile: services/ai/Dockerfile
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${AI_LOG_LEVEL:-info}
+      PORT: 3100
+      npm_package_version: ${APP_VERSION:-0.1.0}
+    ports:
+      - "127.0.0.1:${AI_PORT:-3100}:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks: [backend]
+    restart: unless-stopped
+
+  core:
+    build:
+      context: ../..
+      dockerfile: services/core/Dockerfile
+    environment:
+      APP_VERSION: ${APP_VERSION:-0.1.0}
+      SERVER_PORT: 8080
+      SPRING_CONFIG_IMPORT: configtree:/run/secrets/
+      DATABASE_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-innorder_occ}
+      DATABASE_USERNAME: innorder_runtime
+      FLYWAY_USERNAME: innorder_flyway
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      OPA_BASE_URL: http://opa:8181
+      AI_BASE_URL: http://ai:3100
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-innorder-occ}
+    secrets:
+      - source: postgres_runtime_password
+        target: spring.datasource.password
+      - source: postgres_flyway_password
+        target: spring.flyway.password
+      - source: redis_password
+        target: spring.data.redis.password
+      - source: minio_app_user
+        target: occ.object-storage.access-key
+      - source: minio_app_password
+        target: occ.object-storage.secret-key
+    ports:
+      - "127.0.0.1:${CORE_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [backend]
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  kafka-data:
+  redis-data:
+  minio-data:
+
+networks:
+  backend:
+    internal: true
+
+secrets:
+  postgres_admin_password:
+    file: ${POSTGRES_ADMIN_PASSWORD_FILE:?Set POSTGRES_ADMIN_PASSWORD_FILE}
+  postgres_flyway_password:
+    file: ${POSTGRES_FLYWAY_PASSWORD_FILE:?Set POSTGRES_FLYWAY_PASSWORD_FILE}
+  postgres_runtime_password:
+    file: ${POSTGRES_RUNTIME_PASSWORD_FILE:?Set POSTGRES_RUNTIME_PASSWORD_FILE}
+  redis_password:
+    file: ${REDIS_PASSWORD_FILE:?Set REDIS_PASSWORD_FILE}
+  minio_root_user:
+    file: ${MINIO_ROOT_USER_FILE:?Set MINIO_ROOT_USER_FILE}
+  minio_root_password:
+    file: ${MINIO_ROOT_PASSWORD_FILE:?Set MINIO_ROOT_PASSWORD_FILE}
+  minio_app_user:
+    file: ${MINIO_APP_USER_FILE:?Set MINIO_APP_USER_FILE}
+  minio_app_password:
+    file: ${MINIO_APP_PASSWORD_FILE:?Set MINIO_APP_PASSWORD_FILE}

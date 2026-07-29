@@ -1,0 +1,5 @@
+**
+!infra/
+!infra/compose/
+!infra/compose/opa.Dockerfile
+!infra/compose/opa-entrypoint.sh
