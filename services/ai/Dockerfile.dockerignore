@@ -1,0 +1,16 @@
+**
+!package.json
+!package-lock.json
+!tsconfig.base.json
+!packages/
+!packages/contracts/
+!packages/contracts/package.json
+!packages/contracts/tsconfig.json
+!packages/contracts/src/
+!packages/contracts/src/**
+!services/
+!services/ai/
+!services/ai/package.json
+!services/ai/tsconfig.json
+!services/ai/src/
+!services/ai/src/**

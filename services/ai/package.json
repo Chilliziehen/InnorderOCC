@@ -1,0 +1,21 @@
+{
+  "name": "@innorder/ai-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@innorder/contracts": "0.1.0",
+    "@langchain/core": "^1.2.3",
+    "fastify": "^5.10.0",
+    "zod": "^4.0.10"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}
