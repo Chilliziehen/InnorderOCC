@@ -1,0 +1,67 @@
+openapi: 3.1.0
+info:
+  title: Innorder OCC Core API
+  version: 0.1.0
+paths:
+  /api/v1/system/status:
+    get:
+      operationId: getSystemStatus
+      responses:
+        "200":
+          description: Current OCC Core service and component status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemStatus"
+components:
+  schemas:
+    ServiceState:
+      type: string
+      enum:
+        - READY
+        - DEGRADED
+        - UNREACHABLE
+        - CHECKING
+    ComponentStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - label
+        - state
+        - checkedAt
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        state:
+          $ref: "#/components/schemas/ServiceState"
+        detail:
+          type: string
+        checkedAt:
+          type: string
+          format: date-time
+    SystemStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - service
+        - version
+        - state
+        - checkedAt
+        - components
+      properties:
+        service:
+          type: string
+        version:
+          type: string
+        state:
+          $ref: "#/components/schemas/ServiceState"
+        checkedAt:
+          type: string
+          format: date-time
+        components:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComponentStatus"
