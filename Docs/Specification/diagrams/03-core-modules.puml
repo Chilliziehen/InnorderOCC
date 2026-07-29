@@ -1,0 +1,58 @@
+@startuml
+title OCC Core - Modular Monolith Boundaries
+left to right direction
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam componentStyle rectangle
+
+package "OCC Core" {
+  [Identity & Access] as iam
+  [Authorization] as authz
+  [Domain Package] as catalog
+  [Process Definition] as pd
+  [Process Instance] as pi
+  [Task] as task
+  [Evidence] as evidence
+  [Risk] as risk
+  [Resource] as resource
+  [Audit] as audit
+  [Outbox] as outbox
+
+  iam --> authz : principals
+  catalog --> authz : actions, relations, policy scope
+  catalog --> pd : BPMN / DMN / forms / rules
+  pd --> pi : versioned binding
+  pi --> task : lifecycle
+  task --> evidence : requirements
+  task --> risk : events and deadlines
+  task --> resource : reservations
+  authz ..> pi : authorize commands
+  authz ..> task : authorize commands
+  authz ..> evidence : authorize commands
+  pi --> audit
+  task --> audit
+  evidence --> audit
+  risk --> audit
+  pi --> outbox
+  task --> outbox
+  evidence --> outbox
+}
+
+component "Embedded Flowable 7.x" as flowable
+database PostgreSQL as pg
+queue Kafka as kafka
+
+pd --> flowable : deploy definitions
+pi --> flowable : execute instances
+task --> flowable : task adapter
+flowable --> pg : private engine schema
+audit --> pg
+outbox --> pg
+outbox --> kafka : asynchronous publisher
+
+note right of flowable
+  Only Process Definition, Process Instance and Task
+  modules may depend on Flowable APIs or identifiers.
+end note
+@enduml

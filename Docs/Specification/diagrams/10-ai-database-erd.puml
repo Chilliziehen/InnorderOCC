@@ -1,0 +1,87 @@
+@startuml
+title AI and RAG Database ERD
+hide methods
+hide stereotypes
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam classAttributeIconSize 0
+
+entity "authz.entity" as entity
+entity "authz.policy_release" as release
+entity "authz.decision_log" as decision
+entity "catalog.package_version" as packageVersion
+entity "occ.process_instance" as process
+entity "occ.task_projection" as task
+
+entity "ai.model_provider" as provider
+entity "ai.model_profile" as model
+entity "ai.prompt_template" as prompt
+entity "ai.prompt_template_version" as promptVersion
+entity "ai.agent_definition" as agent
+entity "ai.agent_definition_version" as agentVersion
+entity "ai.tool_definition" as tool
+entity "ai.agent_tool_grant" as grant
+entity "ai.knowledge_source" as source
+entity "ai.knowledge_document" as document
+entity "ai.knowledge_document_version" as documentVersion
+entity "ai.knowledge_chunk" as chunk
+entity "ai.embedding_space" as embeddingSpace
+entity "ai.chunk_embedding" as embedding
+entity "ai.ai_run" as run
+entity "ai.ai_run_artifact" as artifact
+entity "ai.tool_call" as toolCall
+entity "ai.recommendation" as recommendation
+entity "ai.recommendation_citation" as citation
+entity "ai.conversation" as conversation
+entity "ai.message" as message
+entity "ai.evaluation_dataset" as dataset
+entity "ai.evaluation_dataset_version" as datasetVersion
+entity "ai.evaluation_case" as evalCase
+entity "ai.evaluation_run" as evalRun
+entity "ai.evaluation_result" as evalResult
+
+entity ||--o| provider : shared PK
+provider ||--o{ model
+prompt ||--o{ promptVersion
+agent ||--o{ agentVersion
+packageVersion ||--o{ agentVersion
+promptVersion ||--o{ agentVersion
+agentVersion ||--o{ grant
+tool ||--o{ grant
+entity ||--o| source : shared PK
+packageVersion |o--o{ source
+source ||--o{ document
+entity ||--o| document : shared PK
+document ||--o{ documentVersion
+documentVersion ||--o{ chunk
+model ||--o{ embeddingSpace
+embeddingSpace ||--o{ embedding
+chunk ||--o{ embedding
+agentVersion ||--o{ run
+model ||--o{ run
+promptVersion ||--o{ run
+packageVersion ||--o{ run
+release ||--o{ run
+run ||--o{ artifact
+run ||--o{ toolCall
+tool ||--o{ toolCall
+decision ||--o{ toolCall
+run ||--o{ recommendation
+entity ||--o| recommendation : shared PK
+recommendation ||--o{ citation
+documentVersion ||--o{ citation
+chunk ||--o{ citation
+entity ||--o| conversation : shared PK
+process |o--o{ conversation
+task |o--o{ conversation
+conversation ||--o{ message
+run |o--o{ message
+dataset ||--o{ datasetVersion
+datasetVersion ||--o{ evalCase
+datasetVersion ||--o{ evalRun
+agentVersion ||--o{ evalRun
+model ||--o{ evalRun
+evalRun ||--o{ evalResult
+evalCase ||--o{ evalResult
+@enduml

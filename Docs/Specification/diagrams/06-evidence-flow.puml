@@ -1,0 +1,31 @@
+@startuml
+title Evidence Submission and Review
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+autonumber
+
+actor Participant
+participant Electron
+participant "OCC Core" as Core
+participant "S3 / MinIO" as Store
+database PostgreSQL as DB
+actor Reviewer
+
+Participant -> Electron : choose evidence file
+Electron -> Core : request upload session\n(target, type, size, expected SHA-256)
+Core -> DB : authorize and create short-lived upload_session
+Core --> Electron : signed upload permission + object key
+Electron -> Store : direct upload
+Electron -> Core : confirm upload + client hash
+Core -> Store : HEAD/read metadata and verify object
+alt missing, expired, wrong size/type/hash
+  Core -> DB : mark session FAILED or EXPIRED
+  Core --> Electron : reject; no valid evidence created
+else valid object
+  Core -> DB : transaction: create immutable evidence_version,\nadvance evidence.current_version, audit + Outbox
+  Core --> Electron : evidence SUBMITTED
+  Reviewer -> Core : accept / reject / conditional review
+  Core -> DB : append immutable evidence_review,\nupdate evidence state, audit + Outbox
+end
+@enduml

@@ -1,0 +1,37 @@
+@startuml
+title Innorder OCC - System Context
+left to right direction
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam componentStyle rectangle
+skinparam rectangle {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+}
+
+actor Participant as participant
+actor "Process Owner / Teacher" as owner
+actor Administrator as admin
+actor "Resource Manager" as resourceManager
+
+rectangle "Innorder OCC\nDeterministic workflow control + probabilistic intelligence" as occ #E0F2FE
+cloud "OIDC Identity Provider" as oidc
+cloud "Model Providers" as llm
+cloud "Customer Infrastructure" as infrastructure
+cloud "Authorized Update Source" as updates
+
+participant --> occ : tasks, evidence, guidance
+owner --> occ : review, intervention, modeling
+admin --> occ : identity, policy, configuration
+resourceManager --> occ : capacity and reservations
+occ --> oidc : authentication federation
+occ --> llm : policy-filtered prompts and retrieval context
+occ --> infrastructure : database, object, event, cache services
+occ --> updates : signed desktop updates
+
+note bottom of occ
+  PostgreSQL is the structured source of truth.
+  AI recommendations cannot directly advance critical workflow state.
+end note
+@enduml

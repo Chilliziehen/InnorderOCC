@@ -1,0 +1,38 @@
+@startuml
+title Authorization-Sensitive Business Command
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+autonumber
+
+actor User
+participant Electron
+participant "OCC Core" as Core
+database PostgreSQL as DB
+participant "Local OPA" as OPA
+participant Flowable
+participant "Outbox Publisher" as Publisher
+queue Kafka
+
+User -> Electron : submit command
+Electron -> Core : command + JWT + idempotency key + expectedVersion
+Core -> DB : BEGIN; lock authorization_state FOR SHARE
+Core -> DB : load principal, resource, direct relations,\nactive policy release and row version
+Core -> OPA : principal / action / resource / context\n+ release and authorization revision
+OPA --> Core : ALLOW or DENY + reason codes
+alt denied, OPA error, or revision mismatch
+  Core -> DB : ROLLBACK
+  Core -> DB : append denied decision in separate transaction
+  Core --> Electron : 403 / stable error code
+else allowed
+  Core -> DB : verify idempotency and expectedVersion
+  Core -> Flowable : execute deterministic transition
+  Flowable -> DB : update engine state
+  Core -> DB : update OCC projection, direct relations,\naudit record and Outbox event
+  Core -> DB : COMMIT
+  Core --> Electron : committed version, state, audit ID
+  Publisher -> DB : claim available Outbox event
+  Publisher -> Kafka : publish with aggregate ID partition key
+  Publisher -> DB : mark published or schedule retry
+end
+@enduml

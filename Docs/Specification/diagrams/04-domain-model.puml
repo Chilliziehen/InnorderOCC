@@ -1,0 +1,94 @@
+@startuml
+title Innorder OCC - Domain Model
+hide methods
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam classAttributeIconSize 0
+
+class OrganizationInstance {
+  instanceKey
+  deploymentMode
+  configVersion
+}
+class Principal {
+  kind: USER | GROUP | SERVICE | ROLE
+  status
+}
+class DomainPackage
+class PackageVersion {
+  semver
+  status
+  contentHash
+}
+class EntityTypeVersion {
+  jsonSchema
+  authSchema
+  indexSpec
+}
+class BusinessObject {
+  lifecycleState
+  data
+  rowVersion
+}
+class ProcessDefinitionBinding
+class ProcessInstance {
+  businessKey
+  state
+  rowVersion
+}
+class Task {
+  activityKey
+  state
+  dueAt
+}
+class Evidence {
+  state
+  currentVersion
+}
+class EvidenceVersion {
+  sha256
+  objectKey
+}
+class EvidenceReview {
+  decision
+}
+class Risk {
+  severity
+  state
+  confidence
+}
+class ManagedResource
+class Reservation {
+  timeRange
+  capacity
+  exclusive
+}
+class Recommendation {
+  payload
+  confidence
+  status
+}
+class AuditRecord
+class OutboxEvent
+
+OrganizationInstance "1" o-- "*" Principal
+DomainPackage "1" *-- "*" PackageVersion
+PackageVersion "1" *-- "*" EntityTypeVersion
+EntityTypeVersion "1" --> "*" BusinessObject : validates
+PackageVersion "1" --> "*" ProcessDefinitionBinding
+ProcessDefinitionBinding "1" --> "*" ProcessInstance
+BusinessObject "0..1" <-- "*" ProcessInstance
+ProcessInstance "1" *-- "*" Task
+Task "0..1" <-- "*" Evidence
+BusinessObject "0..1" <-- "*" Evidence
+Evidence "1" *-- "1..*" EvidenceVersion
+EvidenceVersion "1" *-- "*" EvidenceReview
+Principal "1" --> "*" EvidenceReview : reviewer
+Task "0..1" <-- "*" Risk : target
+ManagedResource "1" *-- "*" Reservation
+Task "0..1" <-- "*" Reservation
+Recommendation "*" --> "1" BusinessObject : target example
+Principal "1" --> "*" AuditRecord : actor
+ProcessInstance "1" --> "*" OutboxEvent : aggregate example
+@enduml

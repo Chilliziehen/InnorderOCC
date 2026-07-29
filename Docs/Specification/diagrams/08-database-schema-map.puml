@@ -1,0 +1,57 @@
+@startuml
+title PostgreSQL Schema Responsibility Map
+left to right direction
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam packageStyle rectangle
+
+package "platform (1)" as platform {
+  [instance]
+}
+package "catalog (10)" as catalog {
+  [packages and versions]
+  [types, actions, relations]
+  [forms, evidence, risk, workflow definitions]
+}
+package "iam (3)" as iam {
+  [principal]
+  [user_account]
+  [external_identity]
+}
+package "authz (13 + default partition)" as authz {
+  [entity and relationship graph]
+  [policy bundles and releases]
+  [decision log]
+}
+package "occ (14)" as occ {
+  [business objects and migrations]
+  [process and task projections]
+  [evidence, risk, resources]
+}
+package "audit (3 + default partition)" as audit {
+  [audit_record]
+  [idempotency_record]
+  [outbox_event]
+}
+package "ai (26)" as ai {
+  [models, prompts, agents, tools]
+  [knowledge, chunks, embeddings]
+  [runs, recommendations, conversations, evaluations]
+}
+package "flowable (vendor-owned)" as flowable {
+  [engine-private tables]
+}
+
+catalog --> platform
+iam --> catalog : principal type
+iam --> authz : shared entity PK
+authz --> catalog : type/action/relation definitions
+occ --> authz : shared entity PK and targets
+occ --> catalog : versioned definitions
+occ ..> flowable : engine IDs only; no FK
+audit --> authz : actors and targets
+ai --> authz : shared entities, policy release, decisions
+ai --> catalog : package versions
+ai --> occ : process/task conversations
+@enduml

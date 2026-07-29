@@ -1,0 +1,90 @@
+@startuml
+title Core Database ERD - Catalog, Identity, Authorization, Runtime and Audit
+hide methods
+hide stereotypes
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam classAttributeIconSize 0
+
+entity "catalog.domain_package" as package
+entity "catalog.package_version" as packageVersion
+entity "catalog.entity_type" as entityType
+entity "catalog.entity_type_version" as entityTypeVersion
+entity "catalog.relation_definition" as relationDef
+entity "catalog.workflow_definition" as workflowDef
+entity "catalog.evidence_requirement" as requirement
+entity "catalog.risk_rule_definition" as riskRule
+
+entity "authz.entity" as entity {
+  * id : uuid <<PK>>
+  --
+  entity_type_id : uuid
+  entity_type_version_id : uuid
+  entity_key : text
+  state : text
+  row_version : bigint
+}
+entity "iam.principal" as principal
+entity "iam.user_account" as account
+entity "authz.relationship" as relationship
+entity "authz.policy_bundle" as bundle
+entity "authz.policy_bundle_version" as bundleVersion
+entity "authz.policy_release" as release
+entity "authz.policy_release_item" as releaseItem
+entity "authz.decision_log" as decision
+
+entity "occ.business_object" as businessObject
+entity "occ.process_definition_binding" as binding
+entity "occ.process_instance" as process
+entity "occ.task_projection" as task
+entity "occ.evidence" as evidence
+entity "occ.evidence_version" as evidenceVersion
+entity "occ.evidence_review" as review
+entity "occ.risk" as risk
+entity "occ.managed_resource" as resource
+entity "occ.resource_reservation" as reservation
+entity "audit.audit_record" as auditRecord
+entity "audit.idempotency_record" as idempotency
+entity "audit.outbox_event" as outbox
+
+package ||--o{ packageVersion
+package ||--o{ entityType
+entityType ||--o{ entityTypeVersion
+packageVersion ||--o{ entityTypeVersion
+packageVersion ||--o{ relationDef
+packageVersion ||--o{ workflowDef
+packageVersion ||--o{ requirement
+packageVersion ||--o{ riskRule
+entityType ||--o{ entity
+entityTypeVersion ||--o{ entity
+entity ||--o| principal : shared PK
+principal ||--o| account : shared PK
+relationDef ||--o{ relationship
+entity ||--o{ relationship : subject
+entity ||--o{ relationship : object
+bundle ||--o{ bundleVersion
+release ||--o{ releaseItem
+bundleVersion ||--o{ releaseItem
+release ||--o{ decision
+entity ||--o{ decision : principal/resource
+entity ||--o| businessObject : shared PK
+workflowDef ||--o{ binding
+packageVersion ||--o{ binding
+binding ||--o{ process
+entity ||--o| process : shared PK
+businessObject |o--o{ process
+process ||--o{ task
+entity ||--o| task : shared PK
+task |o--o{ evidence
+entity ||--o| evidence : shared PK
+requirement ||--o{ evidence
+evidence ||--o{ evidenceVersion
+evidenceVersion ||--o{ review
+entity ||--o| risk : shared PK
+riskRule ||--o{ risk
+entity ||--o| resource : shared PK
+resource ||--o{ reservation
+principal ||--o{ auditRecord
+principal ||--o{ idempotency
+@enduml

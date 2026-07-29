@@ -1,0 +1,48 @@
+@startuml
+title Innorder OCC - Container Architecture
+left to right direction
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam componentStyle rectangle
+
+package "User Device" {
+  [Electron Main] as main
+  [React Renderer] as renderer
+  [Typed Preload IPC] as preload
+  renderer --> preload
+  preload --> main
+}
+
+package "Private Customer Instance" {
+  [OCC Core\nKotlin / Spring Boot / Flowable] as core #DFF3E4
+  [AI Service\nNode.js / Fastify / LangChain.js] as ai #FFF2CC
+  [OPA Sidecar\nRego decision point] as opa
+  database "PostgreSQL 16+\nCore, Flowable, audit, AI" as pg
+  database "Redis\nrebuildable cache" as redis
+  queue "Kafka KRaft\ndomain events" as kafka
+  storage "S3 / MinIO\nevidence and sources" as s3
+}
+
+cloud "OIDC Provider" as oidc
+cloud "LLM / Embedding Providers" as models
+
+renderer --> core : HTTPS REST / SSE
+main --> oidc : system-browser login
+core --> opa : authorization input
+core --> pg : ACID transaction
+core --> redis : cache / ephemeral state
+core --> s3 : validate metadata and hash
+core --> kafka : publish committed Outbox events
+kafka --> ai : at-least-once events
+ai --> core : restricted query / command API
+ai --> pg : AI-owned runtime and index tables
+ai --> redis : retrieval / rate-limit cache
+ai --> s3 : governed artifacts
+ai --> models : policy-filtered model calls
+
+note bottom of core
+  Flowable execution, OCC projections, audit and Outbox
+  are coordinated in one PostgreSQL transaction boundary.
+end note
+@enduml

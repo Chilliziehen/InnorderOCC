@@ -1,0 +1,54 @@
+@startuml
+title Innorder OCC - Per-Customer Private Deployment
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+
+node "Participant Workstations" {
+  artifact "Signed Electron App" as desktop
+  database "Encrypted read-only cache" as localcache
+  desktop --> localcache
+}
+
+node "Customer Private Network / Docker Compose" {
+  node "Application Tier" {
+    component "OCC Core" as core
+    component "AI Service" as ai
+    component "OPA Sidecar" as opa
+  }
+  node "Data Tier" {
+    database "PostgreSQL 16+\npgvector + btree_gist" as pg
+    database Redis as redis
+    queue "Kafka KRaft" as kafka
+    storage "S3 / MinIO" as s3
+  }
+  component "Telemetry Collector" as otel
+}
+
+cloud "Customer OIDC" as oidc
+cloud "Approved Model Endpoints" as models
+cloud "Backup Target" as backup
+
+desktop --> core : TLS / REST / SSE
+desktop --> oidc : browser authentication
+core --> opa : local policy decisions
+core --> pg
+core --> redis
+core --> kafka
+core --> s3
+ai --> core
+ai --> pg
+ai --> redis
+ai --> kafka
+ai --> s3
+ai --> models : governed TLS
+core --> otel
+ai --> otel
+pg --> backup : encrypted backup
+s3 --> backup : versioned object backup
+
+note bottom
+  Pilot: single-node dependencies, no HA claim.
+  Production: customer SLA determines replicas, RPO and RTO.
+end note
+@enduml
