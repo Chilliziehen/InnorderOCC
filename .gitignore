@@ -1,1 +1,33 @@
 .superpowers/
+
+# Node.js and generated output
+node_modules/
+.cache/
+dist/
+out/
+.vite/
+coverage/
+playwright-report/
+test-results/
+
+# Generated documentation and database bundles
+Docs/Specification/build-en/
+Docs/Specification/build-zh/
+database/database.zip
+
+# Gradle
+.gradle/
+.kotlin/
+build/
+
+# IDE and OS metadata
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local environment files
+.env
+.env.*
+!.env.example

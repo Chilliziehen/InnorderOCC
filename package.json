@@ -1,0 +1,36 @@
+{
+  "name": "innorder-occ",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "services/ai",
+    "apps/*"
+  ],
+  "scripts": {
+    "install:verified": "node scripts/install-verified.mjs",
+    "test": "node scripts/verify.mjs --tests",
+    "test:verify": "node --test scripts/verify.test.mjs",
+    "test:provenance": "node --test scripts/dependency-provenance.test.mjs",
+    "test:workspaces": "npm run test --workspaces --if-present",
+    "test:infra": "node --test infra/compose/compose.contract.test.mjs",
+    "test:database": "node --test database/tests/schema-static.test.mjs",
+    "test:electron-provenance": "node --test scripts/electron-provenance.test.mjs",
+    "test:database:pglite": "node scripts/verify.mjs --pglite",
+    "build": "npm run build --workspace @innorder/contracts && npm run build --workspace @innorder/ai-service && npm run build --workspace @innorder/desktop",
+    "typecheck": "npm run build --workspace @innorder/contracts && npm run typecheck --workspaces --if-present",
+    "verify": "node scripts/verify.mjs",
+    "verify:local": "node scripts/verify.mjs --local",
+    "verify:full": "node scripts/verify.mjs --full"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.4",
+    "dockerfile-ast": "0.7.1",
+    "saxes": "6.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "yaml": "2.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
