@@ -1,0 +1,16 @@
+**
+!gradlew
+!settings.gradle.kts
+!build.gradle.kts
+!gradle.properties
+!gradle/
+!gradle/wrapper/
+!gradle/wrapper/**
+!services/
+!services/core/
+!services/core/src/
+!services/core/src/**
+!services/core/build.gradle.kts
+!database/
+!database/migrations/
+!database/migrations/**

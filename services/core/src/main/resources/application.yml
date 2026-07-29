@@ -1,0 +1,67 @@
+spring:
+  application:
+    name: occ-core
+    version: ${APP_VERSION:0.1.0}
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  datasource:
+    url: ${DATABASE_JDBC_URL:jdbc:postgresql://localhost:5432/innorder_occ}
+    username: ${DATABASE_USERNAME:innorder_runtime}
+    password: ${DATABASE_PASSWORD:}
+    hikari:
+      connection-timeout: 1500
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 1500ms
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    locations: ${FLYWAY_LOCATIONS:classpath:db/migration}
+    user: ${FLYWAY_USERNAME:innorder_flyway}
+    password: ${FLYWAY_PASSWORD:}
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  error:
+    include-binding-errors: never
+    include-exception: false
+    include-message: never
+    include-stacktrace: never
+
+management:
+  endpoint:
+    health:
+      group:
+        readiness:
+          include: ping,db
+          show-components: always
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+# Flyway creates the schema; Flowable owns and upgrades its internal tables.
+flowable:
+  database-schema: ${FLOWABLE_DATABASE_SCHEMA:flowable}
+  database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
+
+occ:
+  database-probe:
+    timeout: 1500ms
+  status-probes:
+    deadline: 2000ms
+    external-enabled: ${STATUS_EXTERNAL_PROBES_ENABLED:true}
+  opa:
+    base-url: ${OPA_BASE_URL:http://localhost:8181}
+  ai:
+    base-url: ${AI_BASE_URL:http://localhost:3100}
+  object-storage:
+    endpoint: ${OBJECT_STORAGE_ENDPOINT:http://localhost:9000}
+    bucket: ${OBJECT_STORAGE_BUCKET:innorder-occ}
+    access-key: ${OBJECT_STORAGE_ACCESS_KEY:}
+    secret-key: ${OBJECT_STORAGE_SECRET_KEY:}
