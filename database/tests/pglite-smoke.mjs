@@ -41,7 +41,7 @@ const migrations = [
   'V010__platform_security_kernel.sql',
 ];
 
-for (const migration of migrations) {
+async function applyMigration(migration) {
   let sql = readFileSync(join(migrationDir, migration), 'utf8');
   if (migration === 'V001__bootstrap.sql') {
     sql = sql.replace(
@@ -52,6 +52,120 @@ for (const migration of migrations) {
   await db.exec(sql);
   console.log(`applied ${migration}`);
 }
+
+for (const migration of migrations.slice(0, -1)) {
+  await applyMigration(migration);
+}
+
+await db.exec(`
+  INSERT INTO catalog.domain_package
+    (id, package_key, name, status, row_version, created_at, updated_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000001', 'legacy.security', 'Legacy security', 'ACTIVE', 0, now(), now());
+  INSERT INTO catalog.package_version (id, package_id, semver, status, manifest, created_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000002', '90000000-0000-7000-8000-000000000001', '1.0.0', 'DRAFT', '{}'::jsonb, now());
+  INSERT INTO catalog.entity_type (id, package_id, type_key, name, entity_kind, authorizable)
+  VALUES
+    ('90000000-0000-7000-8000-000000000003', '90000000-0000-7000-8000-000000000001', 'legacy_user', 'Legacy user', 'PRINCIPAL', true);
+  INSERT INTO catalog.entity_type_version
+    (id, entity_type_id, package_version_id, schema_version, json_schema, ui_schema, auth_schema, index_spec)
+  VALUES
+    ('90000000-0000-7000-8000-000000000004', '90000000-0000-7000-8000-000000000003',
+     '90000000-0000-7000-8000-000000000002', 1, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb);
+  INSERT INTO authz.entity
+    (id, entity_type_id, entity_type_version_id, entity_key, state, auth_attributes, row_version, created_at, updated_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000005', '90000000-0000-7000-8000-000000000003',
+     '90000000-0000-7000-8000-000000000004', 'legacy:user', 'ACTIVE', '{}'::jsonb, 0, now(), now());
+  INSERT INTO iam.principal
+    (id, principal_kind, display_name, status, profile, row_version, created_at, updated_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000005', 'USER', 'Legacy User', 'ACTIVE', '{}'::jsonb, 0, now(), now());
+
+  INSERT INTO audit.idempotency_record
+    (id, principal_id, command_key, idempotency_key, request_hash, response_status,
+     response_digest, resource_id, created_at, expires_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000010', '90000000-0000-7000-8000-000000000005',
+     'legacy.complete', 'complete', repeat('a', 64), 200, repeat('b', 64),
+     '90000000-0000-7000-8000-000000000005', now(), now() + interval '1 hour'),
+    ('90000000-0000-7000-8000-000000000011', '90000000-0000-7000-8000-000000000005',
+     'legacy.race', 'race', repeat('c', 64), NULL, NULL, NULL, now(), now() + interval '1 hour'),
+    ('90000000-0000-7000-8000-000000000012', '90000000-0000-7000-8000-000000000005',
+     'legacy.failed', 'failed', repeat('d', 64), 500, NULL, NULL, now(), now() + interval '1 hour'),
+    ('90000000-0000-7000-8000-000000000013', '90000000-0000-7000-8000-000000000005',
+     'legacy.resource-failed', 'resource-failed', repeat('f', 64), NULL, NULL,
+     '90000000-0000-7000-8000-000000000005', now(), now() + interval '1 hour');
+
+  INSERT INTO audit.outbox_event
+    (id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version,
+     payload, correlation_id, available_at, attempts, status, published_at, created_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000020', 'legacy', '90000000-0000-7000-8000-000000000005', 1,
+     'legacy.pending', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000030', now(), 0, 'PENDING', now(), now()),
+    ('90000000-0000-7000-8000-000000000021', 'legacy', '90000000-0000-7000-8000-000000000005', 2,
+     'legacy.publishing', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000031', now(), 1, 'PUBLISHING', now(), now()),
+    ('90000000-0000-7000-8000-000000000022', 'legacy', '90000000-0000-7000-8000-000000000005', 3,
+     'legacy.published', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000032', now(), 1, 'PUBLISHED', now(), now()),
+    ('90000000-0000-7000-8000-000000000023', 'legacy', '90000000-0000-7000-8000-000000000005', 4,
+     'legacy.dead', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000033', now(), 3, 'DEAD', now(), now());
+`);
+console.log('inserted representative V009 legacy rows');
+
+await applyMigration(migrations.at(-1));
+
+const legacyIdempotency = await db.query(`
+  SELECT id::text, state, updated_at = created_at AS timestamps_preserved, resource_id::text
+  FROM audit.idempotency_record
+  WHERE id::text LIKE '90000000-0000-7000-8000-00000000001%'
+  ORDER BY id
+`);
+const expectedStates = ['COMPLETED', 'IN_PROGRESS', 'FAILED', 'FAILED'];
+if (legacyIdempotency.rows.length !== 4
+    || legacyIdempotency.rows.some((row, index) => row.state !== expectedStates[index] || !row.timestamps_preserved)
+    || legacyIdempotency.rows[3].resource_id !== '90000000-0000-7000-8000-000000000005') {
+  throw new Error('V010 idempotency backfill is not deterministic');
+}
+
+const legacyOutbox = await db.query(`
+  SELECT status, customer_instance_id::text, next_attempt_at = available_at AS schedule_preserved,
+         published_at IS NOT NULL AS has_published_at, claimed_at IS NOT NULL AS has_claimed_at,
+         last_error
+  FROM audit.outbox_event
+  WHERE id::text LIKE '90000000-0000-7000-8000-00000000002%'
+  ORDER BY id
+`);
+if (legacyOutbox.rows.length !== 4
+    || legacyOutbox.rows.some((row) => row.customer_instance_id !== '00000000-0000-7000-8000-000000000001' || !row.schedule_preserved)
+    || legacyOutbox.rows[0].has_published_at || legacyOutbox.rows[0].has_claimed_at
+    || legacyOutbox.rows[1].has_published_at || !legacyOutbox.rows[1].has_claimed_at
+    || !legacyOutbox.rows[2].has_published_at || !legacyOutbox.rows[2].has_claimed_at
+    || legacyOutbox.rows[3].has_published_at || legacyOutbox.rows[3].last_error !== 'delivery failed') {
+  throw new Error('V010 outbox backfill is not deterministic');
+}
+console.log('passed V010 legacy upgrade backfill');
+
+const race = await Promise.allSettled([
+  db.exec(`UPDATE audit.idempotency_record
+           SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
+           WHERE id = '90000000-0000-7000-8000-000000000011'`),
+  db.exec(`UPDATE audit.idempotency_record
+           SET state = 'FAILED', response_status = 500
+           WHERE id = '90000000-0000-7000-8000-000000000011'`),
+]);
+if (race.filter(({ status }) => status === 'fulfilled').length !== 1) {
+  throw new Error('exactly one racing idempotency terminal update must succeed');
+}
+try {
+  await db.exec(`UPDATE audit.idempotency_record
+                 SET state = 'IN_PROGRESS', response_status = NULL, response_digest = NULL
+                 WHERE id = '90000000-0000-7000-8000-000000000011'`);
+  throw new Error('terminal idempotency record returned to IN_PROGRESS');
+} catch (error) {
+  if (error.code !== '55000') throw error;
+}
+console.log('passed serialized idempotency race');
 
 for (const testFile of ['000_assert.sql', '001_schema_contract.sql', '002_constraints.sql']) {
   const sql = readFileSync(resolve('database/tests', testFile), 'utf8')

@@ -187,6 +187,11 @@ test('adds protected customer and hashed authentication persistence', () => {
   assert.match(sql, /CREATE TABLE iam\.auth_session\b/i);
   assert.match(sql, /refresh_token_hash text NOT NULL UNIQUE/i);
   assert.match(sql, /refresh_token_hash ~ '\^\[0-9a-f\]\{64\}\$'/i);
+  assert.match(sql, /replaced_by_session_id uuid REFERENCES iam\.auth_session\(id\)/i);
+  assert.doesNotMatch(sql, /replacement_session_id/i);
+  assert.match(sql, /CREATE TRIGGER trg_auth_session_rotation_integrity/i);
+  assert.match(sql, /replacement session must belong to the same principal/i);
+  assert.match(sql, /replacement session cannot predate rotated session/i);
   assert.match(sql, /CREATE INDEX ix_auth_session_active_principal_expiry/i);
   assert.doesNotMatch(sql, /\b(?:refresh_token|access_token|password)\b\s+(?:text|varchar)/i);
 });
@@ -206,18 +211,35 @@ test('adds deterministic idempotency and outbox lifecycles', () => {
   }
   assert.match(sql, /CREATE INDEX ix_outbox_pending_claim/i);
   assert.match(sql, /next_attempt_at, created_at/i);
-  assert.match(sql, /published_at = CASE WHEN status = 'PUBLISHED'/i);
+  assert.match(sql, /published_at\s*=\s*CASE\s+WHEN status = 'PUBLISHED'/i);
   assert.match(sql, /CREATE TRIGGER trg_outbox_event_lifecycle/i);
+  assert.match(sql, /ck_outbox_retry_schedule/i);
+  assert.match(sql, /ck_outbox_claim_publish_time/i);
+  assert.match(sql, /fk_outbox_customer_instance/i);
+  assert.match(sql, /fk_outbox_actor_entity/i);
 });
 
 test('uses time-window relationship authorization and exact revision triggers', () => {
   const sql = readMigration('V010__platform_security_kernel.sql');
   assert.match(sql, /DROP INDEX authz\.uq_relationship_active/i);
   assert.match(sql, /CREATE INDEX ix_relationship_active_window/i);
+  assert.match(sql, /ADD COLUMN max_subjects integer/i);
+  assert.match(sql, /ADD COLUMN max_objects integer/i);
+  assert.match(sql, /tstzrange\(r\.valid_from, r\.valid_until, '\[\)'\)/i);
+  assert.match(sql, /definition\.auth_relevant/i);
   assert.match(sql, /valid_from <= statement_timestamp\(\)/i);
   assert.match(sql, /valid_until IS NULL OR [^)\n]*valid_until > statement_timestamp\(\)/i);
   assert.doesNotMatch(sql, /CREATE (?:UNIQUE )?INDEX[^;]*WHERE[^;]*(?:now|statement_timestamp|transaction_timestamp)\s*\(/i);
   assert.match(sql, /CREATE TRIGGER trg_principal_status_authorization_revision/i);
-  assert.match(sql, /CREATE TRIGGER trg_relationship_active_authorization_revision/i);
+  assert.match(sql, /CREATE TRIGGER trg_relationship_authorization_revision_insert/i);
+  assert.match(sql, /CREATE TRIGGER trg_relationship_authorization_revision_update/i);
+  assert.match(sql, /CREATE TRIGGER trg_relationship_authorization_revision_delete/i);
+  assert.match(sql, /REFERENCING NEW TABLE AS new_relationships/i);
+  assert.match(sql, /REFERENCING OLD TABLE AS old_relationships/i);
+  assert.match(sql, /FOR EACH STATEMENT EXECUTE FUNCTION authz\.bump_relationship_revision_statement/i);
+  assert.doesNotMatch(sql, /FOR EACH ROW EXECUTE FUNCTION authz\.bump_active_relationship_revision/i);
   assert.match(sql, /DROP TRIGGER trg_relationship_authorization_revision/i);
+  assert.match(sql, /revision tracks relationship fact mutations/i);
+  assert.match(sql, /single transaction timestamp/i);
+  assert.match(sql, /five-minute expiry/i);
 });
