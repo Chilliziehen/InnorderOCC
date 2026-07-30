@@ -50,6 +50,8 @@ class SessionRepositoryIntegrationTest(
         jdbcTemplate.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, ?, '{}'::jsonb) ON CONFLICT DO NOTHING", TYPE_VERSION_ID, TYPE_ID, VERSION_ID, 1)
         jdbcTemplate.update("INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", PRINCIPAL_ID, TYPE_ID, TYPE_VERSION_ID, "auth:user", "ACTIVE")
         jdbcTemplate.update("INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", PRINCIPAL_ID, "USER", "Auth User", "ACTIVE")
+        jdbcTemplate.update("UPDATE iam.principal SET status = 'ACTIVE' WHERE id = ?", PRINCIPAL_ID)
+        jdbcTemplate.update("UPDATE authz.entity SET state = 'ACTIVE' WHERE id = ?", PRINCIPAL_ID)
         clock.instant = BASE_TIME
         repository = repository(SequenceSecureRandom())
     }
@@ -219,6 +221,40 @@ class SessionRepositoryIntegrationTest(
     }
 
     @Test
+    fun `access state validation requires matching active session principal entity and singleton without touching last use`() {
+        val issued = repository.create(PRINCIPAL_ID, 4, Duration.ofDays(7), null)
+        val validator = AccessSessionPrincipalValidator(jdbcTemplate)
+        val principal = AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, issued.session.id, 4)
+
+        assertThat(validator.validate(principal)).isEqualTo(principal)
+        assertThat(lastUsed(issued.session.id)).isEqualTo(issued.session.lastUsedAt)
+        assertThat(validator.validate(principal.copy(tokenVersion = 5))).isNull()
+        assertThat(validator.validate(principal.copy(principalId = UUID.randomUUID()))).isNull()
+        assertThat(validator.validate(principal.copy(customerInstanceId = UUID.randomUUID()))).isNull()
+
+        jdbcTemplate.update("UPDATE iam.principal SET status = 'DISABLED' WHERE id = ?", PRINCIPAL_ID)
+        assertThat(validator.validate(principal)).isNull()
+        jdbcTemplate.update("UPDATE iam.principal SET status = 'ACTIVE' WHERE id = ?", PRINCIPAL_ID)
+        jdbcTemplate.update("UPDATE authz.entity SET state = 'SUSPENDED' WHERE id = ?", PRINCIPAL_ID)
+        assertThat(validator.validate(principal)).isNull()
+        jdbcTemplate.update("UPDATE authz.entity SET state = 'ACTIVE' WHERE id = ?", PRINCIPAL_ID)
+
+        assertThat(repository.revoke(issued.session.id)).isTrue()
+        assertThat(validator.validate(principal)).isNull()
+    }
+
+    @Test
+    fun `access state validation fails closed on database errors and database expiry`() {
+        val validator = AccessSessionPrincipalValidator(jdbcTemplate)
+        val missing = AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, UUID.randomUUID(), 0)
+        assertThat(validator.validate(missing)).isNull()
+
+        val issued = repository.create(PRINCIPAL_ID, 0, Duration.ofSeconds(1), null)
+        Thread.sleep(1100)
+        assertThat(validator.validate(AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, issued.session.id, 0))).isNull()
+    }
+
+    @Test
     fun `two concurrent rotations create one replacement and replay revokes the winner`() {
         val issued = repository.create(PRINCIPAL_ID, 0, Duration.ofDays(7), null)
         val start = CountDownLatch(1)
@@ -320,6 +356,7 @@ class SessionRepositoryIntegrationTest(
         private val TYPE_ID = UUID.fromString("41000000-0000-7000-8000-000000000003")
         private val TYPE_VERSION_ID = UUID.fromString("41000000-0000-7000-8000-000000000004")
         private val PRINCIPAL_ID = UUID.fromString("41000000-0000-7000-8000-000000000005")
+        private val INSTANCE_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
 
         @Container
         @JvmStatic

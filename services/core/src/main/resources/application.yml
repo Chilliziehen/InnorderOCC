@@ -51,6 +51,12 @@ flowable:
   database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
 
 occ:
+  jwt:
+    issuer: ${OCC_JWT_ISSUER}
+    private-key-file: file:${OCC_JWT_PRIVATE_KEY_FILE}
+    public-key-file: file:${OCC_JWT_PUBLIC_KEY_FILE}
+    ttl: ${OCC_JWT_TTL:15m}
+    clock-skew: ${OCC_JWT_CLOCK_SKEW:30s}
   database-probe:
     timeout: 1500ms
   status-probes:
