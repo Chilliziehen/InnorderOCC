@@ -35,7 +35,34 @@ class PostgreSqlFlowableIntegrationTest(
         assertThat(flywayJdbc.queryForList("SELECT DISTINCT installed_by FROM flyway_schema_history", String::class.java))
             .containsExactly("innorder_flyway")
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9)
+            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT id::text || ':' || instance_key FROM platform.customer_instance WHERE singleton",
+            String::class.java,
+        )).isEqualTo("00000000-0000-7000-8000-000000000001:default")
+        assertThat(flywayJdbc.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'auth_session' ORDER BY ordinal_position",
+            String::class.java,
+        )).containsExactly(
+            "id",
+            "principal_id",
+            "token_version",
+            "refresh_token_hash",
+            "created_at",
+            "last_used_at",
+            "expires_at",
+            "revoked_at",
+            "replaced_by_session_id",
+            "client_fingerprint",
+        )
+        assertThat(flywayJdbc.queryForList(
+            "SELECT tgname FROM pg_trigger WHERE tgrelid = 'iam.auth_session'::regclass AND NOT tgisinternal",
+            String::class.java,
+        )).containsExactly("trg_auth_session_rotation_integrity")
+        assertThat(flywayJdbc.queryForObject(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'iam' AND indexname = 'ix_auth_session_active_principal_expiry'",
+            String::class.java,
+        )).contains("WHERE (revoked_at IS NULL)")
 
         assertThatThrownBy { jdbcTemplate.execute("CREATE TABLE occ.runtime_must_not_create(id integer)") }
             .isInstanceOf(DataAccessException::class.java)
