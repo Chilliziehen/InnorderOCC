@@ -73,12 +73,35 @@ class PasswordServiceTest {
     }
 
     @Test
+    fun `passwords outside Unicode policy never invoke password crypto`() {
+        val encoder = RecordingPasswordEncoder()
+        val guardedService = PasswordService(encoder)
+        val salt = Base64.getEncoder().encodeToString(ByteArray(16))
+        val hash = Base64.getEncoder().encodeToString(ByteArray(32))
+        val encoded = argonHash(salt = salt, hash = hash)
+        val rejected = listOf(
+            "a".repeat(11),
+            "a".repeat(129),
+            "\uD83D\uDD10".repeat(129),
+            "a".repeat(12) + '\uD83D',
+            "a".repeat(12) + '\uDD10',
+        )
+
+        rejected.forEach { password ->
+            assertThat(guardedService.matches(password, encoded)).isFalse()
+        }
+        assertThat(encoder.matchInvocations).isZero()
+    }
+
+    @Test
     fun `password policy counts Unicode code points from twelve through one hundred twenty eight`() {
         assertThat(service.isAllowed("a".repeat(11))).isFalse()
         assertThat(service.isAllowed("a".repeat(12))).isTrue()
         assertThat(service.isAllowed("\uD83D\uDD10".repeat(12))).isTrue()
         assertThat(service.isAllowed("\uD83D\uDD10".repeat(128))).isTrue()
         assertThat(service.isAllowed("\uD83D\uDD10".repeat(129))).isFalse()
+        assertThat(service.isAllowed("a".repeat(12) + '\uD83D')).isFalse()
+        assertThat(service.isAllowed("a".repeat(12) + '\uDD10')).isFalse()
     }
 
     @Test

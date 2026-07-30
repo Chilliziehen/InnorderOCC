@@ -26,6 +26,7 @@ import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.sql.DataSource
 
 @SpringBootTest
@@ -80,6 +81,56 @@ class SessionRepositoryIntegrationTest(
             issued.session.id,
         )).isTrue()
         assertThat(repository.validate(issued.refreshToken)).isEqualTo(SessionValidation.Invalid)
+    }
+
+    @Test
+    fun `revoking a rotated session revokes its active replacement`() {
+        val first = repository.create(PRINCIPAL_ID, 0, Duration.ofHours(1), null)
+        val replacement = (repository.rotate(first.refreshToken, Duration.ofHours(1)) as SessionRotation.Rotated).issued
+
+        assertThat(repository.revoke(first.session.id)).isTrue()
+
+        assertThat(repository.validate(replacement.refreshToken)).isEqualTo(SessionValidation.Invalid)
+        assertThat(activeSessionCount()).isZero()
+    }
+
+    @Test
+    fun `concurrent rotation followed by waiting revoke leaves no active replacement`() {
+        val first = repository.create(PRINCIPAL_ID, 0, Duration.ofHours(1), null)
+        val rotationEntered = CountDownLatch(1)
+        val allowRotation = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val rotation = pool.submit<SessionRotation> {
+                repository(BlockingSecureRandom(rotationEntered, allowRotation))
+                    .rotate(first.refreshToken, Duration.ofHours(1))
+            }
+            assertThat(rotationEntered.await(15, TimeUnit.SECONDS)).isTrue()
+            val revocation = pool.submit<Boolean> { repository.revoke(first.session.id) }
+            allowRotation.countDown()
+
+            assertThat(rotation.get(15, TimeUnit.SECONDS)).isInstanceOf(SessionRotation.Rotated::class.java)
+            assertThat(revocation.get(15, TimeUnit.SECONDS)).isTrue()
+            assertThat(activeSessionCount()).isZero()
+        } finally {
+            allowRotation.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `replacement chains beyond sixty four links revoke every active session for the principal`() {
+        val longChainRepository = repository(SecureRandom())
+        val root = longChainRepository.create(PRINCIPAL_ID, 0, Duration.ofHours(1), null)
+        longChainRepository.create(PRINCIPAL_ID, 0, Duration.ofHours(1), null)
+        var current = root
+        repeat(65) {
+            current = (longChainRepository.rotate(current.refreshToken, Duration.ofHours(1)) as SessionRotation.Rotated).issued
+        }
+
+        assertThat(longChainRepository.revoke(root.session.id)).isTrue()
+
+        assertThat(activeSessionCount()).isZero()
     }
 
     @Test
@@ -142,7 +193,7 @@ class SessionRepositoryIntegrationTest(
                 }
             }
             start.countDown()
-            val outcomes = attempts.map { it.get() }
+            val outcomes = attempts.map { it.get(15, TimeUnit.SECONDS) }
 
             assertThat(outcomes.count { it is SessionRotation.Rotated }).isEqualTo(1)
             assertThat(outcomes.count { it == SessionRotation.Invalid }).isEqualTo(1)
@@ -166,6 +217,12 @@ class SessionRepositoryIntegrationTest(
         id,
     )!!
 
+    private fun activeSessionCount(): Long = jdbcTemplate.queryForObject(
+        "SELECT count(*) FROM iam.auth_session WHERE principal_id = ? AND revoked_at IS NULL",
+        Long::class.java,
+        PRINCIPAL_ID,
+    )!!
+
     private class MutableClock(var instant: Instant) : Clock() {
         override fun instant(): Instant = instant
         override fun getZone(): ZoneId = ZoneOffset.UTC
@@ -176,6 +233,17 @@ class SessionRepositoryIntegrationTest(
     private class SequenceSecureRandom(private var next: Int = 0) : SecureRandom() {
         override fun nextBytes(bytes: ByteArray) {
             bytes.indices.forEach { bytes[it] = next++.toByte() }
+        }
+    }
+
+    private class BlockingSecureRandom(
+        private val entered: CountDownLatch,
+        private val proceed: CountDownLatch,
+    ) : SecureRandom() {
+        override fun nextBytes(bytes: ByteArray) {
+            entered.countDown()
+            check(proceed.await(15, TimeUnit.SECONDS)) { "Timed out waiting to complete token generation" }
+            bytes.indices.forEach { bytes[it] = (it + 97).toByte() }
         }
     }
 

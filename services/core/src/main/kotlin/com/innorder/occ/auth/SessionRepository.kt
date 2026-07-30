@@ -36,7 +36,7 @@ class SessionRepository(
         val row = lockByToken(token) ?: return@inTransaction SessionValidation.Invalid
         val now = clock.instant()
         if (row.session.revokedAt != null) {
-            row.session.replacedBySessionId?.let { revokeReplacementChain(it, now) }
+            row.session.replacedBySessionId?.let { revokeReplacementChain(it, row.session.principalId, now) }
             return@inTransaction SessionValidation.Invalid
         }
         if (now >= row.session.expiresAt) return@inTransaction SessionValidation.Invalid
@@ -53,7 +53,7 @@ class SessionRepository(
         val old = lockByToken(token) ?: return@inTransaction SessionRotation.Invalid
         val now = clock.instant()
         if (old.session.revokedAt != null) {
-            old.session.replacedBySessionId?.let { revokeReplacementChain(it, now) }
+            old.session.replacedBySessionId?.let { revokeReplacementChain(it, old.session.principalId, now) }
             return@inTransaction SessionRotation.Invalid
         }
         if (now >= old.session.expiresAt) return@inTransaction SessionRotation.Invalid
@@ -77,12 +77,16 @@ class SessionRepository(
 
     fun revoke(sessionId: UUID): Boolean = inTransaction {
         val session = lockById(sessionId) ?: return@inTransaction false
-        if (session.revokedAt != null) return@inTransaction true
-        jdbc.update(
-            "UPDATE iam.auth_session SET revoked_at = ? WHERE id = ?",
-            revocationTime(session, clock.instant()).toSqlTimestamp(),
-            session.id,
-        ) == 1
+        val now = clock.instant()
+        if (session.revokedAt == null) {
+            jdbc.update(
+                "UPDATE iam.auth_session SET revoked_at = ? WHERE id = ?",
+                revocationTime(session, now).toSqlTimestamp(),
+                session.id,
+            )
+        }
+        session.replacedBySessionId?.let { revokeReplacementChain(it, session.principalId, now) }
+        true
     }
 
     private fun createSession(
@@ -146,10 +150,20 @@ class SessionRepository(
         id,
     ).singleOrNull()
 
-    private fun revokeReplacementChain(firstId: UUID, now: Instant) {
+    private fun revokeReplacementChain(firstId: UUID, principalId: UUID, now: Instant) {
+        val visited = HashSet<UUID>(MAX_REPLACEMENT_CHAIN)
         var nextId: UUID? = firstId
-        while (nextId != null) {
-            val descendant = lockById(nextId) ?: return
+        repeat(MAX_REPLACEMENT_CHAIN) {
+            val id = nextId ?: return
+            if (!visited.add(id)) {
+                revokeAllActiveForPrincipal(principalId, now)
+                return
+            }
+            val descendant = lockById(id)
+            if (descendant == null || descendant.principalId != principalId) {
+                revokeAllActiveForPrincipal(principalId, now)
+                return
+            }
             if (descendant.revokedAt == null) {
                 jdbc.update(
                     "UPDATE iam.auth_session SET revoked_at = ? WHERE id = ?",
@@ -159,6 +173,17 @@ class SessionRepository(
             }
             nextId = descendant.replacedBySessionId
         }
+        if (nextId != null) revokeAllActiveForPrincipal(principalId, now)
+    }
+
+    private fun revokeAllActiveForPrincipal(principalId: UUID, now: Instant) {
+        jdbc.update(
+            """UPDATE iam.auth_session
+               SET revoked_at = LEAST(GREATEST(?::timestamptz, created_at, last_used_at), expires_at)
+               WHERE principal_id = ? AND revoked_at IS NULL""",
+            now.toSqlTimestamp(),
+            principalId,
+        )
     }
 
     private fun revocationTime(session: AuthSession, now: Instant): Instant =
@@ -204,5 +229,6 @@ class SessionRepository(
 
     private companion object {
         const val TOKEN_BYTES = 32
+        const val MAX_REPLACEMENT_CHAIN = 64
     }
 }

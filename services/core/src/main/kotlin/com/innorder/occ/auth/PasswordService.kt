@@ -13,7 +13,7 @@ class PasswordService internal constructor(private val encoder: PasswordEncoder)
     }
 
     fun matches(password: CharSequence, encoded: String): Boolean {
-        if (parse(encoded) == null) return false
+        if (!isAllowed(password) || parse(encoded) == null) return false
         return try {
             encoder.matches(password, encoded)
         } catch (_: RuntimeException) {
@@ -31,7 +31,15 @@ class PasswordService internal constructor(private val encoder: PasswordEncoder)
         var offset = 0
         while (offset < password.length) {
             if (++codePoints > MAX_CODE_POINTS) return false
-            offset += Character.charCount(Character.codePointAt(password, offset))
+            val current = password[offset]
+            offset += when {
+                Character.isHighSurrogate(current) -> {
+                    if (offset + 1 >= password.length || !Character.isLowSurrogate(password[offset + 1])) return false
+                    2
+                }
+                Character.isLowSurrogate(current) -> return false
+                else -> 1
+            }
         }
         return codePoints >= MIN_CODE_POINTS
     }
