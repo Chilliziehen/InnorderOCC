@@ -20,6 +20,8 @@ interface OpenApiSchemaProperty {
   $ref?: string;
   format?: string;
   items?: { $ref?: string };
+  maxLength?: number;
+  minLength?: number;
   type?: string;
 }
 
@@ -126,6 +128,11 @@ describe("OCC Core OpenAPI system status", () => {
       "#/components/schemas/CurrentUser",
     );
     expect(logout?.responses?.["204"]).toBeDefined();
+    expect(document.components.schemas.LoginRequest?.properties?.password).toEqual({
+      type: "string",
+      minLength: 12,
+      maxLength: 128,
+    });
 
     for (const response of Object.values(document.components.responses ?? {})) {
       expect(response.content?.["application/problem+json"]?.schema?.$ref).toBe(

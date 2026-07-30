@@ -9,7 +9,7 @@ const normalizedUsernameSchema = z
 export const loginRequestSchema = z
   .object({
     username: normalizedUsernameSchema,
-    password: z.string(),
+    password: z.string().min(12).max(128),
   })
   .strict();
 

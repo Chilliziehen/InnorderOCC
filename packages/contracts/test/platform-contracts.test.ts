@@ -37,17 +37,47 @@ describe("problemDetailsSchema", () => {
 });
 
 describe("auth contracts", () => {
+  const validPassword = "p".repeat(12);
+
   it("accepts only normalized username-compatible values", () => {
     expect(
-      loginRequestSchema.parse({ username: "pilot.user", password: "pw" }),
-    ).toEqual({ username: "pilot.user", password: "pw" });
+      loginRequestSchema.parse({ username: "pilot.user", password: validPassword }),
+    ).toEqual({ username: "pilot.user", password: validPassword });
     expect(() =>
-      loginRequestSchema.parse({ username: " Pilot.User ", password: "pw" }),
+      loginRequestSchema.parse({
+        username: " Pilot.User ",
+        password: validPassword,
+      }),
     ).toThrow();
   });
 
+  it("accepts passwords at the 12 and 128 character boundaries", () => {
+    for (const length of [12, 128]) {
+      const password = "p".repeat(length);
+
+      expect(loginRequestSchema.parse({ username: "pilot.user", password })).toEqual({
+        username: "pilot.user",
+        password,
+      });
+    }
+  });
+
+  it("rejects passwords outside the 12 to 128 character boundaries", () => {
+    for (const length of [11, 129]) {
+      expect(() =>
+        loginRequestSchema.parse({
+          username: "pilot.user",
+          password: "p".repeat(length),
+        }),
+      ).toThrow();
+    }
+  });
+
   it.each([
-    [loginRequestSchema, { username: "pilot.user", password: "pw", otp: "123456" }],
+    [
+      loginRequestSchema,
+      { username: "pilot.user", password: validPassword, otp: "123456" },
+    ],
     [refreshRequestSchema, { refreshToken: "opaque-token", accessToken: "secret" }],
     [currentUserSchema, { ...currentUser, passwordHash: "secret" }],
     [
