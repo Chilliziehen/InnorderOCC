@@ -22,6 +22,8 @@ import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm
 import java.net.URI
 import java.security.KeyFactory
 import java.security.KeyPair
+import java.security.SecureRandom
+import java.security.Signature
 import java.security.interfaces.RSAPrivateKey
 import java.security.interfaces.RSAPublicKey
 import java.security.spec.PKCS8EncodedKeySpec
@@ -95,9 +97,30 @@ class JwtConfiguration {
             require(privateKey is RSAPrivateKey && publicKey is RSAPublicKey) { "JWT keys must be RSA" }
             require(publicKey.modulus.bitLength() >= 3072) { "JWT RSA key must be at least 3072 bits" }
             require(privateKey.modulus == publicKey.modulus) { "JWT key pair does not match" }
+            require(verifyKeyPair(privateKey, publicKey)) { "JWT key pair does not match" }
             return KeyPair(publicKey, privateKey)
         } catch (_: Exception) {
             throw IllegalArgumentException("JWT key material is unavailable or invalid")
+        }
+    }
+
+    private fun verifyKeyPair(privateKey: RSAPrivateKey, publicKey: RSAPublicKey): Boolean {
+        val challenge = ByteArray(KEY_CHALLENGE_BYTES)
+        val random = SecureRandom()
+        random.nextBytes(challenge)
+        var signature = ByteArray(0)
+        return try {
+            val signer = Signature.getInstance(KEY_SIGNATURE_ALGORITHM)
+            signer.initSign(privateKey, random)
+            signer.update(challenge)
+            signature = signer.sign()
+            val verifier = Signature.getInstance(KEY_SIGNATURE_ALGORITHM)
+            verifier.initVerify(publicKey)
+            verifier.update(challenge)
+            verifier.verify(signature)
+        } finally {
+            challenge.fill(0)
+            signature.fill(0)
         }
     }
 
@@ -113,6 +136,7 @@ class JwtConfiguration {
 
     private fun validateClaims(jwt: Jwt, properties: JwtProperties, clock: Clock): OAuth2TokenValidatorResult {
         val validation = runCatching {
+            require(jwt.claims.keys == ALLOWED_CLAIMS)
             require(jwt.issuer.toString() == properties.issuer.toString())
             require(jwt.audience == listOf(JwtProperties.AUDIENCE))
             UUID.fromString(jwt.subject)
@@ -138,5 +162,14 @@ class JwtConfiguration {
         val value = jwt.claims[name]
         require(value is String && value.isNotBlank())
         return value
+    }
+
+    private companion object {
+        const val KEY_CHALLENGE_BYTES = 32
+        const val KEY_SIGNATURE_ALGORITHM = "SHA256withRSA"
+        val ALLOWED_CLAIMS = setOf(
+            "iss", "sub", "aud", "exp", "nbf", "iat", "jti",
+            "instance_id", "session_id", "token_version",
+        )
     }
 }

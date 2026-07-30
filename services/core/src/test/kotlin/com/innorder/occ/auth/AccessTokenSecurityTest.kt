@@ -13,14 +13,20 @@ import com.nimbusds.jwt.PlainJWT
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import org.springframework.core.io.ByteArrayResource
 import org.springframework.core.io.ClassPathResource
 import org.springframework.security.oauth2.jwt.JwtException
 import java.net.URI
+import java.math.BigInteger
+import java.security.KeyFactory
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.security.interfaces.RSAPrivateKey
+import java.security.interfaces.RSAPublicKey
+import java.security.spec.RSAPublicKeySpec
+import java.util.Base64
 import java.util.Date
 import java.util.UUID
 
@@ -124,6 +130,26 @@ class AccessTokenSecurityTest {
     }
 
     @Test
+    fun `decoder rejects a harmless additional claim`() {
+        val decoder = configuration.jwtDecoder(properties, Clock.fixed(now.plusSeconds(1), ZoneOffset.UTC))
+        val keyPair = configuration.loadKeyPair(properties)
+        val token = TestJwt.sign(keyPair.private as RSAPrivateKey, now, mapOf("trace_hint" to "harmless"))
+
+        assertThatThrownBy { decoder.decode(token) }.isInstanceOf(JwtException::class.java)
+    }
+
+    @Test
+    fun `decoder rejects sensitive-looking additional claims`() {
+        val decoder = configuration.jwtDecoder(properties, Clock.fixed(now.plusSeconds(1), ZoneOffset.UTC))
+        val keyPair = configuration.loadKeyPair(properties)
+
+        listOf("capabilities", "roles", "profile", "password_hash").forEach { name ->
+            val token = TestJwt.sign(keyPair.private as RSAPrivateKey, now, mapOf(name to "must-not-be-accepted"))
+            assertThatThrownBy { decoder.decode(token) }.isInstanceOf(JwtException::class.java)
+        }
+    }
+
+    @Test
     fun `configuration rejects invalid settings and bad key resources`() {
         assertThatThrownBy { properties.copy(issuer = URI("http://innorder.test")).validate() }.isInstanceOf(IllegalArgumentException::class.java)
         assertThatThrownBy { properties.copy(ttl = Duration.ofMinutes(16)).validate() }.isInstanceOf(IllegalArgumentException::class.java)
@@ -148,6 +174,22 @@ class AccessTokenSecurityTest {
                 privateKeyFile = ClassPathResource("test-only-ec-private.pem"),
                 publicKeyFile = ClassPathResource("test-only-ec-public.pem"),
             ))
+        }.isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun `configuration rejects same modulus public key with a different exponent`() {
+        val valid = configuration.loadKeyPair(properties)
+        val publicKey = valid.public as RSAPublicKey
+        val wrongExponent = KeyFactory.getInstance("RSA").generatePublic(
+            RSAPublicKeySpec(publicKey.modulus, BigInteger.valueOf(3)),
+        )
+        val pem = "-----BEGIN PUBLIC KEY-----\n" +
+            Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(wrongExponent.encoded) +
+            "\n-----END PUBLIC KEY-----\n"
+
+        assertThatThrownBy {
+            configuration.loadKeyPair(properties.copy(publicKeyFile = ByteArrayResource(pem.toByteArray())))
         }.isInstanceOf(IllegalArgumentException::class.java)
     }
 
