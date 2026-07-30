@@ -2,6 +2,9 @@ package com.innorder.occ.api
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
@@ -31,7 +34,10 @@ import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.servlet.resource.NoResourceFoundException
+import org.springframework.http.HttpMethod
 import java.net.URI
 import java.security.SecureRandom
 import java.time.Clock
@@ -45,9 +51,10 @@ class ApiErrorHandlingTest {
     private val clock = Clock.fixed(Instant.parse("2026-07-30T12:34:56.789Z"), ZoneOffset.UTC)
     private val filter = CorrelationIdFilter(clock, SequenceSecureRandom())
     private val responses = OccProblemResponses(objectMapper)
+    private val failureReporter = Slf4jApiFailureReporter()
     private val controller = TestController()
     private val mockMvc: MockMvc = MockMvcBuilders.standaloneSetup(controller)
-        .setControllerAdvice(ApiExceptionHandler(responses))
+        .setControllerAdvice(ApiExceptionHandler(responses, failureReporter))
         .setValidator(LocalValidatorFactoryBean().also { it.afterPropertiesSet() })
         .addFilters<StandaloneMockMvcBuilder>(filter)
         .build()
@@ -243,6 +250,60 @@ class ApiErrorHandlingTest {
     }
 
     @Test
+    fun `common MVC client errors retain safe HTTP statuses without error logs`() {
+        withFailureLogs { events ->
+            val results = listOf(
+                "not found" to Triple(mockMvc.get("/test/not-found").andReturn(), 404, "Not Found"),
+                "method" to Triple(mockMvc.post("/test/conflict").andReturn(), 405, "Method Not Allowed"),
+                "media type" to Triple(
+                    mockMvc.post("/test/validated") {
+                        contentType = MediaType.TEXT_PLAIN
+                        content = "Bearer rejected-secret"
+                    }.andReturn(),
+                    415,
+                    "Unsupported Media Type",
+                ),
+                "missing parameter" to Triple(mockMvc.get("/test/required").andReturn(), 400, "Bad Request"),
+                "conversion failure" to Triple(
+                    mockMvc.get("/test/required") { param("count", "password-secret") }.andReturn(),
+                    400,
+                    "Bad Request",
+                ),
+            )
+
+            results.forEach { (case, expectation) ->
+                val (result, status, title) = expectation
+                assertThat(result.response.status).`as`(case).isEqualTo(status)
+                assertThat(result.response.contentType).`as`(case).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON_VALUE)
+                val problem = objectMapper.readTree(result.response.contentAsString)
+                assertThat(problem["code"].asText()).isEqualTo("OCC-API-REQUEST")
+                assertThat(problem["title"].asText()).isEqualTo(title)
+                assertStrictProblem(result.response.contentAsString)
+                assertSafe(result.response.contentAsString, "Bearer rejected-secret", "password-secret")
+            }
+            assertThat(events).isEmpty()
+        }
+    }
+
+    @Test
+    fun `unknown failure logs one sanitized correlated event while MDC is populated`() {
+        val correlationId = "018f30c0-7a86-7f8b-a6e0-3c5477bb7e1a"
+
+        withFailureLogs { events ->
+            mockMvc.get("/test/failure") { header(CorrelationIdFilter.HEADER_NAME, correlationId) }
+                .andExpect { status { isInternalServerError() } }
+
+            assertThat(events).hasSize(1)
+            val event = events.single()
+            assertThat(event.formattedMessage)
+                .isEqualTo("Unhandled API failure correlationId=$correlationId exceptionClass=java.lang.RuntimeException")
+                .doesNotContain("jdbc:postgresql", "password", "Bearer", "refresh-token")
+            assertThat(event.throwableProxy).isNull()
+            assertThat(event.mdcPropertyMap[CorrelationIdFilter.MDC_KEY]).isEqualTo(correlationId)
+        }
+    }
+
+    @Test
     fun `constraint violations map to validation without exposing invalid values`() {
         val result = mockMvc.get("/test/constraint").andExpect {
             status { isBadRequest() }
@@ -342,6 +403,20 @@ class ApiErrorHandlingTest {
         assertThat(json).doesNotContain("stackTrace").doesNotContain("exception")
     }
 
+    private fun withFailureLogs(assertions: (List<ILoggingEvent>) -> Unit) {
+        val logger = org.slf4j.LoggerFactory.getLogger(Slf4jApiFailureReporter::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also {
+            it.start()
+            logger.addAppender(it)
+        }
+        try {
+            assertions(appender.list)
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
+    }
+
     @RestController
     @RequestMapping("/test")
     private class TestController {
@@ -380,6 +455,12 @@ class ApiErrorHandlingTest {
             observedMdc = MDC.get(CorrelationIdFilter.MDC_KEY)
             throw OptimisticConflictException()
         }
+
+        @GetMapping("/required")
+        fun required(@RequestParam count: Int): Map<String, Int> = mapOf("count" to count)
+
+        @GetMapping("/not-found")
+        fun notFound(): Nothing = throw NoResourceFoundException(HttpMethod.GET, "/Bearer-not-found-secret")
     }
 
     private data class SecretRequest(

@@ -88,7 +88,7 @@ class OccCoreApplicationTest(
     fun `generic actuator health is not anonymously exposed`() {
         mockMvc.get("/actuator/health")
             .andExpect {
-                status { isForbidden() }
+                status { isUnauthorized() }
             }
     }
 
@@ -96,7 +96,7 @@ class OccCoreApplicationTest(
     fun `unlisted endpoints reject anonymous requests`() {
         mockMvc.get("/api/v1/unlisted")
             .andExpect {
-                status { isForbidden() }
+                status { isUnauthorized() }
             }
     }
 }

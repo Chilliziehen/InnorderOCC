@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.http.MediaType
+import org.springframework.http.HttpStatus
+import org.springframework.http.HttpStatusCode
 import org.springframework.http.ResponseEntity
 import org.springframework.stereotype.Component
 import java.net.URI
@@ -53,6 +55,15 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun internal(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 500, "internal-error", "Internal server error", "OCC-API-INTERNAL")
 
+    fun requestError(request: HttpServletRequest, statusCode: HttpStatusCode): ResponseEntity<OccProblem> {
+        val status = requireNotNull(HttpStatus.resolve(statusCode.value()))
+        return response(request, status.value(), "request", status.reasonPhrase, "OCC-API-REQUEST")
+    }
+
+    fun correlationId(request: HttpServletRequest): String =
+        request.getAttribute(CorrelationIdFilter.REQUEST_ATTRIBUTE) as? String
+            ?: error("CorrelationIdFilter must run before problem response handling")
+
     fun writeAuthenticationRequired(request: HttpServletRequest, response: HttpServletResponse) {
         write(response, authentication(request))
     }
@@ -69,14 +80,12 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
         code: String,
         detail: String? = null,
     ): ResponseEntity<OccProblem> {
-        val correlationId = request.getAttribute(CorrelationIdFilter.REQUEST_ATTRIBUTE) as? String
-            ?: error("CorrelationIdFilter must run before problem response handling")
         val problem = OccProblem(
             URI.create("${OccProblem.PROBLEM_TYPE_ROOT}$slug"),
             title,
             status,
             code,
-            correlationId,
+            correlationId(request),
             detail,
         )
         return ResponseEntity.status(status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(problem)
