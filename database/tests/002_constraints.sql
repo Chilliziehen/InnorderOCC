@@ -432,10 +432,22 @@ SELECT pg_temp.assert_true(
     'principal profile-only changes do not increment authorization revision'
 );
 UPDATE iam.principal SET status = 'LOCKED'
-WHERE id = '20000000-0000-7000-8000-000000000001';
+WHERE id IN (
+    '20000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000004'
+);
 SELECT pg_temp.assert_true(
     (SELECT current_revision = value + 1 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
-    'principal status changes increment authorization revision exactly once'
+    'multi-row principal status change increments authorization revision exactly once'
+);
+UPDATE iam.principal SET status = status
+WHERE id IN (
+    '20000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000004'
+);
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value + 1 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'principal status no-op statement does not increment authorization revision'
 );
 UPDATE revision_checkpoint SET value = value + 1;
 
@@ -635,6 +647,34 @@ INSERT INTO authz.relationship (
 SELECT pg_temp.assert_true(
     (SELECT current_revision = value + 5 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
     'future authorization facts do not bump mutation revision before becoming active'
+);
+
+INSERT INTO authz.relationship (
+    id, relation_definition_id, subject_entity_id, object_entity_id,
+    valid_from, valid_until, source_kind, source_ref, row_version, created_at, updated_at
+) VALUES (
+    '21000000-0000-7000-8000-000000000027', '14000000-0000-7000-8000-000000000002',
+    '20000000-0000-7000-8000-000000000004', '20000000-0000-7000-8000-000000000002',
+    transaction_timestamp() + interval '50 milliseconds', transaction_timestamp() + interval '1 hour',
+    'ADMIN', 'snapshot-boundary', 0, statement_timestamp(), statement_timestamp()
+);
+CREATE TEMP TABLE snapshot_observation (visible boolean NOT NULL);
+INSERT INTO snapshot_observation
+SELECT EXISTS (
+    SELECT 1 FROM authz.active_relationships_at()
+    WHERE id = '21000000-0000-7000-8000-000000000027'
+);
+SELECT pg_temp.assert_true(
+    NOT (SELECT visible FROM snapshot_observation)
+    AND NOT EXISTS (
+        SELECT 1 FROM authz.active_relationships_at()
+        WHERE id = '21000000-0000-7000-8000-000000000027'
+    )
+    AND EXISTS (
+        SELECT 1 FROM authz.active_relationships_at(transaction_timestamp() + interval '1 second')
+        WHERE id = '21000000-0000-7000-8000-000000000027'
+    ),
+    'default authorization snapshot is stable across statements in one transaction'
 );
 
 INSERT INTO occ.business_object (

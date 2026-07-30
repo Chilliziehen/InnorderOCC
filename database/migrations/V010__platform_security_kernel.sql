@@ -278,6 +278,9 @@ WHERE (status = 'PENDING');
 
 DROP INDEX authz.uq_relationship_active;
 
+ALTER TABLE authz.relationship
+    ALTER COLUMN valid_from SET DEFAULT transaction_timestamp();
+
 ALTER TABLE catalog.relation_definition
     ADD COLUMN max_subjects integer CHECK (max_subjects IS NULL OR max_subjects > 0),
     ADD COLUMN max_objects integer CHECK (max_objects IS NULL OR max_objects > 0);
@@ -456,8 +459,8 @@ BEGIN
             JOIN catalog.relation_definition definition ON definition.id = r.relation_definition_id
             WHERE definition.auth_relevant
               AND r.revoked_at IS NULL
-              AND r.valid_from <= statement_timestamp()
-              AND (r.valid_until IS NULL OR r.valid_until > statement_timestamp())
+              AND r.valid_from <= transaction_timestamp()
+              AND (r.valid_until IS NULL OR r.valid_until > transaction_timestamp())
         ) INTO facts_changed;
     ELSIF TG_OP = 'DELETE' THEN
         SELECT EXISTS (
@@ -466,8 +469,8 @@ BEGIN
             JOIN catalog.relation_definition definition ON definition.id = r.relation_definition_id
             WHERE definition.auth_relevant
               AND r.revoked_at IS NULL
-              AND r.valid_from <= statement_timestamp()
-              AND (r.valid_until IS NULL OR r.valid_until > statement_timestamp())
+              AND r.valid_from <= transaction_timestamp()
+              AND (r.valid_until IS NULL OR r.valid_until > transaction_timestamp())
         ) INTO facts_changed;
     ELSE
         SELECT EXISTS (
@@ -477,12 +480,12 @@ BEGIN
             LEFT JOIN new_relationships new_r ON new_r.id = old_r.id
             WHERE definition.auth_relevant
               AND old_r.revoked_at IS NULL
-              AND old_r.valid_from <= statement_timestamp()
-              AND (old_r.valid_until IS NULL OR old_r.valid_until > statement_timestamp())
+              AND old_r.valid_from <= transaction_timestamp()
+              AND (old_r.valid_until IS NULL OR old_r.valid_until > transaction_timestamp())
               AND NOT (
                   new_r.revoked_at IS NULL
-                  AND new_r.valid_from <= statement_timestamp()
-                  AND (new_r.valid_until IS NULL OR new_r.valid_until > statement_timestamp())
+                  AND new_r.valid_from <= transaction_timestamp()
+                  AND (new_r.valid_until IS NULL OR new_r.valid_until > transaction_timestamp())
               )
             UNION ALL
             SELECT 1
@@ -491,12 +494,12 @@ BEGIN
             LEFT JOIN old_relationships old_r ON old_r.id = new_r.id
             WHERE definition.auth_relevant
               AND new_r.revoked_at IS NULL
-              AND new_r.valid_from <= statement_timestamp()
-              AND (new_r.valid_until IS NULL OR new_r.valid_until > statement_timestamp())
+              AND new_r.valid_from <= transaction_timestamp()
+              AND (new_r.valid_until IS NULL OR new_r.valid_until > transaction_timestamp())
               AND NOT (
                   old_r.revoked_at IS NULL
-                  AND old_r.valid_from <= statement_timestamp()
-                  AND (old_r.valid_until IS NULL OR old_r.valid_until > statement_timestamp())
+                  AND old_r.valid_from <= transaction_timestamp()
+                  AND (old_r.valid_until IS NULL OR old_r.valid_until > transaction_timestamp())
               )
             LIMIT 1
         ) INTO facts_changed;
@@ -521,12 +524,32 @@ AFTER DELETE ON authz.relationship
 REFERENCING OLD TABLE AS old_relationships
 FOR EACH STATEMENT EXECUTE FUNCTION authz.bump_relationship_revision_statement();
 
-CREATE FUNCTION authz.bump_principal_status_revision()
+CREATE FUNCTION authz.active_relationships_at(
+    p_snapshot_at timestamptz DEFAULT transaction_timestamp()
+)
+RETURNS SETOF authz.relationship
+LANGUAGE sql
+STABLE
+PARALLEL SAFE
+AS $$
+    SELECT r.*
+    FROM authz.relationship r
+    WHERE r.revoked_at IS NULL
+      AND r.valid_from <= p_snapshot_at
+      AND (r.valid_until IS NULL OR r.valid_until > p_snapshot_at)
+$$;
+
+CREATE FUNCTION authz.bump_principal_status_revision_statement()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NEW.status IS DISTINCT FROM OLD.status THEN
+    IF EXISTS (
+        SELECT 1
+        FROM old_principals old_p
+        JOIN new_principals new_p ON new_p.id = old_p.id
+        WHERE new_p.status IS DISTINCT FROM old_p.status
+    ) THEN
         PERFORM authz.bump_authorization_revision();
     END IF;
     RETURN NULL;
@@ -534,5 +557,6 @@ END;
 $$;
 
 CREATE TRIGGER trg_principal_status_authorization_revision
-AFTER UPDATE OF status ON iam.principal
-FOR EACH ROW EXECUTE FUNCTION authz.bump_principal_status_revision();
+AFTER UPDATE ON iam.principal
+REFERENCING OLD TABLE AS old_principals NEW TABLE AS new_principals
+FOR EACH STATEMENT EXECUTE FUNCTION authz.bump_principal_status_revision_statement();

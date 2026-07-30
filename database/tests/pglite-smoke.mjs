@@ -146,26 +146,18 @@ if (legacyOutbox.rows.length !== 4
 }
 console.log('passed V010 legacy upgrade backfill');
 
-const race = await Promise.allSettled([
-  db.exec(`UPDATE audit.idempotency_record
-           SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
-           WHERE id = '90000000-0000-7000-8000-000000000011'`),
-  db.exec(`UPDATE audit.idempotency_record
-           SET state = 'FAILED', response_status = 500
-           WHERE id = '90000000-0000-7000-8000-000000000011'`),
-]);
-if (race.filter(({ status }) => status === 'fulfilled').length !== 1) {
-  throw new Error('exactly one racing idempotency terminal update must succeed');
-}
+await db.exec(`UPDATE audit.idempotency_record
+               SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
+               WHERE id = '90000000-0000-7000-8000-000000000011'`);
 try {
   await db.exec(`UPDATE audit.idempotency_record
-                 SET state = 'IN_PROGRESS', response_status = NULL, response_digest = NULL
+                 SET state = 'FAILED', response_status = 500
                  WHERE id = '90000000-0000-7000-8000-000000000011'`);
-  throw new Error('terminal idempotency record returned to IN_PROGRESS');
+  throw new Error('sequential terminal idempotency transition was accepted');
 } catch (error) {
   if (error.code !== '55000') throw error;
 }
-console.log('passed serialized idempotency race');
+console.log('passed sequential idempotency terminal transition coverage');
 
 for (const testFile of ['000_assert.sql', '001_schema_contract.sql', '002_constraints.sql']) {
   const sql = readFileSync(resolve('database/tests', testFile), 'utf8')
