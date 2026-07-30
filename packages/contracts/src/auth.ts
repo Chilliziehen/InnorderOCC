@@ -1,14 +1,19 @@
 import { z } from "zod";
 
-const normalizedUsernameSchema = z
+const usernameInputSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[a-z0-9][a-z0-9._@-]*$/);
+  .regex(/^(?=.*[!-~])[ -~]{1,128}$/);
+
+const refreshTokenSchema = z
+  .string()
+  .length(43)
+  .regex(/^[A-Za-z0-9_-]{43}$/);
 
 export const loginRequestSchema = z
   .object({
-    username: normalizedUsernameSchema,
+    username: usernameInputSchema,
     password: z.string().min(12).max(128),
   })
   .strict();
@@ -17,7 +22,7 @@ export type LoginRequest = z.infer<typeof loginRequestSchema>;
 
 export const refreshRequestSchema = z
   .object({
-    refreshToken: z.string().min(1),
+    refreshToken: refreshTokenSchema,
   })
   .strict();
 
@@ -38,9 +43,9 @@ export type CurrentUser = z.infer<typeof currentUserSchema>;
 export const tokenResponseSchema = z
   .object({
     tokenType: z.literal("Bearer"),
-    accessToken: z.string().min(1),
-    refreshToken: z.string().min(1),
-    expiresIn: z.number().int().positive(),
+    accessToken: z.string().min(1).max(8192),
+    refreshToken: refreshTokenSchema,
+    expiresIn: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     user: currentUserSchema,
   })
   .strict();

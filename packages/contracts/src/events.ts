@@ -5,10 +5,14 @@ export const eventEnvelopeSchema = z
     id: z.uuid(),
     customerInstanceId: z.uuid(),
     type: z.string().min(1).max(256),
-    schemaVersion: z.number().int().positive(),
+    schemaVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     aggregateType: z.string().min(1).max(256),
     aggregateId: z.uuid(),
-    aggregateVersion: z.number().int().nonnegative(),
+    aggregateVersion: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(Number.MAX_SAFE_INTEGER),
     occurredAt: z.iso.datetime({ offset: true }),
     actorId: z.uuid().optional(),
     correlationId: z.uuid(),

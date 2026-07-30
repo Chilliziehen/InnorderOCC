@@ -12,6 +12,7 @@ import {
 const id = "550e8400-e29b-41d4-a716-446655440000";
 const anotherId = "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
 const occurredAt = "2026-07-30T14:15:16.000+02:00";
+const refreshToken = `${"A".repeat(41)}_-`;
 
 const currentUser = {
   id,
@@ -39,17 +40,24 @@ describe("problemDetailsSchema", () => {
 describe("auth contracts", () => {
   const validPassword = "p".repeat(12);
 
-  it("accepts only normalized username-compatible values", () => {
-    expect(
-      loginRequestSchema.parse({ username: "pilot.user", password: validPassword }),
-    ).toEqual({ username: "pilot.user", password: validPassword });
-    expect(() =>
-      loginRequestSchema.parse({
-        username: " Pilot.User ",
+  it.each(["A", "  Pilot.User  ", "user+alias@example.test", "A".repeat(128)])(
+    "accepts printable username input %j without transforming it",
+    (username) => {
+      expect(loginRequestSchema.parse({ username, password: validPassword })).toEqual({
+        username,
         password: validPassword,
-      }),
-    ).toThrow();
-  });
+      });
+    },
+  );
+
+  it.each(["", " ", "\t", "pilot\nuser", "pilot\u0000user", "A".repeat(129)])(
+    "rejects invalid username input %j",
+    (username) => {
+      expect(() =>
+        loginRequestSchema.parse({ username, password: validPassword }),
+      ).toThrow();
+    },
+  );
 
   it("accepts passwords at the 12 and 128 character boundaries", () => {
     for (const length of [12, 128]) {
@@ -73,19 +81,90 @@ describe("auth contracts", () => {
     }
   });
 
+  it("accepts a 43-character base64url refresh token in request and response", () => {
+    expect(refreshRequestSchema.parse({ refreshToken })).toEqual({ refreshToken });
+    expect(
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "access-token",
+        refreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }),
+    ).toMatchObject({ refreshToken });
+  });
+
+  it.each([
+    "A".repeat(42),
+    "A".repeat(44),
+    `${"A".repeat(42)}+`,
+    `${"A".repeat(42)}/`,
+    `${"A".repeat(42)}=`,
+  ])("rejects invalid refresh token %j", (invalidRefreshToken) => {
+    expect(() =>
+      refreshRequestSchema.parse({ refreshToken: invalidRefreshToken }),
+    ).toThrow();
+    expect(() =>
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "access-token",
+        refreshToken: invalidRefreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }),
+    ).toThrow();
+  });
+
+  it("bounds access tokens at 8192 characters", () => {
+    expect(
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "A".repeat(8192),
+        refreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }).accessToken,
+    ).toHaveLength(8192);
+    expect(() =>
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "A".repeat(8193),
+        refreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects expiresIn above the JavaScript safe-integer maximum", () => {
+    const token = {
+      tokenType: "Bearer",
+      accessToken: "access-token",
+      refreshToken,
+      user: currentUser,
+    } as const;
+
+    expect(
+      tokenResponseSchema.parse({ ...token, expiresIn: Number.MAX_SAFE_INTEGER }),
+    ).toMatchObject({ expiresIn: Number.MAX_SAFE_INTEGER });
+    expect(() =>
+      tokenResponseSchema.parse({ ...token, expiresIn: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toThrow();
+  });
+
   it.each([
     [
       loginRequestSchema,
       { username: "pilot.user", password: validPassword, otp: "123456" },
     ],
-    [refreshRequestSchema, { refreshToken: "opaque-token", accessToken: "secret" }],
+    [refreshRequestSchema, { refreshToken, accessToken: "secret" }],
     [currentUserSchema, { ...currentUser, passwordHash: "secret" }],
     [
       tokenResponseSchema,
       {
         tokenType: "Bearer",
         accessToken: "access-token",
-        refreshToken: "refresh-token",
+        refreshToken,
         expiresIn: 900,
         user: currentUser,
         clientSecret: "secret",
@@ -121,6 +200,31 @@ describe("eventEnvelopeSchema", () => {
     expect(eventEnvelopeSchema).toBeDefined();
     expect(() =>
       eventEnvelopeSchema.parse({ ...event, password: "must-not-leak" }),
+    ).toThrow();
+  });
+
+  it("caps event versions at the JavaScript safe-integer maximum", () => {
+    expect(
+      eventEnvelopeSchema.parse({
+        ...event,
+        schemaVersion: Number.MAX_SAFE_INTEGER,
+        aggregateVersion: Number.MAX_SAFE_INTEGER,
+      }),
+    ).toMatchObject({
+      schemaVersion: Number.MAX_SAFE_INTEGER,
+      aggregateVersion: Number.MAX_SAFE_INTEGER,
+    });
+    expect(() =>
+      eventEnvelopeSchema.parse({
+        ...event,
+        schemaVersion: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      eventEnvelopeSchema.parse({
+        ...event,
+        aggregateVersion: Number.MAX_SAFE_INTEGER + 1,
+      }),
     ).toThrow();
   });
 });

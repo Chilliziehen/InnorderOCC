@@ -7,21 +7,32 @@ import {
   ComponentStatusSchema,
   ServiceStateSchema,
   SystemStatusSchema,
-} from "../src/system-status.js";
+  currentUserSchema,
+  eventEnvelopeSchema,
+  loginRequestSchema,
+  problemDetailsSchema,
+  refreshRequestSchema,
+  tokenResponseSchema,
+} from "../src/index.js";
 
-interface OpenApiSchema {
+interface OpenApiSchema extends OpenApiSchemaProperty {
   additionalProperties?: boolean;
-  enum?: string[];
   properties?: Record<string, OpenApiSchemaProperty>;
   required?: string[];
 }
 
 interface OpenApiSchemaProperty {
   $ref?: string;
+  additionalProperties?: boolean;
+  const?: string;
+  enum?: string[];
   format?: string;
-  items?: { $ref?: string };
+  items?: OpenApiSchemaProperty;
   maxLength?: number;
+  maximum?: number;
   minLength?: number;
+  minimum?: number;
+  pattern?: string;
   type?: string;
 }
 
@@ -63,6 +74,18 @@ const requiredKeys = (
   Object.entries(shape)
     .filter(([, schema]) => !schema.isOptional())
     .map(([key]) => key);
+
+const expectStrictObjectParity = (
+  openApiSchema: OpenApiSchema | undefined,
+  zodShape: Record<string, { isOptional: () => boolean }>,
+): void => {
+  expect(openApiSchema?.type).toBe("object");
+  expect(openApiSchema?.additionalProperties).toBe(false);
+  expect(openApiSchema?.required).toEqual(requiredKeys(zodShape));
+  expect(Object.keys(openApiSchema?.properties ?? {})).toEqual(
+    Object.keys(zodShape),
+  );
+};
 
 describe("OCC Core OpenAPI system status", () => {
   it("exposes the SystemStatus schema from the versioned GET endpoint", async () => {
@@ -139,6 +162,102 @@ describe("OCC Core OpenAPI system status", () => {
         "#/components/schemas/ProblemDetails",
       );
     }
+  });
+
+  it("matches all strict platform Zod contracts", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+
+    expectStrictObjectParity(schemas.ProblemDetails, problemDetailsSchema.shape);
+    expect(schemas.ProblemDetails?.properties).toEqual({
+      type: { type: "string", format: "uri" },
+      title: { type: "string", minLength: 1, maxLength: 256 },
+      status: { type: "integer", minimum: 400, maximum: 599 },
+      code: { type: "string", minLength: 1, maxLength: 128 },
+      correlationId: { type: "string", format: "uuid" },
+      detail: { type: "string", maxLength: 4096 },
+    });
+
+    expectStrictObjectParity(schemas.LoginRequest, loginRequestSchema.shape);
+    expect(schemas.LoginRequest?.properties).toEqual({
+      username: {
+        type: "string",
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^(?=.*[!-~])[ -~]{1,128}$",
+      },
+      password: { type: "string", minLength: 12, maxLength: 128 },
+    });
+
+    expectStrictObjectParity(schemas.RefreshRequest, refreshRequestSchema.shape);
+    expect(schemas.RefreshRequest?.properties).toEqual({
+      refreshToken: {
+        type: "string",
+        minLength: 43,
+        maxLength: 43,
+        pattern: "^[A-Za-z0-9_-]{43}$",
+      },
+    });
+
+    expectStrictObjectParity(schemas.CurrentUser, currentUserSchema.shape);
+    expect(schemas.CurrentUser?.properties).toEqual({
+      id: { type: "string", format: "uuid" },
+      username: { type: "string", minLength: 1, maxLength: 128 },
+      displayName: { type: "string", minLength: 1, maxLength: 256 },
+      status: {
+        type: "string",
+        enum: ["ACTIVE", "LOCKED", "DISABLED", "ARCHIVED"],
+      },
+      capabilities: {
+        type: "array",
+        items: { type: "string", minLength: 1, maxLength: 128 },
+      },
+    });
+
+    expectStrictObjectParity(schemas.TokenResponse, tokenResponseSchema.shape);
+    expect(schemas.TokenResponse?.properties).toEqual({
+      tokenType: { type: "string", const: "Bearer" },
+      accessToken: { type: "string", minLength: 1, maxLength: 8192 },
+      refreshToken: {
+        type: "string",
+        minLength: 43,
+        maxLength: 43,
+        pattern: "^[A-Za-z0-9_-]{43}$",
+      },
+      expiresIn: {
+        type: "integer",
+        minimum: 1,
+        maximum: Number.MAX_SAFE_INTEGER,
+      },
+      user: { $ref: "#/components/schemas/CurrentUser" },
+    });
+
+    expectStrictObjectParity(schemas.EventEnvelope, eventEnvelopeSchema.shape);
+    expect(schemas.EventEnvelope?.properties).toEqual({
+      id: { type: "string", format: "uuid" },
+      customerInstanceId: { type: "string", format: "uuid" },
+      type: { type: "string", minLength: 1, maxLength: 256 },
+      schemaVersion: {
+        type: "integer",
+        minimum: 1,
+        maximum: Number.MAX_SAFE_INTEGER,
+      },
+      aggregateType: { type: "string", minLength: 1, maxLength: 256 },
+      aggregateId: { type: "string", format: "uuid" },
+      aggregateVersion: {
+        type: "integer",
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
+      },
+      occurredAt: { type: "string", format: "date-time" },
+      actorId: { type: "string", format: "uuid" },
+      correlationId: { type: "string", format: "uuid" },
+      causationId: { type: "string", format: "uuid" },
+      payload: { type: "object", additionalProperties: true },
+    });
   });
 
   it("matches the strict Zod system-status contract", async () => {
