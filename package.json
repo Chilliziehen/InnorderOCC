@@ -15,6 +15,7 @@
     "test:infra": "node --test infra/compose/compose.contract.test.mjs infra/compose/gateway.test.mjs",
     "test:database": "node --test database/tests/schema-static.test.mjs",
     "test:electron-provenance": "node --test scripts/electron-provenance.test.mjs",
+    "test:deployment-docs": "node --test scripts/deployment-docs.test.mjs",
     "test:database:pglite": "node scripts/verify.mjs --pglite",
     "build": "npm run build --workspace @innorder/contracts && npm run build --workspace @innorder/ai-service && npm run build --workspace @innorder/desktop",
     "typecheck": "npm run build --workspace @innorder/contracts && npm run typecheck --workspaces --if-present",

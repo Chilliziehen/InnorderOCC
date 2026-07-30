@@ -95,6 +95,7 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /npm(?:\.cmd)? audit --audit-level high --registry https:\/\/registry\.npmjs\.org --cache /u);
   assert.match(result.stdout, /npm(?:\.cmd)? audit signatures --registry https:\/\/registry\.npmjs\.org --cache /u);
   assert.match(result.stdout, /test:electron-provenance/u);
+  assert.match(result.stdout, /test:deployment-docs/u);
   const guardIndex = result.stdout.indexOf("scripts/electron-provenance.mjs");
   const packageIndex = result.stdout.indexOf("build --workspace @innorder/desktop");
   const smokeIndex = result.stdout.indexOf("smoke --workspace @innorder/desktop");

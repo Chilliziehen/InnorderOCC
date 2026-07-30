@@ -107,6 +107,7 @@ async function main() {
   await run("verification orchestrator tests", npm, ["run", "test:verify"]);
   await run("dependency provenance contracts", npm, ["run", "test:provenance"]);
   await run("Electron provenance contracts", npm, ["run", "test:electron-provenance"]);
+  await run("deployment documentation contracts", npm, ["run", "test:deployment-docs"]);
   await run("TypeScript workspace tests", npm, ["run", "test:workspaces"]);
 
   const opa = requiredOpa ?? findOpa();
