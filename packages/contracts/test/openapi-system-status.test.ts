@@ -25,20 +25,34 @@ interface OpenApiSchemaProperty {
 
 interface OpenApiDocument {
   components: {
+    responses?: Record<
+      string,
+      { content?: Record<string, { schema?: { $ref?: string } }> }
+    >;
+    securitySchemes?: Record<string, unknown>;
     schemas: Record<string, OpenApiSchema>;
   };
   paths: Record<string, OpenApiPathItem>;
+  security?: Array<Record<string, string[]>>;
 }
 
 interface OpenApiPathItem {
-  get?: {
-    responses?: Record<
-      string,
-      {
-        content?: Record<string, { schema?: { $ref?: string } }>;
-      }
-    >;
+  get?: OpenApiOperation;
+  post?: OpenApiOperation;
+}
+
+interface OpenApiOperation {
+  requestBody?: {
+    content?: Record<string, { schema?: { $ref?: string } }>;
   };
+  security?: Array<Record<string, string[]>>;
+  responses?: Record<
+    string,
+    {
+      content?: Record<string, { schema?: { $ref?: string } }>;
+      $ref?: string;
+    }
+  >;
 }
 
 const requiredKeys = (
@@ -65,6 +79,59 @@ describe("OCC Core OpenAPI system status", () => {
     expect(jsonContent?.schema?.$ref).toBe(
       "#/components/schemas/SystemStatus",
     );
+  });
+
+  it("keeps status public while protecting authenticated operations", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+
+    expect(document.security).toEqual([{ bearerAuth: [] }]);
+    expect(document.paths["/api/v1/system/status"]?.get?.security).toEqual([]);
+    expect(document.paths["/api/v1/auth/login"]?.post?.security).toEqual([]);
+    expect(document.paths["/api/v1/auth/refresh"]?.post?.security).toEqual([]);
+    expect(document.paths["/api/v1/auth/logout"]?.post?.security).toBeUndefined();
+    expect(document.paths["/api/v1/me"]?.get?.security).toBeUndefined();
+  });
+
+  it("wires auth request, success, and problem response contracts", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const login = document.paths["/api/v1/auth/login"]?.post;
+    const refresh = document.paths["/api/v1/auth/refresh"]?.post;
+    const logout = document.paths["/api/v1/auth/logout"]?.post;
+    const me = document.paths["/api/v1/me"]?.get;
+
+    expect(login?.requestBody?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/LoginRequest",
+    );
+    expect(refresh?.requestBody?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/RefreshRequest",
+    );
+    expect(logout?.requestBody?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/RefreshRequest",
+    );
+    expect(login?.responses?.["200"]?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/TokenResponse",
+    );
+    expect(refresh?.responses?.["200"]?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/TokenResponse",
+    );
+    expect(me?.responses?.["200"]?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/CurrentUser",
+    );
+    expect(logout?.responses?.["204"]).toBeDefined();
+
+    for (const response of Object.values(document.components.responses ?? {})) {
+      expect(response.content?.["application/problem+json"]?.schema?.$ref).toBe(
+        "#/components/schemas/ProblemDetails",
+      );
+    }
   });
 
   it("matches the strict Zod system-status contract", async () => {
