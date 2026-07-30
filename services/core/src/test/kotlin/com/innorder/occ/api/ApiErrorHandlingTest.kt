@@ -83,6 +83,18 @@ class ApiErrorHandlingTest {
             }
     }
 
+    @ParameterizedTest(name = "accepts UUID version {0}")
+    @MethodSource("standardUuidVersions")
+    fun `canonical RFC UUID versions one through eight are accepted`(version: Int, correlationId: String) {
+        val request = MockHttpServletRequest().also { it.addHeader(CorrelationIdFilter.HEADER_NAME, correlationId) }
+        val response = MockHttpServletResponse()
+
+        filter.doFilter(request, response, FilterChain { _, _ -> })
+
+        assertThat(UUID.fromString(correlationId).version()).isEqualTo(version)
+        assertThat(response.getHeader(CorrelationIdFilter.HEADER_NAME)).isEqualTo(correlationId)
+    }
+
     @ParameterizedTest(name = "replaces invalid header case {0}")
     @MethodSource("invalidHeaders")
     fun `invalid correlation headers are replaced by one generated UUIDv7`(description: String, values: List<String>) {
@@ -276,6 +288,48 @@ class ApiErrorHandlingTest {
         }
     }
 
+    @ParameterizedTest(name = "rejects non-standard UUID {0}")
+    @MethodSource("nonStandardUuidTexts")
+    fun `problem correlation ID requires a standard UUID`(correlationId: String) {
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            problem(correlationId = correlationId)
+        }
+    }
+
+    @Test
+    fun `problem title and detail accept astral characters at code point maxima`() {
+        val problem = problem(
+            title = ASTRAL_CHARACTER.repeat(OccProblem.MAX_TITLE_LENGTH),
+            detail = ASTRAL_CHARACTER.repeat(OccProblem.MAX_DETAIL_LENGTH),
+        )
+
+        assertThat(problem.title.codePointCount(0, problem.title.length)).isEqualTo(OccProblem.MAX_TITLE_LENGTH)
+        assertThat(problem.detail!!.codePointCount(0, problem.detail.length)).isEqualTo(OccProblem.MAX_DETAIL_LENGTH)
+    }
+
+    @Test
+    fun `problem title and detail reject astral characters above code point maxima`() {
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            problem(title = ASTRAL_CHARACTER.repeat(OccProblem.MAX_TITLE_LENGTH + 1))
+        }
+        org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            problem(detail = ASTRAL_CHARACTER.repeat(OccProblem.MAX_DETAIL_LENGTH + 1))
+        }
+    }
+
+    private fun problem(
+        title: String = "Invalid request",
+        detail: String? = null,
+        correlationId: String = "018f30c0-7a86-7f8b-a6e0-3c5477bb7e1a",
+    ) = OccProblem(
+        URI.create("https://innorder.local/problems/validation"),
+        title,
+        400,
+        "OCC-API-VALIDATION",
+        correlationId,
+        detail,
+    )
+
     private fun assertStrictProblem(json: String) {
         assertThat(objectMapper.readTree(json).fieldNames().asSequence().toSet())
             .isSubsetOf("type", "title", "status", "code", "correlationId", "detail")
@@ -342,6 +396,26 @@ class ApiErrorHandlingTest {
     }
 
     companion object {
+        private const val ASTRAL_CHARACTER = "\uD83D\uDE00"
+        private val NON_STANDARD_UUIDS = listOf(
+            "123e4567-e89b-02d3-a456-426614174000",
+            "123e4567-e89b-f2d3-a456-426614174000",
+            "123e4567-e89b-72d3-0456-426614174000",
+            "123e4567-e89b-72d3-7456-426614174000",
+        )
+
+        @JvmStatic
+        fun standardUuidVersions(): Stream<org.junit.jupiter.params.provider.Arguments> = (1..8)
+            .map { version ->
+                org.junit.jupiter.params.provider.Arguments.of(
+                    version,
+                    "123e4567-e89b-${version}2d3-a456-426614174000",
+                )
+            }.stream()
+
+        @JvmStatic
+        fun nonStandardUuidTexts(): Stream<String> = (NON_STANDARD_UUIDS + "00000000-0000-0000-0000-000000000000").stream()
+
         @JvmStatic
         fun invalidHeaders(): Stream<org.junit.jupiter.params.provider.Arguments> = Stream.of(
             org.junit.jupiter.params.provider.Arguments.of("missing", emptyList<String>()),
@@ -357,6 +431,10 @@ class ApiErrorHandlingTest {
             org.junit.jupiter.params.provider.Arguments.of("oversized", listOf("a".repeat(300))),
             org.junit.jupiter.params.provider.Arguments.of("nil", listOf("00000000-0000-0000-0000-000000000000")),
             org.junit.jupiter.params.provider.Arguments.of("control character", listOf("018f30c0-7a86-7f8b-a6e0-3c5477bb7e1a\r")),
+            org.junit.jupiter.params.provider.Arguments.of("version zero", listOf(NON_STANDARD_UUIDS[0])),
+            org.junit.jupiter.params.provider.Arguments.of("version f", listOf(NON_STANDARD_UUIDS[1])),
+            org.junit.jupiter.params.provider.Arguments.of("non-RFC variant zero", listOf(NON_STANDARD_UUIDS[2])),
+            org.junit.jupiter.params.provider.Arguments.of("non-RFC variant seven", listOf(NON_STANDARD_UUIDS[3])),
         )
     }
 }

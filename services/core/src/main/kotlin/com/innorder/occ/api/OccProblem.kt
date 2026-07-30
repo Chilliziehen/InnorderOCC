@@ -8,7 +8,6 @@ import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.stereotype.Component
 import java.net.URI
-import java.util.UUID
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 data class OccProblem(
@@ -21,12 +20,11 @@ data class OccProblem(
 ) {
     init {
         require(type.isAbsolute && PROBLEM_TYPE_PATTERN.matches(type.toString()))
-        require(title.length in 1..MAX_TITLE_LENGTH)
+        require(ApiContractValidation.hasCodePointLengthWithin(title, 1, MAX_TITLE_LENGTH))
         require(status in 400..599)
         require(code.length in 1..MAX_CODE_LENGTH)
-        require(detail == null || detail.length <= MAX_DETAIL_LENGTH)
-        val parsedCorrelationId = runCatching { UUID.fromString(correlationId) }.getOrNull()
-        require(parsedCorrelationId != null && parsedCorrelationId != UUID(0, 0))
+        require(detail == null || ApiContractValidation.hasCodePointLengthWithin(detail, 0, MAX_DETAIL_LENGTH))
+        require(ApiContractValidation.isStandardUuid(correlationId))
     }
 
     companion object {

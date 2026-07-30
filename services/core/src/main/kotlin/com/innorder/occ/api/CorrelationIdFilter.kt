@@ -50,12 +50,7 @@ class CorrelationIdFilter(
         if (values.size != 1) return null
 
         val value = values.single()
-        if (value.length != CANONICAL_UUID_LENGTH) return null
-
-        val parsed = runCatching { UUID.fromString(value) }.getOrNull() ?: return null
-        return value.takeIf {
-            parsed != NIL_UUID && parsed.toString().equals(value, ignoreCase = true)
-        }
+        return value.takeIf(ApiContractValidation::isStandardUuid)
     }
 
     private fun generateUuidV7(): UUID {
@@ -80,9 +75,7 @@ class CorrelationIdFilter(
         const val REQUEST_ATTRIBUTE = "com.innorder.occ.correlationId"
         const val MDC_KEY = "correlationId"
 
-        private const val CANONICAL_UUID_LENGTH = 36
         private const val TIMESTAMP_BYTES = 6
         private const val MAX_UUID_V7_TIMESTAMP = 0x0000FFFFFFFFFFFFL
-        private val NIL_UUID = UUID(0, 0)
     }
 }
