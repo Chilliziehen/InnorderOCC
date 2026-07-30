@@ -205,6 +205,36 @@ SELECT pg_temp.assert_true(
     'valid same-principal forward rotation is retained'
 );
 SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET refresh_token_hash = repeat('9', 64)
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '55000', 'refresh token hash cannot be replaced to resurrect an old session'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET token_version = token_version + 1
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '55000', 'auth session token version is frozen'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET expires_at = expires_at + interval '1 hour'
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '55000', 'auth session expiry is frozen'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET revoked_at = NULL
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '55000', 'auth session revocation cannot be cleared'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET replaced_by_session_id = NULL
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '55000', 'auth session replacement cannot be cleared'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET last_used_at = last_used_at - interval '1 microsecond'
+      WHERE id = '22000000-0000-7000-8000-000000000003'$$,
+    '55000', 'auth session last use cannot move backwards'
+);
+SELECT pg_temp.assert_raises(
     $$UPDATE iam.auth_session
       SET replaced_by_session_id = '22000000-0000-7000-8000-000000000005'
       WHERE id = '22000000-0000-7000-8000-000000000005'$$,
@@ -239,6 +269,20 @@ INSERT INTO audit.idempotency_record (
     '23000000-0000-7000-8000-000000000001',
     '20000000-0000-7000-8000-000000000001', 'test.command', 'idem-1', repeat('b', 64),
     'IN_PROGRESS', statement_timestamp(), statement_timestamp(), statement_timestamp() + interval '1 hour'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.idempotency_record
+      SET principal_id = '20000000-0000-7000-8000-000000000004',
+          command_key = 'other.command', idempotency_key = 'freed-key',
+          expires_at = expires_at + interval '1 hour'
+      WHERE id = '23000000-0000-7000-8000-000000000001'$$,
+    '55000', 'idempotency ownership key and expiry are immutable'
+);
+SELECT pg_temp.assert_true(
+    (SELECT principal_id = '20000000-0000-7000-8000-000000000001'
+            AND command_key = 'test.command' AND idempotency_key = 'idem-1'
+       FROM audit.idempotency_record WHERE id = '23000000-0000-7000-8000-000000000001'),
+    'idempotency unique ownership key cannot be freed or reassigned'
 );
 SELECT pg_temp.assert_raises(
     $$UPDATE audit.idempotency_record SET request_hash = repeat('c', 64)
@@ -322,6 +366,26 @@ INSERT INTO audit.outbox_event (
     '24000000-0000-7000-8000-000000000011',
     statement_timestamp(), statement_timestamp(), 'PENDING', statement_timestamp()
 );
+INSERT INTO audit.outbox_event (
+    id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version,
+    payload, correlation_id, customer_instance_id, available_at, status, created_at
+) VALUES (
+    '24000000-0000-7000-8000-000000000003', 'work_item',
+    '20000000-0000-7000-8000-000000000002', 3, 'work.scheduled', 1,
+    '{}'::jsonb, '24000000-0000-7000-8000-000000000013',
+    '00000000-0000-7000-8000-000000000001',
+    transaction_timestamp() + interval '2 hours', 'PENDING', statement_timestamp()
+);
+SELECT pg_temp.assert_true(
+    (SELECT next_attempt_at = available_at FROM audit.outbox_event
+      WHERE id = '24000000-0000-7000-8000-000000000003'),
+    'future outbox events default retry scheduling to availability'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.outbox_event SET payload = '{"changed":true}'::jsonb
+      WHERE id = '24000000-0000-7000-8000-000000000003'$$,
+    '55000', 'outbox event content is immutable'
+);
 SELECT pg_temp.assert_true(
     (SELECT causation_id = '24000000-0000-7000-8000-000000000011'
        FROM audit.outbox_event WHERE id = '24000000-0000-7000-8000-000000000001'),
@@ -330,12 +394,33 @@ SELECT pg_temp.assert_true(
 SELECT pg_temp.assert_raises(
     $$UPDATE audit.outbox_event SET customer_instance_id = '00000000-0000-7000-8000-000000000099'
       WHERE id = '24000000-0000-7000-8000-000000000001'$$,
-    '23503', 'outbox customer instance foreign key is enforced'
+    '55000', 'outbox customer identity is immutable'
 );
 SELECT pg_temp.assert_raises(
     $$UPDATE audit.outbox_event SET actor_entity_id = '20000000-0000-7000-8000-000000000099'
       WHERE id = '24000000-0000-7000-8000-000000000001'$$,
-    '23503', 'outbox actor foreign key is enforced'
+    '55000', 'outbox actor identity is immutable'
+);
+SELECT pg_temp.assert_raises(
+    $$INSERT INTO audit.outbox_event
+      (id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version,
+       payload, correlation_id, customer_instance_id, available_at, status, created_at)
+      VALUES ('24000000-0000-7000-8000-000000000098', 'work_item',
+              '20000000-0000-7000-8000-000000000002', 98, 'work.invalid-customer', 1,
+              '{}'::jsonb, '24000000-0000-7000-8000-000000000098',
+              '00000000-0000-7000-8000-000000000099', statement_timestamp(), 'PENDING', statement_timestamp())$$,
+    '23503', 'outbox customer instance foreign key is enforced on insert'
+);
+SELECT pg_temp.assert_raises(
+    $$INSERT INTO audit.outbox_event
+      (id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version,
+       payload, correlation_id, customer_instance_id, actor_entity_id, available_at, status, created_at)
+      VALUES ('24000000-0000-7000-8000-000000000099', 'work_item',
+              '20000000-0000-7000-8000-000000000002', 99, 'work.invalid-actor', 1,
+              '{}'::jsonb, '24000000-0000-7000-8000-000000000099',
+              '00000000-0000-7000-8000-000000000001', '20000000-0000-7000-8000-000000000099',
+              statement_timestamp(), 'PENDING', statement_timestamp())$$,
+    '23503', 'outbox actor foreign key is enforced on insert'
 );
 SELECT pg_temp.assert_raises(
     $$UPDATE audit.outbox_event SET next_attempt_at = available_at - interval '1 second'
@@ -380,6 +465,13 @@ UPDATE audit.outbox_event
 SET status = 'PUBLISHED', published_at = statement_timestamp()
 WHERE id = '24000000-0000-7000-8000-000000000001';
 SELECT pg_temp.assert_raises(
+    $$UPDATE audit.outbox_event SET attempts = attempts + 1
+      WHERE id = '24000000-0000-7000-8000-000000000001'$$,
+    '55000', 'published outbox event operational fields are terminal'
+);
+UPDATE audit.outbox_event SET status = status
+WHERE id = '24000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_raises(
     $$UPDATE audit.outbox_event
       SET status = 'PENDING', claimed_at = NULL, published_at = NULL
       WHERE id = '24000000-0000-7000-8000-000000000001'$$,
@@ -401,6 +493,11 @@ SELECT pg_temp.assert_raises(
       WHERE id = '24000000-0000-7000-8000-000000000002'$$,
     '55000', 'dead outbox events are terminal'
 );
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.outbox_event SET last_error = 'changed terminal error'
+      WHERE id = '24000000-0000-7000-8000-000000000002'$$,
+    '55000', 'dead outbox event fields are terminal'
+);
 
 SELECT pg_temp.assert_raises(
     $$INSERT INTO iam.principal
@@ -419,6 +516,13 @@ SELECT pg_temp.assert_raises(
 SELECT pg_temp.assert_true(
     (SELECT current_revision = 0 FROM authz.authorization_state WHERE singleton),
     'authorization revision starts at zero'
+);
+SELECT pg_temp.assert_true(
+    authz.lock_authorization_state_for_change()
+        = (SELECT current_revision FROM authz.authorization_state WHERE singleton)
+    AND authz.lock_authorization_state_for_snapshot()
+        = (SELECT current_revision FROM authz.authorization_state WHERE singleton),
+    'authorization command paths expose exclusive change and shared snapshot locks'
 );
 
 CREATE TEMP TABLE revision_checkpoint (value bigint NOT NULL);

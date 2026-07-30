@@ -8,6 +8,9 @@ const root = fileURLToPath(new URL('../migrations/', import.meta.url));
 const runtimeRoleBootstrapPath = fileURLToPath(
   new URL('../bootstrap/001-create-runtime-role.sql', import.meta.url),
 );
+const postgresqlRaceTestPath = fileURLToPath(
+  new URL('./postgresql-idempotency-race.test.mjs', import.meta.url),
+);
 const migrations = [
   'V001__bootstrap.sql',
   'V002__catalog.sql',
@@ -190,6 +193,10 @@ test('adds protected customer and hashed authentication persistence', () => {
   assert.match(sql, /replaced_by_session_id uuid REFERENCES iam\.auth_session\(id\)/i);
   assert.doesNotMatch(sql, /replacement_session_id/i);
   assert.match(sql, /CREATE TRIGGER trg_auth_session_rotation_integrity/i);
+  assert.match(sql, /auth session security fields are immutable/i);
+  assert.match(sql, /last_used_at cannot move backwards/i);
+  assert.match(sql, /auth session revocation is one-way/i);
+  assert.match(sql, /auth session replacement is one-way/i);
   assert.match(sql, /replacement session must belong to the same principal/i);
   assert.match(sql, /replacement session cannot predate rotated session/i);
   assert.match(sql, /CREATE INDEX ix_auth_session_active_principal_expiry/i);
@@ -203,6 +210,7 @@ test('adds deterministic idempotency and outbox lifecycles', () => {
   assert.match(sql, /octet_length\(response_body::text\) <= 65536/i);
   assert.match(sql, /CREATE TRIGGER trg_idempotency_record_lifecycle/i);
   assert.match(sql, /request_hash is immutable/i);
+  assert.match(sql, /idempotency ownership fields are immutable/i);
   for (const column of [
     'customer_instance_id', 'actor_entity_id', 'causation_id', 'last_error',
     'next_attempt_at', 'claimed_at',
@@ -213,6 +221,12 @@ test('adds deterministic idempotency and outbox lifecycles', () => {
   assert.match(sql, /next_attempt_at, created_at/i);
   assert.match(sql, /published_at\s*=\s*CASE\s+WHEN status = 'PUBLISHED'/i);
   assert.match(sql, /CREATE TRIGGER trg_outbox_event_lifecycle/i);
+  assert.match(sql, /CREATE TRIGGER trg_outbox_event_schedule/i);
+  assert.match(sql, /NEW\.next_attempt_at := NEW\.available_at/i);
+  assert.match(sql, /ALTER COLUMN next_attempt_at DROP DEFAULT/i);
+  assert.match(sql, /outbox event identity and content are immutable/i);
+  assert.match(sql, /terminal outbox event is immutable/i);
+  assert.match(sql, /CREATE INDEX ix_outbox_stale_publishing/i);
   assert.match(sql, /ck_outbox_retry_schedule/i);
   assert.match(sql, /ck_outbox_claim_publish_time/i);
   assert.match(sql, /fk_outbox_customer_instance/i);
@@ -251,4 +265,32 @@ test('uses time-window relationship authorization and exact revision triggers', 
   assert.match(sql, /revision tracks relationship fact mutations/i);
   assert.match(sql, /single transaction timestamp/i);
   assert.match(sql, /five-minute expiry/i);
+  assert.match(sql, /CREATE FUNCTION authz\.lock_authorization_state_for_change\(\)/i);
+  assert.match(sql, /CREATE FUNCTION authz\.lock_authorization_state_for_snapshot\(\)/i);
+  assert.match(sql, /FOR UPDATE/i);
+  assert.match(sql, /FOR SHARE/i);
+  assert.match(sql, /CREATE TRIGGER trg_relationship_authorization_lock/i);
+  assert.match(sql, /CREATE TRIGGER trg_principal_status_authorization_lock/i);
+  assert.match(sql, /CREATE TRIGGER trg_entity_authorization_lock/i);
+  assert.match(sql, /CREATE TRIGGER trg_policy_release_authorization_lock/i);
+  assert.match(sql, /BEFORE INSERT OR UPDATE OR DELETE ON authz\.relationship/i);
+  assert.match(sql, /BEFORE UPDATE OF status ON iam\.principal/i);
+  assert.match(sql, /BEFORE UPDATE OF auth_attributes, state, entity_type_version_id ON authz\.entity/i);
+  assert.match(sql, /BEFORE INSERT OR UPDATE OF status OR DELETE ON authz\.policy_release/i);
+  assert.match(sql, /call lock_authorization_state_for_change before fact writes/i);
+});
+
+test('isolates PostgreSQL race fixtures and keeps credentials out of process arguments', () => {
+  const source = readFileSync(postgresqlRaceTestPath, 'utf8');
+  assert.match(source, /randomUUID\(\)/i);
+  assert.match(source, /new URL\(databaseUrl\)/i);
+  assert.match(source, /PGHOST:\s*decodeURIComponent\(parsed\.hostname\)/i);
+  for (const variable of ['PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'PGSSLMODE']) {
+    assert.match(source, new RegExp(`\\b${variable}\\b`), variable);
+  }
+  assert.doesNotMatch(source, /'--dbname',\s*databaseUrl/i);
+  assert.doesNotMatch(source, /91000000-0000-7000-8000-/i);
+  assert.match(source, /skip:\s*!strict\s*&&\s*localSkip/i);
+  assert.match(source, /t\.after\(cleanup\)[\s\S]*await execPsql/i);
+  assert.match(source, /finally\s*\{[\s\S]*await cleanup\(\)/i);
 });

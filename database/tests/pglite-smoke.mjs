@@ -103,7 +103,8 @@ await db.exec(`
      payload, correlation_id, available_at, attempts, status, published_at, created_at)
   VALUES
     ('90000000-0000-7000-8000-000000000020', 'legacy', '90000000-0000-7000-8000-000000000005', 1,
-     'legacy.pending', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000030', now(), 0, 'PENDING', now(), now()),
+     'legacy.pending', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000030',
+     now() + interval '2 hours', 0, 'PENDING', now(), now()),
     ('90000000-0000-7000-8000-000000000021', 'legacy', '90000000-0000-7000-8000-000000000005', 2,
      'legacy.publishing', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000031', now(), 1, 'PUBLISHING', now(), now()),
     ('90000000-0000-7000-8000-000000000022', 'legacy', '90000000-0000-7000-8000-000000000005', 3,
@@ -114,6 +115,24 @@ await db.exec(`
 console.log('inserted representative V009 legacy rows');
 
 await applyMigration(migrations.at(-1));
+
+await db.exec(`
+  INSERT INTO audit.outbox_event
+    (id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version,
+     payload, correlation_id, customer_instance_id, available_at, status, created_at)
+  VALUES
+    ('90000000-0000-7000-8000-000000000024', 'legacy', '90000000-0000-7000-8000-000000000005', 5,
+     'legacy.future', 1, '{}'::jsonb, '90000000-0000-7000-8000-000000000034',
+     '00000000-0000-7000-8000-000000000001', now() + interval '3 hours', 'PENDING', now());
+`);
+const futureOutbox = await db.query(`
+  SELECT next_attempt_at = available_at AS schedule_initialized
+  FROM audit.outbox_event
+  WHERE id = '90000000-0000-7000-8000-000000000024'
+`);
+if (futureOutbox.rows.length !== 1 || !futureOutbox.rows[0].schedule_initialized) {
+  throw new Error('future outbox insert did not initialize next_attempt_at from available_at');
+}
 
 const legacyIdempotency = await db.query(`
   SELECT id::text, state, updated_at = created_at AS timestamps_preserved, resource_id::text
@@ -133,7 +152,8 @@ const legacyOutbox = await db.query(`
          published_at IS NOT NULL AS has_published_at, claimed_at IS NOT NULL AS has_claimed_at,
          last_error
   FROM audit.outbox_event
-  WHERE id::text LIKE '90000000-0000-7000-8000-00000000002%'
+  WHERE id::text BETWEEN '90000000-0000-7000-8000-000000000020'
+                     AND '90000000-0000-7000-8000-000000000023'
   ORDER BY id
 `);
 if (legacyOutbox.rows.length !== 4

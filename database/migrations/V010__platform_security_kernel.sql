@@ -77,12 +77,22 @@ DECLARE
     replacement_principal_id uuid;
     replacement_created_at timestamptz;
 BEGIN
-    IF TG_OP = 'UPDATE' AND (
-        NEW.id IS DISTINCT FROM OLD.id
-        OR NEW.principal_id IS DISTINCT FROM OLD.principal_id
-        OR NEW.created_at IS DISTINCT FROM OLD.created_at
-    ) THEN
-        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'auth session identity is immutable';
+    IF TG_OP = 'UPDATE' THEN
+        IF (to_jsonb(NEW) - ARRAY['last_used_at', 'revoked_at', 'replaced_by_session_id'])
+           IS DISTINCT FROM
+           (to_jsonb(OLD) - ARRAY['last_used_at', 'revoked_at', 'replaced_by_session_id']) THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'auth session security fields are immutable';
+        END IF;
+        IF NEW.last_used_at < OLD.last_used_at THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'auth session last_used_at cannot move backwards';
+        END IF;
+        IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'auth session revocation is one-way';
+        END IF;
+        IF OLD.replaced_by_session_id IS NOT NULL
+           AND NEW.replaced_by_session_id IS DISTINCT FROM OLD.replaced_by_session_id THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'auth session replacement is one-way';
+        END IF;
     END IF;
 
     IF NEW.replaced_by_session_id IS NOT NULL THEN
@@ -179,6 +189,14 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.principal_id IS DISTINCT FROM OLD.principal_id
+       OR NEW.command_key IS DISTINCT FROM OLD.command_key
+       OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.expires_at IS DISTINCT FROM OLD.expires_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'idempotency ownership fields are immutable';
+    END IF;
     IF NEW.request_hash IS DISTINCT FROM OLD.request_hash THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'idempotency request_hash is immutable';
     END IF;
@@ -228,7 +246,7 @@ ALTER TABLE audit.outbox_event
     ALTER COLUMN customer_instance_id SET NOT NULL,
     ALTER COLUMN customer_instance_id SET DEFAULT '00000000-0000-7000-8000-000000000001',
     ALTER COLUMN next_attempt_at SET NOT NULL,
-    ALTER COLUMN next_attempt_at SET DEFAULT statement_timestamp(),
+    ALTER COLUMN next_attempt_at DROP DEFAULT,
     ADD CONSTRAINT fk_outbox_customer_instance
         FOREIGN KEY (customer_instance_id) REFERENCES platform.customer_instance(id),
     ADD CONSTRAINT fk_outbox_actor_entity
@@ -252,11 +270,48 @@ ALTER TABLE audit.outbox_event
             OR (status = 'DEAD' AND published_at IS NULL AND last_error IS NOT NULL)
         );
 
+CREATE FUNCTION audit.initialize_outbox_schedule()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.next_attempt_at IS NULL THEN
+        NEW.next_attempt_at := NEW.available_at;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_outbox_event_schedule
+BEFORE INSERT ON audit.outbox_event
+FOR EACH ROW EXECUTE FUNCTION audit.initialize_outbox_schedule();
+
 CREATE FUNCTION audit.enforce_outbox_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF OLD.status IN ('PUBLISHED', 'DEAD') THEN
+        IF to_jsonb(NEW) IS DISTINCT FROM to_jsonb(OLD) THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal outbox event is immutable';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.customer_instance_id IS DISTINCT FROM OLD.customer_instance_id
+       OR NEW.aggregate_type IS DISTINCT FROM OLD.aggregate_type
+       OR NEW.aggregate_id IS DISTINCT FROM OLD.aggregate_id
+       OR NEW.aggregate_version IS DISTINCT FROM OLD.aggregate_version
+       OR NEW.event_type IS DISTINCT FROM OLD.event_type
+       OR NEW.schema_version IS DISTINCT FROM OLD.schema_version
+       OR NEW.payload IS DISTINCT FROM OLD.payload
+       OR NEW.actor_entity_id IS DISTINCT FROM OLD.actor_entity_id
+       OR NEW.correlation_id IS DISTINCT FROM OLD.correlation_id
+       OR NEW.causation_id IS DISTINCT FROM OLD.causation_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.available_at IS DISTINCT FROM OLD.available_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'outbox event identity and content are immutable';
+    END IF;
     IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
         (OLD.status = 'PENDING' AND NEW.status IN ('PUBLISHING', 'DEAD'))
         OR (OLD.status = 'PUBLISHING' AND NEW.status IN ('PENDING', 'PUBLISHED', 'DEAD'))
@@ -268,13 +323,16 @@ END;
 $$;
 
 CREATE TRIGGER trg_outbox_event_lifecycle
-BEFORE UPDATE OF status ON audit.outbox_event
+BEFORE UPDATE ON audit.outbox_event
 FOR EACH ROW EXECUTE FUNCTION audit.enforce_outbox_lifecycle();
 
 DROP INDEX audit.ix_outbox_pending;
 CREATE INDEX ix_outbox_pending_claim
 ON audit.outbox_event (next_attempt_at, created_at)
 WHERE (status = 'PENDING');
+CREATE INDEX ix_outbox_stale_publishing
+ON audit.outbox_event (claimed_at, created_at)
+WHERE (status = 'PUBLISHING');
 
 DROP INDEX authz.uq_relationship_active;
 
@@ -439,6 +497,55 @@ ON authz.relationship (
     relation_definition_id, revoked_at, valid_from, valid_until,
     subject_entity_id, object_entity_id
 );
+
+CREATE FUNCTION authz.lock_authorization_state_for_change()
+RETURNS bigint
+LANGUAGE sql
+AS $$
+    SELECT current_revision
+    FROM authz.authorization_state
+    WHERE singleton
+    FOR UPDATE
+$$;
+
+CREATE FUNCTION authz.lock_authorization_state_for_snapshot()
+RETURNS bigint
+LANGUAGE sql
+AS $$
+    SELECT current_revision
+    FROM authz.authorization_state
+    WHERE singleton
+    FOR SHARE
+$$;
+
+CREATE FUNCTION authz.lock_authorization_state_for_change_trigger()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM authz.lock_authorization_state_for_change();
+    RETURN NULL;
+END;
+$$;
+
+-- Auth-changing command paths call lock_authorization_state_for_change before fact writes.
+-- Ordinary snapshots use the shared lock API. A caller that already took locks out of order
+-- cannot be repaired by a trigger and is outside the supported command contract.
+CREATE TRIGGER trg_relationship_authorization_lock
+BEFORE INSERT OR UPDATE OR DELETE ON authz.relationship
+FOR EACH STATEMENT EXECUTE FUNCTION authz.lock_authorization_state_for_change_trigger();
+
+CREATE TRIGGER trg_principal_status_authorization_lock
+BEFORE UPDATE OF status ON iam.principal
+FOR EACH STATEMENT EXECUTE FUNCTION authz.lock_authorization_state_for_change_trigger();
+
+CREATE TRIGGER trg_entity_authorization_lock
+BEFORE UPDATE OF auth_attributes, state, entity_type_version_id ON authz.entity
+FOR EACH STATEMENT EXECUTE FUNCTION authz.lock_authorization_state_for_change_trigger();
+
+CREATE TRIGGER trg_policy_release_authorization_lock
+BEFORE INSERT OR UPDATE OF status OR DELETE ON authz.policy_release
+FOR EACH STATEMENT EXECUTE FUNCTION authz.lock_authorization_state_for_change_trigger();
 
 DROP TRIGGER trg_relationship_authorization_revision ON authz.relationship;
 

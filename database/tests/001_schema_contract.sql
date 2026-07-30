@@ -44,6 +44,26 @@ SELECT pg_temp.assert_true(
     EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'audit' AND indexname = 'ix_outbox_pending_claim'),
     'outbox pending claim index exists'
 );
+SELECT pg_temp.assert_true(
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'audit' AND indexname = 'ix_outbox_stale_publishing'),
+    'outbox stale publishing recovery index exists'
+);
+SELECT pg_temp.assert_true(
+    to_regprocedure('authz.lock_authorization_state_for_change()') IS NOT NULL
+    AND to_regprocedure('authz.lock_authorization_state_for_snapshot()') IS NOT NULL,
+    'authorization lock-order APIs exist'
+);
+SELECT pg_temp.assert_true(
+    (SELECT count(*) = 4
+       FROM pg_trigger
+      WHERE tgname IN (
+          'trg_relationship_authorization_lock',
+          'trg_principal_status_authorization_lock',
+          'trg_entity_authorization_lock',
+          'trg_policy_release_authorization_lock'
+      ) AND NOT tgisinternal),
+    'authorization fact writes acquire the exclusive state lock before mutation'
+);
 
 SELECT pg_temp.assert_true(
     has_table_privilege('innorder_runtime', 'platform.customer_instance', 'SELECT,INSERT,UPDATE,DELETE')
