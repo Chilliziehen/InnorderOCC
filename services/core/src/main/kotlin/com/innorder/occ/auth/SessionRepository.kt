@@ -26,6 +26,7 @@ class SessionRepository(
         lifetime: Duration,
         clientFingerprint: String?,
     ): IssuedSession = inTransaction {
+        require(lockPrincipal(principalId)) { "Session could not be created" }
         createSession(principalId, tokenVersion, lifetime, clientFingerprint, clock.instant())
     }
 
@@ -33,7 +34,11 @@ class SessionRepository(
         RefreshToken.parse(rawToken)?.let(::validate) ?: SessionValidation.Invalid
 
     fun validate(token: RefreshToken): SessionValidation = inTransaction {
-        val row = lockByToken(token) ?: return@inTransaction SessionValidation.Invalid
+        val expected = hash(token)
+        val principalId = findPrincipalByTokenHash(expected.hex) ?: return@inTransaction SessionValidation.Invalid
+        if (!lockPrincipal(principalId)) return@inTransaction SessionValidation.Invalid
+        val row = lockByTokenHash(expected) ?: return@inTransaction SessionValidation.Invalid
+        if (row.session.principalId != principalId) return@inTransaction SessionValidation.Invalid
         val now = clock.instant()
         if (row.session.revokedAt != null) {
             row.session.replacedBySessionId?.let { revokeReplacementChain(it, row.session.principalId, now) }
@@ -50,7 +55,11 @@ class SessionRepository(
         RefreshToken.parse(rawToken)?.let { rotate(it, lifetime, clientFingerprint) } ?: SessionRotation.Invalid
 
     fun rotate(token: RefreshToken, lifetime: Duration, clientFingerprint: String? = null): SessionRotation = inTransaction {
-        val old = lockByToken(token) ?: return@inTransaction SessionRotation.Invalid
+        val expected = hash(token)
+        val principalId = findPrincipalByTokenHash(expected.hex) ?: return@inTransaction SessionRotation.Invalid
+        if (!lockPrincipal(principalId)) return@inTransaction SessionRotation.Invalid
+        val old = lockByTokenHash(expected) ?: return@inTransaction SessionRotation.Invalid
+        if (old.session.principalId != principalId) return@inTransaction SessionRotation.Invalid
         val now = clock.instant()
         if (old.session.revokedAt != null) {
             old.session.replacedBySessionId?.let { revokeReplacementChain(it, old.session.principalId, now) }
@@ -76,7 +85,10 @@ class SessionRepository(
     }
 
     fun revoke(sessionId: UUID): Boolean = inTransaction {
+        val principalId = findPrincipalBySessionId(sessionId) ?: return@inTransaction false
+        if (!lockPrincipal(principalId)) return@inTransaction false
         val session = lockById(sessionId) ?: return@inTransaction false
+        if (session.principalId != principalId) return@inTransaction false
         val now = clock.instant()
         if (session.revokedAt == null) {
             jdbc.update(
@@ -129,8 +141,25 @@ class SessionRepository(
         return IssuedSession(session, token)
     }
 
-    private fun lockByToken(token: RefreshToken): StoredSession? {
-        val expected = hash(token)
+    private fun findPrincipalByTokenHash(tokenHash: String): UUID? = jdbc.query(
+        "SELECT principal_id FROM iam.auth_session WHERE refresh_token_hash = ?",
+        { rs, _ -> rs.getObject("principal_id", UUID::class.java) },
+        tokenHash,
+    ).singleOrNull()
+
+    private fun findPrincipalBySessionId(id: UUID): UUID? = jdbc.query(
+        "SELECT principal_id FROM iam.auth_session WHERE id = ?",
+        { rs, _ -> rs.getObject("principal_id", UUID::class.java) },
+        id,
+    ).singleOrNull()
+
+    private fun lockPrincipal(principalId: UUID): Boolean = jdbc.query(
+        "SELECT id FROM iam.principal WHERE id = ? FOR UPDATE",
+        { rs, _ -> rs.getObject("id", UUID::class.java) },
+        principalId,
+    ).singleOrNull() == principalId
+
+    private fun lockByTokenHash(expected: TokenHash): StoredSession? {
         val rows = jdbc.query(
             """SELECT id, principal_id, token_version, refresh_token_hash, created_at, last_used_at,
                       expires_at, revoked_at, replaced_by_session_id, client_fingerprint
@@ -156,6 +185,10 @@ class SessionRepository(
         repeat(MAX_REPLACEMENT_CHAIN) {
             val id = nextId ?: return
             if (!visited.add(id)) {
+                revokeAllActiveForPrincipal(principalId, now)
+                return
+            }
+            if (findPrincipalBySessionId(id) != principalId) {
                 revokeAllActiveForPrincipal(principalId, now)
                 return
             }

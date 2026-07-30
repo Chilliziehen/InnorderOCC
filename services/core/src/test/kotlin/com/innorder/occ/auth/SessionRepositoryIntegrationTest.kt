@@ -25,7 +25,9 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import javax.sql.DataSource
 
@@ -100,13 +102,16 @@ class SessionRepositoryIntegrationTest(
         val rotationEntered = CountDownLatch(1)
         val allowRotation = CountDownLatch(1)
         val pool = Executors.newFixedThreadPool(2)
+        val futures = mutableListOf<Future<*>>()
         try {
             val rotation = pool.submit<SessionRotation> {
                 repository(BlockingSecureRandom(rotationEntered, allowRotation))
                     .rotate(first.refreshToken, Duration.ofHours(1))
             }
+            futures += rotation
             assertThat(rotationEntered.await(15, TimeUnit.SECONDS)).isTrue()
             val revocation = pool.submit<Boolean> { repository.revoke(first.session.id) }
+            futures += revocation
             allowRotation.countDown()
 
             assertThat(rotation.get(15, TimeUnit.SECONDS)).isInstanceOf(SessionRotation.Rotated::class.java)
@@ -114,7 +119,7 @@ class SessionRepositoryIntegrationTest(
             assertThat(activeSessionCount()).isZero()
         } finally {
             allowRotation.countDown()
-            pool.shutdownNow()
+            shutdown(pool, futures)
         }
     }
 
@@ -131,6 +136,39 @@ class SessionRepositoryIntegrationTest(
         assertThat(longChainRepository.revoke(root.session.id)).isTrue()
 
         assertThat(activeSessionCount()).isZero()
+    }
+
+    @Test
+    fun `rotation at chain overflow serializes with fail closed revocation`() {
+        val longChainRepository = repository(SecureRandom())
+        val root = longChainRepository.create(PRINCIPAL_ID, 0, Duration.ofHours(1), null)
+        var current = root
+        repeat(65) {
+            current = (longChainRepository.rotate(current.refreshToken, Duration.ofHours(1)) as SessionRotation.Rotated).issued
+        }
+        val rotationEntered = CountDownLatch(1)
+        val allowRotation = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        val futures = mutableListOf<Future<*>>()
+        try {
+            val rotation = pool.submit<SessionRotation> {
+                repository(BlockingSecureRandom(rotationEntered, allowRotation))
+                    .rotate(current.refreshToken, Duration.ofHours(1))
+            }
+            futures += rotation
+            assertThat(rotationEntered.await(15, TimeUnit.SECONDS)).isTrue()
+            val revocation = pool.submit<Boolean> { repository.revoke(root.session.id) }
+            futures += revocation
+            awaitSessionLockWait()
+            allowRotation.countDown()
+
+            assertThat(rotation.get(15, TimeUnit.SECONDS)).isInstanceOf(SessionRotation.Rotated::class.java)
+            assertThat(revocation.get(15, TimeUnit.SECONDS)).isTrue()
+            assertThat(activeSessionCount()).isZero()
+        } finally {
+            allowRotation.countDown()
+            shutdown(pool, futures)
+        }
     }
 
     @Test
@@ -185,12 +223,13 @@ class SessionRepositoryIntegrationTest(
         val issued = repository.create(PRINCIPAL_ID, 0, Duration.ofDays(7), null)
         val start = CountDownLatch(1)
         val pool = Executors.newFixedThreadPool(2)
+        val futures = mutableListOf<Future<*>>()
         try {
             val attempts = (1..2).map { index ->
                 pool.submit<SessionRotation> {
                     start.await()
                     repository(SequenceSecureRandom(index)).rotate(issued.refreshToken, Duration.ofDays(7))
-                }
+                }.also { futures += it }
             }
             start.countDown()
             val outcomes = attempts.map { it.get(15, TimeUnit.SECONDS) }
@@ -200,7 +239,8 @@ class SessionRepositoryIntegrationTest(
             assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM iam.auth_session", Long::class.java)).isEqualTo(2L)
             assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM iam.auth_session WHERE revoked_at IS NOT NULL", Long::class.java)).isEqualTo(2L)
         } finally {
-            pool.shutdownNow()
+            start.countDown()
+            shutdown(pool, futures)
         }
     }
 
@@ -222,6 +262,31 @@ class SessionRepositoryIntegrationTest(
         Long::class.java,
         PRINCIPAL_ID,
     )!!
+
+    private fun awaitSessionLockWait() {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
+            val waiting = jdbcTemplate.queryForObject(
+                """SELECT EXISTS (
+                       SELECT 1 FROM pg_stat_activity
+                       WHERE datname = current_database()
+                         AND pid <> pg_backend_pid()
+                         AND wait_event_type = 'Lock'
+                         AND (query LIKE '%iam.auth_session%' OR query LIKE '%iam.principal%')
+                   )""",
+                Boolean::class.java,
+            ) == true
+            if (waiting) return
+            Thread.sleep(10)
+        }
+        error("Timed out waiting for a session operation to block on a database lock")
+    }
+
+    private fun shutdown(pool: ExecutorService, futures: List<Future<*>>) {
+        futures.filterNot { it.isDone }.forEach { it.cancel(true) }
+        pool.shutdownNow()
+        assertThat(pool.awaitTermination(15, TimeUnit.SECONDS)).isTrue()
+    }
 
     private class MutableClock(var instant: Instant) : Clock() {
         override fun instant(): Instant = instant
