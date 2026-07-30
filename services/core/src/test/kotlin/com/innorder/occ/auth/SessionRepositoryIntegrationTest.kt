@@ -16,6 +16,7 @@ import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import org.testcontainers.utility.MountableFile
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Clock
 import java.time.Duration
@@ -55,12 +56,30 @@ class SessionRepositoryIntegrationTest(
         val issued = repository.create(PRINCIPAL_ID, 7, Duration.ofDays(7), "desktop:test")
         val rawToken = issued.refreshToken.exposeValue()
         val stored = jdbcTemplate.queryForObject("SELECT refresh_token_hash FROM iam.auth_session WHERE id = ?", String::class.java, issued.session.id)
+        val expectedHash = MessageDigest.getInstance("SHA-256")
+            .digest(rawToken.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
         assertThat(rawToken).hasSize(43).matches("^[A-Za-z0-9_-]{43}${'$'}")
         assertThat(issued.refreshToken.toString()).isEqualTo("RefreshToken([REDACTED])")
         assertThat(issued.toString()).doesNotContain(rawToken)
-        assertThat(stored).hasSize(64).matches("^[0-9a-f]{64}${'$'}").doesNotContain(rawToken)
+        assertThat(stored).isEqualTo(expectedHash).hasSize(64).matches("^[0-9a-f]{64}${'$'}").doesNotContain(rawToken)
         assertThat(issued.session.clientFingerprint).isEqualTo("desktop:test")
+    }
+
+    @Test
+    fun `logout revokes an active session and makes subsequent validation generic invalid`() {
+        val issued = repository.create(PRINCIPAL_ID, 0, Duration.ofHours(1), null)
+
+        assertThat(repository.validate(issued.refreshToken)).isInstanceOf(SessionValidation.Active::class.java)
+        assertThat(repository.revoke(issued.session.id)).isTrue()
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT revoked_at IS NOT NULL FROM iam.auth_session WHERE id = ?",
+            Boolean::class.java,
+            issued.session.id,
+        )).isTrue()
+        assertThat(repository.validate(issued.refreshToken)).isEqualTo(SessionValidation.Invalid)
     }
 
     @Test

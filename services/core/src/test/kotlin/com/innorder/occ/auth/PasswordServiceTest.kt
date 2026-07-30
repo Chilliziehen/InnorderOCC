@@ -5,6 +5,8 @@ import org.assertj.core.api.Assertions.assertThatCode
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.security.crypto.argon2.Argon2PasswordEncoder
+import org.springframework.security.crypto.password.PasswordEncoder
+import java.util.Base64
 
 class PasswordServiceTest {
     private val service = PasswordService()
@@ -39,6 +41,38 @@ class PasswordServiceTest {
     }
 
     @Test
+    fun `rejected Argon2 parameters and malformed payloads never invoke password crypto`() {
+        val encoder = RecordingPasswordEncoder()
+        val guardedService = PasswordService(encoder)
+        val salt = Base64.getEncoder().encodeToString(ByteArray(16))
+        val hash = Base64.getEncoder().encodeToString(ByteArray(32))
+        val rejected = listOf(
+            argonHash(memory = "999999999999999999999", salt = salt, hash = hash),
+            argonHash(memory = "65537", salt = salt, hash = hash),
+            argonHash(iterations = "999999999999999999999", salt = salt, hash = hash),
+            argonHash(iterations = "4", salt = salt, hash = hash),
+            argonHash(parallelism = "999999999999999999999", salt = salt, hash = hash),
+            argonHash(parallelism = "2", salt = salt, hash = hash),
+            argonHash(memory = "0", salt = salt, hash = hash),
+            argonHash(memory = "-1", salt = salt, hash = hash),
+            argonHash(salt = "not-base64!", hash = hash),
+            argonHash(salt = Base64.getEncoder().encodeToString(ByteArray(15)), hash = hash),
+            argonHash(salt = salt, hash = "not-base64!"),
+            argonHash(salt = salt, hash = Base64.getEncoder().encodeToString(ByteArray(31))),
+            "${'$'}argon2id${'$'}v=19${'$'}m=65536,t=3,t=3,p=1${'$'}${salt}${'$'}$hash",
+            "${'$'}argon2id${'$'}v=19${'$'}m=65536,t=3${'$'}${salt}${'$'}$hash",
+            "${'$'}argon2i${'$'}v=19${'$'}m=65536,t=3,p=1${'$'}${salt}${'$'}$hash",
+            "${'$'}argon2id${'$'}v=16${'$'}m=65536,t=3,p=1${'$'}${salt}${'$'}$hash",
+        )
+
+        rejected.forEach { encoded ->
+            assertThat(guardedService.matches("correct horse battery staple", encoded)).isFalse()
+            assertThat(guardedService.needsRehash(encoded)).isTrue()
+        }
+        assertThat(encoder.matchInvocations).isZero()
+    }
+
+    @Test
     fun `password policy counts Unicode code points from twelve through one hundred twenty eight`() {
         assertThat(service.isAllowed("a".repeat(11))).isFalse()
         assertThat(service.isAllowed("a".repeat(12))).isTrue()
@@ -53,8 +87,28 @@ class PasswordServiceTest {
             .encode("correct horse battery staple")
         val current = service.encode("correct horse battery staple")
 
+        assertThat(service.matches("correct horse battery staple", weaker)).isTrue()
         assertThat(service.needsRehash(weaker)).isTrue()
         assertThat(service.needsRehash(current)).isFalse()
+    }
+
+    @Test
+    fun `rehash requires every encoded parameter to match the configured target exactly`() {
+        val salt = Base64.getEncoder().encodeToString(ByteArray(16))
+        val hash = Base64.getEncoder().encodeToString(ByteArray(32))
+        val exact = argonHash(salt = salt, hash = hash)
+        val notCurrent = listOf(
+            argonHash(memory = "8192", salt = salt, hash = hash),
+            argonHash(iterations = "1", salt = salt, hash = hash),
+            argonHash(memory = "65537", salt = salt, hash = hash),
+            argonHash(iterations = "4", salt = salt, hash = hash),
+            argonHash(parallelism = "2", salt = salt, hash = hash),
+            argonHash(salt = Base64.getEncoder().encodeToString(ByteArray(15)), hash = hash),
+            argonHash(salt = salt, hash = Base64.getEncoder().encodeToString(ByteArray(31))),
+        )
+
+        assertThat(service.needsRehash(exact)).isFalse()
+        notCurrent.forEach { assertThat(service.needsRehash(it)).isTrue() }
     }
 
     @Test
@@ -65,5 +119,24 @@ class PasswordServiceTest {
         assertThatThrownBy { service.encode(secret) }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageNotContaining(secret)
+    }
+
+    private fun argonHash(
+        memory: String = "65536",
+        iterations: String = "3",
+        parallelism: String = "1",
+        salt: String,
+        hash: String,
+    ): String = "${'$'}argon2id${'$'}v=19${'$'}m=$memory,t=$iterations,p=$parallelism${'$'}${salt}${'$'}$hash"
+
+    private class RecordingPasswordEncoder : PasswordEncoder {
+        var matchInvocations = 0
+
+        override fun encode(rawPassword: CharSequence): String = error("not used")
+
+        override fun matches(rawPassword: CharSequence, encodedPassword: String): Boolean {
+            matchInvocations++
+            return true
+        }
     }
 }

@@ -102,6 +102,7 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.ok(guardIndex >= 0 && guardIndex < packageIndex && guardIndex < smokeIndex);
   assert.match(result.stdout, /gradlew(?:\.bat)? :services:core:build --dependency-verification strict/u);
   assert.match(result.stdout, /PostgreSqlFlowableIntegrationTest/u);
+  assert.match(result.stdout, /SessionRepositoryIntegrationTest/u);
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
 });
 

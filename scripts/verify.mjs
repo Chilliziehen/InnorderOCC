@@ -33,7 +33,10 @@ async function main() {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const gradle = process.platform === "win32" ? "gradlew.bat" : "./gradlew";
   const npmAuditCache = join(tmpdir(), "innorder-occ-npm-audit-cache");
-  const integrationResult = join(root, "services", "core", "build", "test-results", "test", "TEST-com.innorder.occ.PostgreSqlFlowableIntegrationTest.xml");
+  const integrationResults = [
+    "TEST-com.innorder.occ.PostgreSqlFlowableIntegrationTest.xml",
+    "TEST-com.innorder.occ.auth.SessionRepositoryIntegrationTest.xml",
+  ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
     return [command, ...args].join(" ");
@@ -152,11 +155,12 @@ async function main() {
     await run("Docker Testcontainers PostgreSQL integration tests", gradle, [
       ":services:core:test",
       "--tests", "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
+      "--tests", "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ]);
     console.log("\n[verify] enforce Docker integration JUnit results");
-    if (!dryRun) assertJUnitSuiteExecuted(integrationResult);
+    if (!dryRun) integrationResults.forEach((result) => assertJUnitSuiteExecuted(result));
   }
 
   const label = full ? "full" : local ? "local" : "quick";
