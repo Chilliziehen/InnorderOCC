@@ -25,6 +25,31 @@ SELECT pg_temp.assert_true(to_regclass('occ.process_instance') IS NOT NULL, 'occ
 SELECT pg_temp.assert_true(to_regclass('audit.outbox_event') IS NOT NULL, 'audit.outbox_event exists');
 SELECT pg_temp.assert_true(to_regclass('ai.knowledge_chunk') IS NOT NULL, 'ai.knowledge_chunk exists');
 SELECT pg_temp.assert_true(to_regclass('ai.chunk_embedding') IS NOT NULL, 'ai.chunk_embedding exists');
+SELECT pg_temp.assert_true(to_regclass('platform.customer_instance') IS NOT NULL, 'platform.customer_instance exists');
+SELECT pg_temp.assert_true(to_regclass('iam.auth_session') IS NOT NULL, 'iam.auth_session exists');
+
+SELECT pg_temp.assert_true(
+    (SELECT count(*) = 1
+            AND count(*) FILTER (WHERE id = '00000000-0000-7000-8000-000000000001'::uuid) = 1
+       FROM platform.customer_instance),
+    'one stable default customer instance exists'
+);
+
+SELECT pg_temp.assert_true(
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'authz' AND indexname = 'ix_relationship_active_window'),
+    'relationship active-window index exists'
+);
+
+SELECT pg_temp.assert_true(
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'audit' AND indexname = 'ix_outbox_pending_claim'),
+    'outbox pending claim index exists'
+);
+
+SELECT pg_temp.assert_true(
+    has_table_privilege('innorder_runtime', 'platform.customer_instance', 'SELECT,INSERT,UPDATE,DELETE')
+    AND has_table_privilege('innorder_runtime', 'iam.auth_session', 'SELECT,INSERT,UPDATE,DELETE'),
+    'V009 default grants cover V010 tables'
+);
 
 SELECT pg_temp.assert_true(
     EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'authz' AND indexname = 'uq_policy_release_active'),

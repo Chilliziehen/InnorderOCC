@@ -99,6 +99,129 @@ INSERT INTO iam.principal (
 );
 
 SELECT pg_temp.assert_raises(
+    $$DELETE FROM platform.customer_instance$$,
+    '55000', 'customer instance cannot be deleted'
+);
+SELECT pg_temp.assert_raises(
+    $$TRUNCATE platform.customer_instance CASCADE$$,
+    '55000', 'customer instance cannot be truncated'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE platform.customer_instance SET id = '00000000-0000-7000-8000-000000000002'$$,
+    '55000', 'customer instance id is immutable'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE platform.customer_instance SET instance_key = 'renamed'$$,
+    '55000', 'customer instance key is immutable'
+);
+SELECT pg_temp.assert_raises(
+    $$INSERT INTO platform.customer_instance (id, instance_key)
+      VALUES ('00000000-0000-7000-8000-000000000002', 'second')$$,
+    '23505', 'customer instance is a singleton'
+);
+
+INSERT INTO iam.auth_session (
+    id, principal_id, token_version, refresh_token_hash, client_fingerprint,
+    created_at, last_used_at, expires_at
+) VALUES (
+    '22000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000001', 0, repeat('a', 64), 'desktop:test',
+    statement_timestamp(), statement_timestamp(), statement_timestamp() + interval '1 hour'
+);
+SELECT pg_temp.assert_raises(
+    $$INSERT INTO iam.auth_session
+      (id, principal_id, refresh_token_hash, created_at, expires_at)
+      VALUES ('22000000-0000-7000-8000-000000000002',
+              '20000000-0000-7000-8000-000000000001', 'plaintext-token',
+              statement_timestamp(), statement_timestamp() + interval '1 hour')$$,
+    '23514', 'auth sessions store only lowercase SHA-256 token hashes'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session
+      SET replacement_session_id = '22000000-0000-7000-8000-000000000001'
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '23514', 'auth session cannot replace itself'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.auth_session SET revoked_at = created_at - interval '1 second'
+      WHERE id = '22000000-0000-7000-8000-000000000001'$$,
+    '23514', 'auth session revocation cannot predate creation'
+);
+
+INSERT INTO audit.idempotency_record (
+    id, principal_id, command_key, idempotency_key, request_hash,
+    state, created_at, updated_at, expires_at
+) VALUES (
+    '23000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000001', 'test.command', 'idem-1', repeat('b', 64),
+    'IN_PROGRESS', statement_timestamp(), statement_timestamp(), statement_timestamp() + interval '1 hour'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.idempotency_record SET request_hash = repeat('c', 64)
+      WHERE id = '23000000-0000-7000-8000-000000000001'$$,
+    '55000', 'idempotency request hash is immutable'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.idempotency_record SET state = 'COMPLETED'
+      WHERE id = '23000000-0000-7000-8000-000000000001'$$,
+    '23514', 'completed idempotency records require status and digest'
+);
+UPDATE audit.idempotency_record
+SET state = 'COMPLETED', response_status = 200, response_digest = repeat('d', 64),
+    response_body = '{"ok":true}'::jsonb
+WHERE id = '23000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.idempotency_record SET state = 'IN_PROGRESS', response_status = NULL,
+          response_digest = NULL, response_body = NULL
+      WHERE id = '23000000-0000-7000-8000-000000000001'$$,
+    '55000', 'terminal idempotency records cannot return to in progress'
+);
+SELECT pg_temp.assert_raises(
+    $$INSERT INTO audit.idempotency_record
+      (id, principal_id, command_key, idempotency_key, request_hash, state,
+       response_status, response_digest, response_body, created_at, updated_at, expires_at)
+      VALUES ('23000000-0000-7000-8000-000000000002',
+              '20000000-0000-7000-8000-000000000001', 'test.command', 'idem-large', repeat('e', 64),
+              'COMPLETED', 200, repeat('f', 64), jsonb_build_object('data', repeat('x', 65536)),
+              statement_timestamp(), statement_timestamp(), statement_timestamp() + interval '1 hour')$$,
+    '23514', 'idempotency response bodies are bounded to 64 KiB'
+);
+
+INSERT INTO audit.outbox_event (
+    id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version,
+    payload, correlation_id, customer_instance_id, actor_entity_id,
+    available_at, next_attempt_at, status, created_at
+) VALUES (
+    '24000000-0000-7000-8000-000000000001', 'work_item',
+    '20000000-0000-7000-8000-000000000002', 1, 'work.created', 1,
+    '{}'::jsonb, '24000000-0000-7000-8000-000000000010',
+    '00000000-0000-7000-8000-000000000001', '20000000-0000-7000-8000-000000000001',
+    statement_timestamp(), statement_timestamp(), 'PENDING', statement_timestamp()
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.outbox_event SET status = 'PUBLISHING'
+      WHERE id = '24000000-0000-7000-8000-000000000001'$$,
+    '23514', 'publishing outbox events require a claim timestamp'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.outbox_event SET status = 'DEAD', last_error = E'unsafe\nerror'
+      WHERE id = '24000000-0000-7000-8000-000000000001'$$,
+    '23514', 'outbox errors reject control characters'
+);
+UPDATE audit.outbox_event
+SET status = 'PUBLISHING', claimed_at = statement_timestamp()
+WHERE id = '24000000-0000-7000-8000-000000000001';
+UPDATE audit.outbox_event
+SET status = 'PUBLISHED', published_at = statement_timestamp()
+WHERE id = '24000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_raises(
+    $$UPDATE audit.outbox_event
+      SET status = 'PENDING', claimed_at = NULL, published_at = NULL
+      WHERE id = '24000000-0000-7000-8000-000000000001'$$,
+    '55000', 'published outbox events are terminal'
+);
+
+SELECT pg_temp.assert_raises(
     $$INSERT INTO iam.principal
       (id, principal_kind, display_name, status, profile, row_version, created_at, updated_at)
       VALUES ('20000000-0000-7000-8000-000000000002', 'USER', 'Invalid Resource User',
@@ -117,6 +240,24 @@ SELECT pg_temp.assert_true(
     'authorization revision starts at zero'
 );
 
+CREATE TEMP TABLE revision_checkpoint (value bigint NOT NULL);
+INSERT INTO revision_checkpoint
+SELECT current_revision FROM authz.authorization_state WHERE singleton;
+
+UPDATE iam.principal SET display_name = 'User One Renamed', profile = '{"locale":"en"}'::jsonb
+WHERE id = '20000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'principal profile-only changes do not increment authorization revision'
+);
+UPDATE iam.principal SET status = 'LOCKED'
+WHERE id = '20000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value + 1 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'principal status changes increment authorization revision exactly once'
+);
+UPDATE revision_checkpoint SET value = value + 1;
+
 INSERT INTO authz.relationship (
     id, relation_definition_id, subject_entity_id, object_entity_id,
     source_kind, source_ref, row_version, created_at, updated_at
@@ -129,7 +270,7 @@ INSERT INTO authz.relationship (
 );
 
 SELECT pg_temp.assert_true(
-    (SELECT current_revision = 1 FROM authz.authorization_state WHERE singleton),
+    (SELECT current_revision = value + 1 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
     'relationship insert increments authorization revision'
 );
 
@@ -160,6 +301,49 @@ SELECT pg_temp.assert_raises(
 UPDATE authz.relationship
 SET revoked_at = now(), revoked_by = '20000000-0000-7000-8000-000000000001'
 WHERE id = '21000000-0000-7000-8000-000000000001';
+
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value + 2 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'active relationship insert and revocation each increment authorization revision exactly once'
+);
+
+INSERT INTO authz.relationship (
+    id, relation_definition_id, subject_entity_id, object_entity_id,
+    valid_from, valid_until, source_kind, source_ref, row_version, created_at, updated_at
+) VALUES (
+    '21000000-0000-7000-8000-000000000004',
+    '14000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000002',
+    statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour',
+    'ADMIN', 'expired', 0, statement_timestamp(), statement_timestamp()
+);
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value + 2 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'expired relationship inserts do not increment authorization revision'
+);
+UPDATE authz.relationship
+SET revoked_at = statement_timestamp(), revoked_by = '20000000-0000-7000-8000-000000000001'
+WHERE id = '21000000-0000-7000-8000-000000000004';
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value + 2 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'expired relationship revocations do not increment authorization revision'
+);
+
+INSERT INTO authz.relationship (
+    id, relation_definition_id, subject_entity_id, object_entity_id,
+    source_kind, source_ref, row_version, created_at, updated_at
+) VALUES (
+    '21000000-0000-7000-8000-000000000005',
+    '14000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000001',
+    '20000000-0000-7000-8000-000000000002',
+    'ADMIN', 'replacement', 0, statement_timestamp(), statement_timestamp()
+);
+SELECT pg_temp.assert_true(
+    (SELECT current_revision = value + 3 FROM authz.authorization_state, revision_checkpoint WHERE singleton),
+    'expired relationships permit active replacement and active insert bumps once'
+);
 
 INSERT INTO occ.business_object (
     id, entity_type_version_id, lifecycle_state, data, row_version, created_at, updated_at

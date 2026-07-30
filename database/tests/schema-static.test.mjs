@@ -18,6 +18,7 @@ const migrations = [
   'V007__ai_rag.sql',
   'V008__cross_schema_constraints.sql',
   'V009__runtime_privileges.sql',
+  'V010__platform_security_kernel.sql',
 ];
 
 function readMigration(name) {
@@ -174,4 +175,49 @@ test('protects stable policy, principal, relation, and package identities', () =
   assert.match(sql, /relationship definition must be published/i);
   assert.match(sql, /UNIQUE \(release_id, bundle_id\)/i);
   assert.match(sql, /FOREIGN KEY \(bundle_version_id, bundle_id\)/i);
+});
+
+test('adds protected customer and hashed authentication persistence', () => {
+  const sql = readMigration('V010__platform_security_kernel.sql');
+  assert.match(sql, /CREATE TABLE platform\.customer_instance\b/i);
+  assert.match(sql, /00000000-0000-7000-8000-000000000001/i);
+  assert.match(sql, /CREATE TRIGGER trg_customer_instance_identity/i);
+  assert.match(sql, /CREATE TRIGGER trg_customer_instance_no_delete/i);
+  assert.match(sql, /CREATE TRIGGER trg_customer_instance_no_truncate/i);
+  assert.match(sql, /CREATE TABLE iam\.auth_session\b/i);
+  assert.match(sql, /refresh_token_hash text NOT NULL UNIQUE/i);
+  assert.match(sql, /refresh_token_hash ~ '\^\[0-9a-f\]\{64\}\$'/i);
+  assert.match(sql, /CREATE INDEX ix_auth_session_active_principal_expiry/i);
+  assert.doesNotMatch(sql, /\b(?:refresh_token|access_token|password)\b\s+(?:text|varchar)/i);
+});
+
+test('adds deterministic idempotency and outbox lifecycles', () => {
+  const sql = readMigration('V010__platform_security_kernel.sql');
+  assert.match(sql, /ADD COLUMN state text/i);
+  assert.match(sql, /IN_PROGRESS[\s\S]*COMPLETED[\s\S]*FAILED/i);
+  assert.match(sql, /octet_length\(response_body::text\) <= 65536/i);
+  assert.match(sql, /CREATE TRIGGER trg_idempotency_record_lifecycle/i);
+  assert.match(sql, /request_hash is immutable/i);
+  for (const column of [
+    'customer_instance_id', 'actor_entity_id', 'causation_id', 'last_error',
+    'next_attempt_at', 'claimed_at',
+  ]) {
+    assert.match(sql, new RegExp(`ADD COLUMN ${column}\\b`, 'i'), column);
+  }
+  assert.match(sql, /CREATE INDEX ix_outbox_pending_claim/i);
+  assert.match(sql, /next_attempt_at, created_at/i);
+  assert.match(sql, /published_at = CASE WHEN status = 'PUBLISHED'/i);
+  assert.match(sql, /CREATE TRIGGER trg_outbox_event_lifecycle/i);
+});
+
+test('uses time-window relationship authorization and exact revision triggers', () => {
+  const sql = readMigration('V010__platform_security_kernel.sql');
+  assert.match(sql, /DROP INDEX authz\.uq_relationship_active/i);
+  assert.match(sql, /CREATE INDEX ix_relationship_active_window/i);
+  assert.match(sql, /valid_from <= statement_timestamp\(\)/i);
+  assert.match(sql, /valid_until IS NULL OR [^)\n]*valid_until > statement_timestamp\(\)/i);
+  assert.doesNotMatch(sql, /CREATE (?:UNIQUE )?INDEX[^;]*WHERE[^;]*(?:now|statement_timestamp|transaction_timestamp)\s*\(/i);
+  assert.match(sql, /CREATE TRIGGER trg_principal_status_authorization_revision/i);
+  assert.match(sql, /CREATE TRIGGER trg_relationship_active_authorization_revision/i);
+  assert.match(sql, /DROP TRIGGER trg_relationship_authorization_revision/i);
 });

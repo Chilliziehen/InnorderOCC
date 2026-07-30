@@ -38,6 +38,7 @@ const migrations = [
   'V007__ai_rag.sql',
   'V008__cross_schema_constraints.sql',
   'V009__runtime_privileges.sql',
+  'V010__platform_security_kernel.sql',
 ];
 
 for (const migration of migrations) {
