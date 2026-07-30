@@ -160,6 +160,7 @@ components:
           format: uuid
         detail:
           type: string
+          minLength: 0
           maxLength: 4096
     LoginRequest:
       type: object

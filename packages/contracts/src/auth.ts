@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
+
 export const LOGIN_USERNAME_MIN_LENGTH = 1;
 export const LOGIN_USERNAME_MAX_LENGTH = 128;
 export const LOGIN_USERNAME_PATTERN = `^(?=.*[!-~])[ -~]{${LOGIN_USERNAME_MIN_LENGTH},${LOGIN_USERNAME_MAX_LENGTH}}$`;
@@ -30,13 +32,12 @@ const refreshTokenSchema = z
   .regex(new RegExp(REFRESH_TOKEN_PATTERN));
 
 const passwordInputSchema = z.string().refine(
-  (value) => {
-    const codePointLength = [...value].length;
-    return (
-      codePointLength >= LOGIN_PASSWORD_MIN_CODE_POINTS &&
-      codePointLength <= LOGIN_PASSWORD_MAX_CODE_POINTS
-    );
-  },
+  (value) =>
+    hasUnicodeCodePointLengthWithin(
+      value,
+      LOGIN_PASSWORD_MIN_CODE_POINTS,
+      LOGIN_PASSWORD_MAX_CODE_POINTS,
+    ),
   `Password must contain ${LOGIN_PASSWORD_MIN_CODE_POINTS}-${LOGIN_PASSWORD_MAX_CODE_POINTS} Unicode code points`,
 );
 
@@ -66,8 +67,13 @@ export const currentUserSchema = z
       .max(CURRENT_USER_USERNAME_MAX_LENGTH),
     displayName: z
       .string()
-      .min(CURRENT_USER_DISPLAY_NAME_MIN_LENGTH)
-      .max(CURRENT_USER_DISPLAY_NAME_MAX_LENGTH),
+      .refine((value) =>
+        hasUnicodeCodePointLengthWithin(
+          value,
+          CURRENT_USER_DISPLAY_NAME_MIN_LENGTH,
+          CURRENT_USER_DISPLAY_NAME_MAX_LENGTH,
+        ),
+      ),
     status: z.enum(["ACTIVE", "LOCKED", "DISABLED", "ARCHIVED"]),
     capabilities: z.array(
       z.string().min(CAPABILITY_MIN_LENGTH).max(CAPABILITY_MAX_LENGTH),

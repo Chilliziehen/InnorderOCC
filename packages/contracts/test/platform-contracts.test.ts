@@ -95,6 +95,19 @@ describe("problemDetailsSchema", () => {
       expect(() => problemDetailsSchema.parse(invalid)).toThrow();
     }
   });
+
+  it("counts ProblemDetails user-visible text in Unicode code points", () => {
+    const problem = {
+      type: "https://innorder.example/problems/unicode",
+      title: "😀".repeat(PROBLEM_TITLE_MAX_LENGTH),
+      status: PROBLEM_STATUS_MIN,
+      code: "UNICODE_DETAIL",
+      correlationId: id,
+      detail: "😀".repeat(PROBLEM_DETAIL_MAX_LENGTH),
+    };
+
+    expect(problemDetailsSchema.parse(problem)).toEqual(problem);
+  });
 });
 
 describe("auth contracts", () => {
@@ -269,6 +282,15 @@ describe("auth contracts", () => {
     ]) {
       expect(() => currentUserSchema.parse(invalid)).toThrow();
     }
+  });
+
+  it("counts displayName in Unicode code points", () => {
+    const user = {
+      ...currentUser,
+      displayName: "😀".repeat(CURRENT_USER_DISPLAY_NAME_MAX_LENGTH),
+    };
+
+    expect(currentUserSchema.parse(user)).toEqual(user);
   });
 
   it.each([

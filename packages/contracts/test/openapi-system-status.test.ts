@@ -47,6 +47,7 @@ import {
 import {
   PROBLEM_CODE_MAX_LENGTH,
   PROBLEM_CODE_MIN_LENGTH,
+  PROBLEM_DETAIL_MIN_LENGTH,
   PROBLEM_DETAIL_MAX_LENGTH,
   PROBLEM_STATUS_MAX,
   PROBLEM_STATUS_MIN,
@@ -278,7 +279,11 @@ describe("OCC Core OpenAPI system status", () => {
         maxLength: PROBLEM_CODE_MAX_LENGTH,
       },
       correlationId: { type: "string", format: "uuid" },
-      detail: { type: "string", maxLength: PROBLEM_DETAIL_MAX_LENGTH },
+      detail: {
+        type: "string",
+        minLength: PROBLEM_DETAIL_MIN_LENGTH,
+        maxLength: PROBLEM_DETAIL_MAX_LENGTH,
+      },
     });
 
     expectStrictObjectParity(schemas.LoginRequest, loginRequestSchema.shape);
