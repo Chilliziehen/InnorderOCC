@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 
 # Node.js and generated output
 node_modules/
