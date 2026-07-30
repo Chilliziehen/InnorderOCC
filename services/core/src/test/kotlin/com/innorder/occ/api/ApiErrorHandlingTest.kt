@@ -31,8 +31,10 @@ import org.springframework.validation.BindException
 import org.springframework.validation.MapBindingResult
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean
 import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.CookieValue
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
@@ -269,6 +271,13 @@ class ApiErrorHandlingTest {
                     400,
                     "Bad Request",
                 ),
+                "not acceptable" to Triple(
+                    mockMvc.get("/test/acceptable") { accept = MediaType.TEXT_PLAIN }.andReturn(),
+                    406,
+                    "Not Acceptable",
+                ),
+                "missing header" to Triple(mockMvc.get("/test/header").andReturn(), 400, "Bad Request"),
+                "missing cookie" to Triple(mockMvc.get("/test/cookie").andReturn(), 400, "Bad Request"),
             )
 
             results.forEach { (case, expectation) ->
@@ -300,6 +309,26 @@ class ApiErrorHandlingTest {
                 .doesNotContain("jdbc:postgresql", "password", "Bearer", "refresh-token")
             assertThat(event.throwableProxy).isNull()
             assertThat(event.mdcPropertyMap[CorrelationIdFilter.MDC_KEY]).isEqualTo(correlationId)
+        }
+    }
+
+    @Test
+    fun `exception wrapping JVM error is rethrown without a handled failure log`() {
+        val request = MockHttpServletRequest().also {
+            it.setAttribute(CorrelationIdFilter.REQUEST_ATTRIBUTE, "018f30c0-7a86-7f8b-a6e0-3c5477bb7e1a")
+        }
+        val fatal = AssertionError("fatal password-secret")
+
+        withFailureLogs { events ->
+            val thrown = org.junit.jupiter.api.assertThrows<AssertionError> {
+                ApiExceptionHandler(responses, failureReporter).fallback(
+                    IllegalStateException("wrapper Bearer-secret", fatal),
+                    request,
+                )
+            }
+
+            assertThat(thrown).isSameAs(fatal)
+            assertThat(events).isEmpty()
         }
     }
 
@@ -461,6 +490,15 @@ class ApiErrorHandlingTest {
 
         @GetMapping("/not-found")
         fun notFound(): Nothing = throw NoResourceFoundException(HttpMethod.GET, "/Bearer-not-found-secret")
+
+        @GetMapping("/acceptable", produces = [MediaType.APPLICATION_JSON_VALUE])
+        fun acceptable(): Map<String, String> = mapOf("status" to "ok")
+
+        @GetMapping("/header")
+        fun header(@RequestHeader("X-Required") value: String): Map<String, String> = mapOf("value" to value)
+
+        @GetMapping("/cookie")
+        fun cookie(@CookieValue("required") value: String): Map<String, String> = mapOf("value" to value)
     }
 
     private data class SecretRequest(

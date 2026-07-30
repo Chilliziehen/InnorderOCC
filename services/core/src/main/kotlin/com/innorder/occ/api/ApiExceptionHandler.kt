@@ -5,19 +5,16 @@ import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.http.converter.HttpMessageNotReadableException
-import org.springframework.web.ErrorResponse
-import org.springframework.web.ErrorResponseException
 import org.springframework.security.access.AccessDeniedException
 import org.springframework.security.core.AuthenticationException
 import org.springframework.validation.BindException
-import org.springframework.web.HttpMediaTypeNotSupportedException
-import org.springframework.web.HttpRequestMethodNotSupportedException
-import org.springframework.web.bind.MissingServletRequestParameterException
+import org.springframework.web.ErrorResponse
 import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
-import org.springframework.web.servlet.resource.NoResourceFoundException
+import java.util.Collections
+import java.util.IdentityHashMap
 
 class OptimisticConflictException : RuntimeException {
     constructor() : super()
@@ -78,27 +75,29 @@ class ApiExceptionHandler(
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.conflict(request)
 
-    @ExceptionHandler(
-        HttpRequestMethodNotSupportedException::class,
-        HttpMediaTypeNotSupportedException::class,
-        MissingServletRequestParameterException::class,
-        MethodArgumentTypeMismatchException::class,
-        NoResourceFoundException::class,
-        ErrorResponseException::class,
-    )
-    fun requestError(exception: Exception, request: HttpServletRequest): ResponseEntity<OccProblem> {
-        val status = (exception as? ErrorResponse)?.statusCode ?: HttpStatus.BAD_REQUEST
-        return if (status.is4xxClientError) {
-            responses.requestError(request, status)
-        } else {
-            fallback(exception, request)
-        }
-    }
+    @ExceptionHandler(MethodArgumentTypeMismatchException::class)
+    fun typeMismatch(
+        exception: MethodArgumentTypeMismatchException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.requestError(request, HttpStatus.BAD_REQUEST)
 
-    @ExceptionHandler(Throwable::class)
-    fun fallback(exception: Throwable, request: HttpServletRequest): ResponseEntity<OccProblem> {
+    @ExceptionHandler(Exception::class)
+    fun fallback(exception: Exception, request: HttpServletRequest): ResponseEntity<OccProblem> {
+        rethrowJvmError(exception)
+        if (exception is ErrorResponse && exception.statusCode.is4xxClientError) {
+            return responses.requestError(request, exception.statusCode)
+        }
         failureReporter.report(responses.correlationId(request), exception.javaClass.name)
         return responses.internal(request)
+    }
+
+    private fun rethrowJvmError(exception: Exception) {
+        val visited = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
+        var current: Throwable? = exception
+        while (current != null && visited.add(current)) {
+            if (current is Error) throw current
+            current = current.cause
+        }
     }
 
     private companion object {
