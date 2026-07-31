@@ -2,6 +2,7 @@ package com.innorder.occ.command
 
 import com.innorder.occ.authz.AuthorizationDecisionReference
 import org.springframework.jdbc.core.JdbcOperations
+import java.util.Collections
 import java.util.UUID
 
 data class CommandMetadata(
@@ -49,7 +50,7 @@ data class PendingEventSpec(
     val aggregateVersion: Long,
 )
 
-data class CommandMutation(
+class CommandMutation(
     val status: Int,
     val body: CanonicalJsonObject,
     val resourceId: UUID,
@@ -59,8 +60,26 @@ data class CommandMutation(
     val afterVersion: Long,
     val auditReason: String?,
     val auditDetail: CanonicalJsonObject,
-    val events: List<PendingEventSpec>,
-)
+    events: List<PendingEventSpec>,
+) {
+    val events: List<PendingEventSpec> = Collections.unmodifiableList(events.toList())
+
+    fun copy(
+        status: Int = this.status,
+        body: CanonicalJsonObject = this.body,
+        resourceId: UUID = this.resourceId,
+        aggregateId: UUID = this.aggregateId,
+        aggregateType: String = this.aggregateType,
+        beforeVersion: Long? = this.beforeVersion,
+        afterVersion: Long = this.afterVersion,
+        auditReason: String? = this.auditReason,
+        auditDetail: CanonicalJsonObject = this.auditDetail,
+        events: List<PendingEventSpec> = this.events,
+    ): CommandMutation = CommandMutation(
+        status, body, resourceId, aggregateId, aggregateType, beforeVersion, afterVersion,
+        auditReason, auditDetail, events,
+    )
+}
 
 data class CommandResult(
     val status: Int,

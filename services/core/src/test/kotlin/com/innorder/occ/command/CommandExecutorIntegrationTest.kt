@@ -352,6 +352,42 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
+    fun `mutation snapshots caller event list before executor validation and persistence`() {
+        val callerEvents = mutableListOf(
+            PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), 4),
+        )
+        lateinit var mutation: CommandMutation
+        val mutableEventsCommand = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
+                    AGGREGATE_ID,
+                )
+                mutation = CommandMutation(
+                    200, json("""{"result":"after"}"""), RESOURCE_ID, AGGREGATE_ID,
+                    "kernel-test", 3, 4, "test", json("""{"changed":true}"""), callerEvents,
+                )
+                callerEvents.clear()
+                return mutation
+            }
+        }
+
+        val result = executor.execute(metadata("event-snapshot"), "{}".toByteArray(), mutableEventsCommand)
+
+        assertThat(result.status).isEqualTo(200)
+        assertThat(mutation.events).hasSize(1)
+        assertThatThrownBy {
+            @Suppress("UNCHECKED_CAST")
+            (mutation.events as MutableList<PendingEventSpec>).clear()
+        }.isInstanceOf(UnsupportedOperationException::class.java)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?",
+            Long::class.java,
+            AGGREGATE_ID,
+        )).isEqualTo(1)
+    }
+
+    @Test
     fun `completed idempotency expires at exact 24 hour boundary and cannot replay until cleanup`() {
         val started = Instant.parse("2026-08-01T00:00:00Z")
         val key = metadata("expiry-key")
