@@ -292,7 +292,17 @@ class BootstrapAdministrator internal constructor(
                      AND max_subjects IS NULL AND max_objects IS NULL""",
                 BootstrapIds.PACKAGE_VERSION, BootstrapIds.ROLE_ASSIGNMENT_RELATION,
                 BootstrapIds.USER_TYPE, BootstrapIds.ROLE_TYPE,
-            ) != 1L
+            ) != 1L ||
+            count(
+                """SELECT
+                     (SELECT count(*) FROM catalog.action_definition WHERE package_version_id = ?)
+                     + (SELECT count(*) FROM catalog.form_definition WHERE package_version_id = ?)
+                     + (SELECT count(*) FROM catalog.evidence_requirement WHERE package_version_id = ?)
+                     + (SELECT count(*) FROM catalog.risk_rule_definition WHERE package_version_id = ?)
+                     + (SELECT count(*) FROM catalog.workflow_definition WHERE package_version_id = ?)""",
+                BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE_VERSION,
+                BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE_VERSION,
+            ) != 0L
         ) throw BootstrapBaselineException()
     }
 

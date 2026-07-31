@@ -388,6 +388,25 @@ class BootstrapAdministratorIntegrationTest {
     }
 
     @Test
+    fun `published baseline with extra action and form definitions is rejected without mutation`() {
+        database { jdbc, transactions ->
+            seedPublishedBaseline(jdbc, includeRelation = true, includeExtraDefinitions = true)
+            val before = bootstrapState(jdbc)
+            val path = secret(TEST_PASSWORD, "extra-published-definitions")
+
+            assertThatThrownBy {
+                administrator(
+                    jdbc,
+                    transactions,
+                    PasswordService(),
+                    BootstrapAdministratorProperties(path.toString()),
+                ).bootstrap()
+            }.isInstanceOf(BootstrapBaselineException::class.java)
+            assertThat(bootstrapState(jdbc)).isEqualTo(before)
+        }
+    }
+
+    @Test
     fun `delete secret happens after commit and refuses a replacement`() {
         database { jdbc, transactions ->
             val path = secret(TEST_PASSWORD)
@@ -422,7 +441,10 @@ class BootstrapAdministratorIntegrationTest {
                 .hasMessageNotContaining(TEST_PASSWORD)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isEqualTo(1)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.relationship", Long::class.java)).isEqualTo(1)
-            assertThat(Files.readString(path)).isEqualTo(TEST_PASSWORD)
+            assertThat(Files.exists(path)).isFalse()
+            assertThat(Files.list(path.parent).use { paths ->
+                paths.anyMatch { it.fileName.toString().startsWith(".occ-bootstrap-quarantine-") }
+            }).isTrue()
         }
     }
 
@@ -557,6 +579,20 @@ class BootstrapAdministratorIntegrationTest {
     private fun testReader(failDelete: Boolean = false): BootstrapSecretReader = BootstrapSecretReader(
         SecureSecretDirectoryFactory { parent ->
             object : SecureSecretDirectory {
+                override fun inspectParent(): SecretFileMetadata = SecretFileMetadata(
+                    SecretFileKind.DIRECTORY,
+                    0,
+                    parent.toAbsolutePath().normalize().toString(),
+                    java.time.Instant.EPOCH,
+                    java.time.Instant.EPOCH,
+                    setOf(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE,
+                    ),
+                    currentOwner(),
+                )
+
                 override fun inspect(relativeName: Path): SecretFileMetadata {
                     val path = parent.resolve(relativeName)
                     val attributes = Files.readAttributes(
@@ -573,7 +609,7 @@ class BootstrapAdministratorIntegrationTest {
                     return SecretFileMetadata(
                         kind,
                         attributes.size(),
-                        path.toAbsolutePath().normalize().toString(),
+                        "${attributes.creationTime().toInstant()}:${attributes.size()}",
                         attributes.creationTime().toInstant(),
                         attributes.lastModifiedTime().toInstant(),
                         setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
@@ -581,10 +617,19 @@ class BootstrapAdministratorIntegrationTest {
                     )
                 }
 
-                override fun read(relativeName: Path, maximumBytes: Int): ByteArray =
-                    Files.readAllBytes(parent.resolve(relativeName)).also {
+                override fun openChannel(relativeName: Path, maximumBytes: Int): SecureSecretChannel {
+                    val bytes = Files.readAllBytes(parent.resolve(relativeName)).also {
                         check(it.size <= maximumBytes)
                     }
+                    return object : SecureSecretChannel {
+                        override fun read(): ByteArray = bytes.copyOf()
+                        override fun close() = Unit
+                    }
+                }
+
+                override fun move(source: Path, target: Path) {
+                    Files.move(parent.resolve(source), parent.resolve(target))
+                }
 
                 override fun delete(relativeName: Path) {
                     check(!TransactionSynchronizationManager.isActualTransactionActive())
@@ -657,6 +702,7 @@ class BootstrapAdministratorIntegrationTest {
         jdbc: JdbcTemplate,
         includeRelation: Boolean,
         includeExtraType: Boolean = false,
+        includeExtraDefinitions: Boolean = false,
     ) {
         jdbc.update(
             """INSERT INTO catalog.domain_package(id, package_key, name, description, status)
@@ -717,6 +763,23 @@ class BootstrapAdministratorIntegrationTest {
                 BootstrapIds.PACKAGE_VERSION,
             )
         }
+        if (includeExtraDefinitions) {
+            jdbc.update(
+                """INSERT INTO catalog.action_definition
+                   (id, package_version_id, action_key, resource_type_id, context_schema, risk_level)
+                   VALUES (?, ?, 'platform.extra-action', ?, '{}'::jsonb, 'LOW')""",
+                EXTRA_ACTION_ID,
+                BootstrapIds.PACKAGE_VERSION,
+                BootstrapIds.USER_TYPE,
+            )
+            jdbc.update(
+                """INSERT INTO catalog.form_definition
+                   (id, package_version_id, form_key, json_schema, ui_schema, content_hash)
+                   VALUES (?, ?, 'platform.extra-form', '{}'::jsonb, '{}'::jsonb, repeat('a', 64))""",
+                EXTRA_FORM_ID,
+                BootstrapIds.PACKAGE_VERSION,
+            )
+        }
         jdbc.update(
             """UPDATE catalog.package_version
                SET status = 'PUBLISHED', content_hash = ?, published_at = transaction_timestamp()
@@ -764,5 +827,7 @@ class BootstrapAdministratorIntegrationTest {
         private const val LOG_FAILURE_HASH = "encoded-bootstrap-failure-hash-sensitive"
         private val EXTRA_TYPE_ID = UUID.fromString("71000000-0000-7000-8000-000000000001")
         private val EXTRA_TYPE_VERSION_ID = UUID.fromString("71000000-0000-7000-8000-000000000002")
+        private val EXTRA_ACTION_ID = UUID.fromString("71000000-0000-7000-8000-000000000003")
+        private val EXTRA_FORM_ID = UUID.fromString("71000000-0000-7000-8000-000000000004")
     }
 }

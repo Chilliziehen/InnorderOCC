@@ -12,7 +12,9 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributeView
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
+import java.security.SecureRandom
 import java.time.Instant
+import java.util.HexFormat
 
 internal enum class SecretFileKind { REGULAR, SYMLINK, REPARSE, DIRECTORY }
 
@@ -39,9 +41,15 @@ internal fun interface SecureSecretDirectoryFactory {
 }
 
 internal interface SecureSecretDirectory : AutoCloseable {
+    fun inspectParent(): SecretFileMetadata
     fun inspect(relativeName: Path): SecretFileMetadata
-    fun read(relativeName: Path, maximumBytes: Int): ByteArray
+    fun openChannel(relativeName: Path, maximumBytes: Int): SecureSecretChannel
+    fun move(source: Path, target: Path)
     fun delete(relativeName: Path)
+}
+
+internal interface SecureSecretChannel : AutoCloseable {
+    fun read(): ByteArray
 }
 
 internal open class BootstrapSecretReader(
@@ -57,21 +65,27 @@ internal open class BootstrapSecretReader(
             null
         } ?: throw BootstrapConfigurationException()
         try {
-            val before = directory.inspect(relativeName)
-            validate(before, expectedOwner)
-            val bytes = directory.read(relativeName, MAX_BYTES)
+            validateParent(directory.inspectParent(), expectedOwner)
+            val channel = directory.openChannel(relativeName, MAX_BYTES)
             try {
-                val after = directory.inspect(relativeName)
-                validate(after, expectedOwner)
-                if (!same(before, after)) throw BootstrapConfigurationException()
-                val characters = decode(bytes)
-                if (!PasswordService().isAllowed(characters)) {
-                    characters.clearSecret()
-                    throw BootstrapConfigurationException()
+                val before = directory.inspect(relativeName)
+                validate(before, expectedOwner)
+                val bytes = channel.read()
+                try {
+                    val after = directory.inspect(relativeName)
+                    validate(after, expectedOwner)
+                    if (!same(before, after)) throw BootstrapConfigurationException()
+                    val characters = decode(bytes)
+                    if (!PasswordService().isAllowed(characters)) {
+                        characters.clearSecret()
+                        throw BootstrapConfigurationException()
+                    }
+                    return BootstrapSecretMaterial(directory, relativeName, after, expectedOwner, characters)
+                } finally {
+                    bytes.fill(0)
                 }
-                return BootstrapSecretMaterial(directory, relativeName, after, expectedOwner, characters)
             } finally {
-                bytes.fill(0)
+                channel.close()
             }
         } catch (failure: Exception) {
             try {
@@ -116,6 +130,14 @@ internal open class BootstrapSecretReader(
         ) throw BootstrapConfigurationException()
     }
 
+    private fun validateParent(metadata: SecretFileMetadata, expectedOwner: String) {
+        // Supported Ubuntu deployment modes: 0500, 0700, or 0750. No group/other write is trusted.
+        // The expected service identity owns this boundary; compromise of that identity is outside permission isolation.
+        if (metadata.kind != SecretFileKind.DIRECTORY || metadata.fileKey == null ||
+            metadata.owner != expectedOwner || metadata.posixPermissions !in TRUSTED_DIRECTORY_MODES
+        ) throw BootstrapConfigurationException()
+    }
+
     private fun same(first: SecretFileMetadata, second: SecretFileMetadata): Boolean =
         first.fileKey == second.fileKey && first.size == second.size &&
             first.creationTime == second.creationTime && first.modifiedTime == second.modifiedTime &&
@@ -126,6 +148,14 @@ internal open class BootstrapSecretReader(
         val OWNER_ONLY_MODES = setOf(
             setOf(PosixFilePermission.OWNER_READ),
             setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+        )
+        val TRUSTED_DIRECTORY_MODES = setOf(
+            setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_EXECUTE),
+            setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE),
+            setOf(
+                PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE,
+                PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_EXECUTE,
+            ),
         )
     }
 }
@@ -142,20 +172,30 @@ internal class BootstrapSecretMaterial(
     fun delete() {
         try {
             val current = directory.inspect(relativeName)
-            val validMode = current.posixPermissions == setOf(PosixFilePermission.OWNER_READ) ||
-                current.posixPermissions == setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
-            if (current.kind != SecretFileKind.REGULAR || current.fileKey == null ||
-                current.fileKey != identity.fileKey || current.size != identity.size ||
-                current.creationTime != identity.creationTime || current.modifiedTime != identity.modifiedTime ||
-                current.owner != expectedOwner || current.owner != identity.owner || !validMode
-            ) throw BootstrapSecretCleanupException()
-            directory.delete(relativeName)
+            requireIdentity(current)
+            val quarantine = Path.of(".occ-bootstrap-quarantine-${randomName()}")
+            directory.move(relativeName, quarantine)
+            val moved = directory.inspect(quarantine)
+            requireIdentity(moved)
+            directory.delete(quarantine)
         } catch (_: BootstrapSecretCleanupException) {
             throw BootstrapSecretCleanupException()
         } catch (_: Exception) {
             throw BootstrapSecretCleanupException()
         }
     }
+
+    private fun requireIdentity(current: SecretFileMetadata) {
+        val validMode = current.posixPermissions == setOf(PosixFilePermission.OWNER_READ) ||
+            current.posixPermissions == setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
+        if (current.kind != SecretFileKind.REGULAR || current.fileKey == null ||
+            current.fileKey != identity.fileKey || current.size != identity.size ||
+            current.creationTime != identity.creationTime || current.modifiedTime != identity.modifiedTime ||
+            current.owner != expectedOwner || current.owner != identity.owner || !validMode
+        ) throw BootstrapSecretCleanupException()
+    }
+
+    private fun randomName(): String = ByteArray(16).also(RANDOM::nextBytes).let(HexFormat.of()::formatHex)
 
     override fun close() {
         if (closed) return
@@ -166,6 +206,10 @@ internal class BootstrapSecretMaterial(
         } catch (_: Exception) {
             // Closing is always attempted; no provider detail may escape startup.
         }
+    }
+
+    private companion object {
+        val RANDOM = SecureRandom()
     }
 }
 
@@ -184,6 +228,8 @@ internal object NioSecureSecretDirectoryFactory : SecureSecretDirectoryFactory {
 private class NioSecureSecretDirectory(
     private val directory: SecureDirectoryStream<Path>,
 ) : SecureSecretDirectory {
+    override fun inspectParent(): SecretFileMetadata = inspect(Path.of("."))
+
     override fun inspect(relativeName: Path): SecretFileMetadata {
         val basicView = directory.getFileAttributeView(
             relativeName,
@@ -214,20 +260,26 @@ private class NioSecureSecretDirectory(
         )
     }
 
-    override fun read(relativeName: Path, maximumBytes: Int): ByteArray =
-        directory.newByteChannel(
+    override fun openChannel(relativeName: Path, maximumBytes: Int): SecureSecretChannel {
+        val channel = directory.newByteChannel(
             relativeName,
             setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
-        ).use { channel ->
-            val buffer = ByteBuffer.allocate(maximumBytes + 1)
-            while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
-            if (buffer.position() > maximumBytes || channel.read(ByteBuffer.allocate(1)) >= 0) {
-                throw BootstrapConfigurationException()
+        )
+        return object : SecureSecretChannel {
+            override fun read(): ByteArray {
+                val buffer = ByteBuffer.allocate(maximumBytes + 1)
+                while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
+                if (buffer.position() > maximumBytes || channel.read(ByteBuffer.allocate(1)) >= 0) {
+                    throw BootstrapConfigurationException()
+                }
+                buffer.flip()
+                return ByteArray(buffer.remaining()).also(buffer::get)
             }
-            buffer.flip()
-            ByteArray(buffer.remaining()).also(buffer::get)
+            override fun close() = channel.close()
         }
+    }
 
+    override fun move(source: Path, target: Path) = directory.move(source, directory, target)
     override fun delete(relativeName: Path) = directory.deleteFile(relativeName)
     override fun close() = directory.close()
 }

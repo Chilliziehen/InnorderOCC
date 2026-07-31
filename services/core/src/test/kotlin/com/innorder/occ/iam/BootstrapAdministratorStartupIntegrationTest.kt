@@ -71,8 +71,26 @@ class BootstrapAdministratorStartupIntegrationTest {
                 OWNER,
             )
             object : SecureSecretDirectory {
+                override fun inspectParent(): SecretFileMetadata = SecretFileMetadata(
+                    SecretFileKind.DIRECTORY,
+                    0,
+                    "startup-parent-key",
+                    Instant.EPOCH,
+                    Instant.EPOCH,
+                    setOf(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE,
+                    ),
+                    OWNER,
+                )
                 override fun inspect(relativeName: Path): SecretFileMetadata = stable
-                override fun read(relativeName: Path, maximumBytes: Int): ByteArray = PASSWORD.toByteArray()
+                override fun openChannel(relativeName: Path, maximumBytes: Int): SecureSecretChannel =
+                    object : SecureSecretChannel {
+                        override fun read(): ByteArray = PASSWORD.toByteArray()
+                        override fun close() = Unit
+                    }
+                override fun move(source: Path, target: Path) = Unit
                 override fun delete(relativeName: Path) = Unit
                 override fun close() = Unit
             }
