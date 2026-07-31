@@ -7,11 +7,17 @@ class AuthorizationDecisionValidator {
     fun validateRaw(result: JsonNode) {
         if (!result.isObject ||
             result.fieldNames().asSequence().toSet() != OUTPUT_FIELDS ||
+            !result.path("contractVersion").isIntegralNumber ||
+            !result.path("contractVersion").canConvertToInt() ||
+            result.path("contractVersion").intValue() != CONTRACT_VERSION ||
             !result.path("requestId").isTextual ||
             !OUTPUT_UUID.matches(result.path("requestId").textValue()) ||
             !result.path("authorizationRevision").isIntegralNumber ||
             !result.path("authorizationRevision").canConvertToLong() ||
-            result.path("authorizationRevision").longValue() !in 0..MAX_SAFE_INTEGER
+            result.path("authorizationRevision").longValue() !in 0..MAX_SAFE_INTEGER ||
+            !result.path("decision").isTextual ||
+            result.path("decision").textValue() !in setOf("ALLOW", "DENY") ||
+            !result.path("allow").isBoolean
         ) fail()
         val releases = result.path("releases")
         if (!releases.isObject || releases.fieldNames().asSequence().any { it !in RELEASE_KEYS }) fail()
@@ -20,6 +26,13 @@ class AuthorizationDecisionValidator {
             value.textValue().lowercase()
         }.toList()
         if (releaseIds.toSet().size != releaseIds.size) fail()
+        validateTextArray(result.path("reasonCodes"), REASON_CODES_MAX)
+        validateTextArray(result.path("reasonIds"), REASON_IDS_MAX)
+        validateTextArray(result.path("matchedPolicyIds"), MATCHED_IDS_MAX)
+    }
+
+    private fun validateTextArray(node: JsonNode, maximum: Int) {
+        if (!node.isArray || node.size() > maximum || node.any { !it.isTextual }) fail()
     }
 
     fun validate(output: AuthorizationDecision) {

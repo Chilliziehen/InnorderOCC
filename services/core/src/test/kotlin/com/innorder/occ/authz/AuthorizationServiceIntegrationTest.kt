@@ -1,6 +1,9 @@
 package com.innorder.occ.authz
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.node.JsonNodeFactory
+import com.fasterxml.jackson.databind.node.ObjectNode
 import com.sun.net.httpserver.HttpServer
 import com.sun.net.httpserver.HttpExchange
 import org.assertj.core.api.Assertions.assertThat
@@ -170,6 +173,43 @@ class AuthorizationServiceIntegrationTest {
                 OpaProperties("http://127.0.0.1:${server!!.address.port}"),
             ).decide(snapshot())
         }.isInstanceOf(OpaClientException::class.java)
+    }
+
+    @Test
+    fun `OPA client rejects wrong JSON types for every decision field before binding`() {
+        val replacements = listOf<JsonNode>(
+            JsonNodeFactory.instance.textNode("1"),
+            JsonNodeFactory.instance.numberNode(1),
+            JsonNodeFactory.instance.booleanNode(true),
+            JsonNodeFactory.instance.nullNode(),
+            JsonNodeFactory.instance.objectNode(),
+            JsonNodeFactory.instance.arrayNode(),
+        )
+        val fields = listOf(
+            "contractVersion", "requestId", "authorizationRevision", "releases", "decision", "allow",
+            "reasonCodes", "reasonIds", "matchedPolicyIds",
+        )
+        fields.forEach { field ->
+            replacements.forEachIndexed { index, replacement ->
+                if ((field == "contractVersion" || field == "authorizationRevision") && index == 1) return@forEachIndexed
+                if (field == "allow" && index == 2) return@forEachIndexed
+                assertMalformedDecisionRejected("$field-$index") { decision ->
+                    decision.set<JsonNode>(field, replacement.deepCopy())
+                }
+            }
+        }
+        replacements.forEachIndexed { index, replacement ->
+            assertMalformedDecisionRejected("release-value-$index") { decision ->
+                (decision.path("releases") as ObjectNode).set<JsonNode>("PLATFORM", replacement.deepCopy())
+            }
+        }
+        listOf("reasonCodes", "reasonIds", "matchedPolicyIds").forEach { field ->
+            replacements.forEachIndexed { index, replacement ->
+                assertMalformedDecisionRejected("$field-element-$index") { decision ->
+                    decision.putArray(field).add(replacement.deepCopy())
+                }
+            }
+        }
     }
 
     @Test
@@ -576,6 +616,13 @@ class AuthorizationServiceIntegrationTest {
                     put("rawUnknownResponseSecret", true)
                 }, mapper)
             },
+            HttpFailureCase("coerced-allow") { exchange, input ->
+                val decision = validAllowDecision(mapper, input).apply {
+                    put("contractVersion", "1")
+                    put("allow", "true")
+                }
+                sendJson(exchange, mapper.createObjectNode().set("result", decision), mapper)
+            },
             HttpFailureCase("oversized") { exchange, _ ->
                 val bytes = ByteArray(256 * 1024 + 1) { 'x'.code.toByte() }
                 exchange.sendResponseHeaders(200, bytes.size.toLong())
@@ -757,6 +804,29 @@ class AuthorizationServiceIntegrationTest {
             ).decide(snapshot())
         }.isInstanceOf(OpaClientException::class.java)
             .hasMessage("Policy decision service is unavailable")
+    }
+
+    private fun assertMalformedDecisionRejected(name: String, mutate: (ObjectNode) -> Unit) {
+        server?.stop(0)
+        val mapper = ObjectMapper().findAndRegisterModules()
+        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
+                exchange.requestBody.use { it.readAllBytes() }
+                val decision = validAllowDecision(mapper, mapper.valueToTree(snapshot())).apply(mutate)
+                sendJson(exchange, mapper.createObjectNode().set("result", decision), mapper)
+            }
+            start()
+        }
+        val failure = try {
+            OpaClient(
+                mapper,
+                OpaProperties("http://127.0.0.1:${server!!.address.port}"),
+            ).decide(snapshot())
+            null
+        } catch (caught: Throwable) {
+            caught
+        }
+        assertThat(failure).describedAs(name).isInstanceOf(OpaClientException::class.java)
     }
 
     private fun validAllowDecision(

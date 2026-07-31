@@ -2,8 +2,12 @@ package com.innorder.occ.authz
 
 import com.fasterxml.jackson.core.JsonParser
 import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.databind.MapperFeature
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.cfg.CoercionAction
+import com.fasterxml.jackson.databind.cfg.CoercionInputShape
 import com.fasterxml.jackson.databind.exc.MismatchedInputException
+import com.fasterxml.jackson.databind.type.LogicalType
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
@@ -36,9 +40,26 @@ class OpaClient(
     private val client: HttpClient = buildClient(properties),
     private val decisionValidator: AuthorizationDecisionValidator = AuthorizationDecisionValidator(),
 ) : PolicyDecisionClient {
-    private val mapper = objectMapper.copy()
+    private val mapper = objectMapper.copy().apply {
+        setConfig(deserializationConfig.without(MapperFeature.ALLOW_COERCION_OF_SCALARS))
+        coercionConfigFor(LogicalType.Boolean)
+            .setCoercion(CoercionInputShape.String, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Integer, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
+        coercionConfigFor(LogicalType.Integer)
+            .setCoercion(CoercionInputShape.String, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
+        coercionConfigFor(LogicalType.Enum)
+            .setCoercion(CoercionInputShape.Integer, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail)
+            .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
+    }
         .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+        .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+        .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
+        .disable(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
     private val requestTimeout = properties.requestTimeout
     private val endpoint = endpoint(properties.baseUrl)
