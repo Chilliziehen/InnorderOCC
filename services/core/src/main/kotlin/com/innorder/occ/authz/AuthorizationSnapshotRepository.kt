@@ -145,7 +145,11 @@ class AuthorizationSnapshotRepository(
             },
         )
         if (rows.isEmpty() || rows.size > PolicyLayer.entries.size || rows.map { it.releaseId }.toSet().size != 1 ||
-            rows.any { it.opaRevision.isNullOrBlank() || it.bundleStatus != "ACTIVE" || it.versionStatus != "PUBLISHED" }
+            rows.any {
+                it.opaRevision.isNullOrBlank() || it.opaRevision.length > AuthorizationDecisionValidator.OPA_REVISION_MAX_LENGTH ||
+                    !OPA_REVISION.matches(it.opaRevision) || it.bundleStatus !in PINNED_BUNDLE_STATUSES ||
+                    it.versionStatus != "PUBLISHED"
+            }
         ) throw AuthorizationSnapshotException()
         val layers = rows.map { raw ->
             val layer = try { PolicyLayer.valueOf(raw.layer) } catch (_: Exception) { throw AuthorizationSnapshotException() }
@@ -357,6 +361,8 @@ class AuthorizationSnapshotRepository(
     )
 
     companion object {
+        private val PINNED_BUNDLE_STATUSES = setOf("ACTIVE", "DEPRECATED")
+        private val OPA_REVISION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private const val MAX_ACTION_LENGTH = 128
         private const val MAX_CONTEXT_PROPERTIES = 32
         private const val MAX_CONTEXT_BYTES = 4096

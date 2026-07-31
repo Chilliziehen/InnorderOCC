@@ -1,44 +1,44 @@
 package com.innorder.occ.authz
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
-import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
 
 @Repository
 class DecisionLogRepository(
-    private val jdbc: JdbcTemplate,
-    private val transactionManager: PlatformTransactionManager,
+    @Qualifier("jdbcTemplate") private val jdbc: JdbcTemplate,
+    private val audit: AuditDatabase,
     private val mapper: ObjectMapper,
 ) : DecisionAuditLog {
     override fun persistInCallerTransaction(entry: DecisionLogEntry) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) throw AuthorizationAvailabilityException()
-        insert(entry)
+        insert(jdbc, entry, independent = false)
     }
 
     override fun persistIndependently(entry: DecisionLogEntry) {
-        val requiresNew = TransactionTemplate(transactionManager).apply {
+        val requiresNew = TransactionTemplate(audit.transactionManager).apply {
             propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW
             timeout = 2
         }
         try {
-            requiresNew.executeWithoutResult { insert(entry) }
+            requiresNew.executeWithoutResult { insert(audit.jdbc, entry, independent = true) }
         } catch (_: RuntimeException) {
             throw AuthorizationAvailabilityException()
         }
     }
 
-    private fun insert(entry: DecisionLogEntry) {
+    private fun insert(target: JdbcTemplate, entry: DecisionLogEntry, independent: Boolean) {
         validate(entry)
-        jdbc.update(
+        target.update(
             """INSERT INTO authz.decision_log
                (id, request_id, correlation_id, policy_release_id, authorization_revision,
                 principal_entity_id, action_key, resource_entity_id, resource_ref, decision,
                 reason_codes, matched_policies, entity_versions, context_digest, result_digest, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?, ?, ?)""",
             entry.id,
             entry.requestId,
             entry.correlationId,
@@ -46,7 +46,8 @@ class DecisionLogRepository(
             entry.authorizationRevision,
             entry.principalEntityId,
             entry.action,
-            entry.resourceEntityId,
+            if (independent) null else entry.resourceEntityId,
+            if (independent) entry.resourceEntityId?.toString() else null,
             entry.decision.name,
             mapper.writeValueAsString(entry.reasonCodes),
             mapper.writeValueAsString(entry.matchedPolicyIds),

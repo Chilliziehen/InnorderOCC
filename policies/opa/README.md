@@ -8,6 +8,7 @@ input under `input`:
 {
   "input": {
     "contractVersion": 1,
+    "opaRevision": "platform-authz-v1",
     "requestId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
     "authorizationRevision": 17,
     "releases": {
@@ -58,14 +59,19 @@ Any layer deny or platform baseline denial wins. With no denial, at least one
 layer must allow. All layers abstaining produces `DENY` with
 `NO_MATCHING_ALLOW`.
 
-A valid decision echoes the request ID, authorization revision, and exact
+A valid decision echoes the compiled `platform-authz-v1` runtime revision, request ID,
+authorization revision, and exact
 release object. `reasonCodes`, `reasonIds`, and `matchedPolicyIds` are sorted and
 distinct. Grant references use `grant:` plus the lowercase SHA-256 digest of the
 opaque grant ID. Static policy references use `policy:` plus the lowercase
 SHA-256 digest of a canonical platform policy ID. Output never contains raw
 grant IDs or request context.
 
-Malformed input returns the fixed envelope with a nil request ID, revision zero,
+The required `opaRevision` is an additive correction to the internal, pre-release
+version-1 contract. It binds a release snapshot to the compiled policy runtime;
+a mismatch fails closed instead of allowing stale Rego to authorize.
+
+Malformed input returns the fixed envelope with an empty OPA revision, nil request ID, revision zero,
 empty releases, `INVALID_INPUT`, the hashed invalid-input policy reference, and
 no matched grants. Unknown fields, nil or non-RFC input UUIDs, duplicate IDs,
 partial wildcards, release mismatches, and exceeded bounds are malformed.

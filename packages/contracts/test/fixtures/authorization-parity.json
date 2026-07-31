@@ -1,6 +1,7 @@
 {
   "baseInput": {
     "contractVersion": 1,
+    "opaRevision": "platform-authz-v1",
     "requestId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
     "authorizationRevision": 17,
     "releases": {

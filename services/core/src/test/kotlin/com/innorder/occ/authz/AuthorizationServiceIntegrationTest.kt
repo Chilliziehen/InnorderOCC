@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.node.JsonNodeFactory
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.zaxxer.hikari.HikariConfig
+import com.zaxxer.hikari.HikariDataSource
 import com.sun.net.httpserver.HttpServer
 import com.sun.net.httpserver.HttpExchange
 import org.assertj.core.api.Assertions.assertThat
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
+import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
@@ -51,12 +54,30 @@ class AuthorizationServiceIntegrationTest {
     }
 
     @Test
+    fun `audit pool connects with bounded PostgreSQL session timeouts and closes`() {
+        val handle = AuditDataSourceHandle(DataSourceProperties().apply {
+            url = postgres.jdbcUrl
+            username = "innorder_runtime"
+            password = "runtime-test-only"
+            driverClassName = "org.postgresql.Driver"
+        })
+        try {
+            assertThat(handle.jdbc.queryForObject("SHOW statement_timeout", String::class.java)).isEqualTo("1500ms")
+            assertThat(handle.jdbc.queryForObject("SHOW lock_timeout", String::class.java)).isEqualTo("500ms")
+            assertThat(handle.dataSource.maximumPoolSize).isEqualTo(2)
+        } finally {
+            handle.close()
+        }
+        assertThat(handle.dataSource.isClosed).isTrue()
+    }
+
+    @Test
     fun `OPA client sends the exact v1 wrapper and strictly parses an allow decision`() {
         val requestBody = arrayOfNulls<String>(1)
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
                 requestBody[0] = exchange.requestBody.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val response = """{"result":{"contractVersion":1,"requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
+                val response = """{"result":{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
                 exchange.responseHeaders.add("Content-Type", "application/json")
                 exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
                 exchange.responseBody.use { it.write(response.toByteArray()) }
@@ -74,7 +95,7 @@ class AuthorizationServiceIntegrationTest {
         assertThat(decision.allow).isTrue()
         val input = ObjectMapper().readTree(requestBody[0]).path("input")
         val expected = ObjectMapper().readTree(
-            """{"contractVersion":1,"requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"principal":{"id":"$PRINCIPAL_ID","enabled":true},"entity":{"id":"$ENTITY_ID"},"action":"occ.read","resource":{"id":"$RESOURCE_ID","active":true},"context":{"correlationId":"$REQUEST_ID"},"forbiddenActions":[],"grants":[{"id":"platform-administrator-read","layer":"PLATFORM","releaseId":"$PLATFORM_VERSION_ID","effect":"ALLOW","action":"occ.read","principalId":"$PRINCIPAL_ID","entityId":"*","resourceId":"*"}]}""",
+            """{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"principal":{"id":"$PRINCIPAL_ID","enabled":true},"entity":{"id":"$ENTITY_ID"},"action":"occ.read","resource":{"id":"$RESOURCE_ID","active":true},"context":{"correlationId":"$REQUEST_ID"},"forbiddenActions":[],"grants":[{"id":"platform-administrator-read","layer":"PLATFORM","releaseId":"$PLATFORM_VERSION_ID","effect":"ALLOW","action":"occ.read","principalId":"$PRINCIPAL_ID","entityId":"*","resourceId":"*"}]}""",
         )
         assertThat(input).isEqualTo(expected)
     }
@@ -139,7 +160,7 @@ class AuthorizationServiceIntegrationTest {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
                 exchange.requestBody.use { it.readAllBytes() }
-                val response = """{"result":{"contractVersion":1,"requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["grant:raw-id"],"matchedPolicyIds":["grant:raw-id"]}}"""
+                val response = """{"result":{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["grant:raw-id"],"matchedPolicyIds":["grant:raw-id"]}}"""
                 exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
                 exchange.responseBody.use { it.write(response.toByteArray()) }
             }
@@ -160,7 +181,7 @@ class AuthorizationServiceIntegrationTest {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
                 exchange.requestBody.use { it.readAllBytes() }
-                val response = """{"result":{"contractVersion":1,"requestId":"3d3d3d3dTd2N3d3d3d3d3Q==","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
+                val response = """{"result":{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"3d3d3d3dTd2N3d3d3d3d3Q==","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
                 exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
                 exchange.responseBody.use { it.write(response.toByteArray()) }
             }
@@ -186,12 +207,13 @@ class AuthorizationServiceIntegrationTest {
             JsonNodeFactory.instance.arrayNode(),
         )
         val fields = listOf(
-            "contractVersion", "requestId", "authorizationRevision", "releases", "decision", "allow",
+            "contractVersion", "opaRevision", "requestId", "authorizationRevision", "releases", "decision", "allow",
             "reasonCodes", "reasonIds", "matchedPolicyIds",
         )
         fields.forEach { field ->
             replacements.forEachIndexed { index, replacement ->
                 if ((field == "contractVersion" || field == "authorizationRevision") && index == 1) return@forEachIndexed
+                if (field == "opaRevision" && index == 0) return@forEachIndexed
                 if (field == "allow" && index == 2) return@forEachIndexed
                 assertMalformedDecisionRejected("$field-$index") { decision ->
                     decision.set<JsonNode>(field, replacement.deepCopy())
@@ -294,6 +316,21 @@ class AuthorizationServiceIntegrationTest {
             .hasMessage("Authorization is unavailable")
         assertThat(logs.independent.single().decision).isEqualTo(AuthorizationDecisionValue.ERROR)
         assertThat(logs.independent.single().reasonCodes).containsExactly("AUTHORIZATION_INTEGRITY_ERROR")
+    }
+
+    @Test
+    fun `service logs an error when OPA returns a structurally valid allow for the wrong runtime revision`() {
+        TransactionSynchronizationManager.setActualTransactionActive(true)
+        val logs = RecordingDecisionLog()
+        val service = AuthorizationService(
+            RecordingSnapshotSource(snapshot()),
+            FixedDecisionClient(decision().copy(opaRevision = "platform-authz-v0")),
+            logs,
+        )
+
+        assertThatThrownBy { service.authorize(request()) }
+            .isInstanceOf(AuthorizationAvailabilityException::class.java)
+        assertThat(logs.independent.single().decision).isEqualTo(AuthorizationDecisionValue.ERROR)
     }
 
     @Test
@@ -441,6 +478,97 @@ class AuthorizationServiceIntegrationTest {
     }
 
     @Test
+    fun `parent deprecation preserves a pinned snapshot while another release activation remains exclusive`() {
+        val jdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(jdbc)
+        jdbc.update("UPDATE authz.policy_bundle SET status = 'ACTIVE' WHERE id = ?", BUNDLE_ID)
+        val stagedReleaseId = UUID.randomUUID()
+        val releaseHash = jdbc.queryForObject(
+            "SELECT content_hash FROM authz.policy_release WHERE id = ?",
+            String::class.java,
+            COMPOSED_RELEASE_ID,
+        )!!
+        jdbc.update(
+            "INSERT INTO authz.policy_release(id, release_number, status, content_hash) VALUES (?, ?, 'STAGED', ?)",
+            stagedReleaseId,
+            jdbc.queryForObject("SELECT max(release_number) + 1 FROM authz.policy_release", Long::class.java),
+            releaseHash,
+        )
+        jdbc.update(
+            "INSERT INTO authz.policy_release_item(release_id, bundle_id, bundle_version_id) VALUES (?, ?, ?), (?, ?, ?)",
+            stagedReleaseId, BUNDLE_ID, PLATFORM_VERSION_ID,
+            stagedReleaseId, DOMAIN_BUNDLE_ID, DOMAIN_VERSION_ID,
+        )
+        val initialRevision = jdbc.queryForObject(
+            "SELECT current_revision FROM authz.authorization_state WHERE singleton",
+            Long::class.java,
+        )!!
+        val loaded = CountDownLatch(1)
+        val deprecatedSnapshotLoaded = CountDownLatch(1)
+        val releaseSnapshot = CountDownLatch(1)
+        val finishSnapshot = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val snapshotFuture = executor.submit<List<AuthorizationSnapshot>> {
+                val local = JdbcTemplate(dataSource())
+                TransactionTemplate(DataSourceTransactionManager(local.dataSource!!)).execute {
+                    val repository = AuthorizationSnapshotRepository(local, ObjectMapper().findAndRegisterModules())
+                    val first = repository.load(request())
+                    loaded.countDown()
+                    assertThat(deprecatedSnapshotLoaded.await(10, TimeUnit.SECONDS)).isTrue()
+                    val second = repository.load(request())
+                    releaseSnapshot.countDown()
+                    assertThat(finishSnapshot.await(10, TimeUnit.SECONDS)).isTrue()
+                    listOf(first, second)
+                }!!
+            }
+            assertThat(loaded.await(10, TimeUnit.SECONDS)).isTrue()
+
+            assertThat(jdbc.update("UPDATE authz.policy_bundle SET status = 'DEPRECATED' WHERE id = ?", BUNDLE_ID))
+                .isEqualTo(1)
+            assertThat(jdbc.queryForObject(
+                "SELECT current_revision FROM authz.authorization_state WHERE singleton",
+                Long::class.java,
+            )).isEqualTo(initialRevision)
+            deprecatedSnapshotLoaded.countDown()
+            assertThat(releaseSnapshot.await(10, TimeUnit.SECONDS)).isTrue()
+
+            val activationFuture = executor.submit<Int> {
+                val local = JdbcTemplate(dataSource())
+                TransactionTemplate(DataSourceTransactionManager(local.dataSource!!)).execute { status ->
+                    local.update("UPDATE authz.policy_release SET status = 'RETIRED' WHERE id = ?", COMPOSED_RELEASE_ID)
+                    val changed = local.update(
+                        """UPDATE authz.policy_release
+                           SET status = 'ACTIVE', opa_revision = 'platform-authz-v1', published_at = transaction_timestamp()
+                           WHERE id = ?""",
+                        stagedReleaseId,
+                    )
+                    status.setRollbackOnly()
+                    changed
+                }!!
+            }
+            Thread.sleep(250)
+            assertThat(activationFuture.isDone).isFalse()
+            finishSnapshot.countDown()
+
+            val snapshots = snapshotFuture.get(10, TimeUnit.SECONDS)
+            assertThat(snapshots.map { it.authorizationRevision }).containsOnly(initialRevision)
+            assertThat(snapshots.map { it.composedReleaseId }).containsOnly(COMPOSED_RELEASE_ID)
+            assertThat(activationFuture.get(10, TimeUnit.SECONDS)).isEqualTo(1)
+        } finally {
+            loaded.countDown()
+            deprecatedSnapshotLoaded.countDown()
+            releaseSnapshot.countDown()
+            finishSnapshot.countDown()
+            executor.shutdownNow()
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
+            jdbc.update("UPDATE authz.policy_bundle SET status = 'ACTIVE' WHERE id = ?", BUNDLE_ID)
+            jdbc.update("DELETE FROM authz.policy_release_item WHERE release_id = ?", stagedReleaseId)
+            jdbc.update("DELETE FROM authz.policy_release WHERE id = ?", stagedReleaseId)
+        }
+    }
+
+    @Test
     fun `allow log rolls back with its caller transaction`() {
         val jdbc = JdbcTemplate(dataSource())
         resetAuthorizationFacts(jdbc)
@@ -494,7 +622,7 @@ class AuthorizationServiceIntegrationTest {
         val service = AuthorizationService(
             AuthorizationSnapshotSource { fixedSnapshot },
             PolicyDecisionClient { decision() },
-            DecisionLogRepository(jdbc, manager, mapper),
+            decisionLogRepository(jdbc, mapper),
         )
 
         TransactionTemplate(manager).execute { service.authorize(request()) }
@@ -508,7 +636,7 @@ class AuthorizationServiceIntegrationTest {
         assertThat(row["context_digest"])
             .isEqualTo("f0f1045f6f1922e3bc4fcc9ec9eec908ec2b38dc70d0586f97edb522633cd567")
         assertThat(row["result_digest"])
-            .isEqualTo("5b30953c997b180c5191dd50f272e6ccbdbd5c9b07518e58643bc81a2cbaad47")
+            .isEqualTo("58550ec3986331489d91c872e124989630489daac625b2c346aebe7d25c78c59")
         assertThat(row["principal_entity_id"]).isEqualTo(PRINCIPAL_ID)
         assertThat(row["action_key"]).isEqualTo("occ.read")
         assertThat(row["resource_entity_id"]).isEqualTo(RESOURCE_ID)
@@ -533,7 +661,7 @@ class AuthorizationServiceIntegrationTest {
         assertThat(decisionCount(jdbc, request.requestId)).isEqualTo(1)
         val row = jdbc.queryForMap(
             """SELECT decision, reason_codes, matched_policies, context_digest,
-                      resource_ref, result_digest, latency_ms
+                      resource_entity_id, resource_ref, result_digest, latency_ms
                FROM authz.decision_log WHERE request_id = ?""",
             request.requestId,
         )
@@ -541,7 +669,8 @@ class AuthorizationServiceIntegrationTest {
         assertThat(row["reason_codes"].toString()).contains("NO_MATCHING_ALLOW")
         assertThat(row["matched_policies"].toString()).isEqualTo("[]")
         assertThat(row["context_digest"].toString()).matches("^[0-9a-f]{64}${'$'}")
-        assertThat(row["resource_ref"]).isNull()
+        assertThat(row["resource_entity_id"]).isNull()
+        assertThat(row["resource_ref"]).isEqualTo(request.resourceId.toString())
         assertThat(row["result_digest"].toString()).matches("^[0-9a-f]{64}${'$'}")
         assertThat(row["latency_ms"] as Int).isNotNegative()
         assertThat(jdbc.queryForObject(
@@ -549,6 +678,78 @@ class AuthorizationServiceIntegrationTest {
             String::class.java,
             request.requestId,
         )).doesNotContain("context-secret-value")
+    }
+
+    @Test
+    fun `independent deny does not wait for an uncommitted resource foreign key`() {
+        val jdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(jdbc)
+        val manager = DataSourceTransactionManager(jdbc.dataSource!!)
+        val resourceId = UUID.randomUUID()
+        val deniedRequest = request().copy(requestId = UUID.randomUUID(), resourceId = resourceId)
+        val service = databaseService(jdbc, manager, AuthorizationDecisionValue.DENY)
+
+        assertThatThrownBy {
+            TransactionTemplate(manager).apply { timeout = 5 }.execute {
+                jdbc.update(
+                    """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+                       VALUES (?, ?, ?, ?, 'ACTIVE')""",
+                    resourceId, TYPE_ID, TYPE_VERSION_ID, "resource:$resourceId",
+                )
+                service.authorize(deniedRequest)
+            }
+        }.isInstanceOf(AuthorizationDeniedException::class.java)
+
+        val row = jdbc.queryForMap(
+            "SELECT resource_entity_id, resource_ref FROM authz.decision_log WHERE request_id = ?",
+            deniedRequest.requestId,
+        )
+        assertThat(row["resource_entity_id"]).isNull()
+        assertThat(row["resource_ref"]).isEqualTo(resourceId.toString())
+    }
+
+    @Test
+    fun `four denied outer transactions do not starve a two connection primary pool`() {
+        val seedJdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(seedJdbc)
+        val primary = HikariDataSource(HikariConfig().apply {
+            jdbcUrl = postgres.jdbcUrl
+            username = "innorder_runtime"
+            password = "runtime-test-only"
+            maximumPoolSize = 2
+            minimumIdle = 0
+            connectionTimeout = 5_000
+        })
+        val requestIds = List(4) { UUID.randomUUID() }
+        val executor = Executors.newFixedThreadPool(4)
+        try {
+            val jdbc = JdbcTemplate(primary)
+            val manager = DataSourceTransactionManager(primary)
+            val service = databaseService(jdbc, manager, AuthorizationDecisionValue.DENY)
+            val futures = requestIds.map { requestId ->
+                executor.submit<Boolean> {
+                    try {
+                        TransactionTemplate(manager).apply { timeout = 5 }.execute {
+                            service.authorize(request().copy(requestId = requestId))
+                        }
+                        false
+                    } catch (_: AuthorizationDeniedException) {
+                        true
+                    }
+                }
+            }
+
+            assertThat(futures.map { it.get(10, TimeUnit.SECONDS) }).containsOnly(true)
+            assertThat(seedJdbc.queryForObject(
+                "SELECT count(*) FROM authz.decision_log WHERE request_id IN (?, ?, ?, ?)",
+                Long::class.java,
+                *requestIds.toTypedArray(),
+            )).isEqualTo(4)
+        } finally {
+            executor.shutdownNow()
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
+            primary.close()
+        }
     }
 
     @Test
@@ -561,14 +762,14 @@ class AuthorizationServiceIntegrationTest {
             PolicyDecisionClient { throw OpaClientException() },
             PolicyDecisionClient { snapshot ->
                 AuthorizationDecision(
-                    1, snapshot.requestId, snapshot.authorizationRevision - 1, snapshot.releases,
+                    1, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision - 1, snapshot.releases,
                     AuthorizationDecisionValue.ALLOW, true, listOf("ALLOW_GRANT_MATCH"),
                     listOf(GRANT_REFERENCE), listOf(GRANT_REFERENCE),
                 )
             },
             PolicyDecisionClient { snapshot ->
                 AuthorizationDecision(
-                    1, snapshot.requestId, snapshot.authorizationRevision,
+                    1, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
                     snapshot.releases + (PolicyLayer.PLATFORM to UUID.randomUUID()),
                     AuthorizationDecisionValue.ALLOW, true, listOf("ALLOW_GRANT_MATCH"),
                     listOf(GRANT_REFERENCE), listOf(GRANT_REFERENCE),
@@ -580,7 +781,7 @@ class AuthorizationServiceIntegrationTest {
             val service = AuthorizationService(
                 AuthorizationSnapshotRepository(jdbc, mapper),
                 client,
-                DecisionLogRepository(jdbc, manager, mapper),
+                decisionLogRepository(jdbc, mapper),
             )
             assertThatThrownBy { TransactionTemplate(manager).execute { service.authorize(request) } }
                 .isInstanceOf(AuthorizationAvailabilityException::class.java)
@@ -639,6 +840,12 @@ class AuthorizationServiceIntegrationTest {
                 }
                 sendJson(exchange, mapper.createObjectNode().set("result", decision), mapper)
             },
+            HttpFailureCase("wrong-opa-revision") { exchange, input ->
+                val decision = validAllowDecision(mapper, input).apply {
+                    put("opaRevision", "platform-authz-v0")
+                }
+                sendJson(exchange, mapper.createObjectNode().set("result", decision), mapper)
+            },
             HttpFailureCase("stale-release") { exchange, input ->
                 val decision = validAllowDecision(mapper, input)
                 (decision.path("releases") as com.fasterxml.jackson.databind.node.ObjectNode)
@@ -664,7 +871,7 @@ class AuthorizationServiceIntegrationTest {
             val service = AuthorizationService(
                 AuthorizationSnapshotRepository(jdbc, mapper),
                 client,
-                DecisionLogRepository(jdbc, manager, mapper),
+                decisionLogRepository(jdbc, mapper),
             )
             val request = request().copy(
                 requestId = UUID.randomUUID(),
@@ -728,6 +935,7 @@ class AuthorizationServiceIntegrationTest {
 
     private fun decision() = AuthorizationDecision(
         contractVersion = 1,
+        opaRevision = "platform-authz-v1",
         requestId = REQUEST_ID,
         authorizationRevision = 17,
         releases = mapOf(PolicyLayer.PLATFORM to PLATFORM_VERSION_ID),
@@ -749,6 +957,7 @@ class AuthorizationServiceIntegrationTest {
             PolicyDecisionClient { snapshot ->
                 AuthorizationDecision(
                     1,
+                    snapshot.opaRevision,
                     snapshot.requestId,
                     snapshot.authorizationRevision,
                     snapshot.releases,
@@ -759,7 +968,7 @@ class AuthorizationServiceIntegrationTest {
                     if (outcome == AuthorizationDecisionValue.ALLOW) listOf(GRANT_REFERENCE) else emptyList(),
                 )
             },
-            DecisionLogRepository(jdbc, manager, mapper),
+            decisionLogRepository(jdbc, mapper),
         )
     }
 
@@ -768,6 +977,18 @@ class AuthorizationServiceIntegrationTest {
         Long::class.java,
         requestId,
     )!!
+
+    private fun decisionLogRepository(jdbc: JdbcTemplate, mapper: ObjectMapper): DecisionLogRepository {
+        val auditDataSource = dataSource()
+        return DecisionLogRepository(
+            jdbc,
+            object : AuditDatabase {
+                override val jdbc = JdbcTemplate(auditDataSource)
+                override val transactionManager = DataSourceTransactionManager(auditDataSource)
+            },
+            mapper,
+        )
+    }
 
     private fun awaitOpa(port: Int, process: Process) {
         val client = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(250)).build()
@@ -834,6 +1055,7 @@ class AuthorizationServiceIntegrationTest {
         input: com.fasterxml.jackson.databind.JsonNode,
     ): com.fasterxml.jackson.databind.node.ObjectNode = mapper.createObjectNode().apply {
         put("contractVersion", 1)
+        put("opaRevision", input.path("opaRevision").textValue())
         put("requestId", input.path("requestId").textValue())
         put("authorizationRevision", input.path("authorizationRevision").longValue())
         set<com.fasterxml.jackson.databind.JsonNode>("releases", input.path("releases").deepCopy())

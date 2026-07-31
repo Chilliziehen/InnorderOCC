@@ -12,6 +12,7 @@ request_id := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 base_input := {
     "contractVersion": 1,
+    "opaRevision": "platform-authz-v1",
     "requestId": request_id,
     "authorizationRevision": 17,
     "releases": {
@@ -52,6 +53,7 @@ policy_ref(id) := sprintf("policy:%s", [crypto.sha256(id)])
 
 expected(decision_value, codes, ids) := {
     "contractVersion": 1,
+    "opaRevision": "platform-authz-v1",
     "requestId": request_id,
     "authorizationRevision": 17,
     "releases": base_input.releases,
@@ -64,6 +66,7 @@ expected(decision_value, codes, ids) := {
 
 invalid_envelope := {
     "contractVersion": 1,
+    "opaRevision": "",
     "requestId": "00000000-0000-0000-0000-000000000000",
     "authorizationRevision": 0,
     "releases": {},
@@ -189,7 +192,12 @@ test_partial_wildcard_is_invalid if {
 test_revision_and_release_ids_echo_exactly if {
     result := decision with input as object.union(base_input, {"grants": [platform_allow]})
     result.authorizationRevision == 17
+    result.opaRevision == "platform-authz-v1"
     result.releases == base_input.releases
+}
+
+test_runtime_revision_mismatch_fails_closed if {
+    decision with input as object.union(base_input, {"opaRevision": "platform-authz-v2"}) == invalid_envelope
 }
 
 test_reason_and_policy_ids_are_sorted_distinct_and_opaque if {

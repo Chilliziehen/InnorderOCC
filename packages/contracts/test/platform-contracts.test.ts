@@ -69,6 +69,7 @@ const noMatchingAllowPolicyHash = "policy:7ec3d68be5ac070a6d48cb53daaf85bf7b4d76
 
 const authorizationInput = {
   contractVersion: 1,
+  opaRevision: "platform-authz-v1",
   requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   authorizationRevision: 17,
   releases: {
@@ -101,6 +102,7 @@ describe("authorization contracts", () => {
     expect(authorizationInputSchema.parse(authorizationInput)).toEqual(authorizationInput);
     const decision = {
       contractVersion: 1,
+      opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: authorizationInput.authorizationRevision,
       releases: authorizationInput.releases,
@@ -127,6 +129,9 @@ describe("authorization contracts", () => {
   it("rejects malformed versions, UUIDs, revisions, and context", () => {
     for (const invalid of [
       { ...authorizationInput, contractVersion: 2 },
+      { ...authorizationInput, opaRevision: "" },
+      { ...authorizationInput, opaRevision: "platform authz v1" },
+      { ...authorizationInput, opaRevision: "x".repeat(257) },
       { ...authorizationInput, requestId: "not-a-uuid" },
       { ...authorizationInput, requestId: "00000000-0000-0000-0000-000000000000" },
       { ...authorizationInput, requestId: "dddddddd-dddd-0ddd-8ddd-dddddddddddd" },
@@ -273,6 +278,7 @@ describe("authorization contracts", () => {
   it("rejects inconsistent, unsorted, duplicate, or unknown decision fields", () => {
     const baseDecision = {
       contractVersion: 1,
+      opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: 17,
       releases: authorizationInput.releases,
@@ -300,6 +306,7 @@ describe("authorization contracts", () => {
   it("accepts only the canonical invalid-input decision envelope", () => {
     const invalidEnvelope = {
       contractVersion: 1,
+      opaRevision: "",
       requestId: "00000000-0000-0000-0000-000000000000",
       authorizationRevision: 0,
       releases: {},
@@ -312,6 +319,7 @@ describe("authorization contracts", () => {
     expect(authorizationDecisionSchema.parse(invalidEnvelope)).toEqual(invalidEnvelope);
     for (const invalid of [
       { ...invalidEnvelope, requestId: authorizationInput.requestId },
+      { ...invalidEnvelope, opaRevision: authorizationInput.opaRevision },
       { ...invalidEnvelope, authorizationRevision: 1 },
       { ...invalidEnvelope, releases: { PLATFORM: id } },
       { ...invalidEnvelope, reasonIds: [] },
@@ -322,6 +330,7 @@ describe("authorization contracts", () => {
   it("accepts exactly possible allow and deny reason semantics", () => {
     const allowDecision = {
       contractVersion: 1,
+      opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: 17,
       releases: authorizationInput.releases,
@@ -408,6 +417,7 @@ describe("authorization contracts", () => {
   it("rejects case-insensitive duplicate release IDs in decisions", () => {
     const decision = {
       contractVersion: 1,
+      opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: 17,
       releases: { PLATFORM: id, DOMAIN: id.toUpperCase() },

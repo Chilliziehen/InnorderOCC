@@ -3,6 +3,7 @@ package innorder.platform.authz
 import rego.v1
 
 contract_version := 1
+opa_revision := "platform-authz-v1"
 max_safe_integer := 9007199254740991
 action_key_max_length := 128
 context_max_properties := 32
@@ -14,6 +15,7 @@ grant_id_max_length := 256
 
 default decision := {
     "contractVersion": 1,
+    "opaRevision": "",
     "requestId": "00000000-0000-0000-0000-000000000000",
     "authorizationRevision": 0,
     "releases": {},
@@ -26,6 +28,7 @@ default decision := {
 
 decision := {
     "contractVersion": contract_version,
+    "opaRevision": opa_revision,
     "requestId": input.requestId,
     "authorizationRevision": input.authorizationRevision,
     "releases": input.releases,
@@ -195,11 +198,12 @@ policy_ref(id) := sprintf("policy:%s", [crypto.sha256(id)])
 valid_input if {
     is_object(input)
     object.keys(input) == {
-        "contractVersion", "requestId", "authorizationRevision", "releases",
+        "contractVersion", "opaRevision", "requestId", "authorizationRevision", "releases",
         "principal", "entity", "action", "resource", "context",
         "forbiddenActions", "grants",
     }
     input.contractVersion == contract_version
+    input.opaRevision == opa_revision
     valid_uuid(input.requestId)
     valid_revision(input.authorizationRevision)
     valid_releases(input.releases)

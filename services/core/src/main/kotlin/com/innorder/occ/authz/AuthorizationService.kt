@@ -65,6 +65,7 @@ class AuthorizationService(
 
     private fun matchesSnapshot(decision: AuthorizationDecision, snapshot: AuthorizationSnapshot): Boolean =
         decision.contractVersion == snapshot.contractVersion &&
+            decision.opaRevision == snapshot.opaRevision &&
             decision.requestId == snapshot.requestId &&
             decision.authorizationRevision == snapshot.authorizationRevision &&
             decision.releases == snapshot.releases &&

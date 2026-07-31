@@ -10,6 +10,9 @@ class AuthorizationDecisionValidator {
             !result.path("contractVersion").isIntegralNumber ||
             !result.path("contractVersion").canConvertToInt() ||
             result.path("contractVersion").intValue() != CONTRACT_VERSION ||
+            !result.path("opaRevision").isTextual ||
+            result.path("opaRevision").textValue().length > OPA_REVISION_MAX_LENGTH ||
+            result.path("opaRevision").textValue().let { it.isNotEmpty() && !OPA_REVISION.matches(it) } ||
             !result.path("requestId").isTextual ||
             !OUTPUT_UUID.matches(result.path("requestId").textValue()) ||
             !result.path("authorizationRevision").isIntegralNumber ||
@@ -37,6 +40,8 @@ class AuthorizationDecisionValidator {
 
     fun validate(output: AuthorizationDecision) {
         if (output.contractVersion != CONTRACT_VERSION ||
+            output.opaRevision.length > OPA_REVISION_MAX_LENGTH ||
+            output.opaRevision.let { it.isNotEmpty() && !OPA_REVISION.matches(it) } ||
             output.authorizationRevision !in 0..MAX_SAFE_INTEGER ||
             output.decision == AuthorizationDecisionValue.ERROR ||
             output.allow != (output.decision == AuthorizationDecisionValue.ALLOW) ||
@@ -58,7 +63,7 @@ class AuthorizationDecisionValidator {
         if (grantReasonIds != output.matchedPolicyIds) fail()
 
         if ("INVALID_INPUT" in output.reasonCodes) {
-            if (output.requestId != NIL_UUID || output.authorizationRevision != 0L || output.releases.isNotEmpty() ||
+            if (output.opaRevision.isNotEmpty() || output.requestId != NIL_UUID || output.authorizationRevision != 0L || output.releases.isNotEmpty() ||
                 output.decision != AuthorizationDecisionValue.DENY || output.allow ||
                 output.reasonCodes != listOf("INVALID_INPUT") ||
                 output.reasonIds != listOf(POLICY_REASON_IDS.getValue("INVALID_INPUT")) ||
@@ -67,7 +72,7 @@ class AuthorizationDecisionValidator {
             return
         }
 
-        if (!validUuid(output.requestId) || PolicyLayer.PLATFORM !in output.releases) fail()
+        if (output.opaRevision.isEmpty() || !validUuid(output.requestId) || PolicyLayer.PLATFORM !in output.releases) fail()
         when (output.decision) {
             AuthorizationDecisionValue.ALLOW -> validateAllow(output, policyReasonIds)
             AuthorizationDecisionValue.DENY -> validateDeny(output, policyReasonIds)
@@ -113,6 +118,7 @@ class AuthorizationDecisionValidator {
         const val REASON_CODES_MAX = 7
         const val REASON_IDS_MAX = 260
         const val MATCHED_IDS_MAX = 256
+        const val OPA_REVISION_MAX_LENGTH = 256
         val NIL_UUID: UUID = UUID(0, 0)
 
         val REASON_CODES = setOf(
@@ -135,6 +141,7 @@ class AuthorizationDecisionValidator {
 
         private val REASON_ID = Regex("^(grant|policy):[0-9a-f]{64}${'$'}")
         private val GRANT_ID = Regex("^grant:[0-9a-f]{64}${'$'}")
+        private val OPA_REVISION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private val NON_NIL_UUID = Regex(
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}${'$'}",
         )
@@ -143,7 +150,7 @@ class AuthorizationDecisionValidator {
         )
         private val RELEASE_KEYS = setOf("PLATFORM", "DOMAIN", "CUSTOMER")
         private val OUTPUT_FIELDS = setOf(
-            "contractVersion", "requestId", "authorizationRevision", "releases", "decision", "allow",
+            "contractVersion", "opaRevision", "requestId", "authorizationRevision", "releases", "decision", "allow",
             "reasonCodes", "reasonIds", "matchedPolicyIds",
         )
     }

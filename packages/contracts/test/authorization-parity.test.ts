@@ -23,6 +23,7 @@ const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const invalidPolicyId = "policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176";
 const canonicalInvalidDecision = {
   contractVersion: 1,
+  opaRevision: "",
   requestId: "00000000-0000-0000-0000-000000000000",
   authorizationRevision: 0,
   releases: {},
@@ -90,6 +91,7 @@ describeWithOpa("authorization Zod/OPA parity", () => {
       const decision = evaluateWithOpa(input);
       expect(() => authorizationDecisionSchema.parse(decision)).not.toThrow();
       expect(decision).toMatchObject({
+        opaRevision: input.opaRevision,
         requestId: input.requestId,
         authorizationRevision: input.authorizationRevision,
         releases: input.releases,
@@ -104,4 +106,10 @@ describeWithOpa("authorization Zod/OPA parity", () => {
       expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
     });
   }
+
+  it("fails closed when the expected OPA runtime revision differs", () => {
+    const input = { ...fixtures.baseInput, opaRevision: "platform-authz-v2" };
+    expect(authorizationInputSchema.parse(input)).toEqual(input);
+    expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
+  });
 });

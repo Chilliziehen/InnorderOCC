@@ -46,7 +46,7 @@ data class AuthorizationSnapshot(
     val forbiddenActions: List<String>,
     val grants: List<AuthorizationGrant>,
     @get:JsonIgnore val composedReleaseId: UUID,
-    @get:JsonIgnore val opaRevision: String,
+    val opaRevision: String,
     @get:JsonIgnore val entityVersions: Map<UUID, Long>,
     @get:JsonIgnore val contextDigest: String,
     @get:JsonIgnore val snapshotAt: OffsetDateTime? = null,
@@ -55,6 +55,7 @@ data class AuthorizationSnapshot(
 
 data class AuthorizationDecision(
     val contractVersion: Int,
+    val opaRevision: String,
     val requestId: UUID,
     val authorizationRevision: Long,
     val releases: Map<PolicyLayer, UUID>,

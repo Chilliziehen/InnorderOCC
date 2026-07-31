@@ -66,14 +66,13 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
     }
 
     @Test
-    fun `rejects inactive bundle and unpublished bundle version`() {
+    fun `accepts a deprecated parent pinned by an active release and rejects unpublished bundle version`() {
         scenario { jdbc ->
             val item = bundle(
                 jdbc, PolicyLayer.PLATFORM, manifest("inactive", "ALLOW", "occ.read"), bundleStatus = "DEPRECATED",
             )
             activate(jdbc, listOf(item))
-            assertThatThrownBy { repository(jdbc).load(request()) }
-                .isInstanceOf(AuthorizationSnapshotException::class.java)
+            assertThat(repository(jdbc).load(request()).grants.map { it.id }).containsExactly("inactive")
         }
         scenario { jdbc ->
             val item = bundle(

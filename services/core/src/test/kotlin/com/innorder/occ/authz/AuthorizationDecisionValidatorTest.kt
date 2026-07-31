@@ -27,6 +27,7 @@ class AuthorizationDecisionValidatorTest {
             ),
             AuthorizationDecision(
                 1,
+                "",
                 UUID(0, 0),
                 0,
                 emptyMap(),
@@ -54,6 +55,9 @@ class AuthorizationDecisionValidatorTest {
             allow().copy(decision = AuthorizationDecisionValue.DENY),
             allow().copy(allow = false),
             allow().copy(requestId = UUID(0, 0)),
+            allow().copy(opaRevision = ""),
+            allow().copy(opaRevision = "bad revision"),
+            allow().copy(opaRevision = "x".repeat(257)),
             allow().copy(authorizationRevision = 9_007_199_254_740_992L),
             allow().copy(releases = emptyMap()),
             allow().copy(releases = mapOf(PolicyLayer.DOMAIN to DOMAIN_RELEASE)),
@@ -81,6 +85,7 @@ class AuthorizationDecisionValidatorTest {
             deny(reasonCodes = listOf("NO_MATCHING_ALLOW"), reasonIds = listOf(NO_MATCHING_ALLOW_POLICY, GRANT_A), matched = listOf(GRANT_A)),
             deny(reasonCodes = listOf("INVALID_INPUT"), reasonIds = listOf(INVALID_INPUT_POLICY)),
             canonicalInvalid().copy(requestId = REQUEST_ID),
+            canonicalInvalid().copy(opaRevision = "platform-authz-v1"),
             canonicalInvalid().copy(authorizationRevision = 1),
             canonicalInvalid().copy(releases = mapOf(PolicyLayer.PLATFORM to PLATFORM_RELEASE)),
             canonicalInvalid().copy(reasonIds = emptyList()),
@@ -90,6 +95,7 @@ class AuthorizationDecisionValidatorTest {
 
     private fun allow() = AuthorizationDecision(
         1,
+        "platform-authz-v1",
         REQUEST_ID,
         17,
         mapOf(PolicyLayer.PLATFORM to PLATFORM_RELEASE),
@@ -113,7 +119,7 @@ class AuthorizationDecisionValidatorTest {
     )
 
     private fun canonicalInvalid() = AuthorizationDecision(
-        1, UUID(0, 0), 0, emptyMap(), AuthorizationDecisionValue.DENY, false,
+        1, "", UUID(0, 0), 0, emptyMap(), AuthorizationDecisionValue.DENY, false,
         listOf("INVALID_INPUT"), listOf(INVALID_INPUT_POLICY), emptyList(),
     )
 

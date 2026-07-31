@@ -10,9 +10,11 @@ export const CONTEXT_MAX_DEPTH = 8;
 export const FORBIDDEN_ACTIONS_MAX_LENGTH = 128;
 export const GRANTS_MAX_LENGTH = 256;
 export const GRANT_ID_MAX_LENGTH = 256;
+export const OPA_REVISION_MAX_LENGTH = 256;
 export const OUTPUT_IDS_MAX_LENGTH = GRANTS_MAX_LENGTH;
 
 const ACTION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const OPA_REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const OPAQUE_REASON_ID_PATTERN = /^(?:grant|policy):[0-9a-f]{64}$/;
 const OPAQUE_MATCHED_ID_PATTERN = /^grant:[0-9a-f]{64}$/;
 export const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -68,6 +70,8 @@ const stableActionSchema = z
   .min(1)
   .max(ACTION_KEY_MAX_LENGTH)
   .regex(ACTION_KEY_PATTERN);
+
+const opaRevisionSchema = z.string().min(1).max(OPA_REVISION_MAX_LENGTH).regex(OPA_REVISION_PATTERN);
 
 const releaseIdsSchema = z
   .object({
@@ -144,6 +148,7 @@ const authorizationGrantSchema = z
 export const authorizationInputSchema = z
   .object({
     contractVersion: z.literal(AUTHORIZATION_CONTRACT_VERSION),
+    opaRevision: opaRevisionSchema,
     requestId: nonNilUuidSchema,
     authorizationRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     releases: releaseIdsSchema,
@@ -205,6 +210,7 @@ const matchedPolicyIdSchema = z.string().regex(OPAQUE_MATCHED_ID_PATTERN);
 export const authorizationDecisionSchema = z
   .object({
     contractVersion: z.literal(AUTHORIZATION_CONTRACT_VERSION),
+    opaRevision: z.union([opaRevisionSchema, z.literal("")]),
     requestId: z.union([nonNilUuidSchema, z.literal(NIL_UUID)]),
     authorizationRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     releases: z
@@ -242,6 +248,7 @@ export const authorizationDecisionSchema = z
     if (output.reasonCodes.includes("INVALID_INPUT")) {
       const canonical =
         output.requestId === NIL_UUID &&
+        output.opaRevision === "" &&
         output.authorizationRevision === 0 &&
         Object.keys(output.releases).length === 0 &&
         output.decision === "DENY" &&
@@ -254,6 +261,9 @@ export const authorizationDecisionSchema = z
         context.addIssue({ code: "custom", message: "Invalid input must use the canonical deny envelope" });
       }
     } else {
+      if (output.opaRevision === "") {
+        context.addIssue({ code: "custom", path: ["opaRevision"], message: "Valid decisions require an OPA revision" });
+      }
       if (output.requestId === NIL_UUID) {
         context.addIssue({ code: "custom", path: ["requestId"], message: "Valid decisions require a request UUID" });
       }
