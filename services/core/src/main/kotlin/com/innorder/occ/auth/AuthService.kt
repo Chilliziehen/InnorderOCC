@@ -4,6 +4,7 @@ import com.innorder.occ.iam.CurrentUser
 import com.innorder.occ.iam.AccountCredentialSnapshot
 import com.innorder.occ.iam.LockedAccount
 import com.innorder.occ.iam.PrincipalRepository
+import com.innorder.occ.iam.CanonicalUsername
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.jdbc.core.JdbcTemplate
@@ -14,7 +15,6 @@ import org.springframework.transaction.support.TransactionTemplate
 import java.security.SecureRandom
 import java.time.Clock
 import java.time.Duration
-import java.util.Locale
 import java.util.UUID
 
 class TokenResponse(
@@ -41,8 +41,8 @@ class AuthService(
     private val clock: Clock,
 ) {
     fun login(rawUsername: String, password: String): TokenResponse {
-        val username = rawUsername.trim().lowercase(Locale.ROOT)
-        if (!CANONICAL_USERNAME.matches(username) || username.length > MAX_USERNAME_LENGTH) {
+        val username = CanonicalUsername.normalize(rawUsername)
+        if (username == null) {
             passwords.matches(password, DUMMY_HASH)
             throw invalidCredentials()
         }
@@ -136,9 +136,7 @@ class AuthService(
             tokenVersion == snapshot.tokenVersion
 
     companion object {
-        private const val MAX_USERNAME_LENGTH = 128
         private val REFRESH_LIFETIME = Duration.ofDays(7)
-        private val CANONICAL_USERNAME = Regex("^[a-z0-9][a-z0-9._@-]*${'$'}")
         private const val DUMMY_HASH = "${'$'}argon2id${'$'}v=19${'$'}m=65536,t=3,p=1${'$'}AAAAAAAAAAAAAAAAAAAAAA==${'$'}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
     }
 }

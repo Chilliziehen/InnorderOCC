@@ -37,6 +37,7 @@ async function main() {
     "TEST-com.innorder.occ.PostgreSqlFlowableIntegrationTest.xml",
     "TEST-com.innorder.occ.auth.SessionRepositoryIntegrationTest.xml",
     "TEST-com.innorder.occ.auth.AuthControllerIntegrationTest.xml",
+    "TEST-com.innorder.occ.iam.BootstrapAdministratorIntegrationTest.xml",
   ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
@@ -158,6 +159,7 @@ async function main() {
       "--tests", "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
       "--tests", "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
       "--tests", "com.innorder.occ.auth.AuthControllerIntegrationTest",
+      "--tests", "com.innorder.occ.iam.BootstrapAdministratorIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ]);

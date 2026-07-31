@@ -51,6 +51,11 @@ flowable:
   database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
 
 occ:
+  bootstrap-administrator:
+    password-file: ${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:}
+    username: ${OCC_BOOTSTRAP_ADMIN_USERNAME:admin}
+    display-name: ${OCC_BOOTSTRAP_ADMIN_DISPLAY_NAME:Platform Administrator}
+    delete-secret: ${OCC_BOOTSTRAP_DELETE_SECRET:false}
   jwt:
     issuer: ${OCC_JWT_ISSUER}
     private-key-file: file:${OCC_JWT_PRIVATE_KEY_FILE}
