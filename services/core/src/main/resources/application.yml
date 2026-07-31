@@ -56,6 +56,7 @@ occ:
     username: ${OCC_BOOTSTRAP_ADMIN_USERNAME:admin}
     display-name: ${OCC_BOOTSTRAP_ADMIN_DISPLAY_NAME:Platform Administrator}
     delete-secret: ${OCC_BOOTSTRAP_DELETE_SECRET:false}
+    secret-owner: ${OCC_BOOTSTRAP_SECRET_OWNER:${user.name}}
   jwt:
     issuer: ${OCC_JWT_ISSUER}
     private-key-file: file:${OCC_JWT_PRIVATE_KEY_FILE}

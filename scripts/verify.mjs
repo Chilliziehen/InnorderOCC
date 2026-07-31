@@ -38,7 +38,8 @@ async function main() {
     "TEST-com.innorder.occ.auth.SessionRepositoryIntegrationTest.xml",
     "TEST-com.innorder.occ.auth.AuthControllerIntegrationTest.xml",
     "TEST-com.innorder.occ.iam.BootstrapAdministratorIntegrationTest.xml",
-    "TEST-com.innorder.occ.iam.BootstrapSecretFilePolicyTest.xml",
+    "TEST-com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest.xml",
+    "TEST-com.innorder.occ.iam.BootstrapSecretReaderTest.xml",
   ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
@@ -161,7 +162,8 @@ async function main() {
       "--tests", "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
       "--tests", "com.innorder.occ.auth.AuthControllerIntegrationTest",
       "--tests", "com.innorder.occ.iam.BootstrapAdministratorIntegrationTest",
-      "--tests", "com.innorder.occ.iam.BootstrapSecretFilePolicyTest",
+      "--tests", "com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest",
+      "--tests", "com.innorder.occ.iam.BootstrapSecretReaderTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ]);
