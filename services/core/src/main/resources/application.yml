@@ -18,6 +18,11 @@ spring:
       timeout: 1500ms
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      retries: 0
+      properties:
+        enable.idempotence: false
   flyway:
     enabled: ${FLYWAY_ENABLED:true}
     locations: ${FLYWAY_LOCATIONS:classpath:db/migration}
@@ -51,6 +56,14 @@ flowable:
   database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
 
 occ:
+  outbox:
+    enabled: ${OCC_OUTBOX_ENABLED:true}
+    topic: occ.events.v1
+    batch-size: ${OCC_OUTBOX_BATCH_SIZE:50}
+    poll-interval: ${OCC_OUTBOX_POLL_INTERVAL:250ms}
+    ack-timeout: ${OCC_OUTBOX_ACK_TIMEOUT:5s}
+    stale-claim: 5m
+    max-attempts: 10
   bootstrap-administrator:
     password-file: ${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:}
     username: ${OCC_BOOTSTRAP_ADMIN_USERNAME:admin}

@@ -23,6 +23,7 @@ const migrations = [
   'V009__runtime_privileges.sql',
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
+  'V012__outbox_publisher_lifecycle.sql',
 ];
 
 function readMigration(name) {

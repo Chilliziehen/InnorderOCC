@@ -531,7 +531,7 @@ SELECT pg_temp.assert_raises(
     '23514', 'outbox publication cannot predate claim'
 );
 UPDATE audit.outbox_event
-SET status = 'PUBLISHED', published_at = statement_timestamp()
+SET status = 'PUBLISHED', published_at = statement_timestamp(), claimed_at = NULL
 WHERE id = '24000000-0000-7000-8000-000000000001';
 SELECT pg_temp.assert_raises(
     $$UPDATE audit.outbox_event SET attempts = attempts + 1

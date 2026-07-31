@@ -1,0 +1,93 @@
+package com.innorder.occ.events
+
+import jakarta.annotation.PreDestroy
+import org.slf4j.LoggerFactory
+import org.springframework.scheduling.annotation.Scheduled
+import java.util.concurrent.atomic.AtomicBoolean
+
+data class PublishBatchResult(
+    val claimed: Int,
+    val published: Int,
+    val failed: Int,
+    val casLost: Int,
+)
+
+class OutboxPublisher(
+    private val repository: OutboxPublishingRepository,
+    private val sender: OutboxEventSender,
+    private val properties: OutboxProperties,
+) {
+    private val polling = AtomicBoolean()
+    private val stopping = AtomicBoolean()
+    private val lifecycleMonitor = Object()
+
+    /**
+     * Delivery is at-least-once: a broker acknowledgement followed by a process crash before the
+     * success CAS can cause stale recovery to publish the same event ID again. Consumers deduplicate by event ID.
+     */
+    fun publishBatch(): PublishBatchResult {
+        if (!properties.enabled || stopping.get() || !polling.compareAndSet(false, true)) return PublishBatchResult(0, 0, 0, 0)
+        var published = 0
+        var failed = 0
+        var casLost = 0
+        var interrupted = false
+        var claimed = emptyList<ClaimedOutboxEvent>()
+        try {
+            claimed = repository.claim()
+            for (event in claimed) {
+                if (stopping.get()) break
+                var deliverySucceeded = false
+                val finalization = try {
+                    sender.publish(event.envelope())
+                    deliverySucceeded = true
+                    repository.succeed(event)
+                } catch (_: InvalidEventEnvelopeException) {
+                    failed++
+                    repository.fail(event, FailureCategory.INVALID_EVENT)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    failed++
+                    repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                } catch (_: Exception) {
+                    failed++
+                    repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                }
+                if (finalization == FinalizeResult.CAS_LOST) casLost++
+                else if (deliverySucceeded) published++
+                if (interrupted) break
+            }
+        } finally {
+            polling.set(false)
+            synchronized(lifecycleMonitor) { lifecycleMonitor.notifyAll() }
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+        return PublishBatchResult(claimed.size, published, failed, casLost)
+    }
+
+    @Scheduled(fixedDelayString = "#{@'occ.outbox-com.innorder.occ.events.OutboxProperties'.pollInterval.toMillis()}")
+    fun poll() {
+        try {
+            publishBatch()
+        } catch (error: Exception) {
+            LOG.warn("Outbox polling batch failed", error)
+        }
+    }
+
+    @PreDestroy
+    fun shutdown() {
+        stopping.set(true)
+        val deadline = System.nanoTime() + SHUTDOWN_WAIT_NANOS
+        synchronized(lifecycleMonitor) {
+            while (polling.get() && System.nanoTime() < deadline) {
+                val remainingMillis = (deadline - System.nanoTime()) / 1_000_000
+                if (remainingMillis <= 0) break
+                lifecycleMonitor.wait(remainingMillis)
+            }
+        }
+    }
+
+    companion object {
+        private val LOG = LoggerFactory.getLogger(OutboxPublisher::class.java)
+        private const val SHUTDOWN_WAIT_NANOS = 30_000_000_000L
+    }
+}

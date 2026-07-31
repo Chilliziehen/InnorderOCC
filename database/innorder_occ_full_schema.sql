@@ -11,3 +11,4 @@
 \ir migrations/V009__runtime_privileges.sql
 \ir migrations/V010__platform_security_kernel.sql
 \ir migrations/V011__account_failed_attempt_window.sql
+\ir migrations/V012__outbox_publisher_lifecycle.sql

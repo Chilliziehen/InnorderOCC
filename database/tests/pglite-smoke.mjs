@@ -40,6 +40,7 @@ const migrations = [
   'V009__runtime_privileges.sql',
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
+  'V012__outbox_publisher_lifecycle.sql',
 ];
 
 async function applyMigration(migration) {
@@ -54,7 +55,7 @@ async function applyMigration(migration) {
   console.log(`applied ${migration}`);
 }
 
-for (const migration of migrations.slice(0, -2)) {
+for (const migration of migrations.slice(0, -3)) {
   await applyMigration(migration);
 }
 
@@ -115,7 +116,7 @@ await db.exec(`
 `);
 console.log('inserted representative V009 legacy rows');
 
-await applyMigration(migrations.at(-2));
+await applyMigration('V010__platform_security_kernel.sql');
 
 await db.exec(`
   INSERT INTO audit.outbox_event
@@ -173,7 +174,7 @@ await db.exec(`
   VALUES
     ('90000000-0000-7000-8000-000000000005', 'legacy.user', NULL, 0, now() + interval '15 minutes');
 `);
-await applyMigration(migrations.at(-1));
+await applyMigration('V011__account_failed_attempt_window.sql');
 const legacyAccountWindow = await db.query(`
   SELECT failed_attempts, failed_window_started_at = locked_until - interval '15 minutes' AS window_preserved
   FROM iam.user_account
@@ -185,6 +186,8 @@ if (legacyAccountWindow.rows.length !== 1
   throw new Error('V011 failed-attempt window backfill is not forward-compatible');
 }
 console.log('passed V011 legacy account failure-window backfill');
+
+await applyMigration('V012__outbox_publisher_lifecycle.sql');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
