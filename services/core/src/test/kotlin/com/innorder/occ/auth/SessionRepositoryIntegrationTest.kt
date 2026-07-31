@@ -50,14 +50,17 @@ class SessionRepositoryIntegrationTest(
         jdbcTemplate.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, ?, '{}'::jsonb) ON CONFLICT DO NOTHING", TYPE_VERSION_ID, TYPE_ID, VERSION_ID, 1)
         jdbcTemplate.update("INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", PRINCIPAL_ID, TYPE_ID, TYPE_VERSION_ID, "auth:user", "ACTIVE")
         jdbcTemplate.update("INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", PRINCIPAL_ID, "USER", "Auth User", "ACTIVE")
+        jdbcTemplate.update("INSERT INTO iam.user_account(principal_id, username) VALUES (?, ?) ON CONFLICT DO NOTHING", PRINCIPAL_ID, "auth.user")
         jdbcTemplate.update("UPDATE iam.principal SET status = 'ACTIVE' WHERE id = ?", PRINCIPAL_ID)
         jdbcTemplate.update("UPDATE authz.entity SET state = 'ACTIVE' WHERE id = ?", PRINCIPAL_ID)
+        jdbcTemplate.update("UPDATE iam.user_account SET password_version = 0 WHERE principal_id = ?", PRINCIPAL_ID)
         clock.instant = BASE_TIME
         repository = repository(SequenceSecureRandom())
     }
 
     @Test
     fun `creates 256 bit URL safe token while database stores only its SHA-256 hash`() {
+        jdbcTemplate.update("UPDATE iam.user_account SET password_version = 7 WHERE principal_id = ?", PRINCIPAL_ID)
         val issued = repository.create(PRINCIPAL_ID, 7, Duration.ofDays(7), "desktop:test")
         val rawToken = issued.refreshToken.exposeValue()
         val stored = jdbcTemplate.queryForObject("SELECT refresh_token_hash FROM iam.auth_session WHERE id = ?", String::class.java, issued.session.id)
@@ -175,6 +178,7 @@ class SessionRepositoryIntegrationTest(
 
     @Test
     fun `rotation links lineage and replay revokes every replacement descendant`() {
+        jdbcTemplate.update("UPDATE iam.user_account SET password_version = 2 WHERE principal_id = ?", PRINCIPAL_ID)
         val first = repository.create(PRINCIPAL_ID, 2, Duration.ofDays(7), null)
         clock.advance(Duration.ofMinutes(1))
         val second = (repository.rotate(first.refreshToken, Duration.ofDays(7)) as SessionRotation.Rotated).issued
@@ -222,6 +226,7 @@ class SessionRepositoryIntegrationTest(
 
     @Test
     fun `access state validation requires matching active session principal entity and singleton without touching last use`() {
+        jdbcTemplate.update("UPDATE iam.user_account SET password_version = 4 WHERE principal_id = ?", PRINCIPAL_ID)
         val issued = repository.create(PRINCIPAL_ID, 4, Duration.ofDays(7), null)
         val validator = AccessSessionPrincipalValidator(jdbcTemplate)
         val principal = AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, issued.session.id, 4)
@@ -252,6 +257,39 @@ class SessionRepositoryIntegrationTest(
         val issued = repository.create(PRINCIPAL_ID, 0, Duration.ofSeconds(1), null)
         Thread.sleep(1100)
         assertThat(validator.validate(AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, issued.session.id, 0))).isNull()
+    }
+
+    @Test
+    fun `password version increment invalidates access refresh and descendants while new version works`() {
+        val first = repository.create(PRINCIPAL_ID, 0, Duration.ofDays(7), null)
+        val second = (repository.rotate(first.refreshToken, Duration.ofDays(7)) as SessionRotation.Rotated).issued
+        val validator = AccessSessionPrincipalValidator(jdbcTemplate)
+        val secondPrincipal = AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, second.session.id, 0)
+        assertThat(validator.validate(secondPrincipal)).isEqualTo(secondPrincipal)
+
+        jdbcTemplate.update("UPDATE iam.user_account SET password_version = 1 WHERE principal_id = ?", PRINCIPAL_ID)
+
+        assertThat(validator.validate(secondPrincipal)).isNull()
+        assertThat(repository.validate(second.refreshToken)).isEqualTo(SessionValidation.Invalid)
+        assertThat(repository.rotate(second.refreshToken, Duration.ofDays(7))).isEqualTo(SessionRotation.Invalid)
+        assertThat(activeSessionCount()).isZero()
+
+        val current = repository.create(PRINCIPAL_ID, 1, Duration.ofDays(7), null)
+        val currentPrincipal = AccessTokenPrincipal(PRINCIPAL_ID, INSTANCE_ID, current.session.id, 1)
+        assertThat(validator.validate(currentPrincipal)).isEqualTo(currentPrincipal)
+        assertThat(repository.validate(current.refreshToken)).isInstanceOf(SessionValidation.Active::class.java)
+        assertThat(repository.rotate(current.refreshToken, Duration.ofDays(7))).isInstanceOf(SessionRotation.Rotated::class.java)
+    }
+
+    @Test
+    fun `stale refresh token is revoked without creating a replacement`() {
+        val stale = repository.create(PRINCIPAL_ID, 0, Duration.ofDays(7), null)
+        jdbcTemplate.update("UPDATE iam.user_account SET password_version = 1 WHERE principal_id = ?", PRINCIPAL_ID)
+
+        assertThat(repository.rotate(stale.refreshToken, Duration.ofDays(7))).isEqualTo(SessionRotation.Invalid)
+
+        assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM iam.auth_session", Long::class.java)).isEqualTo(1L)
+        assertThat(activeSessionCount()).isZero()
     }
 
     @Test

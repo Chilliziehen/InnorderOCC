@@ -22,6 +22,8 @@ import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken
+import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication
 import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.post
 import org.testcontainers.containers.PostgreSQLContainer
@@ -446,12 +448,29 @@ class AuthControllerIntegrationTest(
     }
 
     @Test
+    fun `unrelated auth relevant relationship to administrator role grants no capabilities`() {
+        val relationshipId = seedUnrelatedAdministratorRole()
+        try {
+            val login = login()
+            assertThat(login["user"]["capabilities"]).isEmpty()
+
+            val result = mockMvc.get("/api/v1/me") {
+                header("Authorization", "Bearer ${login["accessToken"].asText()}")
+            }.andExpect { status { isOk() } }.andReturn()
+            assertThat(objectMapper.readTree(result.response.contentAsString)["capabilities"]).isEmpty()
+        } finally {
+            jdbc.update("UPDATE authz.relationship SET revoked_at = statement_timestamp() WHERE id = ? AND revoked_at IS NULL", relationshipId)
+        }
+    }
+
+    @Test
     fun `me database credential failure uses business code while invalid bearer stays security code`() {
         val login = login()
+        val authenticated = authenticatedPrincipal()
         jdbc.update("DELETE FROM iam.user_account WHERE principal_id = ?", USER_ID)
 
         val businessResult = mockMvc.get("/api/v1/me") {
-            header("Authorization", "Bearer ${login["accessToken"].asText()}")
+            with(authentication(authenticated))
         }.andExpect { status { isUnauthorized() } }.andReturn()
         assertInvalidCredentials(objectMapper.readTree(businessResult.response.contentAsString))
 
@@ -471,6 +490,7 @@ class AuthControllerIntegrationTest(
         ))
 
         val login = login()
+        val authenticated = authenticatedPrincipal()
         problems.add(postJson(
             "/api/v1/auth/refresh",
             """{"refreshToken":"${"a".repeat(43)}"}""",
@@ -486,7 +506,7 @@ class AuthControllerIntegrationTest(
 
         jdbc.update("DELETE FROM iam.user_account WHERE principal_id = ?", USER_ID)
         val me = mockMvc.get("/api/v1/me") {
-            header("Authorization", "Bearer ${login["accessToken"].asText()}")
+            with(authentication(authenticated))
         }.andExpect { status { isUnauthorized() } }.andReturn()
         problems.add(objectMapper.readTree(me.response.contentAsString))
 
@@ -525,8 +545,13 @@ class AuthControllerIntegrationTest(
         jdbc.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, ?, '{}'::jsonb) ON CONFLICT DO NOTHING", TYPE_VERSION_ID, TYPE_ID, VERSION_ID, 1)
         jdbc.update(
             """INSERT INTO catalog.relation_definition(id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
-               VALUES (?, ?, 'assigned-role', ?, ?, 'MANY_TO_MANY', true)""",
+               VALUES (?, ?, 'platform.role-assignment', ?, ?, 'MANY_TO_MANY', true),
+                      (?, ?, 'platform.unrelated-admin-link', ?, ?, 'MANY_TO_MANY', true)""",
             RELATION_DEFINITION_ID,
+            VERSION_ID,
+            TYPE_ID,
+            TYPE_ID,
+            UNRELATED_RELATION_DEFINITION_ID,
             VERSION_ID,
             TYPE_ID,
             TYPE_ID,
@@ -565,6 +590,26 @@ class AuthControllerIntegrationTest(
         return relationshipId
     }
 
+    private fun seedUnrelatedAdministratorRole(): UUID {
+        jdbc.update(
+            """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('a', 64), published_at = statement_timestamp()
+               WHERE id = ? AND status IN ('DRAFT', 'VALIDATED')""",
+            VERSION_ID,
+        )
+        jdbc.update("INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", ADMIN_ROLE_ID, TYPE_ID, TYPE_VERSION_ID, "role:administrator", "ACTIVE")
+        jdbc.update("INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", ADMIN_ROLE_ID, "ROLE", "Administrator", "ACTIVE")
+        val relationshipId = UUID.randomUUID()
+        jdbc.update(
+            """INSERT INTO authz.relationship(id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+               VALUES (?, ?, ?, ?, 'ADMIN', 'auth-test-unrelated')""",
+            relationshipId,
+            UNRELATED_RELATION_DEFINITION_ID,
+            USER_ID,
+            ADMIN_ROLE_ID,
+        )
+        return relationshipId
+    }
+
     private fun login(): JsonNode = postJson(
         "/api/v1/auth/login",
         """{"username":"$USERNAME","password":"$PASSWORD"}""",
@@ -578,6 +623,24 @@ class AuthControllerIntegrationTest(
         "ACTIVE",
         emptyList(),
     )
+
+    private fun authenticatedPrincipal(): UsernamePasswordAuthenticationToken {
+        val sessionId = jdbc.queryForObject(
+            "SELECT id FROM iam.auth_session WHERE principal_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1",
+            UUID::class.java,
+            USER_ID,
+        )!!
+        val tokenVersion = jdbc.queryForObject(
+            "SELECT password_version FROM iam.user_account WHERE principal_id = ?",
+            Int::class.java,
+            USER_ID,
+        )!!
+        return UsernamePasswordAuthenticationToken.authenticated(
+            AccessTokenPrincipal(USER_ID, INSTANCE_ID, sessionId, tokenVersion),
+            null,
+            emptyList(),
+        )
+    }
 
     private fun assertTokenResponse(response: JsonNode) {
         assertThat(response.fieldNames().asSequence().toSet())
@@ -675,6 +738,8 @@ class AuthControllerIntegrationTest(
         private val ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000006")
         private val SECOND_USER_ID = UUID.fromString("61000000-0000-7000-8000-000000000007")
         private val RELATION_DEFINITION_ID = UUID.fromString("61000000-0000-7000-8000-000000000008")
+        private val ADMIN_ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000009")
+        private val UNRELATED_RELATION_DEFINITION_ID = UUID.fromString("61000000-0000-7000-8000-000000000010")
 
         @Container
         @JvmStatic

@@ -1,6 +1,8 @@
 package com.innorder.occ.auth
 
 import com.innorder.occ.iam.CurrentUser
+import com.innorder.occ.iam.AccountCredentialSnapshot
+import com.innorder.occ.iam.LockedAccount
 import com.innorder.occ.iam.PrincipalRepository
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -44,22 +46,29 @@ class AuthService(
             passwords.matches(password, DUMMY_HASH)
             throw invalidCredentials()
         }
+        val snapshot = principals.credentialSnapshot(username)
+        val supportedHash = snapshot?.passwordHash?.takeIf(passwords::isSupportedHash)
+        val passwordMatches = passwords.matches(password, supportedHash ?: DUMMY_HASH) && supportedHash != null
+        if (snapshot == null) throw invalidCredentials()
+        val now = clock.instant()
+        val snapshotLocked = snapshot.lockedUntil?.let { now < it } == true
+        val snapshotActive = snapshot.principalStatus == "ACTIVE" && snapshot.entityState == "ACTIVE"
+        val replacementHash = if (
+            passwordMatches && !snapshotLocked && snapshotActive && passwords.needsRehash(snapshot.passwordHash!!)
+        ) {
+            passwords.encode(password)
+        } else {
+            null
+        }
         val response = transactions.execute {
-            val account = principals.lockAccount(username)
-            if (account == null) {
-                passwords.matches(password, DUMMY_HASH)
-                return@execute null
-            }
-            val now = clock.instant()
-            val supportedHash = account.passwordHash?.takeIf(passwords::isSupportedHash)
-            val passwordMatches = passwords.matches(password, supportedHash ?: DUMMY_HASH) && supportedHash != null
+            val account = principals.lockAccount(snapshot.principalId)
+            if (account == null || !account.matches(snapshot)) return@execute null
             val locked = account.lockedUntil?.let { now < it } == true
             val active = account.principalStatus == "ACTIVE" && account.entityState == "ACTIVE"
             if (!passwordMatches || locked || !active) {
                 if (!locked && active && account.passwordHash != null) principals.recordFailure(account, now)
                 return@execute null
             }
-            val replacementHash = account.passwordHash!!.takeIf(passwords::needsRehash)?.let { passwords.encode(password) }
             principals.recordSuccess(account, replacementHash, now)
             val tokenVersion = account.tokenVersion + if (replacementHash == null) 0 else 1
             val issued = sessions.create(account.principalId, tokenVersion, REFRESH_LIFETIME, null)
@@ -123,6 +132,17 @@ class AuthService(
     }
 
     private fun invalidCredentials() = InvalidCredentialsException()
+
+    private fun LockedAccount.matches(snapshot: AccountCredentialSnapshot): Boolean =
+        principalId == snapshot.principalId &&
+            username == snapshot.username &&
+            principalStatus == snapshot.principalStatus &&
+            entityState == snapshot.entityState &&
+            passwordHash == snapshot.passwordHash &&
+            tokenVersion == snapshot.tokenVersion &&
+            failedAttempts == snapshot.failedAttempts &&
+            failedWindowStartedAt == snapshot.failedWindowStartedAt &&
+            lockedUntil == snapshot.lockedUntil
 
     companion object {
         private const val MAX_USERNAME_LENGTH = 128

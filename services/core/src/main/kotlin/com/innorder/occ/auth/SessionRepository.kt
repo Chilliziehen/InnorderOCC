@@ -37,9 +37,14 @@ class SessionRepository(
         val expected = hash(token)
         val principalId = findPrincipalByTokenHash(expected.hex) ?: return@inTransaction SessionValidation.Invalid
         if (!lockPrincipal(principalId)) return@inTransaction SessionValidation.Invalid
+        val currentTokenVersion = lockCurrentTokenVersion(principalId)
         val row = lockByTokenHash(expected) ?: return@inTransaction SessionValidation.Invalid
         if (row.session.principalId != principalId) return@inTransaction SessionValidation.Invalid
         val now = clock.instant()
+        if (currentTokenVersion == null || row.session.tokenVersion != currentTokenVersion) {
+            revokeSessionAndDescendants(row.session, now)
+            return@inTransaction SessionValidation.Invalid
+        }
         if (row.session.revokedAt != null) {
             row.session.replacedBySessionId?.let { revokeReplacementChain(it, row.session.principalId, now) }
             return@inTransaction SessionValidation.Invalid
@@ -58,9 +63,14 @@ class SessionRepository(
         val expected = hash(token)
         val principalId = findPrincipalByTokenHash(expected.hex) ?: return@inTransaction SessionRotation.Invalid
         if (!lockPrincipal(principalId)) return@inTransaction SessionRotation.Invalid
+        val currentTokenVersion = lockCurrentTokenVersion(principalId)
         val old = lockByTokenHash(expected) ?: return@inTransaction SessionRotation.Invalid
         if (old.session.principalId != principalId) return@inTransaction SessionRotation.Invalid
         val now = clock.instant()
+        if (currentTokenVersion == null || old.session.tokenVersion != currentTokenVersion) {
+            revokeSessionAndDescendants(old.session, now)
+            return@inTransaction SessionRotation.Invalid
+        }
         if (old.session.revokedAt != null) {
             old.session.replacedBySessionId?.let { revokeReplacementChain(it, old.session.principalId, now) }
             return@inTransaction SessionRotation.Invalid
@@ -200,6 +210,23 @@ class SessionRepository(
         { rs, _ -> rs.getObject("id", UUID::class.java) },
         principalId,
     ).singleOrNull() == principalId
+
+    private fun lockCurrentTokenVersion(principalId: UUID): Int? = jdbc.query(
+        "SELECT password_version FROM iam.user_account WHERE principal_id = ? FOR UPDATE",
+        { rs, _ -> rs.getInt("password_version") },
+        principalId,
+    ).singleOrNull()
+
+    private fun revokeSessionAndDescendants(session: AuthSession, now: Instant) {
+        if (session.revokedAt == null) {
+            jdbc.update(
+                "UPDATE iam.auth_session SET revoked_at = ? WHERE id = ?",
+                revocationTime(session, now).toSqlTimestamp(),
+                session.id,
+            )
+        }
+        session.replacedBySessionId?.let { revokeReplacementChain(it, session.principalId, now) }
+    }
 
     private fun lockByTokenHash(expected: TokenHash): StoredSession? {
         val rows = jdbc.query(

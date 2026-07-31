@@ -15,11 +15,13 @@ class AccessSessionPrincipalValidator(private val jdbc: JdbcTemplate) {
             """SELECT s.id
                FROM iam.auth_session s
                JOIN iam.principal p ON p.id = s.principal_id
+               JOIN iam.user_account ua ON ua.principal_id = p.id
                JOIN authz.entity e ON e.id = p.id
                CROSS JOIN platform.customer_instance ci
                WHERE s.id = ?
                  AND s.principal_id = ?
-                 AND s.token_version = ?
+                  AND s.token_version = ?
+                  AND ua.password_version = s.token_version
                  AND s.revoked_at IS NULL
                  AND s.expires_at > statement_timestamp()
                  AND p.status = 'ACTIVE'
