@@ -95,6 +95,7 @@ class AccessTokenSecurityTest {
             mapOf("token_version" to 0.0),
             mapOf("sub" to "not-a-uuid"),
             mapOf("aud" to listOf("other")),
+            mapOf("exp" to now.plusSeconds(899)),
             mapOf("exp" to now.plus(Duration.ofMinutes(16))),
         ).forEach { changes ->
             val token = TestJwt.sign(keyPair.private as RSAPrivateKey, now, changes)
@@ -152,6 +153,7 @@ class AccessTokenSecurityTest {
     @Test
     fun `configuration rejects invalid settings and bad key resources`() {
         assertThatThrownBy { properties.copy(issuer = URI("http://innorder.test")).validate() }.isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy { properties.copy(ttl = Duration.ofMinutes(14)).validate() }.isInstanceOf(IllegalArgumentException::class.java)
         assertThatThrownBy { properties.copy(ttl = Duration.ofMinutes(16)).validate() }.isInstanceOf(IllegalArgumentException::class.java)
         assertThatThrownBy { properties.copy(clockSkew = Duration.ofSeconds(31)).validate() }.isInstanceOf(IllegalArgumentException::class.java)
         assertThatThrownBy {

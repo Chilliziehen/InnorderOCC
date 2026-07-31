@@ -19,6 +19,8 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import org.testcontainers.utility.MountableFile
 import java.util.UUID
+import java.nio.file.Files
+import java.nio.file.Path
 
 @SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
@@ -28,6 +30,23 @@ class PostgreSqlFlowableIntegrationTest(
     @param:Autowired private val repositoryService: RepositoryService,
     @param:Autowired private val runtimeService: RuntimeService,
 ) {
+    @Test
+    fun `real PostgreSQL executes all schema contract SQL`() {
+        val testDirectory = databaseTestDirectory()
+        listOf("000_assert.sql", "001_schema_contract.sql", "002_constraints.sql", "run_all.sql").forEach { name ->
+            postgres.copyFileToContainer(MountableFile.forHostPath(testDirectory.resolve(name)), "/tmp/database-tests/$name")
+        }
+
+        val result = postgres.execInContainer(
+            "sh",
+            "-c",
+            "PGPASSWORD=flyway-test-only psql -h 127.0.0.1 -U innorder_flyway -d innorder_occ -f /tmp/database-tests/run_all.sql",
+        )
+
+        assertThat(result.exitCode).withFailMessage(result.stderr + result.stdout).isZero()
+        assertThat(result.stdout).contains("all single-session schema tests passed")
+    }
+
     @Test
     fun `migrations runtime privileges Flowable and pgvector match production boundaries`() {
         val flywayJdbc = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
@@ -242,5 +261,11 @@ class PostgreSqlFlowableIntegrationTest(
             registry.add("flowable.database-schema") { "flowable" }
             registry.add("occ.status-probes.external-enabled") { "false" }
         }
+
+        private fun databaseTestDirectory(): Path = listOf(
+            Path.of("database", "tests"),
+            Path.of("..", "..", "database", "tests"),
+        ).firstOrNull(Files::isDirectory)
+            ?: error("database/tests directory is unavailable")
     }
 }

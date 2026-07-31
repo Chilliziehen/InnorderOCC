@@ -42,7 +42,7 @@ class AccessTokenService(
     private val properties: JwtProperties,
     private val clock: Clock,
 ) {
-    fun expiresInSeconds(): Long = properties.ttl.seconds
+    fun expiresInSeconds(): Long = JwtProperties.ACCESS_TTL.seconds
 
     fun issue(subject: AccessTokenSubject): String {
         val now = clock.instant()
@@ -56,7 +56,7 @@ class AccessTokenService(
             .id(UUID.randomUUID().toString())
             .issuedAt(now)
             .notBefore(now)
-            .expiresAt(now.plus(properties.ttl))
+            .expiresAt(now.plus(JwtProperties.ACCESS_TTL))
             .build()
         val header = JwsHeader.with(SignatureAlgorithm.RS256).build()
         return encoder.encode(JwtEncoderParameters.from(header, claims)).tokenValue

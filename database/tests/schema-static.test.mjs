@@ -211,7 +211,7 @@ test('adds a constrained and forward-compatible account failure window', () => {
   assert.match(sql, /WHERE locked_until IS NOT NULL/iu);
   assert.match(sql, /failed_window_started_at[\s\S]*locked_until - interval '15 minutes'/iu);
   assert.match(sql, /failed_attempts = 0[\s\S]*failed_window_started_at IS NULL/iu);
-  assert.match(sql, /locked_until >= failed_window_started_at/iu);
+  assert.match(sql, /locked_until > failed_window_started_at/iu);
   assert.match(sql, /GRANT SELECT \(failed_window_started_at\), UPDATE \(failed_window_started_at\)/iu);
 });
 

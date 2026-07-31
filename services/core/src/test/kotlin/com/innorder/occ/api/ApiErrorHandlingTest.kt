@@ -2,6 +2,7 @@ package com.innorder.occ.api
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.innorder.occ.auth.RefreshCompensationException
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
@@ -230,6 +231,7 @@ class ApiErrorHandlingTest {
             Triple("/test/access-denied", 403, "OCC-API-FORBIDDEN"),
             Triple("/test/conflict", 409, "OCC-API-CONFLICT"),
             Triple("/test/failure", 500, "OCC-API-INTERNAL"),
+            Triple("/test/refresh-compensation-failure", 500, "OCC-API-INTERNAL"),
         )
 
         expectations.forEach { (path, status, code) ->
@@ -467,6 +469,9 @@ class ApiErrorHandlingTest {
 
         @GetMapping("/failure")
         fun failure(): Nothing = throw RuntimeException("jdbc:postgresql://admin:password@secret-db/occ Bearer access-token refresh-token")
+
+        @GetMapping("/refresh-compensation-failure")
+        fun refreshCompensationFailure(): Nothing = throw RefreshCompensationException()
 
         @GetMapping("/constraint")
         fun constraint(): Nothing = throw ConstraintViolationException("Bearer constrained-secret", emptySet())

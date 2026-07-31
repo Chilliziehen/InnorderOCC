@@ -7,10 +7,12 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.RETURNS_DEFAULTS
 import org.mockito.Mockito.reset
 import org.mockito.Mockito.`when`
 import org.springframework.security.authentication.BadCredentialsException
 import org.springframework.security.crypto.password.PasswordEncoder
+import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.transaction.TransactionStatus
 import org.springframework.transaction.support.TransactionCallback
 import org.springframework.transaction.support.TransactionTemplate
@@ -65,6 +67,57 @@ class AuthServicePasswordWorkTest {
                 "^\\${'$'}argon2id\\${'$'}v=19\\${'$'}m=65536,t=3,p=1\\${'$'}.*",
             )
         }
+    }
+
+    @Test
+    fun `compensation database failure becomes a message free operational exception`() {
+        var transactionCalls = 0
+        val failingTransactions = mock(TransactionTemplate::class.java) { invocation ->
+            if (invocation.method.name == "execute") {
+                transactionCalls++
+                if (transactionCalls == 1) throw IllegalStateException("refresh secret")
+                throw DataAccessResourceFailureException("jdbc:postgresql://secret")
+            }
+            RETURNS_DEFAULTS.answer(invocation)
+        }
+        val failingService = AuthService(
+            principals,
+            PasswordService(encoder),
+            sessions,
+            accessTokens,
+            failingTransactions,
+            Clock.fixed(Instant.parse("2026-07-31T12:00:00Z"), ZoneOffset.UTC),
+        )
+
+        assertThatThrownBy { failingService.refresh("a".repeat(43)) }
+            .isInstanceOf(RefreshCompensationException::class.java)
+            .hasMessage(null)
+            .hasNoCause()
+        assertThat(transactionCalls).isEqualTo(2)
+    }
+
+    @Test
+    fun `refresh does not catch JVM errors or attempt compensation`() {
+        var transactionCalls = 0
+        val errorTransactions = mock(TransactionTemplate::class.java) { invocation ->
+            if (invocation.method.name == "execute") {
+                transactionCalls++
+                throw AssertionError("fatal")
+            }
+            RETURNS_DEFAULTS.answer(invocation)
+        }
+        val errorService = AuthService(
+            principals,
+            PasswordService(encoder),
+            sessions,
+            accessTokens,
+            errorTransactions,
+            Clock.fixed(Instant.parse("2026-07-31T12:00:00Z"), ZoneOffset.UTC),
+        )
+
+        assertThatThrownBy { errorService.refresh("a".repeat(43)) }
+            .isInstanceOf(AssertionError::class.java)
+        assertThat(transactionCalls).isEqualTo(1)
     }
 
     private fun account(hash: String?): LockedAccount = LockedAccount(

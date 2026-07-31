@@ -106,6 +106,75 @@ INSERT INTO iam.principal (
     ('20000000-0000-7000-8000-000000000001', 'USER', 'User One', 'ACTIVE', '{}'::jsonb, 0, now(), now()),
     ('20000000-0000-7000-8000-000000000004', 'USER', 'User Two', 'ACTIVE', '{}'::jsonb, 0, now(), now());
 
+INSERT INTO iam.user_account (principal_id, username)
+VALUES ('20000000-0000-7000-8000-000000000001', 'user.one');
+
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.user_account
+      SET failed_window_started_at = statement_timestamp()
+      WHERE principal_id = '20000000-0000-7000-8000-000000000001'$$,
+    '23514', 'zero failed attempts require a null failure-window start'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.user_account
+      SET failed_attempts = 1
+      WHERE principal_id = '20000000-0000-7000-8000-000000000001'$$,
+    '23514', 'positive failed attempts require a failure-window start'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.user_account
+      SET locked_until = statement_timestamp() + interval '15 minutes'
+      WHERE principal_id = '20000000-0000-7000-8000-000000000001'$$,
+    '23514', 'a lock requires a positive count and valid failure window'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.user_account
+      SET failed_attempts = 5,
+          failed_window_started_at = statement_timestamp(),
+          locked_until = statement_timestamp()
+      WHERE principal_id = '20000000-0000-7000-8000-000000000001'$$,
+    '23514', 'lock time must be later than the failure-window start'
+);
+SELECT pg_temp.assert_raises(
+    $$UPDATE iam.user_account
+      SET failed_attempts = 5,
+          failed_window_started_at = statement_timestamp(),
+          locked_until = statement_timestamp() - interval '1 microsecond'
+      WHERE principal_id = '20000000-0000-7000-8000-000000000001'$$,
+    '23514', 'lock time cannot predate the failure-window start'
+);
+
+UPDATE iam.user_account
+SET failed_attempts = 1,
+    failed_window_started_at = statement_timestamp(),
+    locked_until = NULL
+WHERE principal_id = '20000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+    (SELECT failed_attempts = 1 AND failed_window_started_at IS NOT NULL AND locked_until IS NULL
+       FROM iam.user_account WHERE principal_id = '20000000-0000-7000-8000-000000000001'),
+    'positive failures without a lock are valid'
+);
+
+UPDATE iam.user_account
+SET failed_attempts = 5,
+    failed_window_started_at = statement_timestamp(),
+    locked_until = statement_timestamp() + interval '1 microsecond'
+WHERE principal_id = '20000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+    (SELECT locked_until > failed_window_started_at
+       FROM iam.user_account WHERE principal_id = '20000000-0000-7000-8000-000000000001'),
+    'the first timestamp after the failure-window start is a valid lock boundary'
+);
+
+UPDATE iam.user_account
+SET failed_attempts = 0, failed_window_started_at = NULL, locked_until = NULL
+WHERE principal_id = '20000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+    (SELECT failed_attempts = 0 AND failed_window_started_at IS NULL AND locked_until IS NULL
+       FROM iam.user_account WHERE principal_id = '20000000-0000-7000-8000-000000000001'),
+    'zero failures with no window or lock are valid'
+);
+
 SELECT pg_temp.assert_raises(
     $$DELETE FROM platform.customer_instance$$,
     '55000', 'customer instance cannot be deleted'

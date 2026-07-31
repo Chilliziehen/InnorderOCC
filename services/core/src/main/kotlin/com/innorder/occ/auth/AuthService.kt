@@ -25,6 +25,10 @@ class TokenResponse(
     override fun toString(): String = "TokenResponse(tokenType=$tokenType, accessToken=[REDACTED], refreshToken=[REDACTED], expiresIn=$expiresIn, user=$user)"
 }
 
+class InvalidCredentialsException : BadCredentialsException("Invalid credentials")
+
+class RefreshCompensationException : RuntimeException()
+
 @Service
 class AuthService(
     private val principals: PrincipalRepository,
@@ -65,21 +69,30 @@ class AuthService(
     }
 
     fun refresh(rawRefreshToken: String): TokenResponse {
-        val response = transactions.execute {
-            when (val rotation = sessions.rotate(rawRefreshToken, REFRESH_LIFETIME)) {
-                SessionRotation.Invalid -> null
-                is SessionRotation.Rotated -> {
-                    val user = principals.lockCurrentUser(rotation.issued.session.principalId)
-                    if (user == null) {
-                        sessions.revoke(rotation.issued.session.id)
-                        null
-                    } else {
-                        tokenResponse(rotation.issued, user)
+        try {
+            val response = transactions.execute {
+                when (val rotation = sessions.rotate(rawRefreshToken, REFRESH_LIFETIME)) {
+                    SessionRotation.Invalid -> null
+                    is SessionRotation.Rotated -> {
+                        val user = principals.lockCurrentUser(rotation.issued.session.principalId)
+                        if (user == null) {
+                            sessions.revoke(rotation.issued.session.id)
+                            null
+                        } else {
+                            tokenResponse(rotation.issued, user)
+                        }
                     }
                 }
             }
+            return response ?: throw invalidCredentials()
+        } catch (failure: Exception) {
+            try {
+                transactions.execute { sessions.revoke(rawRefreshToken) }
+            } catch (_: Exception) {
+                throw RefreshCompensationException()
+            }
+            throw failure
         }
-        return response ?: throw invalidCredentials()
     }
 
     fun logout(principal: AccessTokenPrincipal, rawRefreshToken: String) {
@@ -109,7 +122,7 @@ class AuthService(
         )
     }
 
-    private fun invalidCredentials() = BadCredentialsException("Authentication failed")
+    private fun invalidCredentials() = InvalidCredentialsException()
 
     companion object {
         private const val MAX_USERNAME_LENGTH = 128

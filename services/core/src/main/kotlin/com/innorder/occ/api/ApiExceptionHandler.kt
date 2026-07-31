@@ -1,5 +1,6 @@
 package com.innorder.occ.api
 
+import com.innorder.occ.auth.InvalidCredentialsException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -62,6 +63,12 @@ class ApiExceptionHandler(
         exception: AuthenticationException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.authentication(request)
+
+    @ExceptionHandler(InvalidCredentialsException::class)
+    fun invalidCredentials(
+        exception: InvalidCredentialsException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.invalidCredentials(request)
 
     @ExceptionHandler(AccessDeniedException::class)
     fun accessDenied(

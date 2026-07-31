@@ -17,7 +17,7 @@ ALTER TABLE iam.user_account
     ADD CONSTRAINT ck_user_account_failed_window_lock
         CHECK (locked_until IS NULL OR (
             failed_window_started_at IS NOT NULL
-            AND locked_until >= failed_window_started_at
+            AND locked_until > failed_window_started_at
         ));
 
 GRANT SELECT (failed_window_started_at), UPDATE (failed_window_started_at)

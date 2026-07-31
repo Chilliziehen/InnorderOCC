@@ -46,6 +46,9 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun authentication(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 401, "authentication-required", "Authentication required", "OCC-API-AUTHENTICATION")
 
+    fun invalidCredentials(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 401, "invalid-credentials", "Invalid credentials", "OCC-AUTH-INVALID-CREDENTIALS")
+
     fun forbidden(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 403, "access-denied", "Access denied", "OCC-API-FORBIDDEN")
 

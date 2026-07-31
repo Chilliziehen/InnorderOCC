@@ -45,13 +45,13 @@ data class JwtProperties(
         require(issuer.scheme == "https" && issuer.host != null && issuer.userInfo == null && issuer.fragment == null) {
             "JWT issuer must be an explicit HTTPS URI"
         }
-        require(!ttl.isZero && !ttl.isNegative && ttl <= MAX_TTL) { "JWT TTL must be positive and at most 15 minutes" }
+        require(ttl == ACCESS_TTL) { "JWT TTL must be exactly 15 minutes" }
         require(!clockSkew.isNegative && clockSkew <= MAX_SKEW) { "JWT clock skew must be at most 30 seconds" }
     }
 
     companion object {
         const val AUDIENCE = "occ-core"
-        val MAX_TTL: Duration = Duration.ofMinutes(15)
+        val ACCESS_TTL: Duration = Duration.ofMinutes(15)
         val MAX_SKEW: Duration = Duration.ofSeconds(30)
     }
 }
@@ -150,7 +150,7 @@ class JwtConfiguration {
             val notBefore = requireNotNull(jwt.notBefore)
             val expiresAt = requireNotNull(jwt.expiresAt)
             require(!notBefore.isAfter(issuedAt))
-            require(expiresAt.isAfter(issuedAt) && Duration.between(issuedAt, expiresAt) <= properties.ttl)
+            require(expiresAt == issuedAt.plus(JwtProperties.ACCESS_TTL))
             require(!issuedAt.isAfter(clock.instant().plus(properties.clockSkew)))
         }
         return if (validation.isSuccess) OAuth2TokenValidatorResult.success() else OAuth2TokenValidatorResult.failure(

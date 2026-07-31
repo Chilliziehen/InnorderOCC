@@ -2,7 +2,10 @@ package com.innorder.occ.auth
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.innorder.occ.iam.CurrentUser
+import com.innorder.occ.iam.PrincipalRepository
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -14,6 +17,7 @@ import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.springframework.http.MediaType
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.transaction.support.TransactionTemplate
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
@@ -31,10 +35,15 @@ import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import org.mockito.Mockito.mock
+import org.mockito.Mockito.RETURNS_DEFAULTS
+import org.mockito.Mockito.`when`
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -46,6 +55,7 @@ class AuthControllerIntegrationTest(
     @param:Autowired private val objectMapper: ObjectMapper,
     @param:Autowired private val jdbc: JdbcTemplate,
     @param:Autowired private val clock: MutableClock,
+    @param:Autowired private val transactions: TransactionTemplate,
 ) {
     private val passwords = PasswordService()
 
@@ -59,7 +69,14 @@ class AuthControllerIntegrationTest(
         seedCatalog()
         clock.current = BASE_TIME
         if (jdbc.queryForObject("SELECT count(*) FROM iam.user_account WHERE principal_id = ?", Long::class.java, USER_ID) == 0L) {
-            seedUser(passwords.encode(PASSWORD))
+            val hash = passwords.encode(PASSWORD)
+            if (jdbc.queryForObject("SELECT count(*) FROM iam.principal WHERE id = ?", Long::class.java, USER_ID) == 0L) {
+                seedUser(hash)
+            } else {
+                jdbc.update("UPDATE authz.entity SET state = 'ACTIVE' WHERE id = ?", USER_ID)
+                jdbc.update("UPDATE iam.principal SET display_name = 'Alice Operator', status = 'ACTIVE' WHERE id = ?", USER_ID)
+                jdbc.update("INSERT INTO iam.user_account(principal_id, username, password_hash) VALUES (?, ?, ?)", USER_ID, USERNAME, hash)
+            }
         } else {
             jdbc.update("UPDATE authz.entity SET state = 'ACTIVE' WHERE id = ?", USER_ID)
             jdbc.update("UPDATE iam.principal SET display_name = 'Alice Operator', status = 'ACTIVE' WHERE id = ?", USER_ID)
@@ -111,9 +128,7 @@ class AuthControllerIntegrationTest(
         failures.forEach { problem ->
             assertThat(problem.fieldNames().asSequence().toSet())
                 .containsExactlyInAnyOrder("type", "title", "status", "code", "correlationId")
-            assertThat(problem["title"].asText()).isEqualTo("Authentication required")
-            assertThat(problem["status"].asInt()).isEqualTo(401)
-            assertThat(problem["code"].asText()).isEqualTo("OCC-API-AUTHENTICATION")
+            assertInvalidCredentials(problem)
             assertThat(problem.toString()).doesNotContain(USERNAME).doesNotContain("LOCKED").doesNotContain("DISABLED")
         }
     }
@@ -148,6 +163,35 @@ class AuthControllerIntegrationTest(
 
         assertThat(accountLong("failed_attempts")).isEqualTo(1)
         assertThat(accountInstant("failed_window_started_at")).isEqualTo(BASE_TIME)
+        assertThat(accountInstant("locked_until")).isNull()
+    }
+
+    @Test
+    fun `failure window includes the tick before fifteen minutes and expires at the exact boundary`() {
+        jdbc.update(
+            "UPDATE iam.user_account SET failed_attempts = 4, failed_window_started_at = ?, locked_until = NULL WHERE principal_id = ?",
+            sql(BASE_TIME),
+            USER_ID,
+        )
+        clock.current = BASE_TIME.plus(Duration.ofMinutes(15)).minusNanos(1_000)
+
+        postJson("/api/v1/auth/login", """{"username":"$USERNAME","password":"wrong password value"}""", 401)
+
+        assertThat(accountLong("failed_attempts")).isEqualTo(5)
+        assertThat(accountInstant("failed_window_started_at")).isEqualTo(BASE_TIME)
+        assertThat(accountInstant("locked_until")).isEqualTo(clock.instant().plus(Duration.ofMinutes(15)))
+
+        jdbc.update(
+            "UPDATE iam.user_account SET failed_attempts = 4, failed_window_started_at = ?, locked_until = NULL WHERE principal_id = ?",
+            sql(BASE_TIME),
+            USER_ID,
+        )
+        clock.current = BASE_TIME.plus(Duration.ofMinutes(15))
+
+        postJson("/api/v1/auth/login", """{"username":"$USERNAME","password":"wrong password value"}""", 401)
+
+        assertThat(accountLong("failed_attempts")).isEqualTo(1)
+        assertThat(accountInstant("failed_window_started_at")).isEqualTo(clock.instant())
         assertThat(accountInstant("locked_until")).isNull()
     }
 
@@ -189,7 +233,7 @@ class AuthControllerIntegrationTest(
     fun `null and malformed password hashes fail generically without creating sessions`() {
         listOf(null, "not-an-argon-hash").forEach { hash ->
             jdbc.update("UPDATE iam.user_account SET password_hash = ? WHERE principal_id = ?", hash, USER_ID)
-            assertAuthenticationFailure(postJson(
+            assertInvalidCredentials(postJson(
                 "/api/v1/auth/login",
                 """{"username":"$USERNAME","password":"$PASSWORD"}""",
                 401,
@@ -222,8 +266,8 @@ class AuthControllerIntegrationTest(
         assertThat(rotated["refreshToken"].asText()).isNotEqualTo(firstRefresh)
         assertThat(rotated["accessToken"].asText()).isNotEqualTo(login["accessToken"].asText())
 
-        assertAuthenticationFailure(postJson("/api/v1/auth/refresh", """{"refreshToken":"$firstRefresh"}""", 401))
-        assertAuthenticationFailure(postJson("/api/v1/auth/refresh", """{"refreshToken":"${rotated["refreshToken"].asText()}"}""", 401))
+        assertInvalidCredentials(postJson("/api/v1/auth/refresh", """{"refreshToken":"$firstRefresh"}""", 401))
+        assertInvalidCredentials(postJson("/api/v1/auth/refresh", """{"refreshToken":"${rotated["refreshToken"].asText()}"}""", 401))
     }
 
     @Test
@@ -242,7 +286,7 @@ class AuthControllerIntegrationTest(
             val results = requests.map { it.get(20, TimeUnit.SECONDS) }
             assertThat(results.map { it.first }.sorted()).containsExactly(200, 401)
             val winner = results.single { it.first == 200 }.second
-            assertAuthenticationFailure(postJson(
+            assertInvalidCredentials(postJson(
                 "/api/v1/auth/refresh",
                 """{"refreshToken":"${winner["refreshToken"].asText()}"}""",
                 401,
@@ -259,9 +303,9 @@ class AuthControllerIntegrationTest(
         val refreshToken = login()["refreshToken"].asText()
         jdbc.update("UPDATE iam.principal SET status = 'DISABLED' WHERE id = ?", USER_ID)
 
-        assertAuthenticationFailure(postJson("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""", 401))
+        assertInvalidCredentials(postJson("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""", 401))
         jdbc.update("UPDATE iam.principal SET status = 'ACTIVE' WHERE id = ?", USER_ID)
-        assertAuthenticationFailure(postJson("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""", 401))
+        assertInvalidCredentials(postJson("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""", 401))
         assertThat(jdbc.queryForObject(
             "SELECT count(*) FROM iam.auth_session WHERE principal_id = ? AND revoked_at IS NULL",
             Long::class.java,
@@ -274,12 +318,73 @@ class AuthControllerIntegrationTest(
         val refreshToken = login()["refreshToken"].asText()
         clock.advance(Duration.ofDays(7))
 
-        assertAuthenticationFailure(postJson("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""", 401))
+        assertInvalidCredentials(postJson("/api/v1/auth/refresh", """{"refreshToken":"$refreshToken"}""", 401))
         assertThat(jdbc.queryForObject(
             "SELECT count(*) FROM iam.auth_session WHERE principal_id = ?",
             Long::class.java,
             USER_ID,
         )).isEqualTo(1L)
+    }
+
+    @Test
+    fun `post rotation exceptions commit independent fail closed revocation`() {
+        val scenarios = listOf<(PrincipalRepository) -> AccessTokenService>(
+            { principals ->
+                `when`(principals.lockCurrentUser(USER_ID)).thenThrow(IllegalStateException("current user lookup failed"))
+                mock(AccessTokenService::class.java)
+            },
+            { principals ->
+                `when`(principals.lockCurrentUser(USER_ID)).thenReturn(currentUser())
+                `when`(principals.customerInstanceId()).thenThrow(IllegalStateException("customer lookup failed"))
+                mock(AccessTokenService::class.java)
+            },
+            { principals ->
+                `when`(principals.lockCurrentUser(USER_ID)).thenReturn(currentUser())
+                `when`(principals.customerInstanceId()).thenReturn(INSTANCE_ID)
+                mock(AccessTokenService::class.java) { invocation ->
+                    if (invocation.method.name == "issue") throw IllegalStateException("JWT issuance failed")
+                    RETURNS_DEFAULTS.answer(invocation)
+                }
+            },
+            { principals ->
+                `when`(principals.lockCurrentUser(USER_ID)).thenReturn(currentUser())
+                `when`(principals.customerInstanceId()).thenReturn(INSTANCE_ID)
+                mock(AccessTokenService::class.java) { invocation ->
+                    when (invocation.method.name) {
+                        "issue" -> "access-token"
+                        "expiresInSeconds" -> throw IllegalStateException("response construction failed")
+                        else -> RETURNS_DEFAULTS.answer(invocation)
+                    }
+                }
+            },
+        )
+
+        scenarios.forEach { configureFailure ->
+            jdbc.update("DELETE FROM iam.auth_session WHERE principal_id = ?", USER_ID)
+            val deterministicSessions = SessionRepository(jdbc, transactions, clock, SequenceSecureRandom())
+            val original = deterministicSessions.create(USER_ID, 0, Duration.ofDays(7), null)
+            val replacementToken = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(ByteArray(32) { index -> (index + 32).toByte() })
+            val principals = mock(PrincipalRepository::class.java)
+            val tokens = configureFailure(principals)
+            val service = AuthService(principals, passwords, deterministicSessions, tokens, transactions, clock)
+
+            assertThatThrownBy { service.refresh(original.refreshToken.exposeValue()) }
+                .isInstanceOf(IllegalStateException::class.java)
+
+            assertThat(deterministicSessions.validate(original.refreshToken)).isEqualTo(SessionValidation.Invalid)
+            assertThat(deterministicSessions.validate(replacementToken)).isEqualTo(SessionValidation.Invalid)
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM iam.auth_session WHERE principal_id = ? AND revoked_at IS NULL",
+                Long::class.java,
+                USER_ID,
+            )).isZero()
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM iam.auth_session WHERE principal_id = ?",
+                Long::class.java,
+                USER_ID,
+            )).isEqualTo(1L)
+        }
     }
 
     @Test
@@ -294,7 +399,7 @@ class AuthControllerIntegrationTest(
             """{"refreshToken":"${bob["refreshToken"].asText()}"}""",
         )
         assertThat(mismatch.first).isEqualTo(401)
-        assertAuthenticationFailure(mismatch.second)
+        assertInvalidCredentials(mismatch.second)
         assertThat(postJson("/api/v1/auth/refresh", """{"refreshToken":"${bob["refreshToken"].asText()}"}""", 200)["user"]["username"].asText())
             .isEqualTo("bob@example.com")
 
@@ -312,7 +417,7 @@ class AuthControllerIntegrationTest(
             """{"refreshToken":"${alice["refreshToken"].asText()}"}""",
         )
         assertThat(repeated.first).isEqualTo(401)
-        assertAuthenticationFailure(repeated.second)
+        assertBearerAuthenticationFailure(repeated.second)
     }
 
     @Test
@@ -338,6 +443,60 @@ class AuthControllerIntegrationTest(
         } finally {
             jdbc.update("UPDATE authz.relationship SET revoked_at = statement_timestamp() WHERE id = ? AND revoked_at IS NULL", relationshipId)
         }
+    }
+
+    @Test
+    fun `me database credential failure uses business code while invalid bearer stays security code`() {
+        val login = login()
+        jdbc.update("DELETE FROM iam.user_account WHERE principal_id = ?", USER_ID)
+
+        val businessResult = mockMvc.get("/api/v1/me") {
+            header("Authorization", "Bearer ${login["accessToken"].asText()}")
+        }.andExpect { status { isUnauthorized() } }.andReturn()
+        assertInvalidCredentials(objectMapper.readTree(businessResult.response.contentAsString))
+
+        val bearerResult = mockMvc.get("/api/v1/me") {
+            header("Authorization", "Bearer not-a-valid-jwt")
+        }.andExpect { status { isUnauthorized() } }.andReturn()
+        assertBearerAuthenticationFailure(objectMapper.readTree(bearerResult.response.contentAsString))
+    }
+
+    @Test
+    fun `all endpoint business credential failures have one identical problem shape`() {
+        val problems = mutableListOf<JsonNode>()
+        problems.add(postJson(
+            "/api/v1/auth/login",
+            """{"username":"missing@example.com","password":"$PASSWORD"}""",
+            401,
+        ))
+
+        val login = login()
+        problems.add(postJson(
+            "/api/v1/auth/refresh",
+            """{"refreshToken":"${"a".repeat(43)}"}""",
+            401,
+        ))
+        val logout = authenticatedPost(
+            "/api/v1/auth/logout",
+            login["accessToken"].asText(),
+            """{"refreshToken":"${"b".repeat(43)}"}""",
+        )
+        assertThat(logout.first).isEqualTo(401)
+        problems.add(logout.second)
+
+        jdbc.update("DELETE FROM iam.user_account WHERE principal_id = ?", USER_ID)
+        val me = mockMvc.get("/api/v1/me") {
+            header("Authorization", "Bearer ${login["accessToken"].asText()}")
+        }.andExpect { status { isUnauthorized() } }.andReturn()
+        problems.add(objectMapper.readTree(me.response.contentAsString))
+
+        problems.forEach(::assertInvalidCredentials)
+        val normalized = problems.map { problem ->
+            problem.fields().asSequence()
+                .filter { it.key != "correlationId" }
+                .associate { it.key to it.value }
+        }
+        assertThat(normalized.distinct()).hasSize(1)
     }
 
     @Test
@@ -412,6 +571,14 @@ class AuthControllerIntegrationTest(
         200,
     )
 
+    private fun currentUser(): CurrentUser = CurrentUser(
+        USER_ID,
+        USERNAME,
+        "Alice Operator",
+        "ACTIVE",
+        emptyList(),
+    )
+
     private fun assertTokenResponse(response: JsonNode) {
         assertThat(response.fieldNames().asSequence().toSet())
             .containsExactlyInAnyOrder("tokenType", "accessToken", "refreshToken", "expiresIn", "user")
@@ -419,10 +586,19 @@ class AuthControllerIntegrationTest(
             .containsExactlyInAnyOrder("id", "username", "displayName", "status", "capabilities")
     }
 
-    private fun assertAuthenticationFailure(problem: JsonNode) {
+    private fun assertInvalidCredentials(problem: JsonNode) {
+        assertThat(problem.fieldNames().asSequence().toSet())
+            .containsExactlyInAnyOrder("type", "title", "status", "code", "correlationId")
+        assertThat(problem["type"].asText()).isEqualTo("https://innorder.local/problems/invalid-credentials")
+        assertThat(problem["title"].asText()).isEqualTo("Invalid credentials")
+        assertThat(problem["status"].asInt()).isEqualTo(401)
+        assertThat(problem["code"].asText()).isEqualTo("OCC-AUTH-INVALID-CREDENTIALS")
+        assertThat(problem.toString()).doesNotContain(USERNAME).doesNotContain("refreshToken")
+    }
+
+    private fun assertBearerAuthenticationFailure(problem: JsonNode) {
         assertThat(problem["status"].asInt()).isEqualTo(401)
         assertThat(problem["code"].asText()).isEqualTo("OCC-API-AUTHENTICATION")
-        assertThat(problem.toString()).doesNotContain(USERNAME).doesNotContain("refreshToken")
     }
 
     private fun postJson(path: String, body: String, expectedStatus: Int): JsonNode {
@@ -479,6 +655,12 @@ class AuthControllerIntegrationTest(
         fun advance(duration: Duration) { current = current.plus(duration) }
     }
 
+    private class SequenceSecureRandom(private var next: Int = 0) : SecureRandom() {
+        override fun nextBytes(bytes: ByteArray) {
+            bytes.indices.forEach { bytes[it] = next++.toByte() }
+        }
+    }
+
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val USERNAME = "alice@example.com"
@@ -489,6 +671,7 @@ class AuthControllerIntegrationTest(
         private val TYPE_ID = UUID.fromString("61000000-0000-7000-8000-000000000003")
         private val TYPE_VERSION_ID = UUID.fromString("61000000-0000-7000-8000-000000000004")
         private val USER_ID = UUID.fromString("61000000-0000-7000-8000-000000000005")
+        private val INSTANCE_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
         private val ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000006")
         private val SECOND_USER_ID = UUID.fromString("61000000-0000-7000-8000-000000000007")
         private val RELATION_DEFINITION_ID = UUID.fromString("61000000-0000-7000-8000-000000000008")

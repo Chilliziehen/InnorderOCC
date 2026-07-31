@@ -101,6 +101,27 @@ class SessionRepository(
         true
     }
 
+    fun revoke(rawToken: String): Boolean =
+        RefreshToken.parse(rawToken)?.let(::revoke) ?: false
+
+    private fun revoke(token: RefreshToken): Boolean = inTransaction {
+        val expected = hash(token)
+        val principalId = findPrincipalByTokenHash(expected.hex) ?: return@inTransaction false
+        if (!lockPrincipal(principalId)) return@inTransaction false
+        val stored = lockByTokenHash(expected) ?: return@inTransaction false
+        if (stored.session.principalId != principalId) return@inTransaction false
+        val now = clock.instant()
+        if (stored.session.revokedAt == null) {
+            jdbc.update(
+                "UPDATE iam.auth_session SET revoked_at = ? WHERE id = ?",
+                revocationTime(stored.session, now).toSqlTimestamp(),
+                stored.session.id,
+            )
+        }
+        stored.session.replacedBySessionId?.let { revokeReplacementChain(it, principalId, now) }
+        true
+    }
+
     fun revokeOwned(rawToken: String, sessionId: UUID, principalId: UUID): Boolean =
         RefreshToken.parse(rawToken)?.let { token -> revokeOwned(token, sessionId, principalId) } ?: false
 
