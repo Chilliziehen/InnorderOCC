@@ -1,6 +1,7 @@
 package com.innorder.occ.events
 
 import org.assertj.core.api.Assertions.assertThat
+import org.awaitility.Awaitility.await
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeAll
@@ -19,9 +20,11 @@ import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 @Testcontainers(disabledWithoutDocker = true)
 class OutboxPublisherIntegrationTest {
@@ -79,6 +82,36 @@ class OutboxPublisherIntegrationTest {
     }
 
     @Test
+    fun `two complete publishers concurrently process disjoint batches exactly once`() {
+        repeat(20) { insert(nextAttemptAt = Instant.now().minusSeconds(1)) }
+        val properties = OutboxProperties(batchSize = 10)
+        val otherJdbc = JdbcTemplate(runtimeDataSource())
+        val otherRepository = OutboxPublishingRepository(
+            otherJdbc, DataSourceTransactionManager(otherJdbc.dataSource!!), properties,
+        )
+        val deliveries = ConcurrentHashMap<UUID, AtomicInteger>()
+        val sender = OutboxEventSender { event -> deliveries.computeIfAbsent(event.id) { AtomicInteger() }.incrementAndGet() }
+        val publishers = listOf(
+            OutboxPublisher(repositoryFor(properties), sender, properties),
+            OutboxPublisher(otherRepository, sender, properties),
+        )
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val results = publishers.map { publisher -> pool.submit<PublishBatchResult> { start.await(); publisher.publishBatch() } }
+            start.countDown()
+            val completed = results.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertThat(completed.map { it.published }).containsExactlyInAnyOrder(10, 10)
+            assertThat(deliveries).hasSize(20)
+            assertThat(deliveries.values).allMatch { it.get() == 1 }
+            assertThat(admin.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_type = 'publisher-test' AND status = 'PUBLISHED'", Long::class.java)).isEqualTo(20)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
     fun `publishes outside claim transaction and marks success only after acknowledgement`() {
         val id = insert(nextAttemptAt = Instant.now().minusSeconds(1))
         val entered = CountDownLatch(1)
@@ -101,6 +134,97 @@ class OutboxPublisherIntegrationTest {
             assertThat(status(id)).isEqualTo("PUBLISHED")
             assertThat(publishedAt(id)).isNotNull()
             assertThat(claimedAt(id)).isNull()
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `acknowledged crash is recovered with duplicate stable event id then published`() {
+        val id = insert(nextAttemptAt = Instant.now().minusSeconds(600), createdAt = Instant.now().minusSeconds(700))
+        val deliveries = mutableListOf<UUID>()
+        val crashPublisher = OutboxPublisher(repository, OutboxEventSender { event ->
+            deliveries.add(event.id)
+            throw SimulatedProcessCrash()
+        }, OutboxProperties())
+
+        org.assertj.core.api.Assertions.assertThatThrownBy { crashPublisher.publishBatch() }
+            .isInstanceOf(SimulatedProcessCrash::class.java)
+        assertThat(status(id)).isEqualTo("PUBLISHING")
+        admin.update("UPDATE audit.outbox_event SET claimed_at = statement_timestamp() - interval '6 minutes' WHERE id = ?", id)
+
+        OutboxPublisher(repository, OutboxEventSender { event -> deliveries.add(event.id) }, OutboxProperties()).publishBatch()
+
+        assertThat(deliveries).containsExactly(id, id)
+        assertThat(status(id)).isEqualTo("PUBLISHED")
+    }
+
+    @Test
+    fun `overlapping scheduled polls permit one claim and send`() {
+        val id = insert(nextAttemptAt = Instant.now().minusSeconds(1))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val sends = AtomicInteger()
+        val publisher = OutboxPublisher(repository, OutboxEventSender {
+            sends.incrementAndGet()
+            entered.countDown()
+            release.await(5, TimeUnit.SECONDS)
+        }, OutboxProperties())
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val first = pool.submit { publisher.poll() }
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+            publisher.poll()
+            assertThat(sends).hasValue(1)
+            release.countDown()
+            first.get(10, TimeUnit.SECONDS)
+            assertThat(status(id)).isEqualTo("PUBLISHED")
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `shutdown waits bounded and releases claimed unvisited events while active send remains publishing`() {
+        repeat(3) { insert(nextAttemptAt = Instant.now().minusSeconds(1)) }
+        val properties = OutboxProperties(batchSize = 3, ackTimeout = Duration.ofSeconds(1))
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val activeId = AtomicReference<UUID>()
+        val publisher = OutboxPublisher(repositoryFor(properties), OutboxEventSender { event ->
+            activeId.set(event.id)
+            entered.countDown()
+            release.await(10, TimeUnit.SECONDS)
+        }, properties)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val publishing = pool.submit<PublishBatchResult> { publisher.publishBatch() }
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+            val shutdown = pool.submit { publisher.shutdown() }
+
+            await().atMost(500, TimeUnit.MILLISECONDS).untilAsserted {
+                assertThat(admin.queryForObject(
+                    "SELECT count(*) FROM audit.outbox_event WHERE aggregate_type = 'publisher-test' AND status = 'PENDING' AND last_error = 'SHUTDOWN'",
+                    Long::class.java,
+                )).isEqualTo(2)
+            }
+            assertThat(shutdown.isDone).isFalse()
+
+            shutdown.get(3, TimeUnit.SECONDS)
+
+            val rows = admin.queryForList(
+                "SELECT id, status, attempts, last_error FROM audit.outbox_event WHERE aggregate_type = 'publisher-test' ORDER BY id",
+            )
+            assertThat(rows.single { it["id"] == activeId.get() })
+                .containsEntry("status", "PUBLISHING")
+                .containsEntry("attempts", 1)
+            assertThat(rows.filter { it["id"] != activeId.get() }).allSatisfy {
+                assertThat(it).containsEntry("status", "PENDING").containsEntry("attempts", 1).containsEntry("last_error", "SHUTDOWN")
+            }
+            release.countDown()
+            publishing.get(10, TimeUnit.SECONDS)
         } finally {
             release.countDown()
             pool.shutdownNow()
@@ -150,6 +274,39 @@ class OutboxPublisherIntegrationTest {
     }
 
     @Test
+    fun `stale attempt nine is claimed as attempt ten sent once and failed dead`() {
+        val id = stalePublishing(attempts = 9)
+        val sends = AtomicInteger()
+        val publisher = OutboxPublisher(repository, OutboxEventSender {
+            sends.incrementAndGet()
+            throw RuntimeException("delivery failed")
+        }, OutboxProperties())
+
+        publisher.publishBatch()
+
+        assertThat(sends).hasValue(1)
+        assertThat(admin.queryForMap("SELECT status, attempts, last_error FROM audit.outbox_event WHERE id = ?", id))
+            .containsEntry("status", "DEAD")
+            .containsEntry("attempts", 10)
+            .containsEntry("last_error", "DELIVERY_FAILED")
+    }
+
+    @Test
+    fun `stale attempt ten is dead without attempt eleven or send`() {
+        val id = stalePublishing(attempts = 10)
+        val sends = AtomicInteger()
+
+        OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch()
+
+        assertThat(sends).hasValue(0)
+        assertThat(admin.queryForMap("SELECT status, attempts, last_error, claimed_at FROM audit.outbox_event WHERE id = ?", id))
+            .containsEntry("status", "DEAD")
+            .containsEntry("attempts", 10)
+            .containsEntry("last_error", "STALE_ATTEMPT_LIMIT")
+            .containsEntry("claimed_at", null)
+    }
+
+    @Test
     fun `corrupt secret-bearing event fails without send and follows retry path`() {
         val id = insert(payload = """{"password":"must-not-send"}""", nextAttemptAt = Instant.now().minusSeconds(1))
         val sends = AtomicInteger()
@@ -195,6 +352,20 @@ class OutboxPublisherIntegrationTest {
         return id
     }
 
+    private fun stalePublishing(attempts: Int): UUID {
+        val id = insert(nextAttemptAt = Instant.now().minusSeconds(700), createdAt = Instant.now().minusSeconds(800))
+        admin.update(
+            """UPDATE audit.outbox_event
+               SET status = 'PUBLISHING', attempts = ?, claimed_at = statement_timestamp() - interval '6 minutes'
+               WHERE id = ?""",
+            attempts, id,
+        )
+        return id
+    }
+
+    private fun repositoryFor(properties: OutboxProperties) =
+        OutboxPublishingRepository(jdbc, DataSourceTransactionManager(jdbc.dataSource!!), properties)
+
     private fun status(id: UUID) = admin.queryForObject("SELECT status FROM audit.outbox_event WHERE id = ?", String::class.java, id)
     private fun publishedAt(id: UUID) = admin.queryForMap("SELECT published_at FROM audit.outbox_event WHERE id = ?", id)["published_at"]
     private fun claimedAt(id: UUID) = admin.queryForMap("SELECT claimed_at FROM audit.outbox_event WHERE id = ?", id)["claimed_at"]
@@ -229,4 +400,6 @@ class OutboxPublisherIntegrationTest {
             password = postgres.password
         }
     }
+
+    private class SimulatedProcessCrash : Error("simulated process crash after broker acknowledgement")
 }

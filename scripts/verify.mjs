@@ -44,6 +44,7 @@ async function main() {
     "TEST-com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest.xml",
     "TEST-com.innorder.occ.command.CommandExecutorIntegrationTest.xml",
     "TEST-com.innorder.occ.events.OutboxPublisherIntegrationTest.xml",
+    "TEST-com.innorder.occ.events.KafkaOutboxEventSenderProtocolIntegrationTest.xml",
   ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
@@ -180,6 +181,7 @@ async function main() {
       "--tests", "com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest",
       "--tests", "com.innorder.occ.command.CommandExecutorIntegrationTest",
       "--tests", "com.innorder.occ.events.OutboxPublisherIntegrationTest",
+      "--tests", "com.innorder.occ.events.KafkaOutboxEventSenderProtocolIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ], dryRun ? process.env : {

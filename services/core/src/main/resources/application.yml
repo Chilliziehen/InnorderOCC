@@ -23,6 +23,8 @@ spring:
       retries: 0
       properties:
         enable.idempotence: false
+        delivery.timeout.ms: 4000
+        request.timeout.ms: 3000
   flyway:
     enabled: ${FLYWAY_ENABLED:true}
     locations: ${FLYWAY_LOCATIONS:classpath:db/migration}

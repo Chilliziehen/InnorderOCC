@@ -3,6 +3,7 @@ package com.innorder.occ.events
 import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class PublishBatchResult(
@@ -20,6 +21,8 @@ class OutboxPublisher(
     private val polling = AtomicBoolean()
     private val stopping = AtomicBoolean()
     private val lifecycleMonitor = Object()
+    private val outstanding = linkedMapOf<UUID, ClaimedOutboxEvent>()
+    private var activeEventId: UUID? = null
 
     /**
      * Delivery is at-least-once: a broker acknowledgement followed by a process crash before the
@@ -34,32 +37,43 @@ class OutboxPublisher(
         var claimed = emptyList<ClaimedOutboxEvent>()
         try {
             claimed = repository.claim()
+            synchronized(lifecycleMonitor) {
+                claimed.forEach { outstanding[it.id] = it }
+            }
             for (event in claimed) {
-                if (stopping.get()) break
+                if (!beginSend(event)) break
                 var deliverySucceeded = false
                 val finalization = try {
-                    sender.publish(event.envelope())
-                    deliverySucceeded = true
-                    repository.succeed(event)
-                } catch (_: InvalidEventEnvelopeException) {
-                    failed++
-                    repository.fail(event, FailureCategory.INVALID_EVENT)
-                } catch (_: InterruptedException) {
-                    interrupted = true
-                    failed++
-                    repository.fail(event, FailureCategory.DELIVERY_FAILED)
-                } catch (_: Exception) {
-                    failed++
-                    repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                    try {
+                        sender.publish(event.envelope())
+                        deliverySucceeded = true
+                        repository.succeed(event)
+                    } catch (_: InvalidEventEnvelopeException) {
+                        failed++
+                        repository.fail(event, FailureCategory.INVALID_EVENT)
+                    } catch (_: InterruptedException) {
+                        interrupted = true
+                        failed++
+                        repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                    } catch (_: Exception) {
+                        failed++
+                        repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                    }
+                } finally {
+                    completeSend(event)
                 }
                 if (finalization == FinalizeResult.CAS_LOST) casLost++
                 else if (deliverySucceeded) published++
                 if (interrupted) break
             }
         } finally {
-            polling.set(false)
-            synchronized(lifecycleMonitor) { lifecycleMonitor.notifyAll() }
-            if (interrupted) Thread.currentThread().interrupt()
+            try {
+                if (stopping.get()) releaseUnvisitedClaims()
+            } finally {
+                polling.set(false)
+                synchronized(lifecycleMonitor) { lifecycleMonitor.notifyAll() }
+                if (interrupted) Thread.currentThread().interrupt()
+            }
         }
         return PublishBatchResult(claimed.size, published, failed, casLost)
     }
@@ -76,18 +90,50 @@ class OutboxPublisher(
     @PreDestroy
     fun shutdown() {
         stopping.set(true)
-        val deadline = System.nanoTime() + SHUTDOWN_WAIT_NANOS
+        releaseUnvisitedClaims()
+        val deadline = System.nanoTime() + properties.ackTimeout.toNanos()
+        var interrupted = false
+        try {
+            synchronized(lifecycleMonitor) {
+                while (polling.get() && System.nanoTime() < deadline) {
+                    val remainingMillis = (deadline - System.nanoTime()) / 1_000_000
+                    if (remainingMillis <= 0) break
+                    lifecycleMonitor.wait(remainingMillis)
+                }
+            }
+        } catch (_: InterruptedException) {
+            interrupted = true
+        } finally {
+            releaseUnvisitedClaims()
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun beginSend(event: ClaimedOutboxEvent): Boolean = synchronized(lifecycleMonitor) {
+        if (stopping.get()) false else {
+            activeEventId = event.id
+            true
+        }
+    }
+
+    private fun completeSend(event: ClaimedOutboxEvent) {
         synchronized(lifecycleMonitor) {
-            while (polling.get() && System.nanoTime() < deadline) {
-                val remainingMillis = (deadline - System.nanoTime()) / 1_000_000
-                if (remainingMillis <= 0) break
-                lifecycleMonitor.wait(remainingMillis)
+            outstanding.remove(event.id)
+            if (activeEventId == event.id) activeEventId = null
+            lifecycleMonitor.notifyAll()
+        }
+    }
+
+    private fun releaseUnvisitedClaims() {
+        val claims = synchronized(lifecycleMonitor) {
+            outstanding.values.filter { it.id != activeEventId }.also { releasable ->
+                releasable.forEach { outstanding.remove(it.id) }
             }
         }
+        claims.forEach { repository.fail(it, FailureCategory.SHUTDOWN) }
     }
 
     companion object {
         private val LOG = LoggerFactory.getLogger(OutboxPublisher::class.java)
-        private const val SHUTDOWN_WAIT_NANOS = 30_000_000_000L
     }
 }

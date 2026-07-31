@@ -267,6 +267,11 @@ test("Compose wiring follows application config and completion gates", () => {
     "REDIS_PORT",
     "SERVER_PORT",
     "SPRING_CONFIG_IMPORT",
+    "SPRING_KAFKA_PRODUCER_ACKS",
+    "SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS",
+    "SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE",
+    "SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS",
+    "SPRING_KAFKA_PRODUCER_RETRIES",
   ]);
   assert.deepEqual(Object.keys(ai.environment).sort(), [
     "HOST",
@@ -362,6 +367,11 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.equal(compose.services.core.environment.SPRING_CONFIG_IMPORT, "configtree:/run/secrets/");
   assert.equal(compose.services.core.environment.DATABASE_USERNAME, "innorder_runtime");
   assert.equal(compose.services.core.environment.FLYWAY_USERNAME, "innorder_flyway");
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_RETRIES, 0);
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_ACKS, "all");
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE, false);
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS, 4000);
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS, 3000);
   assert.equal(compose.services.minio.user, "10001:10001");
   assert.ok(compose.services.minio.healthcheck.test.includes("http://localhost:9000/minio/health/ready"));
   assert.equal(compose.services.minio.depends_on["minio-volume-init"].condition, "service_completed_successfully");

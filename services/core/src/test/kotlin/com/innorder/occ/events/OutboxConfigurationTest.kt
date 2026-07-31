@@ -25,6 +25,8 @@ class OutboxConfigurationTest {
         assertThat(source.getProperty("spring.kafka.producer.retries")).isEqualTo(0)
         assertThat(source.getProperty("spring.kafka.producer.acks")).isEqualTo("all")
         assertThat(source.getProperty("spring.kafka.producer.properties.enable.idempotence")).isEqualTo(false)
+        assertThat(source.getProperty("spring.kafka.producer.properties.delivery.timeout.ms")).isEqualTo(4000)
+        assertThat(source.getProperty("spring.kafka.producer.properties.request.timeout.ms")).isEqualTo(3000)
     }
 
     @Test

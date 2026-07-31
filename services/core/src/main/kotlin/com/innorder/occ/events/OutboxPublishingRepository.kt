@@ -30,7 +30,7 @@ data class ClaimedOutboxEvent(
     )
 }
 
-enum class FailureCategory { DELIVERY_FAILED, INVALID_EVENT }
+enum class FailureCategory { DELIVERY_FAILED, INVALID_EVENT, SHUTDOWN }
 enum class FinalizeResult { UPDATED, CAS_LOST }
 
 class OutboxPublishingRepository(
@@ -43,12 +43,21 @@ class OutboxPublishingRepository(
     fun claim(limit: Int = properties.batchSize): List<ClaimedOutboxEvent> {
         require(limit in 1..properties.batchSize && limit <= 100)
         return transactions.execute {
+            jdbc.update(
+                """UPDATE audit.outbox_event
+                   SET status = 'DEAD', claimed_at = NULL, last_error = 'STALE_ATTEMPT_LIMIT'
+                   WHERE status = 'PUBLISHING' AND attempts >= ?
+                     AND claimed_at <= statement_timestamp() - interval '5 minutes'""",
+                properties.maxAttempts,
+            )
             jdbc.query(
                 """WITH candidates AS (
                        SELECT id
                        FROM audit.outbox_event
-                       WHERE (status = 'PENDING' AND next_attempt_at <= statement_timestamp())
-                          OR (status = 'PUBLISHING' AND claimed_at <= statement_timestamp() - interval '5 minutes')
+                       WHERE attempts < ? AND (
+                              (status = 'PENDING' AND next_attempt_at <= statement_timestamp())
+                           OR (status = 'PUBLISHING' AND claimed_at <= statement_timestamp() - interval '5 minutes')
+                       )
                        ORDER BY next_attempt_at, created_at, id
                        FOR UPDATE SKIP LOCKED
                        LIMIT ?
@@ -62,7 +71,7 @@ class OutboxPublishingRepository(
                    )
                    SELECT * FROM claimed ORDER BY next_attempt_at, created_at, id""",
                 ::mapClaim,
-                limit,
+                properties.maxAttempts, limit,
             )
         } ?: emptyList()
     }
