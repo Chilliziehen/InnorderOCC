@@ -39,6 +39,7 @@ const migrations = [
   'V008__cross_schema_constraints.sql',
   'V009__runtime_privileges.sql',
   'V010__platform_security_kernel.sql',
+  'V011__account_failed_attempt_window.sql',
 ];
 
 async function applyMigration(migration) {
@@ -53,7 +54,7 @@ async function applyMigration(migration) {
   console.log(`applied ${migration}`);
 }
 
-for (const migration of migrations.slice(0, -1)) {
+for (const migration of migrations.slice(0, -2)) {
   await applyMigration(migration);
 }
 
@@ -114,7 +115,7 @@ await db.exec(`
 `);
 console.log('inserted representative V009 legacy rows');
 
-await applyMigration(migrations.at(-1));
+await applyMigration(migrations.at(-2));
 
 await db.exec(`
   INSERT INTO audit.outbox_event
@@ -165,6 +166,25 @@ if (legacyOutbox.rows.length !== 4
   throw new Error('V010 outbox backfill is not deterministic');
 }
 console.log('passed V010 legacy upgrade backfill');
+
+await db.exec(`
+  INSERT INTO iam.user_account
+    (principal_id, username, password_hash, failed_attempts, locked_until)
+  VALUES
+    ('90000000-0000-7000-8000-000000000005', 'legacy.user', NULL, 0, now() + interval '15 minutes');
+`);
+await applyMigration(migrations.at(-1));
+const legacyAccountWindow = await db.query(`
+  SELECT failed_attempts, failed_window_started_at = locked_until - interval '15 minutes' AS window_preserved
+  FROM iam.user_account
+  WHERE principal_id = '90000000-0000-7000-8000-000000000005'
+`);
+if (legacyAccountWindow.rows.length !== 1
+    || legacyAccountWindow.rows[0].failed_attempts !== 5
+    || !legacyAccountWindow.rows[0].window_preserved) {
+  throw new Error('V011 failed-attempt window backfill is not forward-compatible');
+}
+console.log('passed V011 legacy account failure-window backfill');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)

@@ -106,7 +106,7 @@ Spring 通过 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/` 把目标文件名
 ### 角色边界
 
 - `innorder_admin`：由 PostgreSQL 官方入口创建的 bootstrap superuser；密码来自管理员文件。
-- `innorder_flyway`：非 superuser、不可建库/建角色/复制的登录角色；拥有应用 schema 并执行 V001-V009。
+- `innorder_flyway`：非 superuser、不可建库/建角色/复制的登录角色；拥有应用 schema 并执行 V001-V011。
 - `innorder_runtime`：非 superuser 的 Core 数据源登录角色；获得限定 DML、序列、函数和 Flowable 建表权限。
 
 三个 PostgreSQL 密码必须互不相同。初始化脚本撤销数据库 `PUBLIC` 权限，给 Flyway `CONNECT, TEMPORARY, CREATE`，给 runtime `CONNECT`，并允许 Flyway 成为 runtime 的成员以正确授予对象权限。
@@ -123,7 +123,7 @@ Flowable schema 归 Flyway 所有，固定版本 Flowable 使用 runtime 连接�
 2. `010-create-roles.sh` 读取三个密钥，拒绝空值或重复值。
 3. 脚本创建/更新 `innorder_flyway` 与 `innorder_runtime`，收紧权限，并安装 `vector`、`btree_gist`。
 4. PostgreSQL 健康后 Core 启动。
-5. Core 以 Flyway 角色执行 V001-V009；以 runtime 角色运行普通 JDBC 和 Flowable。
+5. Core 以 Flyway 角色执行 V001-V011；以 runtime 角色运行普通 JDBC 和 Flowable。
 6. Flowable 在 Flyway 创建的 `flowable` schema 中维护其版本相关表。
 
 **注意：** PostgreSQL `/docker-entrypoint-initdb.d` 脚本只在空数据目录初始化时执行。修改密钥文件或重建容器不会在已有数据库中重新设置角色密码。
@@ -140,9 +140,9 @@ PostgreSQL 的 `pg_isready` 成功只表示数据库接受连接探测。Core �
 
 ### Flyway 迁移失败
 
-Flyway 在 Core 启动期以 `innorder_flyway` 执行 V001-V009。迁移校验、SQL、权限、扩展或连接失败会使 Spring 启动失败，因此 Core 不会提供成功 readiness。Compose 的 `unless-stopped` 可能反复重启 Core；每次尝试仍会在同一根因处失败。
+Flyway 在 Core 启动期以 `innorder_flyway` 执行 V001-V011。迁移校验、SQL、权限、扩展或连接失败会使 Spring 启动失败，因此 Core 不会提供成功 readiness。Compose 的 `unless-stopped` 可能反复重启 Core；每次尝试仍会在同一根因处失败。
 
-Flyway 事务能力取决于具体迁移语句；不能假设一次失败会把已执行的全部迁移自动回滚，也不能手工删除 `flyway_schema_history` 记录。恢复步骤是：停止 Core 重启循环；保全数据库备份；收集 Core/PostgreSQL 日志和 Flyway 历史；确认最后成功版本、失败语句及数据库实际状态；按迁移所有者批准的方法修复根因或执行经评审的修复迁移；再启动 Core 并验证 V001-V009 均成功及 readiness 成功。
+Flyway 事务能力取决于具体迁移语句；不能假设一次失败会把已执行的全部迁移自动回滚，也不能手工删除 `flyway_schema_history` 记录。恢复步骤是：停止 Core 重启循环；保全数据库备份；收集 Core/PostgreSQL 日志和 Flyway 历史；确认最后成功版本、失败语句及数据库实际状态；按迁移所有者批准的方法修复根因或执行经评审的修复迁移；再启动 Core 并验证 V001-V011 均成功及 readiness 成功。
 
 **危险：** 不得通过关闭 Flyway、修改已发布迁移校验和、手工标记成功或删除数据卷使启动表面通过。迁移已经改变 schema 时，应用镜像回退也不等于数据库回滚。
 

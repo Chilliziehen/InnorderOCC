@@ -38,7 +38,7 @@ Docs/superpowers/       本基础阶段的设计与实施计划
 - JDK 21。wrapper 固定 Gradle `8.14.3`，Core 编译目标固定 Java 21。
 - Electron 本地开发/烟测需要图形桌面；当前阶段只打包和烟测 Windows x64。
 - Electron `43.2.0` Windows x64 二进制与校验和只使用 Electron 项目的官方 GitHub Releases 固定版本源；仓库不配置第三方镜像或下载覆盖变量。
-- Core 当前启动时的阻塞依赖是 PostgreSQL 16 + pgvector、`btree_gist`，以及已配置登录凭据和所需数据库权限的 `innorder_flyway`/`innorder_runtime` 角色。启用 Flyway 时，Core 在启动过程中应用 V001-V009。Kafka、Redis、MinIO、OPA 与 AI 是已配置的基础集成，其中并非全部已有活动客户端，因此目前不都阻塞 Core 启动。
+- Core 当前启动时的阻塞依赖是 PostgreSQL 16 + pgvector、`btree_gist`，以及已配置登录凭据和所需数据库权限的 `innorder_flyway`/`innorder_runtime` 角色。启用 Flyway 时，Core 在启动过程中应用 V001-V011。Kafka、Redis、MinIO、OPA 与 AI 是已配置的基础集成，其中并非全部已有活动客户端，因此目前不都阻塞 Core 启动。
 - Compose 启动需要 Docker Engine 和 Compose v2 的 Linux 容器支持。
 - 执行真实 Rego 行为测试需要 `opa` 可执行文件；没有时根测试仍执行静态 Rego 契约。
 
@@ -90,7 +90,7 @@ Remove-Item Env:OPA_PATH
 
 `npm run verify` 保持离线友好，运行静态 Rego 契约，并在 OPA 可用时附加真实检查。`npm run verify:local` 增加 PGlite、官方 npm registry high 阈值漏洞审计、registry 签名审计和已打包 Electron 烟测；Docker 或 OPA 不可用时允许对应测试 skipped，成功消息只能是 `local verification passed`。
 
-`npm run verify:full` 是 CI/发布用严格模式。它在任何构建前要求 `docker info` 成功连接 Docker Engine，并要求 `OPA_PATH` 或 `PATH` 中的真实 `opa version` 成功；随后执行真实 OPA 测试、强制重跑 digest-pinned PostgreSQL Testcontainers 测试，并解析 `PostgreSqlFlowableIntegrationTest` JUnit XML。结果文件缺失、测试为零、任何 failures/errors 或任何 skipped 都会失败，绝不输出 full success。Full 同样包含 local 扩展检查。Gradle 始终以 strict dependency verification 校验已签入的 artifact checksum/签名元数据；这是 JVM artifact provenance 控制，不是 JVM 漏洞扫描，可靠且固定版本的 JVM CVE scanner 仍是后续 CI 控制。
+`npm run verify:full` 是 CI/发布用严格模式。它在任何构建前要求 `docker info` 成功连接 Docker Engine，并要求 `OPA_PATH` 或 `PATH` 中的真实 `opa version` 成功；随后执行真实 OPA 测试、强制重跑 digest-pinned PostgreSQL Testcontainers 测试，并解析 `PostgreSqlFlowableIntegrationTest`、`SessionRepositoryIntegrationTest` 和 `AuthControllerIntegrationTest` JUnit XML。结果文件缺失、测试为零、任何 failures/errors 或任何 skipped 都会失败，绝不输出 full success。Full 同样包含 local 扩展检查。Gradle 始终以 strict dependency verification 校验已签入的 artifact checksum/签名元数据；这是 JVM artifact provenance 控制，不是 JVM 漏洞扫描，可靠且固定版本的 JVM CVE scanner 仍是后续 CI 控制。
 
 ## 本地运行
 
@@ -161,4 +161,4 @@ docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up --b
 
 完整变量名、角色权限、停止和清理命令见 `infra/compose/README.md` 与 `infra/compose/.env.example`。外部镜像和 Dockerfile 基础镜像均固定可读 tag 与 `sha256` digest；`V009` 只向运行角色授予所需 DML、序列及 Flowable schema 的 `USAGE, CREATE`。`flowable` schema 仍由 `innorder_flyway` 所有，运行角色只拥有自己创建的 `ACT_*` 表。
 
-Core 的 PostgreSQL 集成测试使用 Compose 中相同 digest 的 pgvector PostgreSQL 镜像并自动执行 V001-V009、Flyway/运行账号隔离、Flowable schema/操作和扩展检查。普通 `npm test` 与 `verify:local` 在 Docker 不可用时允许明确 skip；严格 `verify:full` 要求 Docker 和 OPA 均可用，并拒绝任何 skipped 集成测试。
+Core 的 PostgreSQL 集成测试使用 Compose 中相同 digest 的 pgvector PostgreSQL 镜像并自动执行 V001-V011、Flyway/运行账号隔离、Flowable schema/操作和扩展检查。普通 `npm test` 与 `verify:local` 在 Docker 不可用时允许明确 skip；严格 `verify:full` 要求 Docker 和 OPA 均可用，并拒绝任何 skipped 集成测试。

@@ -10,3 +10,4 @@
 \ir migrations/V008__cross_schema_constraints.sql
 \ir migrations/V009__runtime_privileges.sql
 \ir migrations/V010__platform_security_kernel.sql
+\ir migrations/V011__account_failed_attempt_window.sql

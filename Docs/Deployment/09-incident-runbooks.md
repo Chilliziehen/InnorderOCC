@@ -558,7 +558,7 @@ stop_core_for_incident
 
 ### 4. 主机到容器到依赖决策树
 
-先确认 PostgreSQL 健康；再确认 Flyway 已完成 V001-V009；再检查 `flowable` owner 应为 `innorder_flyway`、runtime 的 `USAGE,CREATE` 及已有对象权限；最后对照异常链和 `ACT_*` 版本状态。owner 漂移不一定单独导致当前启动失败，但必须修复。
+先确认 PostgreSQL 健康；再确认 Flyway 已完成 V001-V011；再检查 `flowable` owner 应为 `innorder_flyway`、runtime 的 `USAGE,CREATE` 及已有对象权限；最后对照异常链和 `ACT_*` 版本状态。owner 漂移不一定单独导致当前启动失败，但必须修复。
 
 ### 5. 从最小到最大修正
 

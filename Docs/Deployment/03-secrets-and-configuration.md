@@ -462,7 +462,7 @@ npm run test:infra
 | 配置域 | 验证方法 | 通过标准 |
 |---|---|---|
 | PostgreSQL runtime | Core readiness | `http://127.0.0.1:8080/actuator/health/readiness` 为成功且 db 健康 |
-| Flyway | Core 日志与 Flyway 历史 | V001-V009 成功，无重复迁移进程 |
+| Flyway | Core 日志与 Flyway 历史 | V001-V011 成功，无重复迁移进程 |
 | Redis | 容器健康和 Core 状态 | Redis 认证 `PING` 成功；Core 使用同一密钥 |
 | MinIO root | MinIO readiness | `http://127.0.0.1:9000/minio/health/ready` 成功 |
 | MinIO app | `minio-init` 退出码与 Core 状态 | 初始化成功，Core 只使用桶级账号 |

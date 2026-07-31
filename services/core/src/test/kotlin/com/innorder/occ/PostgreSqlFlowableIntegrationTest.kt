@@ -35,7 +35,24 @@ class PostgreSqlFlowableIntegrationTest(
         assertThat(flywayJdbc.queryForList("SELECT DISTINCT installed_by FROM flyway_schema_history", String::class.java))
             .containsExactly("innorder_flyway")
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+        assertThat(flywayJdbc.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'user_account' ORDER BY ordinal_position",
+            String::class.java,
+        )).containsExactly(
+            "principal_id",
+            "username",
+            "password_hash",
+            "password_version",
+            "failed_attempts",
+            "locked_until",
+            "last_login_at",
+            "failed_window_started_at",
+        )
+        assertThat(flywayJdbc.queryForObject(
+            "SELECT has_column_privilege('innorder_runtime', 'iam.user_account', 'failed_window_started_at', 'SELECT,UPDATE')",
+            Boolean::class.java,
+        )).isTrue()
         assertThat(jdbcTemplate.queryForObject(
             "SELECT id::text || ':' || instance_key FROM platform.customer_instance WHERE singleton",
             String::class.java,

@@ -36,6 +36,7 @@ async function main() {
   const integrationResults = [
     "TEST-com.innorder.occ.PostgreSqlFlowableIntegrationTest.xml",
     "TEST-com.innorder.occ.auth.SessionRepositoryIntegrationTest.xml",
+    "TEST-com.innorder.occ.auth.AuthControllerIntegrationTest.xml",
   ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
@@ -156,6 +157,7 @@ async function main() {
       ":services:core:test",
       "--tests", "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
       "--tests", "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
+      "--tests", "com.innorder.occ.auth.AuthControllerIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ]);

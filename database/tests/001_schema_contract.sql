@@ -27,6 +27,16 @@ SELECT pg_temp.assert_true(to_regclass('ai.knowledge_chunk') IS NOT NULL, 'ai.kn
 SELECT pg_temp.assert_true(to_regclass('ai.chunk_embedding') IS NOT NULL, 'ai.chunk_embedding exists');
 SELECT pg_temp.assert_true(to_regclass('platform.customer_instance') IS NOT NULL, 'platform.customer_instance exists');
 SELECT pg_temp.assert_true(to_regclass('iam.auth_session') IS NOT NULL, 'iam.auth_session exists');
+SELECT pg_temp.assert_true(
+    EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'iam'
+          AND table_name = 'user_account'
+          AND column_name = 'failed_window_started_at'
+          AND data_type = 'timestamp with time zone'
+    ),
+    'user account stores the failed-attempt window start'
+);
 
 SELECT pg_temp.assert_true(
     (SELECT count(*) = 1
@@ -69,6 +79,10 @@ SELECT pg_temp.assert_true(
     has_table_privilege('innorder_runtime', 'platform.customer_instance', 'SELECT,INSERT,UPDATE,DELETE')
     AND has_table_privilege('innorder_runtime', 'iam.auth_session', 'SELECT,INSERT,UPDATE,DELETE'),
     'V009 default grants cover V010 tables'
+);
+SELECT pg_temp.assert_true(
+    has_column_privilege('innorder_runtime', 'iam.user_account', 'failed_window_started_at', 'SELECT,UPDATE'),
+    'runtime can maintain failed-attempt windows added by V011'
 );
 
 SELECT pg_temp.assert_true(

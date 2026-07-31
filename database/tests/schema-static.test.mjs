@@ -22,6 +22,7 @@ const migrations = [
   'V008__cross_schema_constraints.sql',
   'V009__runtime_privileges.sql',
   'V010__platform_security_kernel.sql',
+  'V011__account_failed_attempt_window.sql',
 ];
 
 function readMigration(name) {
@@ -201,6 +202,17 @@ test('adds protected customer and hashed authentication persistence', () => {
   assert.match(sql, /replacement session cannot predate rotated session/i);
   assert.match(sql, /CREATE INDEX ix_auth_session_active_principal_expiry/i);
   assert.doesNotMatch(sql, /\b(?:refresh_token|access_token|password)\b\s+(?:text|varchar)/i);
+});
+
+test('adds a constrained and forward-compatible account failure window', () => {
+  const sql = readMigration('V011__account_failed_attempt_window.sql');
+  assert.match(sql, /ADD COLUMN failed_window_started_at timestamptz/iu);
+  assert.match(sql, /failed_attempts\s*=\s*greatest\(failed_attempts, 5\)/iu);
+  assert.match(sql, /WHERE locked_until IS NOT NULL/iu);
+  assert.match(sql, /failed_window_started_at[\s\S]*locked_until - interval '15 minutes'/iu);
+  assert.match(sql, /failed_attempts = 0[\s\S]*failed_window_started_at IS NULL/iu);
+  assert.match(sql, /locked_until >= failed_window_started_at/iu);
+  assert.match(sql, /GRANT SELECT \(failed_window_started_at\), UPDATE \(failed_window_started_at\)/iu);
 });
 
 test('adds deterministic idempotency and outbox lifecycles', () => {

@@ -26,6 +26,8 @@ class PasswordService internal constructor(private val encoder: PasswordEncoder)
         return parameters.memoryKib != MEMORY_KIB || parameters.iterations != ITERATIONS
     }
 
+    fun isSupportedHash(encoded: String): Boolean = parse(encoded) != null
+
     fun isAllowed(password: CharSequence): Boolean {
         var codePoints = 0
         var offset = 0

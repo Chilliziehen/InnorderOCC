@@ -42,6 +42,8 @@ class AccessTokenService(
     private val properties: JwtProperties,
     private val clock: Clock,
 ) {
+    fun expiresInSeconds(): Long = properties.ttl.seconds
+
     fun issue(subject: AccessTokenSubject): String {
         val now = clock.instant()
         val claims = JwtClaimsSet.builder()
