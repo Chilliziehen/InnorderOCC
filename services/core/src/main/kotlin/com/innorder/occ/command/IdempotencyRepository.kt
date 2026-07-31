@@ -23,7 +23,11 @@ class IdempotencyRepository private constructor(
     @Autowired
     constructor(jdbc: JdbcTemplate) : this(jdbc, Clock.systemUTC())
 
-    fun acquire(metadata: CommandMetadata, requestDigest: String): IdempotencyAcquisition {
+    fun acquire(
+        descriptor: CommandDescriptor,
+        idempotencyKey: String,
+        requestDigest: String,
+    ): IdempotencyAcquisition {
         requireTransaction()
         val id = UUID.randomUUID()
         val createdAt = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)
@@ -33,7 +37,7 @@ class IdempotencyRepository private constructor(
                (id, principal_id, command_key, idempotency_key, request_hash, state, created_at, updated_at, expires_at)
                VALUES (?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?, ?)
                ON CONFLICT (principal_id, command_key, idempotency_key) DO NOTHING""",
-            id, metadata.principalId, metadata.commandKey, metadata.idempotencyKey, requestDigest,
+            id, descriptor.principalId, descriptor.commandKey, idempotencyKey, requestDigest,
             createdAt, createdAt, expiresAt,
         )
         if (inserted == 1) return IdempotencyAcquisition.Owner(id)
@@ -53,7 +57,7 @@ class IdempotencyRepository private constructor(
                 result.getObject("resource_id", UUID::class.java),
                 result.getObject("expires_at", OffsetDateTime::class.java).toInstant(),
             ) },
-            metadata.principalId, metadata.commandKey, metadata.idempotencyKey,
+            descriptor.principalId, descriptor.commandKey, idempotencyKey,
         ) ?: throw IdempotencyInProgressException()
         if (!clock.instant().isBefore(row.expiresAt)) throw IdempotencyExpiredException()
         if (row.requestDigest != requestDigest) throw IdempotencyConflictException()

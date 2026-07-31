@@ -1,6 +1,6 @@
 package com.innorder.occ.events
 
-import com.innorder.occ.command.CommandMetadata
+import com.innorder.occ.command.CommandDescriptor
 import com.innorder.occ.command.CommandMutation
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
@@ -11,7 +11,7 @@ import java.util.UUID
 class OutboxRepository(
     private val jdbc: JdbcTemplate,
 ) {
-    fun insert(metadata: CommandMetadata, transactionId: UUID, mutation: CommandMutation) {
+    fun insert(descriptor: CommandDescriptor, correlationId: UUID, transactionId: UUID, mutation: CommandMutation) {
         check(TransactionSynchronizationManager.isActualTransactionActive()) { "Outbox repository requires a transaction" }
         mutation.events.forEach { event ->
             jdbc.update(
@@ -22,7 +22,7 @@ class OutboxRepository(
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, statement_timestamp(), statement_timestamp(), 'PENDING')""",
                 UUID.randomUUID(), DEFAULT_CUSTOMER_INSTANCE_ID, mutation.aggregateType, mutation.aggregateId,
                 event.aggregateVersion, event.eventType, event.schemaVersion, event.payload.canonicalText(),
-                metadata.principalId, metadata.correlationId, transactionId,
+                descriptor.principalId, correlationId, transactionId,
             )
         }
     }

@@ -399,6 +399,65 @@ class AuthorizationServiceIntegrationTest {
     }
 
     @Test
+    fun `concurrent authorization fact commands serialize exclusive revision snapshot and mutation locks`() {
+        val jdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(jdbc)
+        resetKernelAggregate(jdbc)
+        jdbc.update(
+            "INSERT INTO occ.command_kernel_authz_test(id, value, row_version) VALUES (?, 'before', 3)",
+            KERNEL_AGGREGATE_ID_TWO,
+        )
+        val mapper = ObjectMapper().findAndRegisterModules()
+        val observedRevisions = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+        val authorization = AuthorizationService(
+            AuthorizationSnapshotRepository(jdbc, mapper),
+            PolicyDecisionClient { snapshot ->
+                observedRevisions.add(snapshot.authorizationRevision)
+                AuthorizationDecision(
+                    1, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
+                    snapshot.releases, AuthorizationDecisionValue.ALLOW, true,
+                    listOf("ALLOW_GRANT_MATCH"), listOf(GRANT_REFERENCE), listOf(GRANT_REFERENCE),
+                )
+            },
+            decisionLogRepository(jdbc, mapper),
+        )
+        val executor = commandExecutor(jdbc, authorization)
+        val initialRevision = jdbc.queryForObject(
+            "SELECT current_revision FROM authz.authorization_state WHERE singleton",
+            Long::class.java,
+        )!!
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val futures = listOf(KERNEL_AGGREGATE_ID to "one", KERNEL_AGGREGATE_ID_TWO to "two").map { (id, marker) ->
+                pool.submit<com.innorder.occ.command.CommandResult> {
+                    check(start.await(10, TimeUnit.SECONDS))
+                    executor.execute(
+                        CommandMetadata(PRINCIPAL_ID, "occ.command.authz-change", "auth-change-$marker-${UUID.randomUUID()}", 3, UUID.randomUUID()),
+                        "{}".toByteArray(),
+                        authorizationFactCommand(id, marker),
+                    )
+                }
+            }
+            start.countDown()
+            futures.forEach { assertThat(it.get(30, TimeUnit.SECONDS).status).isEqualTo(200) }
+        } finally {
+            pool.shutdownNow()
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
+        }
+
+        assertThat(observedRevisions.sorted()).containsExactly(initialRevision, initialRevision + 1)
+        assertThat(jdbc.queryForObject(
+            "SELECT current_revision FROM authz.authorization_state WHERE singleton",
+            Long::class.java,
+        )).isEqualTo(initialRevision + 2)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.command_kernel_authz_test WHERE row_version = 4",
+            Long::class.java,
+        )).isEqualTo(2)
+    }
+
+    @Test
     fun `service fails closed when OPA echoes a stale authorization revision`() {
         TransactionSynchronizationManager.setActualTransactionActive(true)
         val logs = RecordingDecisionLog()
@@ -1089,6 +1148,7 @@ class AuthorizationServiceIntegrationTest {
         authorizationService: AuthorizationService,
     ) = CommandExecutor(
         DataSourceTransactionManager(jdbc.dataSource!!), authorizationService,
+        AuthorizationRevisionLockRepository(jdbc),
         IdempotencyRepository(jdbc), AuditRepository(jdbc), OutboxRepository(jdbc), jdbc,
     )
 
@@ -1135,7 +1195,7 @@ class AuthorizationServiceIntegrationTest {
     }
 
     private fun resetKernelAggregate(jdbc: JdbcTemplate) {
-        jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", KERNEL_AGGREGATE_ID)
+        jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id IN (?, ?)", KERNEL_AGGREGATE_ID, KERNEL_AGGREGATE_ID_TWO)
         jdbc.update("DELETE FROM occ.command_kernel_authz_test")
         jdbc.update(
             "INSERT INTO occ.command_kernel_authz_test(id, value, row_version) VALUES (?, 'before', 3)",
@@ -1147,8 +1207,10 @@ class AuthorizationServiceIntegrationTest {
         override val action = "occ.read"
         override val entityId = ENTITY_ID
         override val resourceId = RESOURCE_ID
+        override val aggregateType = "kernel-authz-test"
         override val aggregateId = KERNEL_AGGREGATE_ID
         override val expectedVersionRequired = true
+        override val changesAuthorizationFacts = false
 
         override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
             "SELECT row_version FROM occ.command_kernel_authz_test WHERE id = ? FOR UPDATE",
@@ -1175,6 +1237,41 @@ class AuthorizationServiceIntegrationTest {
                     "kernel-authz-test.updated", 1,
                     CanonicalJsonObject.from(ObjectMapper().readTree("""{"value":"after"}""")), 4,
                 )),
+            )
+        }
+    }
+
+    private fun authorizationFactCommand(aggregate: UUID, marker: String) = object : AuthorizedCommand {
+        override val action = "occ.read"
+        override val entityId = ENTITY_ID
+        override val resourceId = RESOURCE_ID
+        override val aggregateType = "authz.entity"
+        override val aggregateId = aggregate
+        override val expectedVersionRequired = true
+        override val changesAuthorizationFacts = true
+
+        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
+            "SELECT row_version FROM occ.command_kernel_authz_test WHERE id = ? FOR UPDATE",
+            Long::class.java,
+            context.descriptor.aggregateId,
+        )!!
+
+        override fun execute(context: CommandContext): CommandMutation {
+            context.jdbc.update(
+                "UPDATE occ.command_kernel_authz_test SET value = ?, row_version = 4 WHERE id = ?",
+                marker,
+                context.descriptor.aggregateId,
+            )
+            context.jdbc.update(
+                "UPDATE authz.entity SET auth_attributes = jsonb_build_object('commandMarker', CAST(? AS text)) WHERE id = ?",
+                marker,
+                ENTITY_ID,
+            )
+            fun canonical(value: String) = CanonicalJsonObject.from(ObjectMapper().readTree(value))
+            return CommandMutation(
+                200, canonical("""{"result":"changed"}"""), resourceId, aggregateId, aggregateType,
+                3, 4, "authorization fact change", canonical("""{"changed":true}"""),
+                listOf(PendingEventSpec("authz.entity.updated", 1, canonical("""{"changed":true}"""), 4)),
             )
         }
     }
@@ -1311,6 +1408,7 @@ class AuthorizationServiceIntegrationTest {
         private val PLATFORM_VERSION_ID = UUID.fromString("550e8400-e29b-41d4-a716-446655440000")
         private val COMPOSED_RELEASE_ID = UUID.fromString("123e4567-e89b-42d3-a456-426614174000")
         private val KERNEL_AGGREGATE_ID = UUID.fromString("72000000-0000-7000-8000-000000000011")
+        private val KERNEL_AGGREGATE_ID_TWO = UUID.fromString("72000000-0000-7000-8000-000000000012")
         private const val GRANT_REFERENCE = "grant:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         private const val POLICY_REFERENCE = "policy:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 

@@ -7,6 +7,7 @@ import com.innorder.occ.authz.AuthorizationEntity
 import com.innorder.occ.authz.AuthorizationPrincipal
 import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationResource
+import com.innorder.occ.authz.AuthorizationRevisionLockRepository
 import com.innorder.occ.authz.AuthorizationService
 import com.innorder.occ.authz.AuthorizationSnapshot
 import com.innorder.occ.authz.AuthorizationSnapshotSource
@@ -75,6 +76,7 @@ class CommandExecutorIntegrationTest {
         executor = CommandExecutor(
             DataSourceTransactionManager(jdbc.dataSource!!),
             authorization,
+            AuthorizationRevisionLockRepository(jdbc),
             IdempotencyRepository(jdbc),
             AuditRepository(jdbc),
             OutboxRepository(jdbc),
@@ -161,6 +163,99 @@ class CommandExecutorIntegrationTest {
             .isInstanceOf(IdempotencyConflictException::class.java)
         assertThat(executions).hasValue(1)
         assertThat(snapshots.calls).hasValue(1)
+    }
+
+    @Test
+    fun `descriptor is captured once and stateful getters cannot redirect authorization or persistence`() {
+        val reads = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
+        fun <T> once(name: String, first: T, later: T): T =
+            if (reads.computeIfAbsent(name) { AtomicInteger() }.incrementAndGet() == 1) first else later
+        val malicious = object : AuthorizedCommand {
+            override val action get() = once("action", "test.update", "iam.redirect")
+            override val entityId get() = once("entity", ENTITY_ID, UUID.randomUUID())
+            override val resourceId get() = once("resource", RESOURCE_ID, ENTITY_ID)
+            override val aggregateType get() = once("aggregateType", "kernel-test", "authz.entity")
+            override val aggregateId get() = once("aggregateId", AGGREGATE_ID, UUID.randomUUID())
+            override val expectedVersionRequired get() = once("expected", true, false)
+            override val changesAuthorizationFacts get() = once("authFacts", false, true)
+
+            override fun lockCurrentVersion(context: CommandContext): Long {
+                assertThat(context.descriptor.action).isEqualTo("test.update")
+                return context.jdbc.queryForObject(
+                    "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
+                    Long::class.java,
+                    context.descriptor.aggregateId,
+                )!!
+            }
+
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
+                    context.descriptor.aggregateId,
+                )
+                return successMutation()
+            }
+        }
+
+        val result = executor.execute(metadata("stateful-command"), "{}".toByteArray(), malicious)
+
+        assertThat(result.status).isEqualTo(200)
+        assertThat(reads.values).allMatch { it.get() == 1 }
+        assertThat(snapshots.lastRequest!!.action).isEqualTo("test.update")
+        assertThat(jdbc.queryForObject("SELECT aggregate_type FROM audit.outbox_event WHERE aggregate_id = ?", String::class.java, AGGREGATE_ID))
+            .isEqualTo("kernel-test")
+    }
+
+    @Test
+    fun `same idempotency key and body conflict when behavior target or expected version changes`() {
+        data class Variant(val name: String, val metadata: CommandMetadata, val command: AuthorizedCommand)
+        val variants = listOf(
+            Variant("action", metadata("fingerprint-action"), object : AuthorizedCommand by command() {
+                override val action = "test.other"
+            }),
+            Variant("resource", metadata("fingerprint-resource"), object : AuthorizedCommand by command() {
+                override val resourceId = ENTITY_ID
+            }),
+            Variant("aggregate", metadata("fingerprint-aggregate"), object : AuthorizedCommand by command() {
+                override val aggregateId = UUID.fromString("81000000-0000-7000-8000-000000000007")
+            }),
+            Variant("expected", metadata("fingerprint-expected").copy(expectedVersion = 4), command()),
+        )
+        variants.forEach { variant ->
+            jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", AGGREGATE_ID)
+            jdbc.update("UPDATE occ.command_kernel_test SET value = 'before', row_version = 3 WHERE id = ?", AGGREGATE_ID)
+            val originalMetadata = metadata(variant.metadata.idempotencyKey)
+            executor.execute(originalMetadata, "{}".toByteArray(), command())
+
+            assertThatThrownBy { executor.execute(variant.metadata, "{}".toByteArray(), variant.command) }
+                .describedAs(variant.name)
+                .isInstanceOf(IdempotencyConflictException::class.java)
+        }
+    }
+
+    @Test
+    fun `command context exposes descriptor and digest but no raw request`() {
+        assertThat(CommandContext::class.java.methods.map { it.name })
+            .doesNotContain("getRequest")
+            .contains("getDescriptor", "getRequestDigest")
+    }
+
+    @Test
+    fun `authorization aggregate command without change declaration fails before idempotency`() {
+        listOf("authz.entity", "iam.principal", "relationship", "policy.release").forEachIndexed { index, type ->
+            val undeclared = object : AuthorizedCommand by command() {
+                override val aggregateType = type
+            }
+
+            assertThatThrownBy {
+                executor.execute(metadata("undeclared-auth-change-$index"), "{}".toByteArray(), undeclared)
+            }.isInstanceOf(InvalidCommandMetadataException::class.java)
+        }
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ?",
+            Long::class.java,
+            PRINCIPAL_ID,
+        )).isZero()
     }
 
     @Test
@@ -265,6 +360,58 @@ class CommandExecutorIntegrationTest {
             .isInstanceOf(RuntimeException::class.java)
 
         assertRolledBack()
+    }
+
+    @Test
+    fun `sensitive audit and event content is rejected without persistence or value disclosure`() {
+        data class Attempt(val name: String, val request: String, val detail: String, val payload: String)
+        val attempts = listOf(
+            Attempt("renamed-secret", """{"secret":"s3cr3t-value"}""", """{"note":"s3cr3t-value"}""", "{}"),
+            Attempt("nested-key", "{}", """{"nested":{"private_key":"hidden"}}""", "{}"),
+            Attempt("jwt-token", "{}", "{}", """{"token":"eyJhbGciOiJIUzI1NiJ9.payload.signature"}"""),
+            Attempt("refresh-token", "{}", "{}", """{"refresh_token":"refresh-value"}"""),
+        )
+        attempts.forEach { attempt ->
+            val malicious = object : AuthorizedCommand by command() {
+                override fun execute(context: CommandContext): CommandMutation {
+                    context.jdbc.update(
+                        "UPDATE occ.command_kernel_test SET value = 'unsafe', row_version = 4 WHERE id = ?",
+                        AGGREGATE_ID,
+                    )
+                    return successMutation().copy(
+                        auditDetail = json(attempt.detail),
+                        events = listOf(PendingEventSpec("kernel-test.updated", 1, json(attempt.payload), 4)),
+                    )
+                }
+            }
+            assertThatThrownBy {
+                executor.execute(metadata("sensitive-${attempt.name}"), attempt.request.toByteArray(), malicious)
+            }.isInstanceOf(InvalidCommandRequestException::class.java)
+            assertRolledBack()
+        }
+    }
+
+    @Test
+    fun `safe non-sensitive request-derived scalar may appear in audit and event payload`() {
+        val safe = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
+                    AGGREGATE_ID,
+                )
+                return successMutation().copy(
+                    auditDetail = json("""{"displayName":"Alice"}"""),
+                    events = listOf(PendingEventSpec(
+                        "kernel-test.updated", 1, json("""{"displayName":"Alice"}"""), 4,
+                    )),
+                )
+            }
+        }
+
+        executor.execute(metadata("safe-derived"), """{"displayName":"Alice"}""".toByteArray(), safe)
+
+        assertThat(jdbc.queryForObject("SELECT detail->>'displayName' FROM audit.audit_record WHERE target_entity_id = ?", String::class.java, RESOURCE_ID))
+            .isEqualTo("Alice")
     }
 
     @Test
@@ -457,6 +604,7 @@ class CommandExecutorIntegrationTest {
     private fun executorAt(clock: Clock): CommandExecutor {
         return CommandExecutor(
             DataSourceTransactionManager(jdbc.dataSource!!), authorization,
+            AuthorizationRevisionLockRepository(jdbc),
             IdempotencyRepository.forTesting(jdbc, clock), AuditRepository(jdbc),
             OutboxRepository(jdbc), jdbc,
         )
@@ -466,8 +614,10 @@ class CommandExecutorIntegrationTest {
         override val action = "test.update"
         override val entityId = ENTITY_ID
         override val resourceId = RESOURCE_ID
+        override val aggregateType = "kernel-test"
         override val aggregateId = AGGREGATE_ID
         override val expectedVersionRequired = true
+        override val changesAuthorizationFacts = false
 
         override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
             "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",

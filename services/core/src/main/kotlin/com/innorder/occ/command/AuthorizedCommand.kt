@@ -27,19 +27,37 @@ interface AuthorizedCommand {
     val action: String
     val entityId: UUID
     val resourceId: UUID
+    val aggregateType: String
     val aggregateId: UUID
     val expectedVersionRequired: Boolean
+
+    /** IAM, relationship, and policy mutation commands must declare this mode. */
+    val changesAuthorizationFacts: Boolean
 
     /** Called after authorization. Update commands must lock their aggregate row with FOR UPDATE before returning. */
     fun lockCurrentVersion(context: CommandContext): Long?
     fun execute(context: CommandContext): CommandMutation
 }
 
+data class CommandDescriptor(
+    val commandKey: String,
+    val action: String,
+    val entityId: UUID,
+    val resourceId: UUID,
+    val aggregateType: String,
+    val aggregateId: UUID,
+    val requiresExpectedVersion: Boolean,
+    val changesAuthorizationFacts: Boolean,
+    val expectedVersion: Long?,
+    val principalId: UUID,
+)
+
 class CommandContext internal constructor(
     val jdbc: JdbcOperations,
     val metadata: CommandMetadata,
-    val request: CanonicalJsonObject,
+    val descriptor: CommandDescriptor,
     val authorization: AuthorizationDecisionReference,
+    val requestDigest: String,
     val transactionId: UUID,
 )
 

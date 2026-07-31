@@ -11,8 +11,8 @@ class AuditRepository(
 ) {
     fun insert(
         transactionId: UUID,
-        metadata: CommandMetadata,
-        action: String,
+        correlationId: UUID,
+        descriptor: CommandDescriptor,
         mutation: CommandMutation,
     ) {
         check(TransactionSynchronizationManager.isActualTransactionActive()) { "Audit repository requires a transaction" }
@@ -21,9 +21,9 @@ class AuditRepository(
                (id, transaction_id, actor_entity_id, action_key, target_entity_id, before_version,
                 after_version, reason, detail, correlation_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)""",
-            UUID.randomUUID(), transactionId, metadata.principalId, action, mutation.resourceId,
+            UUID.randomUUID(), transactionId, descriptor.principalId, descriptor.action, mutation.resourceId,
             mutation.beforeVersion, mutation.afterVersion, mutation.auditReason,
-            mutation.auditDetail.canonicalText(), metadata.correlationId,
+            mutation.auditDetail.canonicalText(), correlationId,
         )
     }
 }
