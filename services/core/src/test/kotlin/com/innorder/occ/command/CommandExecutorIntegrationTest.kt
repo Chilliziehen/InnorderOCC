@@ -476,6 +476,81 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
+    fun `record keys reject embedded request secrets but allow near matches`() {
+        data class Attempt(val name: String, val transform: (CommandMutation, String) -> CommandMutation)
+        val secret = "needle-7x"
+        val attempts = listOf(
+            Attempt("audit-prefix") { mutation, value ->
+                mutation.copy(auditDetail = json("""{"${value}-after":"unsafe"}"""))
+            },
+            Attempt("event-suffix") { mutation, value ->
+                mutation.copy(events = listOf(PendingEventSpec(
+                    "kernel-test.updated", 1, json("""{"before-$value":"unsafe"}"""), 4,
+                )))
+            },
+            Attempt("response-embedded") { mutation, value ->
+                mutation.copy(body = json("""{"before-${value}-after":"unsafe"}"""))
+            },
+        )
+
+        attempts.forEach { attempt ->
+            val attemptMetadata = metadata("embedded-${attempt.name}")
+            val malicious = object : AuthorizedCommand by command() {
+                override fun execute(context: CommandContext): CommandMutation {
+                    context.jdbc.update(
+                        "UPDATE occ.command_kernel_test SET value = 'unsafe', row_version = 4 WHERE id = ?",
+                        AGGREGATE_ID,
+                    )
+                    return attempt.transform(successMutation(), secret)
+                }
+            }
+
+            assertThatThrownBy {
+                executor.execute(attemptMetadata, """{"secret":"$secret"}""".toByteArray(), malicious)
+            }.describedAs(attempt.name).isInstanceOf(InvalidCommandRequestException::class.java)
+            assertRolledBack()
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM authz.decision_log WHERE correlation_id = ?",
+                Long::class.java,
+                attemptMetadata.correlationId,
+            )).isZero()
+        }
+
+        val nearMatch = "before-needle-7-after"
+        val safe = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
+                    AGGREGATE_ID,
+                )
+                return successMutation(json("""{"$nearMatch":"safe"}""")).copy(
+                    auditDetail = json("""{"$nearMatch":"safe"}"""),
+                    events = listOf(PendingEventSpec(
+                        "kernel-test.updated", 1, json("""{"$nearMatch":"safe"}"""), 4,
+                    )),
+                )
+            }
+        }
+
+        val result = executor.execute(
+            metadata("embedded-near-match"),
+            """{"secret":"$secret"}""".toByteArray(),
+            safe,
+        )
+        assertThat(result.body.toJsonNode().path(nearMatch).textValue()).isEqualTo("safe")
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.audit_record WHERE jsonb_extract_path_text(detail, ?) = 'safe'",
+            Long::class.java,
+            nearMatch,
+        )).isOne()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.outbox_event WHERE jsonb_extract_path_text(payload, ?) = 'safe'",
+            Long::class.java,
+            nearMatch,
+        )).isOne()
+    }
+
+    @Test
     fun `outer forced rollback removes every kernel write`() {
         TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!)).executeWithoutResult { status ->
             executor.execute(metadata("outer-rollback"), "{}".toByteArray(), command())

@@ -190,7 +190,9 @@ class CommandExecutor(
         if (depth > MAX_JSON_DEPTH) throw InvalidCommandRequestException()
         when {
             node.isObject -> node.fields().forEachRemaining { (name, child) ->
-                if (sensitiveName(name) || name in sensitiveValues) throw InvalidCommandRequestException()
+                if (sensitiveName(name) || containsSensitiveValue(name, sensitiveValues)) {
+                    throw InvalidCommandRequestException()
+                }
                 validateSafePersistenceJson(child, sensitiveValues, depth + 1)
             }
             node.isArray -> node.forEach { validateSafePersistenceJson(it, sensitiveValues, depth + 1) }
@@ -202,10 +204,13 @@ class CommandExecutor(
     }
 
     private fun validatePersistedString(value: String, sensitiveValues: Set<String>) {
-        if (sensitiveName(value) || sensitiveValues.any { it.isNotEmpty() && value.contains(it) }) {
+        if (sensitiveName(value) || containsSensitiveValue(value, sensitiveValues)) {
             throw InvalidCommandRequestException()
         }
     }
+
+    private fun containsSensitiveValue(value: String, sensitiveValues: Set<String>): Boolean =
+        sensitiveValues.any { it.isNotEmpty() && value.contains(it) }
 
     private fun scalar(node: JsonNode): String? = when {
         node.isNull -> null
