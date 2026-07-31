@@ -179,6 +179,34 @@ describe("authorization contracts", () => {
     })).toThrow();
   });
 
+  it("rejects ambiguous authorization Unicode and accepts valid astral strings", () => {
+    const grant = authorizationInput.grants[0];
+    for (const invalid of [
+      { ...authorizationInput, grants: [{ ...grant, id: "\ud800" }] },
+      { ...authorizationInput, grants: [{ ...grant, id: "\udc00" }] },
+      { ...authorizationInput, grants: [{ ...grant, id: "bad\ufffdvalue" }] },
+      { ...authorizationInput, context: { value: "\ud800" } },
+      { ...authorizationInput, context: { "\udc00": "value" } },
+      { ...authorizationInput, context: { nested: { value: "\ufffd" } } },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      grants: [{ ...grant, id: "safe-😀-id" }],
+      context: { "key-😀": { value: "safe-🚀" } },
+    })).toBeDefined();
+  });
+
+  it("enforces the bounded context nesting depth", () => {
+    const nested = (depth: number): Record<string, unknown> => {
+      let value: unknown = "leaf";
+      for (let index = 0; index < depth; index += 1) value = { nested: value };
+      return value as Record<string, unknown>;
+    };
+    expect(authorizationInputSchema.parse({ ...authorizationInput, context: nested(8) })).toBeDefined();
+    expect(() => authorizationInputSchema.parse({ ...authorizationInput, context: nested(9) })).toThrow();
+  });
+
   it("rejects duplicate releases, duplicate grants, release mismatches, absent layers, and partial wildcards", () => {
     const grant = authorizationInput.grants[0];
     for (const invalid of [

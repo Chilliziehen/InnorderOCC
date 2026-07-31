@@ -177,6 +177,28 @@
           }
         ]
       }
+    },
+    {
+      "name": "valid astral grant and context strings",
+      "overrides": {
+        "context": {"key-😀": {"value": "safe-🚀"}},
+        "grants": [{
+          "id": "safe-😀-grant",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "maximum context nesting depth",
+      "overrides": {
+        "context": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": "safe"}}}}}}}}
+      }
     }
   ],
   "invalid": [
@@ -289,6 +311,46 @@
           "entityId": "*",
           "resourceId": "*"
         }]
+      }
+    },
+    {
+      "name": "raw lone-surrogate grant ID",
+      "overrides": {
+        "grants": [{
+          "id": "\ud800",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "replacement-character grant ID collision",
+      "overrides": {
+        "grants": [{
+          "id": "\ufffd",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {"name": "raw lone-surrogate context value", "overrides": {"context": {"value": "\ud800"}}},
+    {"name": "raw lone-surrogate context key", "overrides": {"context": {"\ud800": "value"}}},
+    {"name": "replacement-character context value", "overrides": {"context": {"value": "\ufffd"}}},
+    {"name": "replacement-character context key", "overrides": {"context": {"\ufffd": "value"}}},
+    {
+      "name": "context nesting exceeds maximum depth",
+      "overrides": {
+        "context": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": "unsafe"}}}}}}}}}
       }
     },
     {

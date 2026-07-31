@@ -7,6 +7,7 @@ max_safe_integer := 9007199254740991
 action_key_max_length := 128
 context_max_properties := 32
 context_max_serialized_length := 4096
+context_max_depth := 8
 forbidden_actions_max_length := 128
 grants_max_length := 256
 grant_id_max_length := 256
@@ -253,6 +254,40 @@ valid_context(context) if {
     is_object(context)
     count(context) <= context_max_properties
     count(json.marshal(context)) <= context_max_serialized_length
+    walked := [entry | entry := walk(context)]
+    every entry in walked {
+        count(entry[0]) <= context_max_depth
+        valid_context_path(entry[0])
+        valid_context_node(entry[1])
+    }
+}
+
+valid_context_path(path) if {
+    every segment in path {
+        valid_context_path_segment(segment)
+    }
+}
+
+valid_context_path_segment(segment) if {
+    not is_string(segment)
+}
+
+valid_context_path_segment(segment) if {
+    is_string(segment)
+    safe_unicode(segment)
+}
+
+valid_context_node(value) if {
+    not is_string(value)
+}
+
+valid_context_node(value) if {
+    is_string(value)
+    safe_unicode(value)
+}
+
+safe_unicode(value) if {
+    not contains(value, "�")
 }
 
 valid_forbidden_actions(actions) if {
@@ -279,6 +314,7 @@ valid_grant(grant, releases) if {
         "id", "layer", "releaseId", "effect", "action", "principalId", "entityId", "resourceId",
     }
     is_string(grant.id)
+    safe_unicode(grant.id)
     count(grant.id) >= 1
     count(grant.id) <= grant_id_max_length
     grant.layer in {"PLATFORM", "DOMAIN", "CUSTOMER"}

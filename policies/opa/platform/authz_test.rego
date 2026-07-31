@@ -240,6 +240,28 @@ test_grant_id_length_counts_unicode_code_points if {
     decision with input as object.union(base_input, {"grants": [rejected]}) == invalid_envelope
 }
 
+test_replacement_character_is_rejected_recursively if {
+    bad_grant := object.union(platform_allow, {"id": "bad�grant"})
+    grant_result := decision with input as object.union(base_input, {"grants": [bad_grant]})
+    value_result := decision with input as object.union(base_input, {"context": {"value": "bad�value"}})
+    key_result := decision with input as object.union(base_input, {"context": {"bad�key": "value"}})
+    nested_result := decision with input as object.union(base_input, {"context": {"nested": [{"value": "�"}]}})
+    grant_result == invalid_envelope
+    value_result == invalid_envelope
+    key_result == invalid_envelope
+    nested_result == invalid_envelope
+}
+
+test_valid_astral_unicode_and_context_depth_boundary if {
+    astral := object.union(platform_allow, {"id": "safe-😀-grant"})
+    accepted_context := {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": "safe-🚀"}}}}}}}}
+    rejected_context := {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": "unsafe"}}}}}}}}}
+    accepted := object.union(base_input, {"context": accepted_context, "grants": [astral]})
+    accepted_result := decision with input as accepted
+    accepted_result.allow
+    decision with input as object.union(base_input, {"context": rejected_context}) == invalid_envelope
+}
+
 test_types_uuid_and_integer_bounds_deny if {
     every patch in [
         {"contractVersion": 2},

@@ -6,6 +6,7 @@ export const AUTHORIZATION_CONTRACT_VERSION = 1;
 export const ACTION_KEY_MAX_LENGTH = 128;
 export const CONTEXT_MAX_PROPERTIES = 32;
 export const CONTEXT_MAX_SERIALIZED_LENGTH = 4096;
+export const CONTEXT_MAX_DEPTH = 8;
 export const FORBIDDEN_ACTIONS_MAX_LENGTH = 128;
 export const GRANTS_MAX_LENGTH = 256;
 export const GRANT_ID_MAX_LENGTH = 256;
@@ -30,6 +31,22 @@ const POLICY_REASON_IDS = {
 const normalizedUuid = (value: string) => value.toLowerCase();
 const definedStrings = (values: Array<string | undefined>) =>
   values.filter((value): value is string => value !== undefined);
+
+function hasUnambiguousUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit === 0xfffd) return false;
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      if (index + 1 >= value.length) return false;
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
 
 const stableActionSchema = z
   .string()
@@ -61,23 +78,27 @@ function isBoundedJsonObject(value: unknown): value is Record<string, unknown> {
 
   const entries = Object.entries(value);
   if (entries.length > CONTEXT_MAX_PROPERTIES) return false;
+  if (!isSafeJsonValue(value, 0)) return false;
   try {
     const serialized = JSON.stringify(value);
     return serialized !== undefined &&
       Array.from(serialized).length <= CONTEXT_MAX_SERIALIZED_LENGTH &&
-      JSON.parse(serialized) !== undefined &&
-      !containsNonJsonValue(value);
+      JSON.parse(serialized) !== undefined;
   } catch {
     return false;
   }
 }
 
-function containsNonJsonValue(value: unknown): boolean {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return false;
-  if (typeof value === "number") return !Number.isFinite(value);
-  if (Array.isArray(value)) return value.some(containsNonJsonValue);
-  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return true;
-  return Object.values(value).some(containsNonJsonValue);
+function isSafeJsonValue(value: unknown, depth: number): boolean {
+  if (depth > CONTEXT_MAX_DEPTH) return false;
+  if (value === null || typeof value === "boolean") return true;
+  if (typeof value === "string") return hasUnambiguousUnicode(value);
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every((item) => isSafeJsonValue(item, depth + 1));
+  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  return Object.entries(value).every(
+    ([key, item]) => hasUnambiguousUnicode(key) && isSafeJsonValue(item, depth + 1),
+  );
 }
 
 const contextSchema = z.unknown().refine(isBoundedJsonObject, {
@@ -90,7 +111,9 @@ const actionOrWildcardSchema = z.union([z.literal("*"), stableActionSchema]);
 const authorizationGrantSchema = z
   .object({
     id: z.string().refine(
-      (value) => hasUnicodeCodePointLengthWithin(value, 1, GRANT_ID_MAX_LENGTH),
+      (value) =>
+        hasUnambiguousUnicode(value) &&
+        hasUnicodeCodePointLengthWithin(value, 1, GRANT_ID_MAX_LENGTH),
       `Grant ID must contain 1-${GRANT_ID_MAX_LENGTH} Unicode code points`,
     ),
     layer: z.enum(["PLATFORM", "DOMAIN", "CUSTOMER"]),
