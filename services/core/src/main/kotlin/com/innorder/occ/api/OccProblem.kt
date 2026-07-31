@@ -19,6 +19,7 @@ data class OccProblem(
     val code: String,
     val correlationId: String,
     val detail: String? = null,
+    val currentVersion: Long? = null,
 ) {
     init {
         require(type.isAbsolute && PROBLEM_TYPE_PATTERN.matches(type.toString()))
@@ -27,6 +28,7 @@ data class OccProblem(
         require(code.length in 1..MAX_CODE_LENGTH)
         require(detail == null || ApiContractValidation.hasCodePointLengthWithin(detail, 0, MAX_DETAIL_LENGTH))
         require(ApiContractValidation.isStandardUuid(correlationId))
+        require(currentVersion == null || currentVersion >= 0)
     }
 
     companion object {
@@ -55,6 +57,21 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun conflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 409, "version-conflict", "Version conflict", "OCC-API-CONFLICT")
 
+    fun invalidIdempotencyKey(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "invalid-idempotency-key", "Invalid idempotency key", "OCC-COMMAND-IDEMPOTENCY-KEY")
+
+    fun idempotencyConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "idempotency-conflict", "Idempotency conflict", "OCC-COMMAND-IDEMPOTENCY-CONFLICT")
+
+    fun optimisticConflict(request: HttpServletRequest, currentVersion: Long): ResponseEntity<OccProblem> =
+        response(
+            request, 409, "optimistic-conflict", "Version conflict", "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+            currentVersion = currentVersion,
+        )
+
+    fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
+
     fun internal(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 500, "internal-error", "Internal server error", "OCC-API-INTERNAL")
 
@@ -82,6 +99,7 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
         title: String,
         code: String,
         detail: String? = null,
+        currentVersion: Long? = null,
     ): ResponseEntity<OccProblem> {
         val problem = OccProblem(
             URI.create("${OccProblem.PROBLEM_TYPE_ROOT}$slug"),
@@ -90,6 +108,7 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
             code,
             correlationId(request),
             detail,
+            currentVersion,
         )
         return ResponseEntity.status(status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(problem)
     }

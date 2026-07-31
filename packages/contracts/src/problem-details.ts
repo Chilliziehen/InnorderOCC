@@ -39,6 +39,7 @@ export const problemDetailsSchema = z
         ),
       )
       .optional(),
+    currentVersion: z.number().int().nonnegative().optional(),
   })
   .strict();
 

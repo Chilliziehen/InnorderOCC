@@ -1,6 +1,14 @@
 package com.innorder.occ.api
 
 import com.innorder.occ.auth.InvalidCredentialsException
+import com.innorder.occ.authz.AuthorizationAvailabilityException
+import com.innorder.occ.authz.AuthorizationDeniedException
+import com.innorder.occ.command.IdempotencyConflictException
+import com.innorder.occ.command.IdempotencyInProgressException
+import com.innorder.occ.command.InvalidIdempotencyKeyException
+import com.innorder.occ.command.InvalidCommandMetadataException
+import com.innorder.occ.command.InvalidCommandRequestException
+import com.innorder.occ.command.InvalidExpectedVersionException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -81,6 +89,46 @@ class ApiExceptionHandler(
         exception: OptimisticConflictException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.conflict(request)
+
+    @ExceptionHandler(InvalidIdempotencyKeyException::class)
+    fun invalidIdempotencyKey(
+        exception: InvalidIdempotencyKeyException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.invalidIdempotencyKey(request)
+
+    @ExceptionHandler(
+        InvalidCommandMetadataException::class,
+        InvalidCommandRequestException::class,
+        InvalidExpectedVersionException::class,
+    )
+    fun invalidCommand(
+        exception: RuntimeException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.validation(request, "Command request is invalid.")
+
+    @ExceptionHandler(IdempotencyConflictException::class, IdempotencyInProgressException::class)
+    fun idempotencyConflict(
+        exception: RuntimeException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.idempotencyConflict(request)
+
+    @ExceptionHandler(com.innorder.occ.command.OptimisticConflictException::class)
+    fun optimisticConflict(
+        exception: com.innorder.occ.command.OptimisticConflictException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.optimisticConflict(request, exception.currentVersion)
+
+    @ExceptionHandler(AuthorizationDeniedException::class)
+    fun authorizationDenied(
+        exception: AuthorizationDeniedException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.forbidden(request)
+
+    @ExceptionHandler(AuthorizationAvailabilityException::class)
+    fun authorizationUnavailable(
+        exception: AuthorizationAvailabilityException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.authorizationUnavailable(request)
 
     @ExceptionHandler(MethodArgumentTypeMismatchException::class)
     fun typeMismatch(

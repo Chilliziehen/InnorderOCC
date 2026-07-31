@@ -461,6 +461,7 @@ describe("problemDetailsSchema", () => {
       code: "C".repeat(PROBLEM_CODE_MAX_LENGTH),
       correlationId: id,
       detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
+      currentVersion: 0,
     };
 
     expect(problemDetailsSchema.parse(boundaryProblem)).toEqual(boundaryProblem);
@@ -472,6 +473,8 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, code: "C".repeat(PROBLEM_CODE_MIN_LENGTH - 1) },
       { ...boundaryProblem, code: "C".repeat(PROBLEM_CODE_MAX_LENGTH + 1) },
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
+      { ...boundaryProblem, currentVersion: -1 },
+      { ...boundaryProblem, currentVersion: 1.5 },
     ]) {
       expect(() => problemDetailsSchema.parse(invalid)).toThrow();
     }

@@ -111,6 +111,7 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /BootstrapSecretReaderTest/u);
   assert.match(result.stdout, /AuthorizationServiceIntegrationTest/u);
   assert.match(result.stdout, /AuthorizationSnapshotIntegrityIntegrationTest/u);
+  assert.match(result.stdout, /CommandExecutorIntegrationTest/u);
   assert.match(result.stdout, /strict Core authorization and real OPA integration/u);
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
 });

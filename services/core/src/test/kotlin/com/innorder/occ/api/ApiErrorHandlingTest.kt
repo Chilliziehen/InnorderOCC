@@ -3,6 +3,13 @@ package com.innorder.occ.api
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import com.innorder.occ.auth.RefreshCompensationException
+import com.innorder.occ.authz.AuthorizationAvailabilityException
+import com.innorder.occ.authz.AuthorizationDeniedException
+import com.innorder.occ.command.IdempotencyConflictException
+import com.innorder.occ.command.InvalidIdempotencyKeyException
+import com.innorder.occ.command.InvalidExpectedVersionException
+import com.innorder.occ.command.InvalidCommandRequestException
+import com.innorder.occ.command.OptimisticConflictException
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
@@ -254,6 +261,33 @@ class ApiErrorHandlingTest {
     }
 
     @Test
+    fun `command failures have focused stable mappings and only optimistic conflict exposes current version`() {
+        val expectations = listOf(
+            Triple("/test/invalid-idempotency", 400, "OCC-COMMAND-IDEMPOTENCY-KEY"),
+            Triple("/test/invalid-expected-version", 400, "OCC-API-VALIDATION"),
+            Triple("/test/invalid-command-request", 400, "OCC-API-VALIDATION"),
+            Triple("/test/idempotency-conflict", 409, "OCC-COMMAND-IDEMPOTENCY-CONFLICT"),
+            Triple("/test/optimistic-conflict", 409, "OCC-COMMAND-OPTIMISTIC-CONFLICT"),
+            Triple("/test/authorization-denied", 403, "OCC-API-FORBIDDEN"),
+            Triple("/test/authorization-unavailable", 503, "OCC-AUTHZ-UNAVAILABLE"),
+        )
+        expectations.forEach { (path, status, code) ->
+            val result = mockMvc.get(path).andExpect {
+                status { isEqualTo(status) }
+                content { contentType(MediaType.APPLICATION_PROBLEM_JSON) }
+                jsonPath("$.code") { value(code) }
+            }.andReturn()
+            val problem = objectMapper.readTree(result.response.contentAsString)
+            if (path.endsWith("optimistic-conflict")) {
+                assertThat(problem["currentVersion"].longValue()).isEqualTo(17)
+            } else {
+                assertThat(problem.has("currentVersion")).isFalse()
+            }
+            assertSafe(result.response.contentAsString, "request-secret")
+        }
+    }
+
+    @Test
     fun `common MVC client errors retain safe HTTP statuses without error logs`() {
         withFailureLogs { events ->
             val results = listOf(
@@ -424,7 +458,7 @@ class ApiErrorHandlingTest {
 
     private fun assertStrictProblem(json: String) {
         assertThat(objectMapper.readTree(json).fieldNames().asSequence().toSet())
-            .isSubsetOf("type", "title", "status", "code", "correlationId", "detail")
+            .isSubsetOf("type", "title", "status", "code", "correlationId", "detail", "currentVersion")
             .contains("type", "title", "status", "code", "correlationId")
         assertThat(objectMapper.readTree(json)["type"].asText()).startsWith("https://innorder.local/problems/")
     }
@@ -465,7 +499,28 @@ class ApiErrorHandlingTest {
         fun accessDenied(): Nothing = throw AccessDeniedException("refresh-token")
 
         @GetMapping("/conflict")
-        fun conflict(): Nothing = throw OptimisticConflictException("database version and password")
+        fun conflict(): Nothing = throw com.innorder.occ.api.OptimisticConflictException("database version and password")
+
+        @GetMapping("/invalid-idempotency")
+        fun invalidIdempotency(): Nothing = throw InvalidIdempotencyKeyException()
+
+        @GetMapping("/invalid-expected-version")
+        fun invalidExpectedVersion(): Nothing = throw InvalidExpectedVersionException()
+
+        @GetMapping("/invalid-command-request")
+        fun invalidCommandRequest(): Nothing = throw InvalidCommandRequestException()
+
+        @GetMapping("/idempotency-conflict")
+        fun idempotencyConflict(): Nothing = throw IdempotencyConflictException()
+
+        @GetMapping("/optimistic-conflict")
+        fun optimisticConflict(): Nothing = throw OptimisticConflictException(17)
+
+        @GetMapping("/authorization-denied")
+        fun authorizationDenied(): Nothing = throw AuthorizationDeniedException()
+
+        @GetMapping("/authorization-unavailable")
+        fun authorizationUnavailable(): Nothing = throw AuthorizationAvailabilityException()
 
         @GetMapping("/failure")
         fun failure(): Nothing = throw RuntimeException("jdbc:postgresql://admin:password@secret-db/occ Bearer access-token refresh-token")
@@ -487,7 +542,7 @@ class ApiErrorHandlingTest {
         fun context(request: HttpServletRequest): Nothing {
             observedAttribute = request.getAttribute(CorrelationIdFilter.REQUEST_ATTRIBUTE)
             observedMdc = MDC.get(CorrelationIdFilter.MDC_KEY)
-            throw OptimisticConflictException()
+            throw com.innorder.occ.api.OptimisticConflictException()
         }
 
         @GetMapping("/required")

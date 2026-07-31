@@ -162,6 +162,10 @@ components:
           type: string
           minLength: 0
           maxLength: 4096
+        currentVersion:
+          type: integer
+          format: int64
+          minimum: 0
     LoginRequest:
       type: object
       additionalProperties: false
