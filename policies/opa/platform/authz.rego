@@ -223,6 +223,9 @@ valid_releases(releases) if {
     is_object(releases)
     object.keys(releases) - {"PLATFORM", "DOMAIN", "CUSTOMER"} == set()
     valid_uuid(releases.PLATFORM)
+    every key in object.keys(releases) {
+        valid_uuid(releases[key])
+    }
     release_ids := [lower(id) | some key; id := releases[key]]
     every id in release_ids {
         valid_uuid(id)

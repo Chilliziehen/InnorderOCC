@@ -232,6 +232,28 @@ test_duplicate_release_and_grant_ids_deny if {
     decision with input as case_duplicate_release == invalid_envelope
 }
 
+invalid_optional_release(layer, value) if {
+    releases := object.union(base_input.releases, {layer: value})
+    request := object.union(base_input, {"releases": releases, "grants": [platform_allow]})
+    result := decision with input as request
+    result == invalid_envelope
+}
+
+test_malformed_optional_releases_fail_closed_with_matching_allow if {
+    invalid_optional_release("DOMAIN", null)
+    invalid_optional_release("DOMAIN", 42)
+    invalid_optional_release("DOMAIN", true)
+    invalid_optional_release("DOMAIN", [])
+    invalid_optional_release("DOMAIN", {})
+    invalid_optional_release("DOMAIN", "")
+    invalid_optional_release("CUSTOMER", null)
+    invalid_optional_release("CUSTOMER", 42)
+    invalid_optional_release("CUSTOMER", false)
+    invalid_optional_release("CUSTOMER", [])
+    invalid_optional_release("CUSTOMER", {})
+    invalid_optional_release("CUSTOMER", "")
+}
+
 test_grant_id_length_counts_unicode_code_points if {
     accepted := object.union(platform_allow, {"id": concat("", ["😀" | some _ in numbers.range(1, 200)])})
     rejected := object.union(platform_allow, {"id": concat("", ["😀" | some _ in numbers.range(1, 257)])})

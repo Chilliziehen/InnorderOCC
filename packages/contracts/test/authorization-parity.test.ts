@@ -12,6 +12,7 @@ type FixtureCase = {
   overrides: JsonObject;
   grantIdRepeat?: { value: string; count: number };
   contextRepeat?: { value: string; count: number; target: "key" | "value" };
+  malformedOptionalRelease?: { layer: "DOMAIN" | "CUSTOMER"; value: unknown };
 };
 type Fixtures = { baseInput: JsonObject; valid: FixtureCase[]; invalid: FixtureCase[] };
 
@@ -59,6 +60,22 @@ function materialize(fixture: FixtureCase): JsonObject {
     input.context = fixture.contextRepeat.target === "key"
       ? { [repeated]: "value" }
       : { value: repeated };
+  }
+  if (fixture.malformedOptionalRelease) {
+    input.releases = {
+      ...(input.releases as JsonObject),
+      [fixture.malformedOptionalRelease.layer]: fixture.malformedOptionalRelease.value,
+    };
+    input.grants = [{
+      id: "matching-platform-allow",
+      layer: "PLATFORM",
+      releaseId: "550e8400-e29b-41d4-a716-446655440000",
+      effect: "ALLOW",
+      action: "resource.read",
+      principalId: "*",
+      entityId: "*",
+      resourceId: "*",
+    }];
   }
   return input;
 }

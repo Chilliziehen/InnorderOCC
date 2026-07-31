@@ -42,8 +42,9 @@ input under `input`:
 ```
 
 `PLATFORM` is required. `DOMAIN` and `CUSTOMER` releases are optional. A grant is
-valid only when its `releaseId` exactly equals the release selected for its
-`layer`; grants cannot target an absent optional layer. Grant selectors accept
+valid only when its `releaseId` is the same UUID value, compared case-insensitively,
+as the release selected for its `layer`; grants cannot target an absent optional
+layer. Grant selectors accept
 an exact action or UUID, or the complete `*` wildcard.
 
 Core owns relationship and policy-release loading. Before constructing this

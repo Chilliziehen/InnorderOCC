@@ -208,6 +208,66 @@
     }
   ],
   "invalid": [
+    {
+      "name": "null DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": null},
+      "overrides": {}
+    },
+    {
+      "name": "numeric DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": 42},
+      "overrides": {}
+    },
+    {
+      "name": "boolean DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": true},
+      "overrides": {}
+    },
+    {
+      "name": "array DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": []},
+      "overrides": {}
+    },
+    {
+      "name": "object DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": {}},
+      "overrides": {}
+    },
+    {
+      "name": "empty DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": ""},
+      "overrides": {}
+    },
+    {
+      "name": "null CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": null},
+      "overrides": {}
+    },
+    {
+      "name": "numeric CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": 42},
+      "overrides": {}
+    },
+    {
+      "name": "boolean CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": false},
+      "overrides": {}
+    },
+    {
+      "name": "array CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": []},
+      "overrides": {}
+    },
+    {
+      "name": "object CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": {}},
+      "overrides": {}
+    },
+    {
+      "name": "empty CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": ""},
+      "overrides": {}
+    },
     {"name": "unknown input field", "overrides": {"unknown": true}},
     {"name": "nil request UUID", "overrides": {"requestId": "00000000-0000-0000-0000-000000000000"}},
     {"name": "UUID version zero", "overrides": {"requestId": "dddddddd-dddd-0ddd-8ddd-dddddddddddd"}},
