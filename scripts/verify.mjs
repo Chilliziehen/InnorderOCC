@@ -40,6 +40,7 @@ async function main() {
     "TEST-com.innorder.occ.iam.BootstrapAdministratorIntegrationTest.xml",
     "TEST-com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest.xml",
     "TEST-com.innorder.occ.iam.BootstrapSecretReaderTest.xml",
+    "TEST-com.innorder.occ.authz.AuthorizationServiceIntegrationTest.xml",
   ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
@@ -164,7 +165,7 @@ async function main() {
   }
 
   if (full) {
-    await run("Docker Testcontainers PostgreSQL integration tests", gradle, [
+    await run("strict Core authorization and real OPA integration", gradle, [
       ":services:core:test",
       "--tests", "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
       "--tests", "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
@@ -172,9 +173,14 @@ async function main() {
       "--tests", "com.innorder.occ.iam.BootstrapAdministratorIntegrationTest",
       "--tests", "com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest",
       "--tests", "com.innorder.occ.iam.BootstrapSecretReaderTest",
+      "--tests", "com.innorder.occ.authz.AuthorizationServiceIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
-    ]);
+    ], dryRun ? process.env : {
+      ...process.env,
+      OPA_PATH: requiredOpa,
+      INNORDER_STRICT_AUTHZ_TESTS: "1",
+    });
     console.log("\n[verify] enforce Docker integration JUnit results");
     if (!dryRun) integrationResults.forEach((result) => assertJUnitSuiteExecuted(result));
   }

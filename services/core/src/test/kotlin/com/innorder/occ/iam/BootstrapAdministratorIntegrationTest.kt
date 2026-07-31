@@ -115,7 +115,7 @@ class BootstrapAdministratorIntegrationTest {
             assertThat(jdbc.queryForObject(
                 "SELECT current_revision FROM authz.authorization_state WHERE singleton",
                 Long::class.java,
-            )).isEqualTo(before + 1)
+            )).isEqualTo(before + 3)
             assertThat(jdbc.queryForObject(
                 """SELECT count(*) FROM authz.relationship
                    WHERE relation_definition_id = ? AND object_entity_id = ? AND source_kind = 'SYSTEM'
@@ -125,6 +125,34 @@ class BootstrapAdministratorIntegrationTest {
                 BootstrapIds.ADMINISTRATOR_ROLE,
             )).isEqualTo(1)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.relationship", Long::class.java)).isEqualTo(1)
+            assertThat(jdbc.queryForMap(
+                """SELECT pr.id AS release_id, pr.release_number, pr.status AS release_status,
+                          pr.content_hash AS release_hash, pr.opa_revision,
+                          pb.id AS bundle_id, pb.bundle_key, pb.layer, pb.status AS bundle_status,
+                          pbv.id AS version_id, pbv.version, pbv.status AS version_status,
+                          pbv.content_hash AS version_hash, pbv.manifest = ?::jsonb AS manifest_matches
+                   FROM authz.policy_release pr
+                   JOIN authz.policy_release_item pri ON pri.release_id = pr.id
+                   JOIN authz.policy_bundle pb ON pb.id = pri.bundle_id
+                   JOIN authz.policy_bundle_version pbv ON pbv.id = pri.bundle_version_id
+                   WHERE pr.status = 'ACTIVE'""",
+                BootstrapPolicyBaseline.manifest,
+            )).containsAllEntriesOf(mapOf(
+                "release_id" to BootstrapIds.POLICY_RELEASE,
+                "release_number" to 1L,
+                "release_status" to "ACTIVE",
+                "release_hash" to BootstrapPolicyBaseline.releaseHash,
+                "opa_revision" to BootstrapPolicyBaseline.OPA_REVISION,
+                "bundle_id" to BootstrapIds.POLICY_BUNDLE,
+                "bundle_key" to "platform-core-authorization",
+                "layer" to "PLATFORM",
+                "bundle_status" to "ACTIVE",
+                "version_id" to BootstrapIds.POLICY_BUNDLE_VERSION,
+                "version" to 1,
+                "version_status" to "PUBLISHED",
+                "version_hash" to BootstrapPolicyBaseline.contentHash,
+                "manifest_matches" to true,
+            ))
             assertThat(jdbc.queryForMap(
                 """SELECT id, package_key, name, description, status
                    FROM catalog.domain_package WHERE id = ?""",
@@ -246,7 +274,7 @@ class BootstrapAdministratorIntegrationTest {
             assertThat(jdbc.queryForObject(
                 "SELECT current_revision FROM authz.authorization_state WHERE singleton",
                 Long::class.java,
-            )).isEqualTo(before + 1)
+            )).isEqualTo(before + 3)
         }
     }
 
@@ -323,6 +351,55 @@ class BootstrapAdministratorIntegrationTest {
             assertThat(restart.bootstrap()).isEqualTo(BootstrapResult.ALREADY_INITIALIZED)
             assertThat(bootstrapState(jdbc)).isEqualTo(orphanPrincipalState)
             assertThat(Files.exists(missing)).isFalse()
+        }
+    }
+
+    @Test
+    fun `existing administrator identity creates policy baseline without reading a missing credential`() {
+        database { jdbc, transactions ->
+            seedPublishedBaseline(jdbc, includeRelation = true)
+            seedInitializedIdentity(jdbc)
+            val missing = temp.resolve("missing-existing-identity-secret")
+
+            val result = administrator(
+                jdbc,
+                transactions,
+                PasswordService(),
+                BootstrapAdministratorProperties(missing.toString()),
+            ).bootstrap()
+
+            assertThat(result).isEqualTo(BootstrapResult.ALREADY_INITIALIZED)
+            assertThat(Files.exists(missing)).isFalse()
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM authz.policy_release WHERE id = ? AND status = 'ACTIVE'",
+                Long::class.java,
+                BootstrapIds.POLICY_RELEASE,
+            )).isEqualTo(1)
+        }
+    }
+
+    @Test
+    fun `existing administrator identity rejects conflicting fixed policy metadata without reading credential`() {
+        database { jdbc, transactions ->
+            seedPublishedBaseline(jdbc, includeRelation = true)
+            seedInitializedIdentity(jdbc)
+            jdbc.update(
+                "INSERT INTO authz.policy_bundle(id, bundle_key, layer, status) VALUES (?, 'spoofed-policy', 'PLATFORM', 'ACTIVE')",
+                BootstrapIds.POLICY_BUNDLE,
+            )
+            val missing = temp.resolve("missing-policy-conflict-secret")
+
+            assertThatThrownBy {
+                administrator(
+                    jdbc,
+                    transactions,
+                    PasswordService(),
+                    BootstrapAdministratorProperties(missing.toString()),
+                ).bootstrap()
+            }.isInstanceOf(BootstrapBaselineException::class.java)
+                .hasMessage("Administrator bootstrap baseline conflicts with existing data")
+            assertThat(Files.exists(missing)).isFalse()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release", Long::class.java)).isZero()
         }
     }
 
@@ -786,6 +863,40 @@ class BootstrapAdministratorIntegrationTest {
                WHERE id = ?""",
             BootstrapBaseline.contentHash,
             BootstrapIds.PACKAGE_VERSION,
+        )
+    }
+
+    private fun seedInitializedIdentity(jdbc: JdbcTemplate) {
+        listOf(
+            Triple(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
+            Triple(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
+            Triple(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
+        ).forEach { (id, key, name) ->
+            jdbc.update(
+                """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+                   VALUES (?, ?, ?, ?, 'ACTIVE')""",
+                id,
+                BootstrapIds.ROLE_TYPE,
+                BootstrapIds.ROLE_TYPE_VERSION,
+                key,
+            )
+            jdbc.update(
+                "INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, 'ROLE', ?, 'ACTIVE')",
+                id,
+                name,
+            )
+        }
+        val userId = UUID.fromString("71000000-0000-7000-8000-000000000005")
+        jdbc.update(
+            """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+               VALUES (?, ?, ?, 'existing:user', 'ACTIVE')""",
+            userId,
+            BootstrapIds.USER_TYPE,
+            BootstrapIds.USER_TYPE_VERSION,
+        )
+        jdbc.update(
+            "INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, 'USER', 'Existing User', 'ACTIVE')",
+            userId,
         )
     }
 

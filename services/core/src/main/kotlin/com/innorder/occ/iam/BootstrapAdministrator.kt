@@ -79,6 +79,9 @@ object BootstrapIds {
     val VIEWER_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000020")
     val OPERATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000021")
     val ADMINISTRATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000022")
+    val POLICY_BUNDLE: UUID = uuid("00000000-0000-7000-8000-000000000030")
+    val POLICY_BUNDLE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000031")
+    val POLICY_RELEASE: UUID = uuid("00000000-0000-7000-8000-000000000032")
 
     private fun uuid(value: String): UUID = UUID.fromString(value)
 }
@@ -96,6 +99,19 @@ internal object BootstrapBaseline {
     """.trimIndent()
     val contentHash: String = MessageDigest.getInstance("SHA-256")
         .digest(canonicalAssets.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+}
+
+internal object BootstrapPolicyBaseline {
+    const val OPA_REVISION = "platform-authz-v1"
+    const val manifest = """{"forbiddenActions":[],"roleGrants":[{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-viewer-read","resourceId":"*","subjectRoleEntityKey":"role:viewer"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-operator-execute","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-operator-read","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.admin","effect":"ALLOW","entityId":"*","id":"platform-administrator-admin","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-administrator-execute","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-administrator-read","resourceId":"*","subjectRoleEntityKey":"role:administrator"}],"version":1}"""
+    val contentHash: String = sha256(manifest)
+    val releaseHash: String = sha256(
+        "release|00000000-0000-7000-8000-000000000030|00000000-0000-7000-8000-000000000031|$contentHash|$OPA_REVISION",
+    )
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 }
 
@@ -136,12 +152,17 @@ class BootstrapAdministrator internal constructor(
         val outcome = try {
             transactions.execute {
                 jdbc.queryForObject("SELECT pg_advisory_xact_lock(?) IS NULL", Boolean::class.java, BOOTSTRAP_LOCK)
-                if (jdbc.queryForObject(
+                val initialized = jdbc.queryForObject(
                         """SELECT EXISTS (SELECT 1 FROM iam.principal WHERE principal_kind = 'USER')
                                   OR EXISTS (SELECT 1 FROM iam.user_account)""",
                         Boolean::class.java,
                     ) == true
-                ) {
+                if (initialized) {
+                    val now = jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)!!
+                    seedCatalog(now)
+                    jdbc.queryForObject("SELECT authz.lock_authorization_state_for_change()", Long::class.java)
+                    seedRoles(now)
+                    seedPolicyBaseline(now)
                     return@execute BootstrapOutcome(BootstrapResult.ALREADY_INITIALIZED, null)
                 }
 
@@ -157,6 +178,7 @@ class BootstrapAdministrator internal constructor(
                 seedCatalog(now)
                 jdbc.queryForObject("SELECT authz.lock_authorization_state_for_change()", Long::class.java)
                 seedRoles(now)
+                seedPolicyBaseline(now)
                 val userId = UUID.randomUUID()
                 jdbc.update(
                     """INSERT INTO authz.entity
@@ -420,6 +442,146 @@ class BootstrapAdministrator internal constructor(
                 )
             }
         }
+    }
+
+    private fun seedPolicyBaseline(now: OffsetDateTime) {
+        ensure(
+            "authz.policy_bundle",
+            "id = ? OR bundle_key = 'platform-core-authorization'",
+            arrayOf(BootstrapIds.POLICY_BUNDLE),
+            """id = ? AND bundle_key = 'platform-core-authorization' AND layer = 'PLATFORM'
+               AND package_id IS NULL AND status = 'ACTIVE' AND created_by IS NULL""",
+            arrayOf(BootstrapIds.POLICY_BUNDLE),
+        ) {
+            jdbc.update(
+                """INSERT INTO authz.policy_bundle(id, bundle_key, layer, status, created_at)
+                   VALUES (?, 'platform-core-authorization', 'PLATFORM', 'ACTIVE', ?)""",
+                BootstrapIds.POLICY_BUNDLE,
+                now,
+            )
+        }
+        ensure(
+            "authz.policy_bundle_version",
+            "id = ? OR (bundle_id = ? AND version = 1)",
+            arrayOf(BootstrapIds.POLICY_BUNDLE_VERSION, BootstrapIds.POLICY_BUNDLE),
+            """id = ? AND bundle_id = ? AND version = 1 AND status IN ('DRAFT', 'PUBLISHED')
+               AND manifest = ?::jsonb AND created_by IS NULL AND published_by IS NULL
+               AND ((status = 'DRAFT' AND content_hash IS NULL AND published_at IS NULL)
+                    OR (status = 'PUBLISHED' AND content_hash = ? AND published_at IS NOT NULL))""",
+            arrayOf(
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapPolicyBaseline.manifest,
+                BootstrapPolicyBaseline.contentHash,
+            ),
+        ) {
+            jdbc.update(
+                """INSERT INTO authz.policy_bundle_version
+                   (id, bundle_id, version, status, manifest, created_at)
+                   VALUES (?, ?, 1, 'DRAFT', ?::jsonb, ?)""",
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapPolicyBaseline.manifest,
+                now,
+            )
+        }
+        val versionStatus = jdbc.queryForObject(
+            "SELECT status FROM authz.policy_bundle_version WHERE id = ?",
+            String::class.java,
+            BootstrapIds.POLICY_BUNDLE_VERSION,
+        )
+        if (versionStatus == "DRAFT") {
+            jdbc.update(
+                """UPDATE authz.policy_bundle_version
+                   SET status = 'PUBLISHED', content_hash = ?, published_at = ?
+                   WHERE id = ? AND status = 'DRAFT'""",
+                BootstrapPolicyBaseline.contentHash,
+                now,
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+            )
+        }
+        if (count(
+                """SELECT count(*) FROM authz.policy_bundle_version
+                   WHERE id = ? AND bundle_id = ? AND version = 1 AND status = 'PUBLISHED'
+                     AND manifest = ?::jsonb AND content_hash = ? AND published_at IS NOT NULL
+                     AND created_by IS NULL AND published_by IS NULL""",
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapPolicyBaseline.manifest,
+                BootstrapPolicyBaseline.contentHash,
+            ) != 1L
+        ) throw BootstrapBaselineException()
+
+        ensure(
+            "authz.policy_release",
+            "id = ? OR release_number = 1",
+            arrayOf(BootstrapIds.POLICY_RELEASE),
+            """id = ? AND release_number = 1 AND status IN ('STAGED', 'ACTIVE') AND content_hash = ?
+               AND published_by IS NULL
+               AND ((status = 'STAGED' AND opa_revision IS NULL AND published_at IS NULL)
+                    OR (status = 'ACTIVE' AND opa_revision = ? AND published_at IS NOT NULL))""",
+            arrayOf(
+                BootstrapIds.POLICY_RELEASE,
+                BootstrapPolicyBaseline.releaseHash,
+                BootstrapPolicyBaseline.OPA_REVISION,
+            ),
+        ) {
+            jdbc.update(
+                """INSERT INTO authz.policy_release(id, release_number, status, content_hash, created_at)
+                   VALUES (?, 1, 'STAGED', ?, ?)""",
+                BootstrapIds.POLICY_RELEASE,
+                BootstrapPolicyBaseline.releaseHash,
+                now,
+            )
+        }
+        val releaseStatus = jdbc.queryForObject(
+            "SELECT status FROM authz.policy_release WHERE id = ?",
+            String::class.java,
+            BootstrapIds.POLICY_RELEASE,
+        )
+        if (releaseStatus == "STAGED") {
+            ensure(
+                "authz.policy_release_item",
+                "release_id = ?",
+                arrayOf(BootstrapIds.POLICY_RELEASE),
+                "release_id = ? AND bundle_id = ? AND bundle_version_id = ?",
+                arrayOf(BootstrapIds.POLICY_RELEASE, BootstrapIds.POLICY_BUNDLE, BootstrapIds.POLICY_BUNDLE_VERSION),
+            ) {
+                jdbc.update(
+                    "INSERT INTO authz.policy_release_item(release_id, bundle_id, bundle_version_id) VALUES (?, ?, ?)",
+                    BootstrapIds.POLICY_RELEASE,
+                    BootstrapIds.POLICY_BUNDLE,
+                    BootstrapIds.POLICY_BUNDLE_VERSION,
+                )
+            }
+            try {
+                jdbc.update(
+                    """UPDATE authz.policy_release
+                       SET status = 'ACTIVE', opa_revision = ?, published_at = ?
+                       WHERE id = ? AND status = 'STAGED'""",
+                    BootstrapPolicyBaseline.OPA_REVISION,
+                    now,
+                    BootstrapIds.POLICY_RELEASE,
+                )
+            } catch (_: Exception) {
+                throw BootstrapBaselineException()
+            }
+        }
+        if (count("SELECT count(*) FROM authz.policy_release WHERE status = 'ACTIVE'") != 1L ||
+            count(
+                """SELECT count(*) FROM authz.policy_release pr
+                   JOIN authz.policy_release_item pri ON pri.release_id = pr.id
+                   WHERE pr.id = ? AND pr.release_number = 1 AND pr.status = 'ACTIVE'
+                     AND pr.content_hash = ? AND pr.opa_revision = ? AND pr.published_at IS NOT NULL
+                     AND pr.published_by IS NULL AND pri.bundle_id = ? AND pri.bundle_version_id = ?""",
+                BootstrapIds.POLICY_RELEASE,
+                BootstrapPolicyBaseline.releaseHash,
+                BootstrapPolicyBaseline.OPA_REVISION,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+            ) != 1L ||
+            count("SELECT count(*) FROM authz.policy_release_item WHERE release_id = ?", BootstrapIds.POLICY_RELEASE) != 1L
+        ) throw BootstrapBaselineException()
     }
 
     private fun ensure(

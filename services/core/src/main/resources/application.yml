@@ -70,6 +70,8 @@ occ:
     external-enabled: ${STATUS_EXTERNAL_PROBES_ENABLED:true}
   opa:
     base-url: ${OPA_BASE_URL:http://localhost:8181}
+    connect-timeout: ${OPA_CONNECT_TIMEOUT:500ms}
+    request-timeout: ${OPA_REQUEST_TIMEOUT:1s}
   ai:
     base-url: ${AI_BASE_URL:http://localhost:3100}
   object-storage:
