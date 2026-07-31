@@ -30,3 +30,12 @@ export type {
 
 export { eventEnvelopeSchema } from "./events.js";
 export type { EventEnvelope } from "./events.js";
+
+export {
+  authorizationDecisionSchema,
+  authorizationInputSchema,
+} from "./authorization.js";
+export type {
+  AuthorizationDecision,
+  AuthorizationInput,
+} from "./authorization.js";

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  authorizationDecisionSchema,
+  authorizationInputSchema,
   currentUserSchema,
   eventEnvelopeSchema,
   loginRequestSchema,
@@ -8,6 +10,14 @@ import {
   refreshRequestSchema,
   tokenResponseSchema,
 } from "../src/index.js";
+import {
+  ACTION_KEY_MAX_LENGTH,
+  CONTEXT_MAX_PROPERTIES,
+  CONTEXT_MAX_SERIALIZED_LENGTH,
+  FORBIDDEN_ACTIONS_MAX_LENGTH,
+  GRANT_ID_MAX_LENGTH,
+  GRANTS_MAX_LENGTH,
+} from "../src/authorization.js";
 import {
   ACCESS_TOKEN_MAX_LENGTH,
   ACCESS_TOKEN_MIN_LENGTH,
@@ -49,6 +59,170 @@ const id = "550e8400-e29b-41d4-a716-446655440000";
 const anotherId = "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
 const occurredAt = "2026-07-30T14:15:16.000+02:00";
 const refreshToken = `${"A".repeat(REFRESH_TOKEN_LENGTH - 2)}_-`;
+
+const authorizationInput = {
+  contractVersion: 1,
+  requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  authorizationRevision: 17,
+  releases: {
+    PLATFORM: id,
+    DOMAIN: anotherId,
+    CUSTOMER: "123e4567-e89b-42d3-a456-426614174000",
+  },
+  principal: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", enabled: true },
+  entity: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+  action: "resource.read",
+  resource: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", active: true },
+  context: { correlationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+  forbiddenActions: ["resource.delete"],
+  grants: [
+    {
+      id: "platform-allow",
+      layer: "PLATFORM",
+      effect: "ALLOW",
+      action: "resource.read",
+      principalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      resourceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    },
+  ],
+} as const;
+
+describe("authorization contracts", () => {
+  it("parses the exact version-1 input and decision envelopes", () => {
+    expect(authorizationInputSchema.parse(authorizationInput)).toEqual(authorizationInput);
+    const decision = {
+      contractVersion: 1,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: authorizationInput.authorizationRevision,
+      releases: authorizationInput.releases,
+      decision: "ALLOW",
+      allow: true,
+      reasonCodes: ["ALLOW_GRANT_MATCH"],
+      reasonIds: ["grant:abc"],
+      matchedPolicyIds: ["grant:abc"],
+    } as const;
+    expect(authorizationDecisionSchema.parse(decision)).toEqual(decision);
+  });
+
+  it("rejects unknown fields throughout the input", () => {
+    for (const invalid of [
+      { ...authorizationInput, secret: true },
+      { ...authorizationInput, releases: { ...authorizationInput.releases, OTHER: id } },
+      { ...authorizationInput, principal: { ...authorizationInput.principal, secret: true } },
+      { ...authorizationInput, entity: { ...authorizationInput.entity, secret: true } },
+      { ...authorizationInput, resource: { ...authorizationInput.resource, secret: true } },
+      { ...authorizationInput, grants: [{ ...authorizationInput.grants[0], secret: true }] },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+  });
+
+  it("rejects malformed versions, UUIDs, revisions, and context", () => {
+    for (const invalid of [
+      { ...authorizationInput, contractVersion: 2 },
+      { ...authorizationInput, requestId: "not-a-uuid" },
+      { ...authorizationInput, authorizationRevision: -1 },
+      { ...authorizationInput, authorizationRevision: 1.5 },
+      { ...authorizationInput, authorizationRevision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...authorizationInput, principal: { ...authorizationInput.principal, id: "bad" } },
+      { ...authorizationInput, entity: { id: "bad" } },
+      { ...authorizationInput, resource: { ...authorizationInput.resource, id: "bad" } },
+      { ...authorizationInput, context: [] },
+      { ...authorizationInput, context: { invalid: undefined } },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+  });
+
+  it("enforces stable action and collection bounds", () => {
+    const grant = authorizationInput.grants[0];
+    const tooManyForbidden = Array.from(
+      { length: FORBIDDEN_ACTIONS_MAX_LENGTH + 1 },
+      (_, index) => `action.${index}`,
+    );
+    const tooManyGrants = Array.from({ length: GRANTS_MAX_LENGTH + 1 }, (_, index) => ({
+      ...grant,
+      id: `grant-${index}`,
+    }));
+    const tooLargeContext = Object.fromEntries(
+      Array.from({ length: CONTEXT_MAX_PROPERTIES + 1 }, (_, index) => [`k${index}`, index]),
+    );
+    for (const invalid of [
+      { ...authorizationInput, action: "" },
+      { ...authorizationInput, action: "resource.*" },
+      { ...authorizationInput, action: "a".repeat(ACTION_KEY_MAX_LENGTH + 1) },
+      { ...authorizationInput, forbiddenActions: ["resource.read", "resource.read"] },
+      { ...authorizationInput, forbiddenActions: tooManyForbidden },
+      { ...authorizationInput, grants: tooManyGrants },
+      { ...authorizationInput, context: tooLargeContext },
+      { ...authorizationInput, context: { value: "x".repeat(CONTEXT_MAX_SERIALIZED_LENGTH) } },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+  });
+
+  it("rejects duplicate releases, duplicate grants, absent layers, and partial wildcards", () => {
+    const grant = authorizationInput.grants[0];
+    for (const invalid of [
+      { ...authorizationInput, releases: { PLATFORM: id, DOMAIN: id } },
+      { ...authorizationInput, grants: [grant, { ...grant, effect: "DENY" }] },
+      {
+        ...authorizationInput,
+        releases: { PLATFORM: id },
+        grants: [{ ...grant, layer: "DOMAIN" }],
+      },
+      { ...authorizationInput, grants: [{ ...grant, action: "resource.*" }] },
+      { ...authorizationInput, grants: [{ ...grant, principalId: "aaaa*" }] },
+      { ...authorizationInput, grants: [{ ...grant, id: "x".repeat(GRANT_ID_MAX_LENGTH + 1) }] },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+
+    expect(
+      authorizationInputSchema.parse({
+        ...authorizationInput,
+        grants: [{ ...grant, action: "*", principalId: "*", entityId: "*", resourceId: "*" }],
+      }),
+    ).toBeDefined();
+  });
+
+  it("rejects inconsistent, unsorted, duplicate, or unknown decision fields", () => {
+    const baseDecision = {
+      contractVersion: 1,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: 17,
+      releases: authorizationInput.releases,
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["EXPLICIT_DENY", "PRINCIPAL_DISABLED"],
+      reasonIds: ["grant:a", "platform:principal-disabled"],
+      matchedPolicyIds: ["grant:a"],
+    } as const;
+    for (const invalid of [
+      { ...baseDecision, allow: true },
+      { ...baseDecision, reasonCodes: [...baseDecision.reasonCodes].reverse() },
+      { ...baseDecision, reasonCodes: ["EXPLICIT_DENY", "EXPLICIT_DENY"] },
+      { ...baseDecision, reasonIds: [...baseDecision.reasonIds].reverse() },
+      { ...baseDecision, matchedPolicyIds: ["grant:a", "grant:a"] },
+      { ...baseDecision, releases: { ...baseDecision.releases, OTHER: id } },
+      { ...baseDecision, secret: true },
+    ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
+  });
+
+  it("accepts only the canonical invalid-input decision envelope", () => {
+    const invalidEnvelope = {
+      contractVersion: 1,
+      requestId: "00000000-0000-0000-0000-000000000000",
+      authorizationRevision: 0,
+      releases: {},
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["INVALID_INPUT"],
+      reasonIds: [],
+      matchedPolicyIds: [],
+    } as const;
+    expect(authorizationDecisionSchema.parse(invalidEnvelope)).toEqual(invalidEnvelope);
+    for (const invalid of [
+      { ...invalidEnvelope, requestId: authorizationInput.requestId },
+      { ...invalidEnvelope, authorizationRevision: 1 },
+      { ...invalidEnvelope, releases: { PLATFORM: id } },
+      { ...invalidEnvelope, reasonIds: ["platform:invalid-input"] },
+    ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
+  });
+});
 
 const currentUser = {
   id,

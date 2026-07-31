@@ -121,42 +121,53 @@ test("structurally checks OPA policy fail-closed and opaque-reference constructs
   assert.match(policy, /^package innorder\.platform\.authz/m);
   assert.match(policy, /^import rego\.v1$/m);
   assert.match(policy, /default decision :=/);
-  assert.match(policy, /every grant in input\.grants\s*\{\s*valid_grant\(grant\)/u);
-  assert.match(policy, /count\(matching_deny_refs\) == 0/u);
+  assert.match(policy, /"requestId": "00000000-0000-0000-0000-000000000000"/u);
+  assert.match(policy, /object\.keys\(input\) ==/u);
+  assert.match(policy, /every grant in grants\s*\{\s*valid_grant\(grant, releases\)/u);
+  assert.match(policy, /grant\.layer in object\.keys\(releases\)/u);
+  assert.match(policy, /count\(denial_reason_codes\) == 0/u);
   assert.match(policy, /crypto\.sha256\(grant\.id\)/u);
+  assert.match(policy, /"reasonCodes": sort\(reason_codes\)/u);
+  assert.match(policy, /"matchedPolicyIds": sort\(matched_policy_ids\)/u);
+  assert.match(policy, /data\.innorder\.platform\.authz\.decision|package innorder\.platform\.authz/u);
   for (const token of [
+    "contractVersion",
+    "authorizationRevision",
+    "PLATFORM",
+    "DOMAIN",
+    "CUSTOMER",
     "PRINCIPAL_DISABLED",
     "RESOURCE_INACTIVE",
     "ACTION_FORBIDDEN",
     "EXPLICIT_DENY",
     "NO_MATCHING_ALLOW",
     "INVALID_INPUT",
-    "reason_codes",
-    "reason_ids",
+    "reasonCodes",
+    "reasonIds",
+    "matchedPolicyIds",
   ]) {
     assert.ok(policy.includes(token), `policy must include ${token}`);
   }
 
   for (const testName of [
-    "test_default_deny",
-    "test_matching_allow",
-    "test_explicit_deny_overrides_allow",
-    "test_nonmatching_grant_denies",
-    "test_disabled_principal_is_non_overridable",
-    "test_inactive_resource_is_non_overridable",
-    "test_forbidden_action_is_non_overridable",
-    "test_wildcards_match_all_supported_dimensions",
-    "test_malformed_input_denies",
-    "test_malformed_deny_grant_fails_closed",
-    "test_nonmatching_deny_does_not_override_matching_allow",
-    "test_reason_output_is_sorted_and_non_secret",
+    "test_all_layers_can_allow",
+    "test_allow_and_abstain_allows",
+    "test_all_abstain_denies",
+    "test_absent_optional_layers_are_not_applicable",
+    "test_grant_for_absent_layer_invalidates_request",
+    "test_each_layer_explicit_deny_overrides_allows",
+    "test_baseline_denials_are_non_overridable",
+    "test_exact_wildcard_matches_all_dimensions",
+    "test_partial_wildcard_is_invalid",
+    "test_unknown_and_malformed_fields_deny_deterministically",
+    "test_duplicate_release_and_grant_ids_deny",
+    "test_oversized_values_deny",
+    "test_reason_and_policy_ids_are_sorted_distinct_and_opaque",
   ]) {
     assert.match(tests, new RegExp(`\\b${testName}\\b`));
   }
-  assert.match(tests, /"effect": "DENY"[\s\S]*object\.remove\([^)]*, \{"action"\}\)/u);
-  assert.match(tests, /"resource_id": "another-resource"[\s\S]*"allow": true/u);
   assert.match(tests, /SENSITIVE_CONTEXT_TOKEN/u);
-  assert.match(tests, /"id": "SENSITIVE_GRANT_ID_Z"/u);
+  assert.match(tests, /SENSITIVE_GRANT_ID_Z/u);
   assert.match(tests, /json\.marshal\(result\)/u);
 });
 

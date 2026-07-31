@@ -2,83 +2,123 @@ package innorder.platform.authz
 
 import rego.v1
 
+contract_version := 1
+max_safe_integer := 9007199254740991
+action_key_max_length := 128
+context_max_properties := 32
+context_max_serialized_length := 4096
+forbidden_actions_max_length := 128
+grants_max_length := 256
+grant_id_max_length := 256
+
 default decision := {
+    "contractVersion": 1,
+    "requestId": "00000000-0000-0000-0000-000000000000",
+    "authorizationRevision": 0,
+    "releases": {},
+    "decision": "DENY",
     "allow": false,
-    "reason_codes": ["INVALID_INPUT"],
-    "reason_ids": ["platform:invalid-input"],
-}
-
-default authorized := false
-
-decision := {
-    "allow": false,
-    "reason_codes": ["INVALID_INPUT"],
-    "reason_ids": ["platform:invalid-input"],
-} if {
-    not valid_input
+    "reasonCodes": ["INVALID_INPUT"],
+    "reasonIds": [],
+    "matchedPolicyIds": [],
 }
 
 decision := {
-    "allow": authorized,
-    "reason_codes": sort(decision_reason_codes),
-    "reason_ids": sort(decision_reason_ids),
+    "contractVersion": contract_version,
+    "requestId": input.requestId,
+    "authorizationRevision": input.authorizationRevision,
+    "releases": input.releases,
+    "decision": decision_name,
+    "allow": decision_name == "ALLOW",
+    "reasonCodes": sort(reason_codes),
+    "reasonIds": sort(reason_ids),
+    "matchedPolicyIds": sort(matched_policy_ids),
 } if {
     valid_input
 }
 
-valid_input if {
-    is_object(input)
-    is_object(input.principal)
-    nonempty_string(input.principal.id)
-    is_boolean(input.principal.enabled)
-    is_object(input.entity)
-    nonempty_string(input.entity.id)
-    nonempty_string(input.action)
-    is_object(input.resource)
-    nonempty_string(input.resource.id)
-    is_boolean(input.resource.active)
-    is_object(input.context)
-    is_array(input.forbidden_actions)
-    every action in input.forbidden_actions {
-        nonempty_string(action)
-    }
-    is_array(input.grants)
-    every grant in input.grants {
-        valid_grant(grant)
-    }
+decision_name := "DENY" if {
+    count(denial_reason_codes) > 0
 }
 
-valid_grant(grant) if {
-    is_object(grant)
-    nonempty_string(grant.id)
-    grant.effect in {"ALLOW", "DENY"}
-    nonempty_string(grant.action)
-    nonempty_string(grant.principal_id)
-    nonempty_string(grant.entity_id)
-    nonempty_string(grant.resource_id)
+decision_name := "ALLOW" if {
+    count(denial_reason_codes) == 0
+    count(matching_allow_refs) > 0
 }
 
-nonempty_string(value) if {
-    is_string(value)
-    value != ""
+decision_name := "DENY" if {
+    count(denial_reason_codes) == 0
+    count(matching_allow_refs) == 0
 }
 
-value_matches(pattern, _) if {
-    pattern == "*"
+reason_codes contains code if {
+    code := denial_reason_codes[_]
 }
 
-value_matches(pattern, value) if {
-    pattern == value
+reason_codes contains "ALLOW_GRANT_MATCH" if {
+    decision_name == "ALLOW"
 }
 
-grant_matches(grant) if {
-    value_matches(grant.action, input.action)
-    value_matches(grant.principal_id, input.principal.id)
-    value_matches(grant.entity_id, input.entity.id)
-    value_matches(grant.resource_id, input.resource.id)
+reason_codes contains "NO_MATCHING_ALLOW" if {
+    count(denial_reason_codes) == 0
+    count(matching_allow_refs) == 0
 }
 
-grant_ref(grant) := sprintf("grant:%s", [crypto.sha256(grant.id)])
+reason_ids contains id if {
+    id := baseline_reason_ids[_]
+}
+
+reason_ids contains id if {
+    count(matching_deny_refs) > 0
+    id := matching_deny_refs[_]
+}
+
+reason_ids contains id if {
+    decision_name == "ALLOW"
+    id := matching_allow_refs[_]
+}
+
+matched_policy_ids contains id if {
+    count(matching_deny_refs) > 0
+    id := matching_deny_refs[_]
+}
+
+matched_policy_ids contains id if {
+    decision_name == "ALLOW"
+    id := matching_allow_refs[_]
+}
+
+denial_reason_codes contains code if {
+    code := baseline_reason_codes[_]
+}
+
+denial_reason_codes contains "EXPLICIT_DENY" if {
+    count(matching_deny_refs) > 0
+}
+
+baseline_reason_codes contains "PRINCIPAL_DISABLED" if {
+    not input.principal.enabled
+}
+
+baseline_reason_codes contains "RESOURCE_INACTIVE" if {
+    not input.resource.active
+}
+
+baseline_reason_codes contains "ACTION_FORBIDDEN" if {
+    input.action in input.forbiddenActions
+}
+
+baseline_reason_ids contains "platform:principal-disabled" if {
+    not input.principal.enabled
+}
+
+baseline_reason_ids contains "platform:resource-inactive" if {
+    not input.resource.active
+}
+
+baseline_reason_ids contains "platform:action-forbidden" if {
+    input.action in input.forbiddenActions
+}
 
 matching_allow_refs contains grant_ref(grant) if {
     grant := input.grants[_]
@@ -92,63 +132,144 @@ matching_deny_refs contains grant_ref(grant) if {
     grant_matches(grant)
 }
 
-baseline_reason_codes contains "PRINCIPAL_DISABLED" if {
-    input.principal.enabled == false
+grant_matches(grant) if {
+    grant.layer in object.keys(input.releases)
+    value_matches(grant.action, input.action)
+    value_matches(grant.principalId, input.principal.id)
+    value_matches(grant.entityId, input.entity.id)
+    value_matches(grant.resourceId, input.resource.id)
 }
 
-baseline_reason_codes contains "RESOURCE_INACTIVE" if {
-    input.resource.active == false
+value_matches("*", _)
+
+value_matches(pattern, value) if {
+    pattern != "*"
+    pattern == value
 }
 
-baseline_reason_codes contains "ACTION_FORBIDDEN" if {
-    input.action in input.forbidden_actions
+grant_ref(grant) := sprintf("grant:%s", [crypto.sha256(grant.id)])
+
+valid_input if {
+    is_object(input)
+    object.keys(input) == {
+        "contractVersion", "requestId", "authorizationRevision", "releases",
+        "principal", "entity", "action", "resource", "context",
+        "forbiddenActions", "grants",
+    }
+    input.contractVersion == contract_version
+    valid_uuid(input.requestId)
+    valid_revision(input.authorizationRevision)
+    valid_releases(input.releases)
+    valid_principal(input.principal)
+    valid_entity(input.entity)
+    valid_action(input.action)
+    valid_resource(input.resource)
+    valid_context(input.context)
+    valid_forbidden_actions(input.forbiddenActions)
+    valid_grants(input.grants, input.releases)
 }
 
-baseline_reason_ids contains "platform:principal-disabled" if {
-    input.principal.enabled == false
+valid_revision(value) if {
+    is_number(value)
+    value >= 0
+    value <= max_safe_integer
+    round(value) == value
 }
 
-baseline_reason_ids contains "platform:resource-inactive" if {
-    input.resource.active == false
+valid_releases(releases) if {
+    is_object(releases)
+    object.keys(releases) - {"PLATFORM", "DOMAIN", "CUSTOMER"} == set()
+    valid_uuid(releases.PLATFORM)
+    release_ids := [id | some key; id := releases[key]]
+    every id in release_ids {
+        valid_uuid(id)
+    }
+    count(release_ids) == count({id | some id in release_ids})
 }
 
-baseline_reason_ids contains "platform:action-forbidden" if {
-    input.action in input.forbidden_actions
+valid_principal(principal) if {
+    is_object(principal)
+    object.keys(principal) == {"id", "enabled"}
+    valid_uuid(principal.id)
+    is_boolean(principal.enabled)
 }
 
-authorized := true if {
-    count(baseline_reason_codes) == 0
-    count(matching_deny_refs) == 0
-    count(matching_allow_refs) > 0
+valid_entity(entity) if {
+    is_object(entity)
+    object.keys(entity) == {"id"}
+    valid_uuid(entity.id)
 }
 
-decision_reason_codes contains code if {
-    code := baseline_reason_codes[_]
+valid_resource(resource) if {
+    is_object(resource)
+    object.keys(resource) == {"id", "active"}
+    valid_uuid(resource.id)
+    is_boolean(resource.active)
 }
 
-decision_reason_codes contains "EXPLICIT_DENY" if {
-    count(matching_deny_refs) > 0
+valid_context(context) if {
+    is_object(context)
+    count(context) <= context_max_properties
+    count(json.marshal(context)) <= context_max_serialized_length
 }
 
-decision_reason_codes contains "ALLOW_GRANT_MATCH" if {
-    authorized
+valid_forbidden_actions(actions) if {
+    is_array(actions)
+    count(actions) <= forbidden_actions_max_length
+    every action in actions {
+        valid_action(action)
+    }
+    count(actions) == count({action | some action in actions})
 }
 
-decision_reason_codes contains "NO_MATCHING_ALLOW" if {
-    count(baseline_reason_codes) == 0
-    count(matching_deny_refs) == 0
-    count(matching_allow_refs) == 0
+valid_grants(grants, releases) if {
+    is_array(grants)
+    count(grants) <= grants_max_length
+    every grant in grants {
+        valid_grant(grant, releases)
+    }
+    count(grants) == count({grant.id | some grant in grants})
 }
 
-decision_reason_ids contains reason_id if {
-    reason_id := baseline_reason_ids[_]
+valid_grant(grant, releases) if {
+    is_object(grant)
+    object.keys(grant) == {
+        "id", "layer", "effect", "action", "principalId", "entityId", "resourceId",
+    }
+    is_string(grant.id)
+    count(grant.id) >= 1
+    count(grant.id) <= grant_id_max_length
+    grant.layer in {"PLATFORM", "DOMAIN", "CUSTOMER"}
+    grant.layer in object.keys(releases)
+    grant.effect in {"ALLOW", "DENY"}
+    valid_action_or_wildcard(grant.action)
+    valid_uuid_or_wildcard(grant.principalId)
+    valid_uuid_or_wildcard(grant.entityId)
+    valid_uuid_or_wildcard(grant.resourceId)
 }
 
-decision_reason_ids contains grant_ref if {
-    grant_ref := matching_deny_refs[_]
+valid_action(value) if {
+    is_string(value)
+    count(value) >= 1
+    count(value) <= action_key_max_length
+    regex.match("^[A-Za-z0-9][A-Za-z0-9._:-]*$", value)
 }
 
-decision_reason_ids contains grant_ref if {
-    authorized
-    grant_ref := matching_allow_refs[_]
+valid_action_or_wildcard("*")
+
+valid_action_or_wildcard(value) if {
+    value != "*"
+    valid_action(value)
+}
+
+valid_uuid_or_wildcard("*")
+
+valid_uuid_or_wildcard(value) if {
+    value != "*"
+    valid_uuid(value)
+}
+
+valid_uuid(value) if {
+    is_string(value)
+    regex.match("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", value)
 }
