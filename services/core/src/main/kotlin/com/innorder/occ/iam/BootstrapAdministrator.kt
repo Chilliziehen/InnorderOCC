@@ -1,6 +1,9 @@
 package com.innorder.occ.iam
 
 import com.innorder.occ.auth.PasswordService
+import com.innorder.occ.authz.PolicyLayer
+import com.innorder.occ.authz.PolicyReleaseIntegrity
+import com.innorder.occ.authz.PolicyReleaseItemIntegrity
 import org.springframework.boot.ApplicationArguments
 import org.springframework.boot.ApplicationRunner
 import org.springframework.boot.autoconfigure.condition.ConditionOutcome
@@ -106,8 +109,16 @@ internal object BootstrapPolicyBaseline {
     const val OPA_REVISION = "platform-authz-v1"
     const val manifest = """{"forbiddenActions":[],"roleGrants":[{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-viewer-read","resourceId":"*","subjectRoleEntityKey":"role:viewer"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-operator-execute","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-operator-read","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.admin","effect":"ALLOW","entityId":"*","id":"platform-administrator-admin","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-administrator-execute","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-administrator-read","resourceId":"*","subjectRoleEntityKey":"role:administrator"}],"version":1}"""
     val contentHash: String = sha256(manifest)
-    val releaseHash: String = sha256(
-        "release|00000000-0000-7000-8000-000000000030|00000000-0000-7000-8000-000000000031|$contentHash|$OPA_REVISION",
+    val releaseHash: String = PolicyReleaseIntegrity.contentHash(
+        OPA_REVISION,
+        listOf(
+            PolicyReleaseItemIntegrity(
+                PolicyLayer.PLATFORM,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+                contentHash,
+            ),
+        ),
     )
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")

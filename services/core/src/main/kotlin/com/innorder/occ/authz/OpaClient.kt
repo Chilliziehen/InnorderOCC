@@ -34,6 +34,7 @@ class OpaClient(
     objectMapper: ObjectMapper,
     properties: OpaProperties,
     private val client: HttpClient = buildClient(properties),
+    private val decisionValidator: AuthorizationDecisionValidator = AuthorizationDecisionValidator(),
 ) : PolicyDecisionClient {
     private val mapper = objectMapper.copy()
         .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -67,13 +68,18 @@ class OpaClient(
                 val responseBody = readBounded(stream)
                 if (response.statusCode() != 200) throw OpaClientException()
                 val wrapper = try {
-                    mapper.readValue(responseBody, OpaResult::class.java)
+                    val root = mapper.readTree(responseBody)
+                    if (!root.isObject || root.fieldNames().asSequence().toSet() != setOf("result")) {
+                        throw OpaClientException()
+                    }
+                    decisionValidator.validateRaw(root.path("result"))
+                    mapper.treeToValue(root, OpaResult::class.java)
                 } catch (_: MismatchedInputException) {
                     throw OpaClientException()
                 } catch (_: RuntimeException) {
                     throw OpaClientException()
                 }
-                return wrapper.result.also(::validateDecision)
+                return wrapper.result.also(decisionValidator::validate)
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
@@ -91,39 +97,12 @@ class OpaClient(
         return bytes
     }
 
-    private fun validateDecision(decision: AuthorizationDecision) {
-        if (decision.contractVersion != 1 || !validUuid(decision.requestId) || decision.authorizationRevision < 0 ||
-            decision.releases.keys !in setOf(
-                setOf(PolicyLayer.PLATFORM),
-                setOf(PolicyLayer.PLATFORM, PolicyLayer.DOMAIN),
-                setOf(PolicyLayer.PLATFORM, PolicyLayer.CUSTOMER),
-                setOf(PolicyLayer.PLATFORM, PolicyLayer.DOMAIN, PolicyLayer.CUSTOMER),
-            ) || decision.releases.values.any { !validUuid(it) } ||
-            decision.releases.values.toSet().size != decision.releases.size ||
-            decision.decision == AuthorizationDecisionValue.ERROR ||
-            decision.allow != (decision.decision == AuthorizationDecisionValue.ALLOW) ||
-            decision.reasonCodes.size > 128 || decision.reasonIds.size > 256 || decision.matchedPolicyIds.size > 256 ||
-            decision.reasonCodes.isEmpty() || decision.reasonCodes.any { !REASON_CODE.matches(it) } ||
-            decision.reasonIds.any { !OPAQUE_REFERENCE.matches(it) } ||
-            decision.matchedPolicyIds.any { !OPAQUE_REFERENCE.matches(it) } ||
-            !decision.reasonIds.containsAll(decision.matchedPolicyIds) ||
-            decision.reasonCodes != decision.reasonCodes.distinct().sorted() ||
-            decision.reasonIds != decision.reasonIds.distinct().sorted() ||
-            decision.matchedPolicyIds != decision.matchedPolicyIds.distinct().sorted()
-        ) throw OpaClientException()
-    }
-
-    private fun validUuid(value: java.util.UUID): Boolean = value.version() in 1..8 && value.variant() == 2
-
     private data class OpaInput(val input: AuthorizationSnapshot)
     private data class OpaResult(val result: AuthorizationDecision)
 
     companion object {
         private const val MAX_RESPONSE_BYTES = 256 * 1024
         private const val DECISION_PATH = "/v1/data/innorder/platform/authz/decision"
-        private val REASON_CODE = Regex("^[A-Z][A-Z0-9_]{0,127}${'$'}")
-        private val OPAQUE_REFERENCE = Regex("^(grant|policy):[0-9a-f]{64}${'$'}")
-
         private fun buildClient(properties: OpaProperties): HttpClient {
             require(!properties.connectTimeout.isNegative && !properties.connectTimeout.isZero)
             require(properties.connectTimeout <= Duration.ofMillis(500))

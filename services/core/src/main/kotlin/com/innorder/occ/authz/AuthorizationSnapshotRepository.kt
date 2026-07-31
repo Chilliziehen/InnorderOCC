@@ -30,6 +30,7 @@ class AuthorizationSnapshotRepository(
             "SELECT authz.lock_authorization_state_for_snapshot()",
             Long::class.java,
         ) ?: throw AuthorizationSnapshotException()
+        if (revision !in 0..AuthorizationDecisionValidator.MAX_SAFE_INTEGER) throw AuthorizationSnapshotException()
         val snapshotAt = jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)
             ?: throw AuthorizationSnapshotException()
         validateRequest(request)
@@ -118,7 +119,8 @@ class AuthorizationSnapshotRepository(
 
     private fun loadReleaseLayers(): List<ReleaseLayer> {
         val rows = jdbc.query(
-            """SELECT pr.id AS release_id, pr.opa_revision, pb.layer, pb.status AS bundle_status,
+            """SELECT pr.id AS release_id, pr.content_hash AS release_content_hash, pr.opa_revision,
+                      pb.id AS bundle_id, pb.layer, pb.status AS bundle_status,
                       pbv.id AS bundle_version_id, pbv.status AS version_status,
                       pbv.manifest::text AS manifest, pbv.content_hash
                FROM authz.policy_release pr
@@ -130,7 +132,9 @@ class AuthorizationSnapshotRepository(
             { rs, _ ->
                 RawReleaseLayer(
                     rs.getObject("release_id", UUID::class.java),
+                    rs.getString("release_content_hash"),
                     rs.getString("opa_revision"),
+                    rs.getObject("bundle_id", UUID::class.java),
                     rs.getString("layer"),
                     rs.getString("bundle_status"),
                     rs.getObject("bundle_version_id", UUID::class.java),
@@ -149,11 +153,24 @@ class AuthorizationSnapshotRepository(
             if (manifestBytes.size > MAX_MANIFEST_BYTES) throw AuthorizationSnapshotException()
             val root = try { mapper.readTree(raw.manifest) } catch (_: Exception) { throw AuthorizationSnapshotException() }
             if (sha256(canonicalBytes(root)) != raw.contentHash) throw AuthorizationSnapshotException()
-            ReleaseLayer(raw.releaseId, raw.opaRevision!!, layer, raw.bundleVersionId, root)
+            ReleaseLayer(
+                raw.releaseId,
+                raw.opaRevision!!,
+                layer,
+                raw.bundleId,
+                raw.bundleVersionId,
+                raw.contentHash,
+                root,
+            )
         }
         if (layers.map { it.layer }.toSet().size != layers.size || layers.none { it.layer == PolicyLayer.PLATFORM }) {
             throw AuthorizationSnapshotException()
         }
+        val expectedReleaseHash = PolicyReleaseIntegrity.contentHash(
+            layers.first().opaRevision,
+            layers.map { PolicyReleaseItemIntegrity(it.layer, it.bundleId, it.bundleVersionId, it.bundleContentHash) },
+        )
+        if (rows.any { it.releaseContentHash != expectedReleaseHash }) throw AuthorizationSnapshotException()
         return layers
     }
 
@@ -306,7 +323,9 @@ class AuthorizationSnapshotRepository(
 
     private data class RawReleaseLayer(
         val releaseId: UUID,
+        val releaseContentHash: String,
         val opaRevision: String?,
+        val bundleId: UUID,
         val layer: String,
         val bundleStatus: String,
         val bundleVersionId: UUID,
@@ -319,7 +338,9 @@ class AuthorizationSnapshotRepository(
         val composedReleaseId: UUID,
         val opaRevision: String,
         val layer: PolicyLayer,
+        val bundleId: UUID,
         val bundleVersionId: UUID,
+        val bundleContentHash: String,
         val manifest: JsonNode,
         var forbiddenActions: List<String> = emptyList(),
     )

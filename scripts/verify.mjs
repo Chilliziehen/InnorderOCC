@@ -41,6 +41,7 @@ async function main() {
     "TEST-com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest.xml",
     "TEST-com.innorder.occ.iam.BootstrapSecretReaderTest.xml",
     "TEST-com.innorder.occ.authz.AuthorizationServiceIntegrationTest.xml",
+    "TEST-com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest.xml",
   ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
 
   function printable(command, args) {
@@ -174,6 +175,7 @@ async function main() {
       "--tests", "com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest",
       "--tests", "com.innorder.occ.iam.BootstrapSecretReaderTest",
       "--tests", "com.innorder.occ.authz.AuthorizationServiceIntegrationTest",
+      "--tests", "com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ], dryRun ? process.env : {
