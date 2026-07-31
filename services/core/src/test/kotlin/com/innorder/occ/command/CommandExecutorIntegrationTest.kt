@@ -400,6 +400,7 @@ class CommandExecutorIntegrationTest {
                     AGGREGATE_ID,
                 )
                 return successMutation().copy(
+                    body = json("""{"displayName":"Alice"}"""),
                     auditDetail = json("""{"displayName":"Alice"}"""),
                     events = listOf(PendingEventSpec(
                         "kernel-test.updated", 1, json("""{"displayName":"Alice"}"""), 4,
@@ -408,10 +409,70 @@ class CommandExecutorIntegrationTest {
             }
         }
 
-        executor.execute(metadata("safe-derived"), """{"displayName":"Alice"}""".toByteArray(), safe)
+        val result = executor.execute(metadata("safe-derived"), """{"displayName":"Alice"}""".toByteArray(), safe)
 
+        assertThat(result.body.toJsonNode().path("displayName").textValue()).isEqualTo("Alice")
         assertThat(jdbc.queryForObject("SELECT detail->>'displayName' FROM audit.audit_record WHERE target_entity_id = ?", String::class.java, RESOURCE_ID))
             .isEqualTo("Alice")
+    }
+
+    @Test
+    fun `all command controlled persisted surfaces reject sensitive terminology and request secrets`() {
+        data class Attempt(
+            val name: String,
+            val requestSecret: String,
+            val metadata: CommandMetadata = metadata("surface-$name"),
+            val command: (String) -> AuthorizedCommand,
+        )
+        fun mutationCommand(transform: (CommandMutation, String) -> CommandMutation) = { secret: String ->
+            object : AuthorizedCommand by command() {
+                override fun execute(context: CommandContext): CommandMutation {
+                    context.jdbc.update(
+                        "UPDATE occ.command_kernel_test SET value = 'unsafe', row_version = 4 WHERE id = ?",
+                        AGGREGATE_ID,
+                    )
+                    return transform(successMutation(), secret)
+                }
+            }
+        }
+        val attempts = listOf(
+            Attempt("audit-reason", "reason-sensitive", command = mutationCommand { mutation, secret ->
+                mutation.copy(auditReason = secret)
+            }),
+            Attempt("event-type", "event-sensitive", command = mutationCommand { mutation, secret ->
+                mutation.copy(events = listOf(PendingEventSpec(secret, 1, json("{}"), 4)))
+            }),
+            Attempt("aggregate-type", "secret.aggregate", command = { secret ->
+                object : AuthorizedCommand by command() { override val aggregateType = secret }
+            }),
+            Attempt("response", "response-sensitive", command = mutationCommand { mutation, secret ->
+                mutation.copy(body = json("""{"result":"$secret"}"""))
+            }),
+            Attempt("field-name", "field-name-sensitive", command = mutationCommand { mutation, secret ->
+                mutation.copy(auditDetail = json("""{"$secret":"safe"}"""))
+            }),
+            Attempt(
+                "idempotency-key", "idempotency-sensitive",
+                metadata = metadata("idempotency-sensitive"),
+                command = { command() },
+            ),
+        )
+
+        attempts.forEach { attempt ->
+            assertThatThrownBy {
+                executor.execute(
+                    attempt.metadata,
+                    """{"secret":"${attempt.requestSecret}"}""".toByteArray(),
+                    attempt.command(attempt.requestSecret),
+                )
+            }.describedAs(attempt.name).isInstanceOf(InvalidCommandRequestException::class.java)
+            assertRolledBack()
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM authz.decision_log WHERE correlation_id = ?",
+                Long::class.java,
+                attempt.metadata.correlationId,
+            )).isZero()
+        }
     }
 
     @Test

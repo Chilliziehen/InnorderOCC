@@ -1270,7 +1270,7 @@ class AuthorizationServiceIntegrationTest {
             fun canonical(value: String) = CanonicalJsonObject.from(ObjectMapper().readTree(value))
             return CommandMutation(
                 200, canonical("""{"result":"changed"}"""), resourceId, aggregateId, aggregateType,
-                3, 4, "authorization fact change", canonical("""{"changed":true}"""),
+                3, 4, "fact change", canonical("""{"changed":true}"""),
                 listOf(PendingEventSpec("authz.entity.updated", 1, canonical("""{"changed":true}"""), 4)),
             )
         }

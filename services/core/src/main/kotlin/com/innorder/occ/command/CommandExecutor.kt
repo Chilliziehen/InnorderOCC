@@ -33,6 +33,7 @@ class CommandExecutor(
         val descriptor = captureDescriptor(metadata, command)
         val fingerprint = fingerprint(descriptor, request)
         val sensitiveValues = sensitiveValues(request)
+        validatePreAcquireDataMinimization(metadata, descriptor, sensitiveValues)
         return transactions.execute {
             when (val acquisition = idempotency.acquire(descriptor, metadata.idempotencyKey, fingerprint)) {
                 is IdempotencyAcquisition.Replay -> acquisition.result
@@ -148,8 +149,25 @@ class CommandExecutor(
     }
 
     private fun validateDataMinimization(mutation: CommandMutation, requestSensitiveValues: Set<String>) {
+        mutation.auditReason?.let { validatePersistedString(it, requestSensitiveValues) }
+        validatePersistedString(mutation.aggregateType, requestSensitiveValues)
+        validateSafePersistenceJson(mutation.body.toJsonNode(), requestSensitiveValues, 0)
         validateSafePersistenceJson(mutation.auditDetail.toJsonNode(), requestSensitiveValues, 0)
-        mutation.events.forEach { validateSafePersistenceJson(it.payload.toJsonNode(), requestSensitiveValues, 0) }
+        mutation.events.forEach {
+            validatePersistedString(it.eventType, requestSensitiveValues)
+            validateSafePersistenceJson(it.payload.toJsonNode(), requestSensitiveValues, 0)
+        }
+    }
+
+    private fun validatePreAcquireDataMinimization(
+        metadata: CommandMetadata,
+        descriptor: CommandDescriptor,
+        requestSensitiveValues: Set<String>,
+    ) {
+        validatePersistedString(metadata.idempotencyKey, requestSensitiveValues)
+        validatePersistedString(descriptor.commandKey, requestSensitiveValues)
+        validatePersistedString(descriptor.action, requestSensitiveValues)
+        validatePersistedString(descriptor.aggregateType, requestSensitiveValues)
     }
 
     private fun sensitiveValues(request: CanonicalJsonObject): Set<String> {
@@ -172,7 +190,7 @@ class CommandExecutor(
         if (depth > MAX_JSON_DEPTH) throw InvalidCommandRequestException()
         when {
             node.isObject -> node.fields().forEachRemaining { (name, child) ->
-                if (sensitiveName(name)) throw InvalidCommandRequestException()
+                if (sensitiveName(name) || name in sensitiveValues) throw InvalidCommandRequestException()
                 validateSafePersistenceJson(child, sensitiveValues, depth + 1)
             }
             node.isArray -> node.forEach { validateSafePersistenceJson(it, sensitiveValues, depth + 1) }
@@ -180,6 +198,12 @@ class CommandExecutor(
                 val candidate = scalar(node) ?: return
                 if (sensitiveValues.any { it.isNotEmpty() && candidate.contains(it) }) throw InvalidCommandRequestException()
             }
+        }
+    }
+
+    private fun validatePersistedString(value: String, sensitiveValues: Set<String>) {
+        if (sensitiveName(value) || sensitiveValues.any { it.isNotEmpty() && value.contains(it) }) {
+            throw InvalidCommandRequestException()
         }
     }
 
