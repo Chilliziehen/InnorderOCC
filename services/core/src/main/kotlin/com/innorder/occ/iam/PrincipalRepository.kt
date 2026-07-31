@@ -24,13 +24,8 @@ data class LockedAccount(
 data class AccountCredentialSnapshot(
     val principalId: UUID,
     val username: String,
-    val principalStatus: String,
-    val entityState: String,
     val passwordHash: String?,
     val tokenVersion: Int,
-    val failedAttempts: Int,
-    val failedWindowStartedAt: Instant?,
-    val lockedUntil: Instant?,
 )
 
 data class CurrentUser(
@@ -44,23 +39,14 @@ data class CurrentUser(
 @Repository
 class PrincipalRepository(private val jdbc: JdbcTemplate) {
     fun credentialSnapshot(username: String): AccountCredentialSnapshot? = jdbc.query(
-        """SELECT ua.principal_id, ua.username, ua.password_hash, ua.password_version,
-                  ua.failed_attempts, ua.failed_window_started_at, ua.locked_until,
-                  p.status, e.state
+        """SELECT ua.principal_id, ua.username, ua.password_hash, ua.password_version
            FROM iam.user_account ua
-           JOIN iam.principal p ON p.id = ua.principal_id
-           JOIN authz.entity e ON e.id = ua.principal_id
            WHERE ua.username = ?""",
         { rs, _ -> AccountCredentialSnapshot(
             rs.getObject("principal_id", UUID::class.java),
             rs.getString("username"),
-            rs.getString("status"),
-            rs.getString("state"),
             rs.getString("password_hash"),
             rs.getInt("password_version"),
-            rs.getInt("failed_attempts"),
-            rs.instant("failed_window_started_at"),
-            rs.instant("locked_until"),
         ) },
         username,
     ).singleOrNull()
@@ -159,7 +145,7 @@ class PrincipalRepository(private val jdbc: JdbcTemplate) {
         """SELECT DISTINCT role_entity.entity_key
            FROM authz.relationship r
            JOIN catalog.relation_definition rd ON rd.id = r.relation_definition_id
-             AND rd.auth_relevant AND rd.relation_key = ?
+             AND rd.auth_relevant AND rd.id = ?
            JOIN authz.entity subject_entity ON subject_entity.id = r.subject_entity_id
              AND subject_entity.state = 'ACTIVE' AND subject_entity.entity_type_id = rd.subject_type_id
            JOIN authz.entity role_entity ON role_entity.id = r.object_entity_id AND role_entity.state = 'ACTIVE'
@@ -171,7 +157,7 @@ class PrincipalRepository(private val jdbc: JdbcTemplate) {
              AND r.valid_from <= transaction_timestamp()
              AND (r.valid_until IS NULL OR r.valid_until > transaction_timestamp())""",
         String::class.java,
-        ROLE_ASSIGNMENT_RELATION_KEY,
+        PLATFORM_ROLE_ASSIGNMENT_RELATION_DEFINITION_ID,
         principalId,
     ).flatMap { ROLE_CAPABILITIES[it].orEmpty() }.distinct().sorted()
 
@@ -203,7 +189,9 @@ class PrincipalRepository(private val jdbc: JdbcTemplate) {
         private const val MAX_FAILURES = 5
         private val FAILURE_WINDOW = java.time.Duration.ofMinutes(15)
         private val LOCK_DURATION = java.time.Duration.ofMinutes(15)
-        private const val ROLE_ASSIGNMENT_RELATION_KEY = "platform.role-assignment"
+        // Stable platform catalog identity reserved for the Task 7 role-assignment bootstrap.
+        val PLATFORM_ROLE_ASSIGNMENT_RELATION_DEFINITION_ID: UUID =
+            UUID.fromString("00000000-0000-7000-8000-000000000002")
         private val ROLE_CAPABILITIES = mapOf(
             "role:viewer" to listOf("occ.read"),
             "role:operator" to listOf("occ.execute", "occ.read"),

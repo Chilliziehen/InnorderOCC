@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.RETURNS_DEFAULTS
 import org.mockito.Mockito.`when`
+import org.springframework.security.crypto.password.PasswordEncoder
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -58,6 +59,7 @@ class AuthControllerIntegrationTest(
     @param:Autowired private val jdbc: JdbcTemplate,
     @param:Autowired private val clock: MutableClock,
     @param:Autowired private val transactions: TransactionTemplate,
+    @param:Autowired private val principals: PrincipalRepository,
 ) {
     private val passwords = PasswordService()
 
@@ -195,6 +197,39 @@ class AuthControllerIntegrationTest(
         assertThat(accountLong("failed_attempts")).isEqualTo(1)
         assertThat(accountInstant("failed_window_started_at")).isEqualTo(clock.instant())
         assertThat(accountInstant("locked_until")).isNull()
+    }
+
+    @Test
+    fun `five concurrent wrong passwords from one snapshot are all counted and lock the account`() {
+        val verificationEntered = CountDownLatch(5)
+        val releaseVerification = CountDownLatch(1)
+        val concurrentService = AuthService(
+            principals,
+            PasswordService(ConcurrentWrongPasswordEncoder(verificationEntered, releaseVerification)),
+            mock(SessionRepository::class.java),
+            mock(AccessTokenService::class.java),
+            transactions,
+            clock,
+        )
+        val pool = Executors.newFixedThreadPool(5)
+        try {
+            val attempts = (1..5).map {
+                pool.submit { runCatching { concurrentService.login(USERNAME, "wrong password value") } }
+            }
+
+            assertThat(verificationEntered.await(15, TimeUnit.SECONDS)).isTrue()
+            assertThat(accountLong("failed_attempts")).isZero()
+            releaseVerification.countDown()
+            attempts.forEach { it.get(20, TimeUnit.SECONDS) }
+
+            assertThat(accountLong("failed_attempts")).isEqualTo(5)
+            assertThat(accountInstant("failed_window_started_at")).isEqualTo(BASE_TIME)
+            assertThat(accountInstant("locked_until")).isEqualTo(BASE_TIME.plus(Duration.ofMinutes(15)))
+        } finally {
+            releaseVerification.countDown()
+            pool.shutdownNow()
+            assertThat(pool.awaitTermination(15, TimeUnit.SECONDS)).isTrue()
+        }
     }
 
     @Test
@@ -448,8 +483,24 @@ class AuthControllerIntegrationTest(
     }
 
     @Test
-    fun `unrelated auth relevant relationship to administrator role grants no capabilities`() {
+    fun `different key auth relevant relationship to administrator role grants no capabilities`() {
         val relationshipId = seedUnrelatedAdministratorRole()
+        try {
+            val login = login()
+            assertThat(login["user"]["capabilities"]).isEmpty()
+
+            val result = mockMvc.get("/api/v1/me") {
+                header("Authorization", "Bearer ${login["accessToken"].asText()}")
+            }.andExpect { status { isOk() } }.andReturn()
+            assertThat(objectMapper.readTree(result.response.contentAsString)["capabilities"]).isEmpty()
+        } finally {
+            jdbc.update("UPDATE authz.relationship SET revoked_at = statement_timestamp() WHERE id = ? AND revoked_at IS NULL", relationshipId)
+        }
+    }
+
+    @Test
+    fun `same role assignment key under a different definition ID grants no capabilities`() {
+        val relationshipId = seedSameKeyOtherPackageAdministratorRole()
         try {
             val login = login()
             assertThat(login["user"]["capabilities"]).isEmpty()
@@ -543,16 +594,23 @@ class AuthControllerIntegrationTest(
         jdbc.update("INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", VERSION_ID, PACKAGE_ID, "1.0.0", "DRAFT")
         jdbc.update("INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", TYPE_ID, PACKAGE_ID, "auth-lifecycle-user", "Auth Lifecycle User", "PRINCIPAL")
         jdbc.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, ?, '{}'::jsonb) ON CONFLICT DO NOTHING", TYPE_VERSION_ID, TYPE_ID, VERSION_ID, 1)
+        jdbc.update("INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, ?, ?, ?)", OTHER_PACKAGE_ID, "auth-lifecycle-other", "Auth Lifecycle Other", "ACTIVE")
+        jdbc.update("INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, ?, ?)", OTHER_VERSION_ID, OTHER_PACKAGE_ID, "1.0.0", "DRAFT")
         jdbc.update(
             """INSERT INTO catalog.relation_definition(id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
                VALUES (?, ?, 'platform.role-assignment', ?, ?, 'MANY_TO_MANY', true),
-                      (?, ?, 'platform.unrelated-admin-link', ?, ?, 'MANY_TO_MANY', true)""",
+                      (?, ?, 'platform.unrelated-admin-link', ?, ?, 'MANY_TO_MANY', true),
+                      (?, ?, 'platform.role-assignment', ?, ?, 'MANY_TO_MANY', true)""",
             RELATION_DEFINITION_ID,
             VERSION_ID,
             TYPE_ID,
             TYPE_ID,
             UNRELATED_RELATION_DEFINITION_ID,
             VERSION_ID,
+            TYPE_ID,
+            TYPE_ID,
+            SAME_KEY_OTHER_RELATION_DEFINITION_ID,
+            OTHER_VERSION_ID,
             TYPE_ID,
             TYPE_ID,
         )
@@ -604,6 +662,31 @@ class AuthControllerIntegrationTest(
                VALUES (?, ?, ?, ?, 'ADMIN', 'auth-test-unrelated')""",
             relationshipId,
             UNRELATED_RELATION_DEFINITION_ID,
+            USER_ID,
+            ADMIN_ROLE_ID,
+        )
+        return relationshipId
+    }
+
+    private fun seedSameKeyOtherPackageAdministratorRole(): UUID {
+        jdbc.update(
+            """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('a', 64), published_at = statement_timestamp()
+               WHERE id = ? AND status IN ('DRAFT', 'VALIDATED')""",
+            VERSION_ID,
+        )
+        jdbc.update(
+            """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('b', 64), published_at = statement_timestamp()
+               WHERE id = ? AND status IN ('DRAFT', 'VALIDATED')""",
+            OTHER_VERSION_ID,
+        )
+        jdbc.update("INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", ADMIN_ROLE_ID, TYPE_ID, TYPE_VERSION_ID, "role:administrator", "ACTIVE")
+        jdbc.update("INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", ADMIN_ROLE_ID, "ROLE", "Administrator", "ACTIVE")
+        val relationshipId = UUID.randomUUID()
+        jdbc.update(
+            """INSERT INTO authz.relationship(id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+               VALUES (?, ?, ?, ?, 'ADMIN', 'auth-test-same-key-other-package')""",
+            relationshipId,
+            SAME_KEY_OTHER_RELATION_DEFINITION_ID,
             USER_ID,
             ADMIN_ROLE_ID,
         )
@@ -724,6 +807,18 @@ class AuthControllerIntegrationTest(
         }
     }
 
+    private class ConcurrentWrongPasswordEncoder(
+        private val entered: CountDownLatch,
+        private val release: CountDownLatch,
+    ) : PasswordEncoder {
+        override fun encode(rawPassword: CharSequence): String = error("not used")
+        override fun matches(rawPassword: CharSequence, encodedPassword: String): Boolean {
+            entered.countDown()
+            check(release.await(15, TimeUnit.SECONDS)) { "Timed out waiting to release concurrent password checks" }
+            return false
+        }
+    }
+
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val USERNAME = "alice@example.com"
@@ -737,9 +832,12 @@ class AuthControllerIntegrationTest(
         private val INSTANCE_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
         private val ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000006")
         private val SECOND_USER_ID = UUID.fromString("61000000-0000-7000-8000-000000000007")
-        private val RELATION_DEFINITION_ID = UUID.fromString("61000000-0000-7000-8000-000000000008")
+        private val RELATION_DEFINITION_ID = PrincipalRepository.PLATFORM_ROLE_ASSIGNMENT_RELATION_DEFINITION_ID
         private val ADMIN_ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000009")
         private val UNRELATED_RELATION_DEFINITION_ID = UUID.fromString("61000000-0000-7000-8000-000000000010")
+        private val OTHER_PACKAGE_ID = UUID.fromString("61000000-0000-7000-8000-000000000011")
+        private val OTHER_VERSION_ID = UUID.fromString("61000000-0000-7000-8000-000000000012")
+        private val SAME_KEY_OTHER_RELATION_DEFINITION_ID = UUID.fromString("61000000-0000-7000-8000-000000000013")
 
         @Container
         @JvmStatic

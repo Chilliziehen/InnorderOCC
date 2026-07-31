@@ -174,7 +174,7 @@ class AuthServicePasswordWorkTest {
     }
 
     @Test
-    fun `changed credential snapshot fails without applying stale counters`() {
+    fun `changed credential identity fails without applying stale counters`() {
         val mutations = AtomicInteger()
         val stalePrincipals = mock(PrincipalRepository::class.java) { invocation ->
             if (invocation.method.name in setOf("recordFailure", "recordSuccess")) mutations.incrementAndGet()
@@ -183,7 +183,7 @@ class AuthServicePasswordWorkTest {
         val snapshotAccount = account(SUPPORTED_HASH)
         `when`(stalePrincipals.credentialSnapshot("alice@example.com")).thenReturn(snapshotAccount.snapshot())
         `when`(stalePrincipals.lockAccount(snapshotAccount.principalId))
-            .thenReturn(snapshotAccount.copy(failedAttempts = 1, failedWindowStartedAt = Instant.parse("2026-07-31T12:00:00Z")))
+            .thenReturn(snapshotAccount.copy(tokenVersion = 1))
         val staleTransactions = callbackTransactions()
         val staleService = AuthService(
             stalePrincipals,
@@ -259,13 +259,8 @@ class AuthServicePasswordWorkTest {
     private fun LockedAccount.snapshot(): AccountCredentialSnapshot = AccountCredentialSnapshot(
         principalId,
         username,
-        principalStatus,
-        entityState,
         passwordHash,
         tokenVersion,
-        failedAttempts,
-        failedWindowStartedAt,
-        lockedUntil,
     )
 
     private class RecordingEncoder : PasswordEncoder {

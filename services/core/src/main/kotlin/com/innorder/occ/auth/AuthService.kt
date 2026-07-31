@@ -51,11 +51,7 @@ class AuthService(
         val passwordMatches = passwords.matches(password, supportedHash ?: DUMMY_HASH) && supportedHash != null
         if (snapshot == null) throw invalidCredentials()
         val now = clock.instant()
-        val snapshotLocked = snapshot.lockedUntil?.let { now < it } == true
-        val snapshotActive = snapshot.principalStatus == "ACTIVE" && snapshot.entityState == "ACTIVE"
-        val replacementHash = if (
-            passwordMatches && !snapshotLocked && snapshotActive && passwords.needsRehash(snapshot.passwordHash!!)
-        ) {
+        val replacementHash = if (passwordMatches && passwords.needsRehash(snapshot.passwordHash!!)) {
             passwords.encode(password)
         } else {
             null
@@ -136,13 +132,8 @@ class AuthService(
     private fun LockedAccount.matches(snapshot: AccountCredentialSnapshot): Boolean =
         principalId == snapshot.principalId &&
             username == snapshot.username &&
-            principalStatus == snapshot.principalStatus &&
-            entityState == snapshot.entityState &&
             passwordHash == snapshot.passwordHash &&
-            tokenVersion == snapshot.tokenVersion &&
-            failedAttempts == snapshot.failedAttempts &&
-            failedWindowStartedAt == snapshot.failedWindowStartedAt &&
-            lockedUntil == snapshot.lockedUntil
+            tokenVersion == snapshot.tokenVersion
 
     companion object {
         private const val MAX_USERNAME_LENGTH = 128
