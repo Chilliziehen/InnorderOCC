@@ -19,7 +19,7 @@ default decision := {
     "decision": "DENY",
     "allow": false,
     "reasonCodes": ["INVALID_INPUT"],
-    "reasonIds": [],
+    "reasonIds": ["policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176"],
     "matchedPolicyIds": [],
 }
 
@@ -69,23 +69,11 @@ reason_ids contains id if {
 }
 
 reason_ids contains id if {
-    count(matching_deny_refs) > 0
-    id := matching_deny_refs[_]
-}
-
-reason_ids contains id if {
-    decision_name == "ALLOW"
-    id := matching_allow_refs[_]
+    id := matching_grant_refs[_]
 }
 
 matched_policy_ids contains id if {
-    count(matching_deny_refs) > 0
-    id := matching_deny_refs[_]
-}
-
-matched_policy_ids contains id if {
-    decision_name == "ALLOW"
-    id := matching_allow_refs[_]
+    id := matching_grant_refs[_]
 }
 
 denial_reason_codes contains code if {
@@ -108,32 +96,77 @@ baseline_reason_codes contains "ACTION_FORBIDDEN" if {
     input.action in input.forbiddenActions
 }
 
-baseline_reason_ids contains "platform:principal-disabled" if {
+baseline_reason_ids contains policy_ref("platform:principal-disabled") if {
     not input.principal.enabled
 }
 
-baseline_reason_ids contains "platform:resource-inactive" if {
+baseline_reason_ids contains policy_ref("platform:resource-inactive") if {
     not input.resource.active
 }
 
-baseline_reason_ids contains "platform:action-forbidden" if {
+baseline_reason_ids contains policy_ref("platform:action-forbidden") if {
     input.action in input.forbiddenActions
 }
 
-matching_allow_refs contains grant_ref(grant) if {
-    grant := input.grants[_]
+baseline_reason_ids contains policy_ref("platform:no-matching-allow") if {
+    count(denial_reason_codes) == 0
+    count(matching_allow_refs) == 0
+}
+
+applicable_layers := object.keys(input.releases)
+
+layer_outcome(layer) := "DENY" if {
+    layer in applicable_layers
+    count(layer_matching_deny_refs(layer)) > 0
+}
+
+layer_outcome(layer) := "ALLOW" if {
+    layer in applicable_layers
+    count(layer_matching_deny_refs(layer)) == 0
+    count(layer_matching_allow_refs(layer)) > 0
+}
+
+layer_outcome(layer) := "ABSTAIN" if {
+    layer in applicable_layers
+    count(layer_matching_deny_refs(layer)) == 0
+    count(layer_matching_allow_refs(layer)) == 0
+}
+
+layer_matching_allow_refs(layer) := {grant_ref(grant) |
+    some grant in input.grants
     grant.effect == "ALLOW"
-    grant_matches(grant)
+    grant_matches_layer_release(grant, layer)
 }
 
-matching_deny_refs contains grant_ref(grant) if {
-    grant := input.grants[_]
+layer_matching_deny_refs(layer) := {grant_ref(grant) |
+    some grant in input.grants
     grant.effect == "DENY"
-    grant_matches(grant)
+    grant_matches_layer_release(grant, layer)
 }
 
-grant_matches(grant) if {
-    grant.layer in object.keys(input.releases)
+matching_allow_refs contains ref if {
+    some layer in applicable_layers
+    layer_outcome(layer) in {"ALLOW", "DENY"}
+    ref := layer_matching_allow_refs(layer)[_]
+}
+
+matching_deny_refs contains ref if {
+    some layer in applicable_layers
+    layer_outcome(layer) == "DENY"
+    ref := layer_matching_deny_refs(layer)[_]
+}
+
+matching_grant_refs contains ref if {
+    ref := matching_allow_refs[_]
+}
+
+matching_grant_refs contains ref if {
+    ref := matching_deny_refs[_]
+}
+
+grant_matches_layer_release(grant, layer) if {
+    grant.layer == layer
+    grant.releaseId == input.releases[layer]
     value_matches(grant.action, input.action)
     value_matches(grant.principalId, input.principal.id)
     value_matches(grant.entityId, input.entity.id)
@@ -148,6 +181,8 @@ value_matches(pattern, value) if {
 }
 
 grant_ref(grant) := sprintf("grant:%s", [crypto.sha256(grant.id)])
+
+policy_ref(id) := sprintf("policy:%s", [crypto.sha256(id)])
 
 valid_input if {
     is_object(input)
@@ -234,13 +269,15 @@ valid_grants(grants, releases) if {
 valid_grant(grant, releases) if {
     is_object(grant)
     object.keys(grant) == {
-        "id", "layer", "effect", "action", "principalId", "entityId", "resourceId",
+        "id", "layer", "releaseId", "effect", "action", "principalId", "entityId", "resourceId",
     }
     is_string(grant.id)
     count(grant.id) >= 1
     count(grant.id) <= grant_id_max_length
     grant.layer in {"PLATFORM", "DOMAIN", "CUSTOMER"}
     grant.layer in object.keys(releases)
+    valid_uuid(grant.releaseId)
+    grant.releaseId == releases[grant.layer]
     grant.effect in {"ALLOW", "DENY"}
     valid_action_or_wildcard(grant.action)
     valid_uuid_or_wildcard(grant.principalId)

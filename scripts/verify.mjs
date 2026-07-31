@@ -116,6 +116,14 @@ async function main() {
   await run("Electron provenance contracts", npm, ["run", "test:electron-provenance"]);
   await run("deployment documentation contracts", npm, ["run", "test:deployment-docs"]);
   await run("TypeScript workspace tests", npm, ["run", "test:workspaces"]);
+  if (full) {
+    await run(
+      "authorization Zod/OPA parity",
+      npm,
+      ["run", "test:authz-parity"],
+      dryRun ? process.env : { ...process.env, OPA_PATH: requiredOpa },
+    );
+  }
 
   const opa = requiredOpa ?? findOpa();
   if (opa) {

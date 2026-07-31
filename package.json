@@ -13,6 +13,7 @@
     "test:provenance": "node --test scripts/dependency-provenance.test.mjs",
     "test:workspaces": "npm run test --workspaces --if-present",
     "test:infra": "node --test infra/compose/compose.contract.test.mjs infra/compose/gateway.test.mjs",
+    "test:authz-parity": "npm run test --workspace @innorder/contracts -- --run test/authorization-parity.test.ts",
     "test:database": "node --test database/tests/schema-static.test.mjs",
     "test:electron-provenance": "node --test scripts/electron-provenance.test.mjs",
     "test:deployment-docs": "node --test scripts/deployment-docs.test.mjs",

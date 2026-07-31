@@ -117,6 +117,7 @@ function secretTargets(service) {
 test("structurally checks OPA policy fail-closed and opaque-reference constructs", () => {
   const policy = read("policies/opa/platform/authz.rego");
   const tests = read("policies/opa/platform/authz_test.rego");
+  const documentation = read("policies/opa/README.md");
 
   assert.match(policy, /^package innorder\.platform\.authz/m);
   assert.match(policy, /^import rego\.v1$/m);
@@ -169,6 +170,12 @@ test("structurally checks OPA policy fail-closed and opaque-reference constructs
   assert.match(tests, /SENSITIVE_CONTEXT_TOKEN/u);
   assert.match(tests, /SENSITIVE_GRANT_ID_Z/u);
   assert.match(tests, /json\.marshal\(result\)/u);
+  assert.match(documentation, /data\.innorder\.platform\.authz\.decision/u);
+  assert.match(documentation, /"contractVersion": 1/u);
+  assert.match(documentation, /"releaseId":/u);
+  assert.match(documentation, /DOMAIN.*CUSTOMER.*optional/is);
+  assert.match(documentation, /Core.*active.*grants/is);
+  assert.doesNotMatch(documentation, /reason_codes|reason_ids|forbidden_actions|principal_id|entity_id|resource_id/u);
 });
 
 test("Compose defines digest-pinned, healthy services on an internal network", () => {

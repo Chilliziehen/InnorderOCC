@@ -10,8 +10,19 @@ export const GRANT_ID_MAX_LENGTH = 256;
 export const OUTPUT_IDS_MAX_LENGTH = GRANTS_MAX_LENGTH;
 
 const ACTION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-const OPAQUE_OUTPUT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+const OPAQUE_REASON_ID_PATTERN = /^(?:grant|policy):[0-9a-f]{64}$/;
+const OPAQUE_MATCHED_ID_PATTERN = /^grant:[0-9a-f]{64}$/;
+export const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+export const NON_NIL_RFC_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const nonNilUuidSchema = z.string().regex(NON_NIL_RFC_UUID_PATTERN);
+
+const POLICY_REASON_IDS = {
+  INVALID_INPUT: "policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176",
+  PRINCIPAL_DISABLED: "policy:8941407440a3ec32c44afbc4ab1fb183748dbf7388cf926f594486cc1f8386a3",
+  RESOURCE_INACTIVE: "policy:78a11476cd4e8cb5ba4afa073e8195510016228408013d8f27bfaafafad47876",
+  ACTION_FORBIDDEN: "policy:105106f1faa19167cdeb0d067dd88443f361b15f20e14424553e14b7ea7e1a5f",
+} as const;
 
 const stableActionSchema = z
   .string()
@@ -21,9 +32,9 @@ const stableActionSchema = z
 
 const releaseIdsSchema = z
   .object({
-    PLATFORM: z.uuid(),
-    DOMAIN: z.uuid().optional(),
-    CUSTOMER: z.uuid().optional(),
+    PLATFORM: nonNilUuidSchema,
+    DOMAIN: nonNilUuidSchema.optional(),
+    CUSTOMER: nonNilUuidSchema.optional(),
   })
   .strict()
   .superRefine((releases, context) => {
@@ -66,13 +77,14 @@ const contextSchema = z.unknown().refine(isBoundedJsonObject, {
   message: "Context must be a bounded JSON object",
 });
 
-const exactUuidOrWildcardSchema = z.union([z.literal("*"), z.uuid()]);
+const exactUuidOrWildcardSchema = z.union([z.literal("*"), nonNilUuidSchema]);
 const actionOrWildcardSchema = z.union([z.literal("*"), stableActionSchema]);
 
 const authorizationGrantSchema = z
   .object({
     id: z.string().min(1).max(GRANT_ID_MAX_LENGTH),
     layer: z.enum(["PLATFORM", "DOMAIN", "CUSTOMER"]),
+    releaseId: nonNilUuidSchema,
     effect: z.enum(["ALLOW", "DENY"]),
     action: actionOrWildcardSchema,
     principalId: exactUuidOrWildcardSchema,
@@ -84,13 +96,13 @@ const authorizationGrantSchema = z
 export const authorizationInputSchema = z
   .object({
     contractVersion: z.literal(AUTHORIZATION_CONTRACT_VERSION),
-    requestId: z.uuid(),
+    requestId: nonNilUuidSchema,
     authorizationRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     releases: releaseIdsSchema,
-    principal: z.object({ id: z.uuid(), enabled: z.boolean() }).strict(),
-    entity: z.object({ id: z.uuid() }).strict(),
+    principal: z.object({ id: nonNilUuidSchema, enabled: z.boolean() }).strict(),
+    entity: z.object({ id: nonNilUuidSchema }).strict(),
     action: stableActionSchema,
-    resource: z.object({ id: z.uuid(), active: z.boolean() }).strict(),
+    resource: z.object({ id: nonNilUuidSchema, active: z.boolean() }).strict(),
     context: contextSchema,
     forbiddenActions: z.array(stableActionSchema).max(FORBIDDEN_ACTIONS_MAX_LENGTH),
     grants: z.array(authorizationGrantSchema).max(GRANTS_MAX_LENGTH),
@@ -105,11 +117,18 @@ export const authorizationInputSchema = z
       context.addIssue({ code: "custom", message: "Grant IDs must be distinct" });
     }
     input.grants.forEach((grant, index) => {
-      if (!(grant.layer in input.releases)) {
+      const releaseId = input.releases[grant.layer];
+      if (releaseId === undefined) {
         context.addIssue({
           code: "custom",
           path: ["grants", index, "layer"],
           message: "Grant layer must have a corresponding release",
+        });
+      } else if (grant.releaseId !== releaseId) {
+        context.addIssue({
+          code: "custom",
+          path: ["grants", index, "releaseId"],
+          message: "Grant releaseId must match its layer release",
         });
       }
     });
@@ -129,25 +148,26 @@ const sortedDistinct = (values: string[]) =>
   new Set(values).size === values.length &&
   values.every((value, index) => index === 0 || values[index - 1]! < value);
 
-const outputIdSchema = z.string().min(1).max(128).regex(OPAQUE_OUTPUT_ID_PATTERN);
+const reasonIdSchema = z.string().regex(OPAQUE_REASON_ID_PATTERN);
+const matchedPolicyIdSchema = z.string().regex(OPAQUE_MATCHED_ID_PATTERN);
 
 export const authorizationDecisionSchema = z
   .object({
     contractVersion: z.literal(AUTHORIZATION_CONTRACT_VERSION),
-    requestId: z.union([z.uuid(), z.literal(NIL_UUID)]),
+    requestId: z.union([nonNilUuidSchema, z.literal(NIL_UUID)]),
     authorizationRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     releases: z
       .object({
-        PLATFORM: z.uuid().optional(),
-        DOMAIN: z.uuid().optional(),
-        CUSTOMER: z.uuid().optional(),
+        PLATFORM: nonNilUuidSchema.optional(),
+        DOMAIN: nonNilUuidSchema.optional(),
+        CUSTOMER: nonNilUuidSchema.optional(),
       })
       .strict(),
     decision: z.enum(["ALLOW", "DENY"]),
     allow: z.boolean(),
     reasonCodes: z.array(reasonCodeSchema).max(7),
-    reasonIds: z.array(outputIdSchema).max(OUTPUT_IDS_MAX_LENGTH + 3),
-    matchedPolicyIds: z.array(outputIdSchema).max(OUTPUT_IDS_MAX_LENGTH),
+    reasonIds: z.array(reasonIdSchema).max(OUTPUT_IDS_MAX_LENGTH + 4),
+    matchedPolicyIds: z.array(matchedPolicyIdSchema).max(OUTPUT_IDS_MAX_LENGTH),
   })
   .strict()
   .superRefine((output, context) => {
@@ -163,6 +183,9 @@ export const authorizationDecisionSchema = z
     if (new Set(releaseIds).size !== releaseIds.length) {
       context.addIssue({ code: "custom", path: ["releases"], message: "Release IDs must be distinct" });
     }
+    if (!output.matchedPolicyIds.every((id) => output.reasonIds.includes(id))) {
+      context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Matched grants must have corresponding reason IDs" });
+    }
     if (output.reasonCodes.includes("INVALID_INPUT")) {
       const canonical =
         output.requestId === NIL_UUID &&
@@ -171,7 +194,8 @@ export const authorizationDecisionSchema = z
         output.decision === "DENY" &&
         !output.allow &&
         output.reasonCodes.length === 1 &&
-        output.reasonIds.length === 0 &&
+        output.reasonIds.length === 1 &&
+        output.reasonIds[0] === POLICY_REASON_IDS.INVALID_INPUT &&
         output.matchedPolicyIds.length === 0;
       if (!canonical) {
         context.addIssue({ code: "custom", message: "Invalid input must use the canonical deny envelope" });
@@ -182,6 +206,42 @@ export const authorizationDecisionSchema = z
       }
       if (output.releases.PLATFORM === undefined) {
         context.addIssue({ code: "custom", path: ["releases", "PLATFORM"], message: "Valid decisions require a platform release" });
+      }
+      const denialCodes = [
+        "PRINCIPAL_DISABLED",
+        "RESOURCE_INACTIVE",
+        "ACTION_FORBIDDEN",
+        "EXPLICIT_DENY",
+        "NO_MATCHING_ALLOW",
+      ] as const;
+      if (output.decision === "ALLOW") {
+        if (!output.reasonCodes.includes("ALLOW_GRANT_MATCH")) {
+          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Allow requires ALLOW_GRANT_MATCH" });
+        }
+        if (denialCodes.some((code) => output.reasonCodes.includes(code))) {
+          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Allow cannot include denial codes" });
+        }
+        if (output.matchedPolicyIds.length === 0) {
+          context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Allow requires a matching grant" });
+        }
+      } else {
+        if (!denialCodes.some((code) => output.reasonCodes.includes(code))) {
+          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Deny requires a denial reason" });
+        }
+        if (output.reasonCodes.includes("ALLOW_GRANT_MATCH")) {
+          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Deny cannot include ALLOW_GRANT_MATCH" });
+        }
+        if (output.reasonCodes.includes("EXPLICIT_DENY") && output.matchedPolicyIds.length === 0) {
+          context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Explicit deny requires a matching grant" });
+        }
+        if (output.reasonCodes.includes("NO_MATCHING_ALLOW") && output.matchedPolicyIds.length !== 0) {
+          context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "No matching allow cannot identify matched grants" });
+        }
+      }
+      for (const code of ["PRINCIPAL_DISABLED", "RESOURCE_INACTIVE", "ACTION_FORBIDDEN"] as const) {
+        if (output.reasonCodes.includes(code) && !output.reasonIds.includes(POLICY_REASON_IDS[code])) {
+          context.addIssue({ code: "custom", path: ["reasonIds"], message: `${code} requires its policy hash` });
+        }
       }
     }
   });

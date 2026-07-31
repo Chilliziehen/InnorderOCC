@@ -1,0 +1,210 @@
+{
+  "baseInput": {
+    "contractVersion": 1,
+    "requestId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "authorizationRevision": 17,
+    "releases": {
+      "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+      "DOMAIN": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+      "CUSTOMER": "123e4567-e89b-42d3-a456-426614174000"
+    },
+    "principal": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "enabled": true},
+    "entity": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+    "action": "resource.read",
+    "resource": {"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "active": true},
+    "context": {"correlationId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"},
+    "forbiddenActions": [],
+    "grants": []
+  },
+  "valid": [
+    {
+      "name": "all layers abstain",
+      "overrides": {}
+    },
+    {
+      "name": "platform allow with optional layers absent",
+      "overrides": {
+        "releases": {"PLATFORM": "550e8400-e29b-41d4-a716-446655440000"},
+        "grants": [{
+          "id": "platform-allow",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "resourceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }]
+      }
+    },
+    {
+      "name": "domain allow",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "DOMAIN": "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+        },
+        "grants": [{
+          "id": "domain-allow",
+          "layer": "DOMAIN",
+          "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "customer allow",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "CUSTOMER": "123e4567-e89b-42d3-a456-426614174000"
+        },
+        "grants": [{
+          "id": "customer-allow",
+          "layer": "CUSTOMER",
+          "releaseId": "123e4567-e89b-42d3-a456-426614174000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "resourceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }]
+      }
+    },
+    {
+      "name": "platform deny overrides customer allow",
+      "overrides": {
+        "grants": [
+          {
+            "id": "platform-deny",
+            "layer": "PLATFORM",
+            "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+            "effect": "DENY",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          },
+          {
+            "id": "customer-allow",
+            "layer": "CUSTOMER",
+            "releaseId": "123e4567-e89b-42d3-a456-426614174000",
+            "effect": "ALLOW",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {"name": "unknown input field", "overrides": {"unknown": true}},
+    {"name": "nil request UUID", "overrides": {"requestId": "00000000-0000-0000-0000-000000000000"}},
+    {"name": "UUID version zero", "overrides": {"requestId": "dddddddd-dddd-0ddd-8ddd-dddddddddddd"}},
+    {"name": "non-RFC UUID variant", "overrides": {"requestId": "dddddddd-dddd-4ddd-7ddd-dddddddddddd"}},
+    {
+      "name": "release mismatch",
+      "overrides": {
+        "grants": [{
+          "id": "mismatch",
+          "layer": "PLATFORM",
+          "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "grant for missing optional layer",
+      "overrides": {
+        "releases": {"PLATFORM": "550e8400-e29b-41d4-a716-446655440000"},
+        "grants": [{
+          "id": "domain-without-release",
+          "layer": "DOMAIN",
+          "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "partial wildcard",
+      "overrides": {
+        "grants": [{
+          "id": "partial",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.*",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "duplicate grant IDs",
+      "overrides": {
+        "grants": [
+          {
+            "id": "duplicate",
+            "layer": "PLATFORM",
+            "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+            "effect": "ALLOW",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          },
+          {
+            "id": "duplicate",
+            "layer": "DOMAIN",
+            "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+            "effect": "DENY",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate release IDs",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "DOMAIN": "550e8400-e29b-41d4-a716-446655440000"
+        }
+      }
+    },
+    {
+      "name": "oversized action bound",
+      "overrides": {"action": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    {
+      "name": "oversized context",
+      "overrides": {
+        "context": {
+          "k00": 0, "k01": 1, "k02": 2, "k03": 3, "k04": 4, "k05": 5, "k06": 6, "k07": 7,
+          "k08": 8, "k09": 9, "k10": 10, "k11": 11, "k12": 12, "k13": 13, "k14": 14, "k15": 15,
+          "k16": 16, "k17": 17, "k18": 18, "k19": 19, "k20": 20, "k21": 21, "k22": 22, "k23": 23,
+          "k24": 24, "k25": 25, "k26": 26, "k27": 27, "k28": 28, "k29": 29, "k30": 30, "k31": 31,
+          "k32": 32
+        }
+      }
+    }
+  ]
+}

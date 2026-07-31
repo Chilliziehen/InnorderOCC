@@ -1,0 +1,67 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+import { authorizationDecisionSchema, authorizationInputSchema } from "../src/index.js";
+
+type JsonObject = Record<string, unknown>;
+type FixtureCase = { name: string; overrides: JsonObject };
+type Fixtures = { baseInput: JsonObject; valid: FixtureCase[]; invalid: FixtureCase[] };
+
+const fixtures = JSON.parse(
+  readFileSync(new URL("./fixtures/authorization-parity.json", import.meta.url), "utf8"),
+) as Fixtures;
+const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+const invalidPolicyId = "policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176";
+const canonicalInvalidDecision = {
+  contractVersion: 1,
+  requestId: "00000000-0000-0000-0000-000000000000",
+  authorizationRevision: 0,
+  releases: {},
+  decision: "DENY",
+  allow: false,
+  reasonCodes: ["INVALID_INPUT"],
+  reasonIds: [invalidPolicyId],
+  matchedPolicyIds: [],
+};
+
+function evaluateWithOpa(input: JsonObject): unknown {
+  const result = spawnSync(
+    process.env.OPA_PATH,
+    ["eval", "--format=json", "--data", "policies/opa", "--stdin-input", "data.innorder.platform.authz.decision"],
+    { cwd: repositoryRoot, encoding: "utf8", input: JSON.stringify(input) },
+  );
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  const output = JSON.parse(result.stdout) as {
+    result: Array<{ expressions: Array<{ value: unknown }> }>;
+  };
+  return output.result[0]?.expressions[0]?.value;
+}
+
+const describeWithOpa = process.env.OPA_PATH ? describe : describe.skip;
+
+describeWithOpa("authorization Zod/OPA parity", () => {
+  for (const fixture of fixtures.valid) {
+    it(`accepts and evaluates: ${fixture.name}`, () => {
+      const input = { ...fixtures.baseInput, ...fixture.overrides };
+      expect(authorizationInputSchema.parse(input)).toEqual(input);
+      const decision = evaluateWithOpa(input);
+      expect(() => authorizationDecisionSchema.parse(decision)).not.toThrow();
+      expect(decision).toMatchObject({
+        requestId: input.requestId,
+        authorizationRevision: input.authorizationRevision,
+        releases: input.releases,
+      });
+    });
+  }
+
+  for (const fixture of fixtures.invalid) {
+    it(`fails closed identically: ${fixture.name}`, () => {
+      const input = { ...fixtures.baseInput, ...fixture.overrides };
+      expect(() => authorizationInputSchema.parse(input)).toThrow();
+      expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
+    });
+  }
+});

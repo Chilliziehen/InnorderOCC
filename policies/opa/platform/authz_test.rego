@@ -31,6 +31,7 @@ base_input := {
 platform_allow := {
     "id": "platform-allow",
     "layer": "PLATFORM",
+    "releaseId": platform_release_id,
     "effect": "ALLOW",
     "action": "resource.read",
     "principalId": principal_id,
@@ -41,10 +42,13 @@ platform_allow := {
 grant(layer, effect, id) := object.union(platform_allow, {
     "id": id,
     "layer": layer,
+    "releaseId": base_input.releases[layer],
     "effect": effect,
 })
 
 grant_ref(id) := sprintf("grant:%s", [crypto.sha256(id)])
+
+policy_ref(id) := sprintf("policy:%s", [crypto.sha256(id)])
 
 expected(decision_value, codes, ids) := {
     "contractVersion": 1,
@@ -66,7 +70,7 @@ invalid_envelope := {
     "decision": "DENY",
     "allow": false,
     "reasonCodes": ["INVALID_INPUT"],
-    "reasonIds": [],
+    "reasonIds": [policy_ref("platform:invalid-input")],
     "matchedPolicyIds": [],
 }
 
@@ -85,7 +89,10 @@ test_allow_and_abstain_allows if {
 }
 
 test_all_abstain_denies if {
-    decision with input as base_input == expected("DENY", ["NO_MATCHING_ALLOW"], [])
+    result := decision with input as base_input
+    result.reasonCodes == ["NO_MATCHING_ALLOW"]
+    result.reasonIds == [policy_ref("platform:no-matching-allow")]
+    result.matchedPolicyIds == []
 }
 
 test_absent_optional_layers_are_not_applicable if {
@@ -111,8 +118,28 @@ test_each_layer_explicit_deny_overrides_allows if {
         result := decision with input as request
         result.decision == "DENY"
         result.reasonCodes == ["EXPLICIT_DENY"]
-        result.reasonIds == [grant_ref(deny.id)]
+        refs := sort({grant_ref(platform_allow.id), grant_ref(deny.id)})
+        result.reasonIds == refs
+        result.matchedPolicyIds == refs
     }
+}
+
+test_release_mismatch_and_cross_release_reuse_are_invalid if {
+    mismatch := object.union(platform_allow, {"releaseId": domain_release_id})
+    cross_layer := object.union(platform_allow, {"layer": "DOMAIN", "releaseId": platform_release_id})
+    reused_layer := object.union(platform_allow, {"id": "reused-layer", "releaseId": customer_release_id})
+    every grants in [[mismatch], [cross_layer], [platform_allow, reused_layer]] {
+        decision with input as object.union(base_input, {"grants": grants}) == invalid_envelope
+    }
+}
+
+test_layer_outcomes_use_only_bound_release_grants if {
+    platform_deny := grant("PLATFORM", "DENY", "platform-deny")
+    domain_allow := grant("DOMAIN", "ALLOW", "domain-allow")
+    result := decision with input as object.union(base_input, {"grants": [platform_deny, domain_allow]})
+    result.decision == "DENY"
+    result.reasonCodes == ["EXPLICIT_DENY"]
+    result.matchedPolicyIds == sort({grant_ref(platform_deny.id), grant_ref(domain_allow.id)})
 }
 
 test_baseline_denials_are_non_overridable if {
@@ -123,6 +150,7 @@ test_baseline_denials_are_non_overridable if {
     inactive_result := decision with input as inactive
     forbidden_result := decision with input as forbidden
     disabled_result.reasonCodes == ["PRINCIPAL_DISABLED"]
+    disabled_result.reasonIds == sort({grant_ref(platform_allow.id), policy_ref("platform:principal-disabled")})
     inactive_result.reasonCodes == ["RESOURCE_INACTIVE"]
     forbidden_result.reasonCodes == ["ACTION_FORBIDDEN"]
 }
@@ -192,6 +220,9 @@ test_types_uuid_and_integer_bounds_deny if {
         {"authorizationRevision": -1},
         {"authorizationRevision": 9007199254740992},
         {"principal": {"id": "not-a-uuid", "enabled": true}},
+        {"requestId": "00000000-0000-0000-0000-000000000000"},
+        {"requestId": "dddddddd-dddd-0ddd-8ddd-dddddddddddd"},
+        {"requestId": "dddddddd-dddd-4ddd-7ddd-dddddddddddd"},
         {"context": []},
         {"forbiddenActions": "resource.read"},
     ] {
