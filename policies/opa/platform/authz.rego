@@ -274,7 +274,7 @@ valid_context_path_segment(segment) if {
 
 valid_context_path_segment(segment) if {
     is_string(segment)
-    safe_unicode(segment)
+    safe_context_string(segment)
 }
 
 valid_context_node(value) if {
@@ -283,7 +283,16 @@ valid_context_node(value) if {
 
 valid_context_node(value) if {
     is_string(value)
+    safe_context_string(value)
+}
+
+safe_context_string(value) if {
     safe_unicode(value)
+    not contains(value, "<")
+    not contains(value, ">")
+    not contains(value, "&")
+    not contains(value, " ")
+    not contains(value, " ")
 }
 
 safe_unicode(value) if {

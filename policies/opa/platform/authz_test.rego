@@ -262,6 +262,35 @@ test_valid_astral_unicode_and_context_depth_boundary if {
     decision with input as object.union(base_input, {"context": rejected_context}) == invalid_envelope
 }
 
+invalid_context_value(value) if {
+    result := decision with input as object.union(base_input, {"context": {"nested": {"value": value}}})
+    result == invalid_envelope
+}
+
+invalid_context_key(value) if {
+    result := decision with input as object.union(base_input, {"context": {value: "metadata"}})
+    result == invalid_envelope
+}
+
+test_context_rejects_serializer_ambiguous_characters if {
+    invalid_context_value("<")
+    invalid_context_value(">")
+    invalid_context_value("&")
+    invalid_context_value(" ")
+    invalid_context_value(" ")
+    invalid_context_key("<")
+    invalid_context_key(">")
+    invalid_context_key("&")
+    invalid_context_key(" ")
+    invalid_context_key(" ")
+}
+
+test_context_accepts_escaped_controls_and_astral_unicode if {
+    context := {"escaped\nkey": "tab\tquote\"slash\\nul\u0000 astral😀"}
+    result := decision with input as object.union(base_input, {"context": context})
+    result.reasonCodes == ["NO_MATCHING_ALLOW"]
+}
+
 test_types_uuid_and_integer_bounds_deny if {
     every patch in [
         {"contractVersion": 2},

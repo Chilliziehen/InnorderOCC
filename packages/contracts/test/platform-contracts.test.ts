@@ -207,6 +207,24 @@ describe("authorization contracts", () => {
     expect(() => authorizationInputSchema.parse({ ...authorizationInput, context: nested(9) })).toThrow();
   });
 
+  it("rejects context characters with divergent JSON serialization", () => {
+    for (const character of ["<", ">", "&", "\u2028", "\u2029"]) {
+      expect(() => authorizationInputSchema.parse({
+        ...authorizationInput,
+        context: { nested: { value: character } },
+      })).toThrow();
+      expect(() => authorizationInputSchema.parse({
+        ...authorizationInput,
+        context: { [character]: "value" },
+      })).toThrow();
+    }
+
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      context: { "escaped\nkey": "tab\tquote\"slash\\nul\u0000 astral😀" },
+    })).toBeDefined();
+  });
+
   it("rejects duplicate releases, duplicate grants, release mismatches, absent layers, and partial wildcards", () => {
     const grant = authorizationInput.grants[0];
     for (const invalid of [

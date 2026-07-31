@@ -199,6 +199,12 @@
       "overrides": {
         "context": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": "safe"}}}}}}}}
       }
+    },
+    {
+      "name": "escaped controls and astral context strings",
+      "overrides": {
+        "context": {"escaped\nkey": "tab\tquote\"slash\\nul\u0000 astral😀"}
+      }
     }
   ],
   "invalid": [
@@ -347,6 +353,31 @@
     {"name": "raw lone-surrogate context key", "overrides": {"context": {"\ud800": "value"}}},
     {"name": "replacement-character context value", "overrides": {"context": {"value": "\ufffd"}}},
     {"name": "replacement-character context key", "overrides": {"context": {"\ufffd": "value"}}},
+    {
+      "name": "700 less-than characters in context",
+      "contextRepeat": {"value": "<", "count": 700, "target": "value"},
+      "overrides": {}
+    },
+    {
+      "name": "700 greater-than characters in context",
+      "contextRepeat": {"value": ">", "count": 700, "target": "value"},
+      "overrides": {}
+    },
+    {
+      "name": "700 ampersands in context key",
+      "contextRepeat": {"value": "&", "count": 700, "target": "key"},
+      "overrides": {}
+    },
+    {
+      "name": "700 line-separator characters in context",
+      "contextRepeat": {"value": "\u2028", "count": 700, "target": "value"},
+      "overrides": {}
+    },
+    {
+      "name": "700 paragraph-separator characters in context key",
+      "contextRepeat": {"value": "\u2029", "count": 700, "target": "key"},
+      "overrides": {}
+    },
     {
       "name": "context nesting exceeds maximum depth",
       "overrides": {

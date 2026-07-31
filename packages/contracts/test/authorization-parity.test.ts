@@ -11,6 +11,7 @@ type FixtureCase = {
   name: string;
   overrides: JsonObject;
   grantIdRepeat?: { value: string; count: number };
+  contextRepeat?: { value: string; count: number; target: "key" | "value" };
 };
 type Fixtures = { baseInput: JsonObject; valid: FixtureCase[]; invalid: FixtureCase[] };
 
@@ -52,6 +53,12 @@ function materialize(fixture: FixtureCase): JsonObject {
       { ...grants[0], id: fixture.grantIdRepeat.value.repeat(fixture.grantIdRepeat.count) },
       ...grants.slice(1),
     ];
+  }
+  if (fixture.contextRepeat) {
+    const repeated = fixture.contextRepeat.value.repeat(fixture.contextRepeat.count);
+    input.context = fixture.contextRepeat.target === "key"
+      ? { [repeated]: "value" }
+      : { value: repeated };
   }
   return input;
 }

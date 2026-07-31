@@ -48,6 +48,21 @@ function hasUnambiguousUnicode(value: string): boolean {
   return true;
 }
 
+function isSafeContextString(value: string): boolean {
+  if (!hasUnambiguousUnicode(value)) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (
+      codeUnit === 0x003c ||
+      codeUnit === 0x003e ||
+      codeUnit === 0x0026 ||
+      codeUnit === 0x2028 ||
+      codeUnit === 0x2029
+    ) return false;
+  }
+  return true;
+}
+
 const stableActionSchema = z
   .string()
   .min(1)
@@ -92,12 +107,12 @@ function isBoundedJsonObject(value: unknown): value is Record<string, unknown> {
 function isSafeJsonValue(value: unknown, depth: number): boolean {
   if (depth > CONTEXT_MAX_DEPTH) return false;
   if (value === null || typeof value === "boolean") return true;
-  if (typeof value === "string") return hasUnambiguousUnicode(value);
+  if (typeof value === "string") return isSafeContextString(value);
   if (typeof value === "number") return Number.isFinite(value);
   if (Array.isArray(value)) return value.every((item) => isSafeJsonValue(item, depth + 1));
   if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
   return Object.entries(value).every(
-    ([key, item]) => hasUnambiguousUnicode(key) && isSafeJsonValue(item, depth + 1),
+    ([key, item]) => isSafeContextString(key) && isSafeJsonValue(item, depth + 1),
   );
 }
 
