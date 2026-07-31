@@ -1,5 +1,8 @@
 package com.innorder.occ.iam
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import com.innorder.occ.auth.AccessTokenService
 import com.innorder.occ.auth.AuthService
 import com.innorder.occ.auth.InvalidCredentialsException
@@ -21,6 +24,7 @@ import org.testcontainers.utility.DockerImageName
 import org.testcontainers.utility.MountableFile
 import org.flywaydb.core.Flyway
 import org.postgresql.ds.PGSimpleDataSource
+import org.springframework.security.crypto.password.PasswordEncoder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
@@ -38,7 +42,7 @@ class BootstrapAdministratorIntegrationTest {
     @Test
     fun `secret reader accepts one newline and rejects weak malformed oversized and nul secrets`() {
         val valid = secret("bootstrap-password-value\r\n")
-        val chars = BootstrapSecretFile.read(valid)
+        val chars = BootstrapSecretFile().read(valid)
         try {
             assertThat(chars.toString()).isEqualTo("bootstrap-password-value")
         } finally {
@@ -51,7 +55,7 @@ class BootstrapAdministratorIntegrationTest {
             "x".repeat(1025),
         ).forEachIndexed { index, value ->
             val path = secret(value, "invalid-$index")
-            assertThatThrownBy { BootstrapSecretFile.read(path) }
+            assertThatThrownBy { BootstrapSecretFile().read(path) }
                 .isInstanceOf(BootstrapConfigurationException::class.java)
                 .hasMessage("Administrator bootstrap configuration is invalid")
         }
@@ -59,31 +63,13 @@ class BootstrapAdministratorIntegrationTest {
         val malformed = temp.resolve("malformed")
         Files.write(malformed, byteArrayOf(0xc3.toByte(), 0x28))
         ownerOnly(malformed)
-        assertThatThrownBy { BootstrapSecretFile.read(malformed) }
+        assertThatThrownBy { BootstrapSecretFile().read(malformed) }
             .isInstanceOf(BootstrapConfigurationException::class.java)
     }
 
     @Test
-    fun `secret reader rejects symlinks and broad POSIX permissions when supported`() {
-        val target = secret("bootstrap-password-value", "target")
-        val link = temp.resolve("secret-link")
-        runCatching { Files.createSymbolicLink(link, target.fileName) }.onSuccess {
-            assertThatThrownBy { BootstrapSecretFile.read(link) }
-                .isInstanceOf(BootstrapConfigurationException::class.java)
-        }
-
-        if (Files.getFileStore(target).supportsFileAttributeView("posix")) {
-            Files.setPosixFilePermissions(target, setOf(PosixFilePermission.OWNER_READ))
-            BootstrapSecretFile.read(target).clearSecret()
-            Files.setPosixFilePermissions(target, setOf(
-                PosixFilePermission.OWNER_READ,
-                PosixFilePermission.GROUP_READ,
-            ))
-            assertThatThrownBy { BootstrapSecretFile.read(target) }
-                .isInstanceOf(BootstrapConfigurationException::class.java)
-        }
-
-        assertThatThrownBy { BootstrapSecretFile.read(temp) }
+    fun `real secret reader rejects directories`() {
+        assertThatThrownBy { BootstrapSecretFile().read(temp) }
             .isInstanceOf(BootstrapConfigurationException::class.java)
     }
 
@@ -134,6 +120,18 @@ class BootstrapAdministratorIntegrationTest {
                 BootstrapIds.ROLE_ASSIGNMENT_RELATION,
                 BootstrapIds.ADMINISTRATOR_ROLE,
             )).isEqualTo(1)
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.relationship", Long::class.java)).isEqualTo(1)
+            assertThat(jdbc.queryForMap(
+                """SELECT id, package_key, name, description, status
+                   FROM catalog.domain_package WHERE id = ?""",
+                BootstrapIds.PACKAGE,
+            )).containsAllEntriesOf(mapOf(
+                "id" to BootstrapIds.PACKAGE,
+                "package_key" to "platform-iam",
+                "name" to "Platform IAM",
+                "description" to "Immutable platform identity and role authorization baseline",
+                "status" to "ACTIVE",
+            ))
             assertThat(jdbc.queryForMap(
                 """SELECT id, package_version_id, relation_key, subject_type_id, object_type_id,
                           cardinality, transitive, acyclic, auth_relevant, max_subjects, max_objects
@@ -153,7 +151,8 @@ class BootstrapAdministratorIntegrationTest {
                 "max_objects" to null,
             ))
             assertThat(jdbc.queryForMap(
-                """SELECT pv.id, pv.package_id, pv.semver, pv.status, pv.content_hash, dp.package_key
+                """SELECT pv.id, pv.package_id, pv.semver, pv.status, pv.content_hash, dp.package_key,
+                          pv.manifest = '{"bootstrap":"platform-iam","version":1}'::jsonb AS manifest_matches
                    FROM catalog.package_version pv
                    JOIN catalog.domain_package dp ON dp.id = pv.package_id
                    WHERE pv.id = ?""",
@@ -165,6 +164,7 @@ class BootstrapAdministratorIntegrationTest {
                 "status" to "PUBLISHED",
                 "content_hash" to CONTENT_HASH,
                 "package_key" to "platform-iam",
+                "manifest_matches" to true,
             ))
             assertThat(jdbc.queryForObject(
                 """SELECT count(*) FROM catalog.entity_type et
@@ -183,12 +183,41 @@ class BootstrapAdministratorIntegrationTest {
                 BootstrapIds.PACKAGE_VERSION,
             )).isEqualTo(2)
             assertThat(jdbc.queryForList(
-                "SELECT entity_key FROM authz.entity WHERE id IN (?, ?, ?) ORDER BY entity_key",
-                String::class.java,
+                """SELECT e.id, e.entity_key, e.entity_type_id, e.entity_type_version_id, e.state,
+                          p.display_name, p.status, p.principal_kind
+                   FROM authz.entity e JOIN iam.principal p ON p.id = e.id
+                   WHERE e.id IN (?, ?, ?) ORDER BY e.entity_key""",
                 BootstrapIds.VIEWER_ROLE,
                 BootstrapIds.OPERATOR_ROLE,
                 BootstrapIds.ADMINISTRATOR_ROLE,
-            )).containsExactly("role:administrator", "role:operator", "role:viewer")
+            )).containsExactly(
+                roleRow(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
+                roleRow(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
+                roleRow(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
+            )
+            assertThat(jdbc.queryForMap(
+                """SELECT r.relation_definition_id, r.subject_entity_id, r.object_entity_id,
+                          r.attributes = '{}'::jsonb AS attributes_match, r.source_kind, r.source_ref,
+                          r.valid_until, r.revoked_at, p.principal_kind AS subject_kind,
+                          r.valid_from = r.created_at AND r.created_at = r.updated_at AS timestamps_match,
+                          r.created_by IS NULL AND r.updated_by IS NULL AND r.revoked_by IS NULL AS actors_match,
+                          r.row_version
+                   FROM authz.relationship r
+                   JOIN iam.principal p ON p.id = r.subject_entity_id""",
+            )).containsAllEntriesOf(mapOf(
+                "relation_definition_id" to BootstrapIds.ROLE_ASSIGNMENT_RELATION,
+                "subject_entity_id" to account["principal_id"],
+                "object_entity_id" to BootstrapIds.ADMINISTRATOR_ROLE,
+                "attributes_match" to true,
+                "source_kind" to "SYSTEM",
+                "source_ref" to "initial-administrator",
+                "valid_until" to null,
+                "revoked_at" to null,
+                "subject_kind" to "USER",
+                "timestamps_match" to true,
+                "actors_match" to true,
+                "row_version" to 0L,
+            ))
             assertThat(Files.exists(path)).isTrue()
 
             val principals = PrincipalRepository(jdbc)
@@ -222,6 +251,9 @@ class BootstrapAdministratorIntegrationTest {
         database { jdbc, transactions ->
             val firstSecret = secret(TEST_PASSWORD, "first-secret")
             val secondSecret = secret("second-bootstrap-test-only-8g!R", "second-secret")
+            val stableDeletionSupported = listOf(firstSecret, secondSecret).all {
+                NioSecretFileMetadataAccess.inspect(it).fileKey != null
+            }
             val first = BootstrapAdministrator(
                 jdbc,
                 transactions,
@@ -246,18 +278,59 @@ class BootstrapAdministratorIntegrationTest {
                 start.countDown()
                 val results = attempts.map { runCatching { it.get(30, TimeUnit.SECONDS) } }
                 val successes = results.mapNotNull { it.getOrNull() }
-                assertThat(successes).containsExactlyInAnyOrder(
-                    BootstrapResult.CREATED,
-                    BootstrapResult.ALREADY_INITIALIZED,
-                )
+                if (stableDeletionSupported) {
+                    assertThat(successes).containsExactlyInAnyOrder(
+                        BootstrapResult.CREATED,
+                        BootstrapResult.ALREADY_INITIALIZED,
+                    )
+                    assertThat(listOf(Files.exists(firstSecret), Files.exists(secondSecret)).count { it }).isEqualTo(1)
+                } else {
+                    assertThat(successes).containsExactly(BootstrapResult.ALREADY_INITIALIZED)
+                    assertThat(results.single { it.isFailure }.exceptionOrNull())
+                        .isInstanceOf(java.util.concurrent.ExecutionException::class.java)
+                        .hasCauseInstanceOf(BootstrapSecretCleanupException::class.java)
+                    assertThat(Files.exists(firstSecret)).isTrue()
+                    assertThat(Files.exists(secondSecret)).isTrue()
+                }
                 assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isEqualTo(1)
                 assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.relationship", Long::class.java)).isEqualTo(1)
-                assertThat(listOf(Files.exists(firstSecret), Files.exists(secondSecret)).count { it }).isEqualTo(1)
             } finally {
                 start.countDown()
                 pool.shutdownNow()
                 assertThat(pool.awaitTermination(15, TimeUnit.SECONDS)).isTrue()
             }
+        }
+    }
+
+    @Test
+    fun `existing account and orphan USER principal both bypass a missing secret without writes`() {
+        database { jdbc, transactions ->
+            val initialSecret = secret(TEST_PASSWORD, "gate-initial-secret")
+            val bootstrap = BootstrapAdministrator(
+                jdbc,
+                transactions,
+                PasswordService(),
+                BootstrapAdministratorProperties(initialSecret.toString()),
+            )
+            assertThat(bootstrap.bootstrap()).isEqualTo(BootstrapResult.CREATED)
+            Files.delete(initialSecret)
+            val missing = temp.resolve("deliberately-missing-secret")
+            val restart = BootstrapAdministrator(
+                jdbc,
+                transactions,
+                PasswordService(),
+                BootstrapAdministratorProperties(missing.toString()),
+            )
+
+            val accountState = bootstrapState(jdbc)
+            assertThat(restart.bootstrap()).isEqualTo(BootstrapResult.ALREADY_INITIALIZED)
+            assertThat(bootstrapState(jdbc)).isEqualTo(accountState)
+
+            jdbc.update("DELETE FROM iam.user_account")
+            val orphanPrincipalState = bootstrapState(jdbc)
+            assertThat(restart.bootstrap()).isEqualTo(BootstrapResult.ALREADY_INITIALIZED)
+            assertThat(bootstrapState(jdbc)).isEqualTo(orphanPrincipalState)
+            assertThat(Files.exists(missing)).isFalse()
         }
     }
 
@@ -294,16 +367,22 @@ class BootstrapAdministratorIntegrationTest {
                 PasswordService(),
                 BootstrapAdministratorProperties(path.toString(), deleteSecret = true),
             )
-            assertThat(bootstrap.bootstrap()).isEqualTo(BootstrapResult.CREATED)
-            assertThat(Files.exists(path)).isFalse()
+            if (NioSecretFileMetadataAccess.inspect(path).fileKey == null) {
+                assertThatThrownBy { bootstrap.bootstrap() }
+                    .isInstanceOf(BootstrapSecretCleanupException::class.java)
+                assertThat(Files.exists(path)).isTrue()
+            } else {
+                assertThat(bootstrap.bootstrap()).isEqualTo(BootstrapResult.CREATED)
+                assertThat(Files.exists(path)).isFalse()
+            }
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isEqualTo(1)
         }
 
         val path = secret(TEST_PASSWORD, "replacement-race")
-        val identity = BootstrapSecretFile.readValidated(path).also { it.characters.clearSecret() }.identity
+        val identity = BootstrapSecretFile().readValidated(path).also { it.characters.clearSecret() }.identity
         Files.delete(path)
         secret("different-test-only-secret", "replacement-race")
-        assertThatThrownBy { BootstrapSecretFile.deleteValidated(identity) }
+        assertThatThrownBy { BootstrapSecretFile().deleteValidated(identity) }
             .isInstanceOf(BootstrapSecretCleanupException::class.java)
             .hasMessageNotContaining(path.toString())
             .hasMessageNotContaining(TEST_PASSWORD)
@@ -322,7 +401,7 @@ class BootstrapAdministratorIntegrationTest {
             ) { identity ->
                 Files.delete(path)
                 secret("replacement-test-only-9h!S", "post-commit-race")
-                BootstrapSecretFile.deleteValidated(identity)
+                BootstrapSecretFile().deleteValidated(identity)
             }
 
             assertThatThrownBy { bootstrap.bootstrap() }
@@ -381,6 +460,73 @@ class BootstrapAdministratorIntegrationTest {
             }
     }
 
+    @Test
+    fun `bootstrap success and failures never log credentials hashes content or paths`() {
+        val captured = mutableListOf<ILoggingEvent>()
+        var encodedHash = ""
+        val successPath = temp.resolve("success-log-secret")
+        database { jdbc, transactions ->
+            secret(LOG_PASSWORD, successPath.fileName.toString())
+            captured += captureBootstrapLogs {
+                BootstrapAdministrator(
+                    jdbc,
+                    transactions,
+                    PasswordService(),
+                    BootstrapAdministratorProperties(successPath.toString(), LOG_RAW_USERNAME, "Log Test Administrator"),
+                ).bootstrap()
+            }
+            encodedHash = jdbc.queryForObject("SELECT password_hash FROM iam.user_account", String::class.java)!!
+        }
+
+        val failurePath = temp.resolve("failure-log-secret")
+        database { jdbc, transactions ->
+            jdbc.update(
+                "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'log-conflict', 'Log Conflict', 'ACTIVE')",
+                BootstrapIds.PACKAGE,
+            )
+            secret(LOG_FAILURE_CONTENT, failurePath.fileName.toString())
+            val deterministicPasswords = PasswordService(object : PasswordEncoder {
+                override fun encode(rawPassword: CharSequence): String = LOG_FAILURE_HASH
+                override fun matches(rawPassword: CharSequence, encodedPassword: String): Boolean = false
+            })
+            captured += captureBootstrapLogs {
+                assertThatThrownBy {
+                    BootstrapAdministrator(
+                        jdbc,
+                        transactions,
+                        deterministicPasswords,
+                        BootstrapAdministratorProperties(failurePath.toString(), LOG_FAILURE_RAW_USERNAME, "Failure Administrator"),
+                    ).bootstrap()
+                }.isInstanceOf(BootstrapBaselineException::class.java)
+                    .hasMessageNotContaining(LOG_FAILURE_CONTENT)
+                    .hasMessageNotContaining(LOG_FAILURE_RAW_USERNAME)
+                    .hasMessageNotContaining(LOG_FAILURE_NORMALIZED_USERNAME)
+                    .hasMessageNotContaining(LOG_FAILURE_HASH)
+                    .hasMessageNotContaining(failurePath.toAbsolutePath().toString())
+            }
+        }
+
+        val rendered = captured.joinToString("\n") { event ->
+            listOf(
+                event.formattedMessage,
+                event.argumentArray?.joinToString(" ").orEmpty(),
+                event.throwableProxy?.message.orEmpty(),
+            ).joinToString(" ")
+        }
+        listOf(
+            LOG_PASSWORD,
+            LOG_RAW_USERNAME,
+            LOG_NORMALIZED_USERNAME,
+            encodedHash,
+            successPath.toAbsolutePath().toString(),
+            LOG_FAILURE_CONTENT,
+            LOG_FAILURE_RAW_USERNAME,
+            LOG_FAILURE_NORMALIZED_USERNAME,
+            LOG_FAILURE_HASH,
+            failurePath.toAbsolutePath().toString(),
+        ).forEach { forbidden -> assertThat(rendered).doesNotContain(forbidden) }
+    }
+
     private fun secret(value: String, name: String = "admin-secret"): Path = temp.resolve(name).also {
         Files.writeString(it, value)
         ownerOnly(it)
@@ -420,9 +566,62 @@ class BootstrapAdministratorIntegrationTest {
         }
     }
 
+    private fun bootstrapState(jdbc: JdbcTemplate): Map<String, Any> = jdbc.queryForMap(
+        """SELECT
+             (SELECT current_revision FROM authz.authorization_state WHERE singleton) AS revision,
+             (SELECT count(*) FROM catalog.domain_package) AS packages,
+             (SELECT count(*) FROM catalog.package_version) AS package_versions,
+             (SELECT count(*) FROM catalog.entity_type) AS entity_types,
+             (SELECT count(*) FROM catalog.entity_type_version) AS entity_type_versions,
+             (SELECT count(*) FROM catalog.relation_definition) AS relation_definitions,
+             (SELECT count(*) FROM authz.entity) AS entities,
+             (SELECT coalesce(sum(row_version), 0) FROM authz.entity) AS entity_row_versions,
+             (SELECT max(updated_at) FROM authz.entity) AS entity_updated_at,
+             (SELECT count(*) FROM iam.principal) AS principals,
+             (SELECT coalesce(sum(row_version), 0) FROM iam.principal) AS principal_row_versions,
+             (SELECT max(updated_at) FROM iam.principal) AS principal_updated_at,
+             (SELECT count(*) FROM iam.user_account) AS accounts,
+             (SELECT count(*) FROM authz.relationship) AS relationships,
+             (SELECT coalesce(sum(row_version), 0) FROM authz.relationship) AS relationship_row_versions,
+             (SELECT max(updated_at) FROM authz.relationship) AS relationship_updated_at""",
+    )
+
+    private fun roleRow(id: UUID, key: String, displayName: String): Map<String, Any> = mapOf(
+        "id" to id,
+        "entity_key" to key,
+        "entity_type_id" to BootstrapIds.ROLE_TYPE,
+        "entity_type_version_id" to BootstrapIds.ROLE_TYPE_VERSION,
+        "state" to "ACTIVE",
+        "display_name" to displayName,
+        "status" to "ACTIVE",
+        "principal_kind" to "ROLE",
+    )
+
+    private fun captureBootstrapLogs(action: () -> Unit): List<ILoggingEvent> {
+        val logger = org.slf4j.LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().also {
+            it.start()
+            logger.addAppender(it)
+        }
+        return try {
+            action()
+            appender.list.toList()
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
+    }
+
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val TEST_PASSWORD = "bootstrap-test-only-7f!Q"
         private const val CONTENT_HASH = "ac6022b02682cc2c737269adb4320750e6d92c51727952392dd45a1b969dbd76"
+        private const val LOG_PASSWORD = "log-success-test-only-4k!V"
+        private const val LOG_RAW_USERNAME = " Log.Success@Test "
+        private const val LOG_NORMALIZED_USERNAME = "log.success@test"
+        private const val LOG_FAILURE_CONTENT = "log-failure-test-only-5m!W"
+        private const val LOG_FAILURE_RAW_USERNAME = " Log.Failure@Test "
+        private const val LOG_FAILURE_NORMALIZED_USERNAME = "log.failure@test"
+        private const val LOG_FAILURE_HASH = "encoded-bootstrap-failure-hash-sensitive"
     }
 }

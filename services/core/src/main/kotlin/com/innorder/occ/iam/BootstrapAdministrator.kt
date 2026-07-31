@@ -109,46 +109,53 @@ internal data class BootstrapSecret(
     val identity: SecretFileIdentity,
 )
 
+internal enum class SecretFileKind { REGULAR, SYMLINK, REPARSE, DIRECTORY }
+
+internal data class SecretFileMetadata(
+    val kind: SecretFileKind,
+    val size: Long,
+    val fileKey: Any?,
+    val creationTime: Instant,
+    val modifiedTime: Instant,
+    val posixPermissions: Set<PosixFilePermission>?,
+)
+
+internal interface SecretFileMetadataAccess {
+    fun inspect(path: Path): SecretFileMetadata
+    fun read(path: Path, maximumBytes: Int): ByteArray
+    fun delete(path: Path)
+}
+
 internal data class SecretFileIdentity(
     val path: Path,
     val fileKey: Any?,
     val size: Long,
     val creation: Instant,
     val modified: Instant,
+)
+
+internal class BootstrapSecretFile(
+    private val files: SecretFileMetadataAccess = NioSecretFileMetadataAccess,
 ) {
-    fun matches(attributes: BasicFileAttributes): Boolean =
-        if (fileKey != null && attributes.fileKey() != null) {
-            fileKey == attributes.fileKey()
-        } else {
-            size == attributes.size() && creation == attributes.creationTime().toInstant() &&
-                modified == attributes.lastModifiedTime().toInstant()
-        }
-}
-
-object BootstrapSecretFile {
-    private const val MAX_BYTES = 1024
-
     fun read(path: Path): SecretCharacters = readValidated(path).characters
 
     internal fun readValidated(path: Path): BootstrapSecret {
-        val before = attributes(path)
-        validate(path, before)
+        val before = inspectForRead(path)
+        validateReadable(before)
         val bytes = try {
-            Files.newByteChannel(path, setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use { channel ->
-                val buffer = ByteBuffer.allocate(MAX_BYTES + 1)
-                while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
-                if (buffer.position() > MAX_BYTES || channel.read(ByteBuffer.allocate(1)) >= 0) invalid()
-                buffer.flip()
-                ByteArray(buffer.remaining()).also(buffer::get)
-            }
+            files.read(path, MAX_BYTES)
         } catch (_: BootstrapConfigurationException) {
             throw invalid()
         } catch (_: Exception) {
             throw invalid()
         }
         try {
-            val after = attributes(path)
-            if (!identity(path, before).matches(after)) invalid()
+            val after = inspectForRead(path)
+            validateReadable(after)
+            if (((before.fileKey != null || after.fileKey != null) && before.fileKey != after.fileKey) ||
+                before.size != after.size || before.creationTime != after.creationTime ||
+                before.modifiedTime != after.modifiedTime
+            ) invalid()
             val contentLength = when {
                 bytes.size >= 2 && bytes[bytes.lastIndex - 1] == '\r'.code.toByte() && bytes.last() == '\n'.code.toByte() -> bytes.size - 2
                 bytes.isNotEmpty() && bytes.last() == '\n'.code.toByte() -> bytes.size - 1
@@ -179,10 +186,13 @@ object BootstrapSecretFile {
 
     internal fun deleteValidated(identity: SecretFileIdentity) {
         try {
-            val current = attributes(identity.path)
-            validate(identity.path, current)
-            if (!identity.matches(current)) throw BootstrapSecretCleanupException()
-            Files.delete(identity.path)
+            val current = files.inspect(identity.path)
+            validateReadable(current)
+            if (identity.fileKey == null || current.fileKey == null || identity.fileKey != current.fileKey ||
+                identity.size != current.size || identity.creation != current.creationTime ||
+                identity.modified != current.modifiedTime
+            ) throw BootstrapSecretCleanupException()
+            files.delete(identity.path)
         } catch (_: BootstrapSecretCleanupException) {
             throw BootstrapSecretCleanupException()
         } catch (_: Exception) {
@@ -190,35 +200,83 @@ object BootstrapSecretFile {
         }
     }
 
-    private fun attributes(path: Path): BasicFileAttributes = try {
-        Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    private fun inspectForRead(path: Path): SecretFileMetadata = try {
+        files.inspect(path)
     } catch (_: Exception) {
         throw invalid()
     }
 
-    private fun validate(path: Path, attributes: BasicFileAttributes) {
-        if (Files.isSymbolicLink(path) || !attributes.isRegularFile || attributes.size() > MAX_BYTES) invalid()
-        if (Files.getFileStore(path).supportsFileAttributeView("posix")) {
-            val permissions = try {
-                Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
-            } catch (_: Exception) {
-                throw invalid()
-            }
+    private fun validateReadable(metadata: SecretFileMetadata) {
+        if (metadata.kind != SecretFileKind.REGULAR || metadata.size > MAX_BYTES) invalid()
+        metadata.posixPermissions?.let { permissions ->
             val readOnly = setOf(PosixFilePermission.OWNER_READ)
             val readWrite = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
             if (permissions != readOnly && permissions != readWrite) invalid()
         }
     }
 
-    private fun identity(path: Path, attributes: BasicFileAttributes) = SecretFileIdentity(
+    private fun identity(path: Path, metadata: SecretFileMetadata) = SecretFileIdentity(
         path.toAbsolutePath().normalize(),
-        attributes.fileKey(),
-        attributes.size(),
-        attributes.creationTime().toInstant(),
-        attributes.lastModifiedTime().toInstant(),
+        metadata.fileKey,
+        metadata.size,
+        metadata.creationTime,
+        metadata.modifiedTime,
     )
 
     private fun invalid(): Nothing = throw BootstrapConfigurationException()
+
+    private companion object {
+        const val MAX_BYTES = 1024
+    }
+}
+
+internal object NioSecretFileMetadataAccess : SecretFileMetadataAccess {
+    override fun inspect(path: Path): SecretFileMetadata {
+        val attributes = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        val symbolicLink = Files.isSymbolicLink(path)
+        val fileStore = if (!symbolicLink && attributes.isRegularFile) Files.getFileStore(path) else null
+        val reparsePoint = if (fileStore?.supportsFileAttributeView("dos") == true) {
+            val dosAttributes = Files.getAttribute(path, "dos:attributes", LinkOption.NOFOLLOW_LINKS) as Int
+            dosAttributes and WINDOWS_REPARSE_POINT_ATTRIBUTE != 0
+        } else {
+            false
+        }
+        val kind = when {
+            symbolicLink -> SecretFileKind.SYMLINK
+            reparsePoint -> SecretFileKind.REPARSE
+            attributes.isRegularFile -> SecretFileKind.REGULAR
+            attributes.isDirectory -> SecretFileKind.DIRECTORY
+            else -> SecretFileKind.REPARSE
+        }
+        val permissions = if (kind == SecretFileKind.REGULAR && fileStore?.supportsFileAttributeView("posix") == true) {
+            Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
+        } else {
+            null
+        }
+        return SecretFileMetadata(
+            kind,
+            attributes.size(),
+            attributes.fileKey(),
+            attributes.creationTime().toInstant(),
+            attributes.lastModifiedTime().toInstant(),
+            permissions,
+        )
+    }
+
+    override fun read(path: Path, maximumBytes: Int): ByteArray =
+        Files.newByteChannel(path, setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use { channel ->
+            val buffer = ByteBuffer.allocate(maximumBytes + 1)
+            while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
+            if (buffer.position() > maximumBytes || channel.read(ByteBuffer.allocate(1)) >= 0) {
+                throw BootstrapConfigurationException()
+            }
+            buffer.flip()
+            ByteArray(buffer.remaining()).also(buffer::get)
+        }
+
+    override fun delete(path: Path) = Files.delete(path)
+
+    private const val WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x400
 }
 
 class BootstrapAdministrator internal constructor(
@@ -233,7 +291,7 @@ class BootstrapAdministrator internal constructor(
         transactions: TransactionTemplate,
         passwords: PasswordService,
         properties: BootstrapAdministratorProperties,
-    ) : this(jdbc, transactions, passwords, properties, BootstrapSecretFile::deleteValidated)
+    ) : this(jdbc, transactions, passwords, properties, BootstrapSecretFile()::deleteValidated)
 
     override fun run(args: ApplicationArguments) {
         bootstrap()
@@ -243,19 +301,24 @@ class BootstrapAdministrator internal constructor(
         val username = CanonicalUsername.normalize(properties.username) ?: throw BootstrapConfigurationException()
         val displayName = normalizeDisplayName(properties.displayName)
         if (!StringUtils.hasText(properties.passwordFile)) throw BootstrapConfigurationException()
-        val path = try {
-            Path.of(properties.passwordFile)
-        } catch (_: Exception) {
-            throw BootstrapConfigurationException()
-        }
         val outcome = try {
             transactions.execute {
                 jdbc.queryForObject("SELECT pg_advisory_xact_lock(?) IS NULL", Boolean::class.java, BOOTSTRAP_LOCK)
-                if (jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM iam.user_account)", Boolean::class.java) == true) {
+                if (jdbc.queryForObject(
+                        """SELECT EXISTS (SELECT 1 FROM iam.principal WHERE principal_kind = 'USER')
+                                  OR EXISTS (SELECT 1 FROM iam.user_account)""",
+                        Boolean::class.java,
+                    ) == true
+                ) {
                     return@execute BootstrapOutcome(BootstrapResult.ALREADY_INITIALIZED, null)
                 }
 
-                val secret = BootstrapSecretFile.readValidated(path)
+                val path = try {
+                    Path.of(properties.passwordFile)
+                } catch (_: Exception) {
+                    throw BootstrapConfigurationException()
+                }
+                val secret = BootstrapSecretFile().readValidated(path)
                 try {
                     val hash = passwords.encode(secret.characters)
                     val now = jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)!!
