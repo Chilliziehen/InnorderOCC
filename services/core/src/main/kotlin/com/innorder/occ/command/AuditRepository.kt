@@ -1,6 +1,5 @@
 package com.innorder.occ.command
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.support.TransactionSynchronizationManager
@@ -9,7 +8,6 @@ import java.util.UUID
 @Repository
 class AuditRepository(
     private val jdbc: JdbcTemplate,
-    private val mapper: ObjectMapper,
 ) {
     fun insert(
         transactionId: UUID,
@@ -25,7 +23,7 @@ class AuditRepository(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)""",
             UUID.randomUUID(), transactionId, metadata.principalId, action, mutation.resourceId,
             mutation.beforeVersion, mutation.afterVersion, mutation.auditReason,
-            mapper.writeValueAsString(mutation.auditDetail), metadata.correlationId,
+            mutation.auditDetail.canonicalText(), metadata.correlationId,
         )
     }
 }

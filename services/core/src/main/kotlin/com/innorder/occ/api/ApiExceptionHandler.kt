@@ -9,6 +9,8 @@ import com.innorder.occ.command.InvalidIdempotencyKeyException
 import com.innorder.occ.command.InvalidCommandMetadataException
 import com.innorder.occ.command.InvalidCommandRequestException
 import com.innorder.occ.command.InvalidExpectedVersionException
+import com.innorder.occ.command.IdempotencyExpiredException
+import com.innorder.occ.command.CommandIntegrityException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -97,7 +99,6 @@ class ApiExceptionHandler(
     ): ResponseEntity<OccProblem> = responses.invalidIdempotencyKey(request)
 
     @ExceptionHandler(
-        InvalidCommandMetadataException::class,
         InvalidCommandRequestException::class,
         InvalidExpectedVersionException::class,
     )
@@ -106,11 +107,35 @@ class ApiExceptionHandler(
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.validation(request, "Command request is invalid.")
 
-    @ExceptionHandler(IdempotencyConflictException::class, IdempotencyInProgressException::class)
+    @ExceptionHandler(InvalidCommandMetadataException::class)
+    fun invalidCommandMetadata(
+        exception: InvalidCommandMetadataException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.invalidCommandMetadata(request)
+
+    @ExceptionHandler(IdempotencyConflictException::class)
     fun idempotencyConflict(
-        exception: RuntimeException,
+        exception: IdempotencyConflictException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.idempotencyConflict(request)
+
+    @ExceptionHandler(IdempotencyInProgressException::class)
+    fun idempotencyInProgress(
+        exception: IdempotencyInProgressException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.idempotencyInProgress(request)
+
+    @ExceptionHandler(IdempotencyExpiredException::class)
+    fun idempotencyExpired(
+        exception: IdempotencyExpiredException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.idempotencyExpired(request)
+
+    @ExceptionHandler(CommandIntegrityException::class)
+    fun commandIntegrity(
+        exception: CommandIntegrityException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.commandIntegrity(request)
 
     @ExceptionHandler(com.innorder.occ.command.OptimisticConflictException::class)
     fun optimisticConflict(

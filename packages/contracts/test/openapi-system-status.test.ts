@@ -288,6 +288,7 @@ describe("OCC Core OpenAPI system status", () => {
         type: "integer",
         format: "int64",
         minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
       },
     });
 

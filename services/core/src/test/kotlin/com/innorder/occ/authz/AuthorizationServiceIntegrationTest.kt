@@ -42,6 +42,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import com.innorder.occ.command.AuditRepository
+import com.innorder.occ.command.AuthorizedCommand
+import com.innorder.occ.command.CanonicalJsonObject
+import com.innorder.occ.command.CommandContext
+import com.innorder.occ.command.CommandExecutor
+import com.innorder.occ.command.CommandMetadata
+import com.innorder.occ.command.CommandMutation
+import com.innorder.occ.command.IdempotencyRepository
+import com.innorder.occ.command.PendingEventSpec
+import com.innorder.occ.events.OutboxRepository
 
 @Testcontainers(disabledWithoutDocker = true)
 class AuthorizationServiceIntegrationTest {
@@ -302,6 +313,89 @@ class AuthorizationServiceIntegrationTest {
             .isInstanceOf(AuthorizationAvailabilityException::class.java)
             .hasMessage("Authorization is unavailable")
         assertThat(snapshots.calls).isZero()
+    }
+
+    @Test
+    fun `command executor commits real allow decision and command records with minimized HTTP OPA context`() {
+        val jdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(jdbc)
+        resetKernelAggregate(jdbc)
+        val mapper = ObjectMapper().findAndRegisterModules()
+        val input = AtomicReference<JsonNode>()
+        val correlationId = UUID.randomUUID()
+        val key = "real-allow-${UUID.randomUUID()}"
+        val executor = commandExecutor(jdbc, httpAuthorization(jdbc, mapper, AuthorizationDecisionValue.ALLOW, input))
+
+        val result = executor.execute(
+            CommandMetadata(PRINCIPAL_ID, "occ.command.real", key, 3, correlationId),
+            """{"secret":"raw-request-secret","value":"after"}""".toByteArray(),
+            kernelCommand(),
+        )
+
+        assertThat(result.replayed).isFalse()
+        assertThat(input.get().path("context").fieldNames().asSequence().toSet())
+            .containsExactlyInAnyOrder("commandKey", "expectedVersion", "requestDigest")
+        assertThat(input.get().path("context").path("commandKey").textValue()).isEqualTo("occ.command.real")
+        assertThat(input.get().path("context").path("expectedVersion").longValue()).isEqualTo(3)
+        assertThat(input.get().path("context").path("requestDigest").textValue()).matches("^[0-9a-f]{64}${'$'}")
+        assertThat(input.get().toString()).doesNotContain("raw-request-secret")
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.decision_log WHERE correlation_id = ? AND decision = 'ALLOW'", Long::class.java, correlationId)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ? AND idempotency_key = ? AND state = 'COMPLETED'", Long::class.java, PRINCIPAL_ID, key)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE correlation_id = ?", Long::class.java, correlationId)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE correlation_id = ?", Long::class.java, correlationId)).isEqualTo(1)
+        val persisted = jdbc.queryForObject(
+            """SELECT coalesce(string_agg(value, ' '), '') FROM (
+                 SELECT detail::text AS value FROM audit.audit_record WHERE correlation_id = ?
+                 UNION ALL SELECT payload::text FROM audit.outbox_event WHERE correlation_id = ?
+               ) persisted""",
+            String::class.java, correlationId, correlationId,
+        )!!
+        assertThat(persisted).doesNotContain("raw-request-secret")
+    }
+
+    @Test
+    fun `forced outer rollback removes real allow decision and every command write`() {
+        val jdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(jdbc)
+        resetKernelAggregate(jdbc)
+        val mapper = ObjectMapper().findAndRegisterModules()
+        val correlationId = UUID.randomUUID()
+        val executor = commandExecutor(jdbc, httpAuthorization(jdbc, mapper, AuthorizationDecisionValue.ALLOW, AtomicReference()))
+        val key = "real-rollback-${UUID.randomUUID()}"
+
+        TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!)).executeWithoutResult { status ->
+            executor.execute(CommandMetadata(PRINCIPAL_ID, "occ.command.real", key, 3, correlationId), "{}".toByteArray(), kernelCommand())
+            status.setRollbackOnly()
+        }
+
+        assertThat(jdbc.queryForObject("SELECT value FROM occ.command_kernel_authz_test WHERE id = ?", String::class.java, KERNEL_AGGREGATE_ID)).isEqualTo("before")
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.decision_log WHERE correlation_id = ?", Long::class.java, correlationId)).isZero()
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ? AND idempotency_key = ?", Long::class.java, PRINCIPAL_ID, key)).isZero()
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE correlation_id = ?", Long::class.java, correlationId)).isZero()
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE correlation_id = ?", Long::class.java, correlationId)).isZero()
+    }
+
+    @Test
+    fun `real deny and error decision logs survive while all command state rolls back`() {
+        listOf(AuthorizationDecisionValue.DENY, AuthorizationDecisionValue.ERROR).forEach { outcome ->
+            val jdbc = JdbcTemplate(dataSource())
+            resetAuthorizationFacts(jdbc)
+            resetKernelAggregate(jdbc)
+            val mapper = ObjectMapper().findAndRegisterModules()
+            val correlationId = UUID.randomUUID()
+            val key = "real-${outcome.name.lowercase()}-${UUID.randomUUID()}"
+            val executor = commandExecutor(jdbc, httpAuthorization(jdbc, mapper, outcome, AtomicReference()))
+
+            assertThatThrownBy {
+                executor.execute(CommandMetadata(PRINCIPAL_ID, "occ.command.real", key, 3, correlationId), "{}".toByteArray(), kernelCommand())
+            }.isInstanceOfAny(AuthorizationDeniedException::class.java, AuthorizationAvailabilityException::class.java)
+
+            assertThat(jdbc.queryForObject("SELECT value FROM occ.command_kernel_authz_test WHERE id = ?", String::class.java, KERNEL_AGGREGATE_ID)).isEqualTo("before")
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.decision_log WHERE correlation_id = ? AND decision = ?", Long::class.java, correlationId, outcome.name)).isEqualTo(1)
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ? AND idempotency_key = ?", Long::class.java, PRINCIPAL_ID, key)).isZero()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE correlation_id = ?", Long::class.java, correlationId)).isZero()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE correlation_id = ?", Long::class.java, correlationId)).isZero()
+        }
     }
 
     @Test
@@ -990,6 +1084,101 @@ class AuthorizationServiceIntegrationTest {
         )
     }
 
+    private fun commandExecutor(
+        jdbc: JdbcTemplate,
+        authorizationService: AuthorizationService,
+    ) = CommandExecutor(
+        DataSourceTransactionManager(jdbc.dataSource!!), authorizationService,
+        IdempotencyRepository(jdbc), AuditRepository(jdbc), OutboxRepository(jdbc), jdbc,
+    )
+
+    private fun httpAuthorization(
+        jdbc: JdbcTemplate,
+        mapper: ObjectMapper,
+        outcome: AuthorizationDecisionValue,
+        capturedInput: AtomicReference<JsonNode>,
+    ): AuthorizationService {
+        server?.stop(0)
+        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
+                val input = mapper.readTree(exchange.requestBody.use { it.readAllBytes() }).path("input")
+                capturedInput.set(input.deepCopy())
+                val reference = if (outcome == AuthorizationDecisionValue.ALLOW) {
+                    GRANT_REFERENCE
+                } else {
+                    AuthorizationDecisionValidator.POLICY_REASON_IDS.getValue("NO_MATCHING_ALLOW")
+                }
+                val result = mapper.createObjectNode().apply {
+                    put("contractVersion", 1)
+                    put("opaRevision", input.path("opaRevision").textValue())
+                    put("requestId", input.path("requestId").textValue())
+                    put("authorizationRevision", input.path("authorizationRevision").longValue())
+                    set<JsonNode>("releases", input.path("releases").deepCopy())
+                    put("decision", outcome.name)
+                    put("allow", outcome == AuthorizationDecisionValue.ALLOW)
+                    putArray("reasonCodes").add(if (outcome == AuthorizationDecisionValue.ALLOW) "ALLOW_GRANT_MATCH" else "NO_MATCHING_ALLOW")
+                    putArray("reasonIds").add(reference)
+                    putArray("matchedPolicyIds").also { if (outcome == AuthorizationDecisionValue.ALLOW) it.add(reference) }
+                }
+                sendJson(exchange, mapper.createObjectNode().set("result", result), mapper)
+            }
+            start()
+        }
+        return AuthorizationService(
+            AuthorizationSnapshotRepository(jdbc, mapper),
+            OpaClient(
+                mapper,
+                OpaProperties("http://127.0.0.1:${server!!.address.port}", Duration.ofMillis(500), Duration.ofSeconds(1)),
+            ),
+            decisionLogRepository(jdbc, mapper),
+        )
+    }
+
+    private fun resetKernelAggregate(jdbc: JdbcTemplate) {
+        jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", KERNEL_AGGREGATE_ID)
+        jdbc.update("DELETE FROM occ.command_kernel_authz_test")
+        jdbc.update(
+            "INSERT INTO occ.command_kernel_authz_test(id, value, row_version) VALUES (?, 'before', 3)",
+            KERNEL_AGGREGATE_ID,
+        )
+    }
+
+    private fun kernelCommand() = object : AuthorizedCommand {
+        override val action = "occ.read"
+        override val entityId = ENTITY_ID
+        override val resourceId = RESOURCE_ID
+        override val aggregateId = KERNEL_AGGREGATE_ID
+        override val expectedVersionRequired = true
+
+        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
+            "SELECT row_version FROM occ.command_kernel_authz_test WHERE id = ? FOR UPDATE",
+            Long::class.java,
+            aggregateId,
+        )!!
+
+        override fun execute(context: CommandContext): CommandMutation {
+            context.jdbc.update(
+                "UPDATE occ.command_kernel_authz_test SET value = 'after', row_version = 4 WHERE id = ?",
+                aggregateId,
+            )
+            return CommandMutation(
+                200,
+                CanonicalJsonObject.from(ObjectMapper().readTree("""{"result":"after"}""")),
+                resourceId,
+                aggregateId,
+                "kernel-authz-test",
+                3,
+                4,
+                "authorized test",
+                CanonicalJsonObject.from(ObjectMapper().readTree("""{"changed":true}""")),
+                listOf(PendingEventSpec(
+                    "kernel-authz-test.updated", 1,
+                    CanonicalJsonObject.from(ObjectMapper().readTree("""{"value":"after"}""")), 4,
+                )),
+            )
+        }
+    }
+
     private fun awaitOpa(port: Int, process: Process) {
         val client = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(250)).build()
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
@@ -1121,6 +1310,7 @@ class AuthorizationServiceIntegrationTest {
         private val RESOURCE_ID = UUID.fromString("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
         private val PLATFORM_VERSION_ID = UUID.fromString("550e8400-e29b-41d4-a716-446655440000")
         private val COMPOSED_RELEASE_ID = UUID.fromString("123e4567-e89b-42d3-a456-426614174000")
+        private val KERNEL_AGGREGATE_ID = UUID.fromString("72000000-0000-7000-8000-000000000011")
         private const val GRANT_REFERENCE = "grant:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         private const val POLICY_REFERENCE = "policy:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -1143,6 +1333,10 @@ class AuthorizationServiceIntegrationTest {
                 .locations("classpath:db/migration")
                 .load()
                 .migrate()
+            JdbcTemplate(adminDataSource()).apply {
+                execute("CREATE TABLE occ.command_kernel_authz_test(id uuid PRIMARY KEY, value text NOT NULL, row_version bigint NOT NULL)")
+                execute("GRANT SELECT, INSERT, UPDATE, DELETE ON occ.command_kernel_authz_test TO innorder_runtime")
+            }
             val jdbc = JdbcTemplate(dataSource())
             jdbc.update("INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'authz-test', 'Authz Test', 'ACTIVE')", PACKAGE_ID)
             jdbc.update("INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')", PACKAGE_VERSION_ID, PACKAGE_ID)
@@ -1192,6 +1386,12 @@ class AuthorizationServiceIntegrationTest {
             setURL(postgres.jdbcUrl)
             user = "innorder_runtime"
             password = "runtime-test-only"
+        }
+
+        private fun adminDataSource() = PGSimpleDataSource().apply {
+            setURL(postgres.jdbcUrl)
+            user = postgres.username
+            password = postgres.password
         }
 
         private fun sha256(value: String): String {

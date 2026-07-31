@@ -9,6 +9,11 @@ import com.innorder.occ.command.IdempotencyConflictException
 import com.innorder.occ.command.InvalidIdempotencyKeyException
 import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.InvalidCommandRequestException
+import com.innorder.occ.command.InvalidCommandMetadataException
+import com.innorder.occ.command.IdempotencyExpiredException
+import com.innorder.occ.command.IdempotencyInProgressException
+import com.innorder.occ.command.CommandIntegrityException
+import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.OptimisticConflictException
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
@@ -20,6 +25,7 @@ import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Size
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
@@ -266,8 +272,12 @@ class ApiErrorHandlingTest {
             Triple("/test/invalid-idempotency", 400, "OCC-COMMAND-IDEMPOTENCY-KEY"),
             Triple("/test/invalid-expected-version", 400, "OCC-API-VALIDATION"),
             Triple("/test/invalid-command-request", 400, "OCC-API-VALIDATION"),
+            Triple("/test/invalid-command-metadata", 400, "OCC-COMMAND-METADATA"),
             Triple("/test/idempotency-conflict", 409, "OCC-COMMAND-IDEMPOTENCY-CONFLICT"),
+            Triple("/test/idempotency-in-progress", 409, "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS"),
+            Triple("/test/idempotency-expired", 409, "OCC-COMMAND-IDEMPOTENCY-EXPIRED"),
             Triple("/test/optimistic-conflict", 409, "OCC-COMMAND-OPTIMISTIC-CONFLICT"),
+            Triple("/test/command-integrity", 503, "OCC-COMMAND-INTEGRITY"),
             Triple("/test/authorization-denied", 403, "OCC-API-FORBIDDEN"),
             Triple("/test/authorization-unavailable", 503, "OCC-AUTHZ-UNAVAILABLE"),
         )
@@ -285,6 +295,24 @@ class ApiErrorHandlingTest {
             }
             assertSafe(result.response.contentAsString, "request-secret")
         }
+    }
+
+    @Test
+    fun `optimistic current version accepts safe integer maximum and rejects larger values`() {
+        val result = mockMvc.get("/test/optimistic-max").andExpect { status { isConflict() } }.andReturn()
+        assertThat(objectMapper.readTree(result.response.contentAsString)["currentVersion"].longValue())
+            .isEqualTo(CommandExecutor.MAX_SAFE_INTEGER)
+        assertThatThrownBy {
+            problem(currentVersion = CommandExecutor.MAX_SAFE_INTEGER + 1)
+        }.isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun `expired idempotency problem instructs caller to use a new key`() {
+        val result = mockMvc.get("/test/idempotency-expired").andExpect { status { isConflict() } }.andReturn()
+        val problem = objectMapper.readTree(result.response.contentAsString)
+        assertThat(problem["code"].textValue()).isEqualTo("OCC-COMMAND-IDEMPOTENCY-EXPIRED")
+        assertThat(problem["detail"].textValue()).isEqualTo("Use a new idempotency key.")
     }
 
     @Test
@@ -447,6 +475,7 @@ class ApiErrorHandlingTest {
         title: String = "Invalid request",
         detail: String? = null,
         correlationId: String = "018f30c0-7a86-7f8b-a6e0-3c5477bb7e1a",
+        currentVersion: Long? = null,
     ) = OccProblem(
         URI.create("https://innorder.local/problems/validation"),
         title,
@@ -454,6 +483,7 @@ class ApiErrorHandlingTest {
         "OCC-API-VALIDATION",
         correlationId,
         detail,
+        currentVersion,
     )
 
     private fun assertStrictProblem(json: String) {
@@ -510,11 +540,26 @@ class ApiErrorHandlingTest {
         @GetMapping("/invalid-command-request")
         fun invalidCommandRequest(): Nothing = throw InvalidCommandRequestException()
 
+        @GetMapping("/invalid-command-metadata")
+        fun invalidCommandMetadata(): Nothing = throw InvalidCommandMetadataException()
+
         @GetMapping("/idempotency-conflict")
         fun idempotencyConflict(): Nothing = throw IdempotencyConflictException()
 
+        @GetMapping("/idempotency-in-progress")
+        fun idempotencyInProgress(): Nothing = throw IdempotencyInProgressException()
+
+        @GetMapping("/idempotency-expired")
+        fun idempotencyExpired(): Nothing = throw IdempotencyExpiredException()
+
         @GetMapping("/optimistic-conflict")
         fun optimisticConflict(): Nothing = throw OptimisticConflictException(17)
+
+        @GetMapping("/optimistic-max")
+        fun optimisticMax(): Nothing = throw OptimisticConflictException(CommandExecutor.MAX_SAFE_INTEGER)
+
+        @GetMapping("/command-integrity")
+        fun commandIntegrity(): Nothing = throw CommandIntegrityException()
 
         @GetMapping("/authorization-denied")
         fun authorizationDenied(): Nothing = throw AuthorizationDeniedException()

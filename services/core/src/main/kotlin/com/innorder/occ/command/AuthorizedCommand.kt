@@ -1,6 +1,5 @@
 package com.innorder.occ.command
 
-import com.fasterxml.jackson.databind.JsonNode
 import com.innorder.occ.authz.AuthorizationDecisionReference
 import org.springframework.jdbc.core.JdbcOperations
 import java.util.UUID
@@ -27,45 +26,45 @@ interface AuthorizedCommand {
     val action: String
     val entityId: UUID
     val resourceId: UUID
+    val aggregateId: UUID
     val expectedVersionRequired: Boolean
-    fun currentVersion(context: CommandContext): Long?
+
+    /** Called after authorization. Update commands must lock their aggregate row with FOR UPDATE before returning. */
+    fun lockCurrentVersion(context: CommandContext): Long?
     fun execute(context: CommandContext): CommandMutation
 }
 
 class CommandContext internal constructor(
     val jdbc: JdbcOperations,
     val metadata: CommandMetadata,
-    request: JsonNode,
+    val request: CanonicalJsonObject,
     val authorization: AuthorizationDecisionReference,
     val transactionId: UUID,
-) {
-    private val canonicalRequest = request.deepCopy<JsonNode>()
-    val request: JsonNode get() = canonicalRequest.deepCopy<JsonNode>()
-}
+)
 
 data class PendingEventSpec(
     val eventType: String,
     val schemaVersion: Int,
-    val payload: JsonNode,
+    val payload: CanonicalJsonObject,
     val aggregateVersion: Long,
 )
 
 data class CommandMutation(
     val status: Int,
-    val body: JsonNode,
+    val body: CanonicalJsonObject,
     val resourceId: UUID,
     val aggregateId: UUID,
     val aggregateType: String,
     val beforeVersion: Long?,
     val afterVersion: Long,
     val auditReason: String?,
-    val auditDetail: JsonNode,
+    val auditDetail: CanonicalJsonObject,
     val events: List<PendingEventSpec>,
 )
 
 data class CommandResult(
     val status: Int,
-    val body: JsonNode,
+    val body: CanonicalJsonObject,
     val resourceId: UUID?,
     val replayed: Boolean,
 )
@@ -76,4 +75,10 @@ class InvalidExpectedVersionException : RuntimeException("Expected version is mi
 class InvalidCommandRequestException : RuntimeException("Command request is invalid")
 class IdempotencyConflictException : RuntimeException("Idempotency key was used with a different request")
 class IdempotencyInProgressException : RuntimeException("Idempotency request is not terminal")
-class OptimisticConflictException(val currentVersion: Long) : RuntimeException("Aggregate version does not match")
+class IdempotencyExpiredException : RuntimeException("Idempotency key is expired; use a new key")
+class CommandIntegrityException : RuntimeException("Stored command result failed integrity validation")
+class OptimisticConflictException(val currentVersion: Long) : RuntimeException("Aggregate version does not match") {
+    init {
+        require(currentVersion in 0..CommandExecutor.MAX_SAFE_INTEGER)
+    }
+}

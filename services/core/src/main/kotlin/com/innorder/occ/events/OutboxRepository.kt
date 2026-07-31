@@ -1,6 +1,5 @@
 package com.innorder.occ.events
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.command.CommandMetadata
 import com.innorder.occ.command.CommandMutation
 import org.springframework.jdbc.core.JdbcTemplate
@@ -11,7 +10,6 @@ import java.util.UUID
 @Repository
 class OutboxRepository(
     private val jdbc: JdbcTemplate,
-    private val mapper: ObjectMapper,
 ) {
     fun insert(metadata: CommandMetadata, transactionId: UUID, mutation: CommandMutation) {
         check(TransactionSynchronizationManager.isActualTransactionActive()) { "Outbox repository requires a transaction" }
@@ -23,7 +21,7 @@ class OutboxRepository(
                     available_at, next_attempt_at, status)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, statement_timestamp(), statement_timestamp(), 'PENDING')""",
                 UUID.randomUUID(), DEFAULT_CUSTOMER_INSTANCE_ID, mutation.aggregateType, mutation.aggregateId,
-                event.aggregateVersion, event.eventType, event.schemaVersion, mapper.writeValueAsString(event.payload),
+                event.aggregateVersion, event.eventType, event.schemaVersion, event.payload.canonicalText(),
                 metadata.principalId, metadata.correlationId, transactionId,
             )
         }

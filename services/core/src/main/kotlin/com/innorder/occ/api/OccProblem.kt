@@ -28,7 +28,7 @@ data class OccProblem(
         require(code.length in 1..MAX_CODE_LENGTH)
         require(detail == null || ApiContractValidation.hasCodePointLengthWithin(detail, 0, MAX_DETAIL_LENGTH))
         require(ApiContractValidation.isStandardUuid(correlationId))
-        require(currentVersion == null || currentVersion >= 0)
+        require(currentVersion == null || currentVersion in 0..com.innorder.occ.command.CommandExecutor.MAX_SAFE_INTEGER)
     }
 
     companion object {
@@ -62,6 +62,21 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
 
     fun idempotencyConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 409, "idempotency-conflict", "Idempotency conflict", "OCC-COMMAND-IDEMPOTENCY-CONFLICT")
+
+    fun invalidCommandMetadata(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "invalid-command-metadata", "Invalid command metadata", "OCC-COMMAND-METADATA")
+
+    fun idempotencyInProgress(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "idempotency-in-progress", "Command is in progress", "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS")
+
+    fun idempotencyExpired(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(
+            request, 409, "idempotency-expired", "Idempotency key expired", "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
+            "Use a new idempotency key.",
+        )
+
+    fun commandIntegrity(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 503, "command-integrity", "Command result unavailable", "OCC-COMMAND-INTEGRITY")
 
     fun optimisticConflict(request: HttpServletRequest, currentVersion: Long): ResponseEntity<OccProblem> =
         response(

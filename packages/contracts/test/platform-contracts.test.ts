@@ -475,6 +475,7 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
       { ...boundaryProblem, currentVersion: -1 },
       { ...boundaryProblem, currentVersion: 1.5 },
+      { ...boundaryProblem, currentVersion: Number.MAX_SAFE_INTEGER + 1 },
     ]) {
       expect(() => problemDetailsSchema.parse(invalid)).toThrow();
     }

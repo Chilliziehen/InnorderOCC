@@ -1,6 +1,5 @@
 package com.innorder.occ.command
 
-import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.authz.AuthorizationDecision
 import com.innorder.occ.authz.AuthorizationDecisionValue
@@ -35,7 +34,9 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.springframework.transaction.support.TransactionTemplate
-import java.security.MessageDigest
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 
 @Testcontainers(disabledWithoutDocker = true)
 class CommandExecutorIntegrationTest {
@@ -71,14 +72,12 @@ class CommandExecutorIntegrationTest {
                 override fun persistIndependently(entry: DecisionLogEntry) = Unit
             },
         )
-        val mapper = ObjectMapper().findAndRegisterModules()
         executor = CommandExecutor(
             DataSourceTransactionManager(jdbc.dataSource!!),
             authorization,
-            IdempotencyRepository(jdbc, mapper),
-            AuditRepository(jdbc, mapper),
-            OutboxRepository(jdbc, mapper),
-            mapper,
+            IdempotencyRepository(jdbc),
+            AuditRepository(jdbc),
+            OutboxRepository(jdbc),
             jdbc,
         )
     }
@@ -91,7 +90,9 @@ class CommandExecutorIntegrationTest {
         val replay = executor.execute(metadata, """{ "a": {"x":1,"y":2}, "z":1, "secret":"request-only" }""".toByteArray(), command())
 
         assertThat(first.status).isEqualTo(200)
-        assertThat(first.body).isEqualTo(JSON.readTree("""{"result":"after"}"""))
+        assertThat(first.body.toJsonNode()).isEqualTo(JSON.readTree("""{"result":"after"}"""))
+        first.body.toJsonNode().put("mutated", true)
+        assertThat(first.body.toJsonNode().has("mutated")).isFalse()
         assertThat(first.replayed).isFalse()
         assertThat(replay).isEqualTo(first.copy(replayed = true))
         assertThat(executions).hasValue(1)
@@ -102,7 +103,7 @@ class CommandExecutorIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, AGGREGATE_ID)).isEqualTo(1)
         assertThat(jdbc.queryForObject("SELECT state FROM audit.idempotency_record WHERE principal_id = ?", String::class.java, PRINCIPAL_ID)).isEqualTo("COMPLETED")
         val persisted = jdbc.queryForObject("SELECT response_body::text FROM audit.idempotency_record WHERE principal_id = ?", String::class.java, PRINCIPAL_ID)!!
-        assertThat(JSON.readTree(persisted)).isEqualTo(first.body)
+        assertThat(JSON.readTree(persisted)).isEqualTo(first.body.toJsonNode())
         val idempotency = jdbc.queryForMap(
             """SELECT response_status, response_digest, resource_id,
                       extract(epoch from (expires_at - created_at))::bigint AS ttl_seconds
@@ -110,7 +111,7 @@ class CommandExecutorIntegrationTest {
             PRINCIPAL_ID,
         )
         assertThat(idempotency["response_status"]).isEqualTo(200)
-        assertThat(idempotency["response_digest"]).isEqualTo(sha256(JSON.writeValueAsBytes(first.body)))
+        assertThat(idempotency["response_digest"]).isEqualTo(first.body.digest)
         assertThat(idempotency["resource_id"]).isEqualTo(RESOURCE_ID)
         assertThat(idempotency["ttl_seconds"]).isEqualTo(86_400L)
         val audit = jdbc.queryForMap(
@@ -195,7 +196,7 @@ class CommandExecutorIntegrationTest {
             val results = futures.map { it.get(30, TimeUnit.SECONDS) }
             assertThat(results.count { !it.replayed }).isEqualTo(1)
             assertThat(results.count { it.replayed }).isEqualTo(19)
-            assertThat(results.map { it.body }).containsOnly(JSON.readTree("""{"result":"after"}"""))
+            assertThat(results.map { it.body.canonicalText() }).containsOnly("""{"result":"after"}""")
             assertThat(executions).hasValue(1)
             assertThat(snapshots.calls).hasValue(1)
         } finally {
@@ -206,10 +207,18 @@ class CommandExecutorIntegrationTest {
 
     @Test
     fun `missing negative and stale expected versions roll back ownership and never execute`() {
-        listOf(null, -1L, 2L).forEachIndexed { index, version ->
+        listOf(null, -1L, CommandExecutor.MAX_SAFE_INTEGER + 1, 2L).forEachIndexed { index, version ->
             assertThatThrownBy {
                 executor.execute(metadata("version-$index").copy(expectedVersion = version), "{}".toByteArray(), command())
             }.isInstanceOfAny(InvalidExpectedVersionException::class.java, OptimisticConflictException::class.java)
+        }
+        listOf(-1L, CommandExecutor.MAX_SAFE_INTEGER + 1).forEachIndexed { index, lockedVersion ->
+            val invalidLock = object : AuthorizedCommand by command() {
+                override fun lockCurrentVersion(context: CommandContext): Long = lockedVersion
+            }
+            assertThatThrownBy {
+                executor.execute(metadata("locked-version-$index"), "{}".toByteArray(), invalidLock)
+            }.isInstanceOf(InvalidCommandRequestException::class.java)
         }
         assertThat(executions).hasValue(0)
         assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ?", Long::class.java, PRINCIPAL_ID)).isZero()
@@ -243,7 +252,7 @@ class CommandExecutorIntegrationTest {
 
         val oversized = object : AuthorizedCommand by command() {
             override fun execute(context: CommandContext): CommandMutation = successMutation(
-                JSON.createObjectNode().put("value", "x".repeat(64 * 1024)),
+                CanonicalJsonObject.from(JSON.createObjectNode().put("value", "x".repeat(64 * 1024))),
             )
         }
         assertThatThrownBy { executor.execute(metadata("response-fail"), "{}".toByteArray(), oversized) }
@@ -290,6 +299,104 @@ class CommandExecutorIntegrationTest {
         }
     }
 
+    @Test
+    fun `distinct idempotency keys serialize at aggregate lock and stale contender conflicts`() {
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val futures = listOf("aggregate-race-a", "aggregate-race-b").map { key ->
+                pool.submit<Any> {
+                    start.await(10, TimeUnit.SECONDS)
+                    try {
+                        executor.execute(metadata(key), "{}".toByteArray(), command())
+                    } catch (failure: RuntimeException) {
+                        failure
+                    }
+                }
+            }
+            start.countDown()
+            val outcomes = futures.map { it.get(30, TimeUnit.SECONDS) }
+
+            assertThat(outcomes.count { it is CommandResult }).isEqualTo(1)
+            assertThat(outcomes.filterIsInstance<OptimisticConflictException>().single().currentVersion).isEqualTo(4)
+            assertThat(executions).hasValue(1)
+            assertThat(jdbc.queryForObject("SELECT row_version FROM occ.command_kernel_test WHERE id = ?", Long::class.java, AGGREGATE_ID)).isEqualTo(4)
+        } finally {
+            pool.shutdownNow()
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
+        }
+    }
+
+    @Test
+    fun `mutation identity and version mismatches roll back before audit and outbox`() {
+        val cases = listOf(
+            successMutation().copy(resourceId = ENTITY_ID),
+            successMutation().copy(aggregateId = UUID.randomUUID()),
+            successMutation().copy(beforeVersion = 2),
+            successMutation().copy(afterVersion = 5),
+        )
+        cases.forEachIndexed { index, mutation ->
+            val invalid = object : AuthorizedCommand by command() {
+                override fun execute(context: CommandContext): CommandMutation {
+                    context.jdbc.update(
+                        "UPDATE occ.command_kernel_test SET value = 'invalid', row_version = 4 WHERE id = ?",
+                        AGGREGATE_ID,
+                    )
+                    return mutation
+                }
+            }
+            assertThatThrownBy { executor.execute(metadata("mutation-$index"), "{}".toByteArray(), invalid) }
+                .isInstanceOf(InvalidCommandRequestException::class.java)
+        }
+        assertRolledBack()
+    }
+
+    @Test
+    fun `completed idempotency expires at exact 24 hour boundary and cannot replay until cleanup`() {
+        val started = Instant.parse("2026-08-01T00:00:00Z")
+        val key = metadata("expiry-key")
+        executorAt(Clock.fixed(started, ZoneOffset.UTC)).execute(key, "{}".toByteArray(), command())
+
+        val beforeBoundary = executorAt(Clock.fixed(started.plusSeconds(86_400).minusMillis(1), ZoneOffset.UTC))
+            .execute(key, "{}".toByteArray(), command())
+        assertThat(beforeBoundary.replayed).isTrue()
+        assertThatThrownBy {
+            executorAt(Clock.fixed(started.plusSeconds(86_400), ZoneOffset.UTC))
+                .execute(key, "{}".toByteArray(), command())
+        }.isInstanceOf(IdempotencyExpiredException::class.java)
+        assertThat(executions).hasValue(1)
+    }
+
+    @Test
+    fun `tampered replay digest or body fails closed without handler execution`() {
+        listOf("digest-tamper" to false, "body-tamper" to true).forEach { (key, tamperBody) ->
+            jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", AGGREGATE_ID)
+            jdbc.update("UPDATE occ.command_kernel_test SET value = 'before', row_version = 3 WHERE id = ?", AGGREGATE_ID)
+            executor.execute(metadata(key), "{}".toByteArray(), command())
+            val admin = JdbcTemplate(adminDataSource())
+            admin.execute("ALTER TABLE audit.idempotency_record DISABLE TRIGGER trg_idempotency_record_lifecycle")
+            try {
+                if (tamperBody) {
+                    admin.update(
+                        "UPDATE audit.idempotency_record SET response_body = '{\"tampered\":true}'::jsonb WHERE principal_id = ? AND idempotency_key = ?",
+                        PRINCIPAL_ID, key,
+                    )
+                } else {
+                    admin.update(
+                        "UPDATE audit.idempotency_record SET response_digest = repeat('f', 64) WHERE principal_id = ? AND idempotency_key = ?",
+                        PRINCIPAL_ID, key,
+                    )
+                }
+            } finally {
+                admin.execute("ALTER TABLE audit.idempotency_record ENABLE TRIGGER trg_idempotency_record_lifecycle")
+            }
+            val countBeforeReplay = executions.get()
+            assertThatThrownBy { executor.execute(metadata(key), "{}".toByteArray(), command()) }
+                .isInstanceOf(CommandIntegrityException::class.java)
+            assertThat(executions).hasValue(countBeforeReplay)
+        }
+    }
+
     private fun metadata(key: String) = CommandMetadata(PRINCIPAL_ID, "test.update", key, 3, CORRELATION_ID)
 
     private fun configureAuthorization(outcome: AuthorizationDecisionValue) {
@@ -303,22 +410,30 @@ class CommandExecutorIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, AGGREGATE_ID)).isZero()
     }
 
-    private fun successMutation(body: JsonNode = JSON.readTree("""{"result":"after"}""")) = CommandMutation(
+    private fun successMutation(body: CanonicalJsonObject = json("""{"result":"after"}""")) = CommandMutation(
         200, body, RESOURCE_ID, AGGREGATE_ID, "kernel-test", 3, 4, "test",
-        JSON.readTree("""{"changed":"value"}"""),
-        listOf(PendingEventSpec("kernel-test.updated", 1, JSON.readTree("""{"value":"after"}"""), 4)),
+        json("""{"changed":"value"}"""),
+        listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), 4)),
     )
 
-    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
-        .joinToString("") { "%02x".format(it) }
+    private fun json(value: String): CanonicalJsonObject = CanonicalJsonObject.from(JSON.readTree(value))
+
+    private fun executorAt(clock: Clock): CommandExecutor {
+        return CommandExecutor(
+            DataSourceTransactionManager(jdbc.dataSource!!), authorization,
+            IdempotencyRepository.forTesting(jdbc, clock), AuditRepository(jdbc),
+            OutboxRepository(jdbc), jdbc,
+        )
+    }
 
     private fun command() = object : AuthorizedCommand {
         override val action = "test.update"
         override val entityId = ENTITY_ID
         override val resourceId = RESOURCE_ID
+        override val aggregateId = AGGREGATE_ID
         override val expectedVersionRequired = true
 
-        override fun currentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
+        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
             "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
             Long::class.java,
             AGGREGATE_ID,
@@ -332,15 +447,15 @@ class CommandExecutorIntegrationTest {
             )
             return CommandMutation(
                 status = 200,
-                body = JSON.readTree("""{"result":"after"}"""),
+                body = json("""{"result":"after"}"""),
                 resourceId = RESOURCE_ID,
                 aggregateId = AGGREGATE_ID,
                 aggregateType = "kernel-test",
                 beforeVersion = 3,
                 afterVersion = 4,
                 auditReason = "test",
-                auditDetail = JSON.readTree("""{"changed":"value"}"""),
-                events = listOf(PendingEventSpec("kernel-test.updated", 1, JSON.readTree("""{"value":"after"}"""), 4)),
+                auditDetail = json("""{"changed":"value"}"""),
+                events = listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), 4)),
             )
         }
     }

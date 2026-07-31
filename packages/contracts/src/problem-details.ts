@@ -39,7 +39,7 @@ export const problemDetailsSchema = z
         ),
       )
       .optional(),
-    currentVersion: z.number().int().nonnegative().optional(),
+    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   })
   .strict();
 

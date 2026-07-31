@@ -166,6 +166,7 @@ components:
           type: integer
           format: int64
           minimum: 0
+          maximum: 9007199254740991
     LoginRequest:
       type: object
       additionalProperties: false
