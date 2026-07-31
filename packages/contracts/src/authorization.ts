@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
+
 export const AUTHORIZATION_CONTRACT_VERSION = 1;
 export const ACTION_KEY_MAX_LENGTH = 128;
 export const CONTEXT_MAX_PROPERTIES = 32;
@@ -22,7 +24,12 @@ const POLICY_REASON_IDS = {
   PRINCIPAL_DISABLED: "policy:8941407440a3ec32c44afbc4ab1fb183748dbf7388cf926f594486cc1f8386a3",
   RESOURCE_INACTIVE: "policy:78a11476cd4e8cb5ba4afa073e8195510016228408013d8f27bfaafafad47876",
   ACTION_FORBIDDEN: "policy:105106f1faa19167cdeb0d067dd88443f361b15f20e14424553e14b7ea7e1a5f",
+  NO_MATCHING_ALLOW: "policy:7ec3d68be5ac070a6d48cb53daaf85bf7b4d76d09985923af422194f7735ab7b",
 } as const;
+
+const normalizedUuid = (value: string) => value.toLowerCase();
+const definedStrings = (values: Array<string | undefined>) =>
+  values.filter((value): value is string => value !== undefined);
 
 const stableActionSchema = z
   .string()
@@ -38,7 +45,7 @@ const releaseIdsSchema = z
   })
   .strict()
   .superRefine((releases, context) => {
-    const ids = Object.values(releases);
+    const ids = definedStrings(Object.values(releases)).map(normalizedUuid);
     if (new Set(ids).size !== ids.length) {
       context.addIssue({ code: "custom", message: "Release IDs must be distinct" });
     }
@@ -82,7 +89,10 @@ const actionOrWildcardSchema = z.union([z.literal("*"), stableActionSchema]);
 
 const authorizationGrantSchema = z
   .object({
-    id: z.string().min(1).max(GRANT_ID_MAX_LENGTH),
+    id: z.string().refine(
+      (value) => hasUnicodeCodePointLengthWithin(value, 1, GRANT_ID_MAX_LENGTH),
+      `Grant ID must contain 1-${GRANT_ID_MAX_LENGTH} Unicode code points`,
+    ),
     layer: z.enum(["PLATFORM", "DOMAIN", "CUSTOMER"]),
     releaseId: nonNilUuidSchema,
     effect: z.enum(["ALLOW", "DENY"]),
@@ -124,7 +134,7 @@ export const authorizationInputSchema = z
           path: ["grants", index, "layer"],
           message: "Grant layer must have a corresponding release",
         });
-      } else if (grant.releaseId !== releaseId) {
+      } else if (normalizedUuid(grant.releaseId) !== normalizedUuid(releaseId)) {
         context.addIssue({
           code: "custom",
           path: ["grants", index, "releaseId"],
@@ -147,6 +157,9 @@ const reasonCodeSchema = z.enum([
 const sortedDistinct = (values: string[]) =>
   new Set(values).size === values.length &&
   values.every((value, index) => index === 0 || values[index - 1]! < value);
+
+const equalSorted = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
 
 const reasonIdSchema = z.string().regex(OPAQUE_REASON_ID_PATTERN);
 const matchedPolicyIdSchema = z.string().regex(OPAQUE_MATCHED_ID_PATTERN);
@@ -179,12 +192,14 @@ export const authorizationDecisionSchema = z
         context.addIssue({ code: "custom", path: [field], message: `${field} must be sorted and distinct` });
       }
     }
-    const releaseIds = Object.values(output.releases);
+    const releaseIds = definedStrings(Object.values(output.releases)).map(normalizedUuid);
     if (new Set(releaseIds).size !== releaseIds.length) {
       context.addIssue({ code: "custom", path: ["releases"], message: "Release IDs must be distinct" });
     }
-    if (!output.matchedPolicyIds.every((id) => output.reasonIds.includes(id))) {
-      context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Matched grants must have corresponding reason IDs" });
+    const grantReasonIds = output.reasonIds.filter((id) => id.startsWith("grant:"));
+    const policyReasonIds = output.reasonIds.filter((id) => id.startsWith("policy:"));
+    if (!equalSorted(grantReasonIds, output.matchedPolicyIds)) {
+      context.addIssue({ code: "custom", path: ["reasonIds"], message: "Grant reason IDs must exactly equal matchedPolicyIds" });
     }
     if (output.reasonCodes.includes("INVALID_INPUT")) {
       const canonical =
@@ -207,40 +222,46 @@ export const authorizationDecisionSchema = z
       if (output.releases.PLATFORM === undefined) {
         context.addIssue({ code: "custom", path: ["releases", "PLATFORM"], message: "Valid decisions require a platform release" });
       }
-      const denialCodes = [
+      const baselineCodes = [
         "PRINCIPAL_DISABLED",
         "RESOURCE_INACTIVE",
         "ACTION_FORBIDDEN",
-        "EXPLICIT_DENY",
-        "NO_MATCHING_ALLOW",
       ] as const;
       if (output.decision === "ALLOW") {
-        if (!output.reasonCodes.includes("ALLOW_GRANT_MATCH")) {
-          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Allow requires ALLOW_GRANT_MATCH" });
-        }
-        if (denialCodes.some((code) => output.reasonCodes.includes(code))) {
-          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Allow cannot include denial codes" });
+        if (!equalSorted(output.reasonCodes, ["ALLOW_GRANT_MATCH"])) {
+          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Allow requires only ALLOW_GRANT_MATCH" });
         }
         if (output.matchedPolicyIds.length === 0) {
           context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Allow requires a matching grant" });
         }
+        if (policyReasonIds.length !== 0) {
+          context.addIssue({ code: "custom", path: ["reasonIds"], message: "Allow cannot include policy reason IDs" });
+        }
       } else {
-        if (!denialCodes.some((code) => output.reasonCodes.includes(code))) {
-          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Deny requires a denial reason" });
-        }
-        if (output.reasonCodes.includes("ALLOW_GRANT_MATCH")) {
-          context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Deny cannot include ALLOW_GRANT_MATCH" });
-        }
-        if (output.reasonCodes.includes("EXPLICIT_DENY") && output.matchedPolicyIds.length === 0) {
-          context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Explicit deny requires a matching grant" });
-        }
-        if (output.reasonCodes.includes("NO_MATCHING_ALLOW") && output.matchedPolicyIds.length !== 0) {
-          context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "No matching allow cannot identify matched grants" });
-        }
-      }
-      for (const code of ["PRINCIPAL_DISABLED", "RESOURCE_INACTIVE", "ACTION_FORBIDDEN"] as const) {
-        if (output.reasonCodes.includes(code) && !output.reasonIds.includes(POLICY_REASON_IDS[code])) {
-          context.addIssue({ code: "custom", path: ["reasonIds"], message: `${code} requires its policy hash` });
+        if (output.reasonCodes.includes("NO_MATCHING_ALLOW")) {
+          const exactNoMatch =
+            equalSorted(output.reasonCodes, ["NO_MATCHING_ALLOW"]) &&
+            output.matchedPolicyIds.length === 0 &&
+            equalSorted(policyReasonIds, [POLICY_REASON_IDS.NO_MATCHING_ALLOW]);
+          if (!exactNoMatch) {
+            context.addIssue({ code: "custom", message: "NO_MATCHING_ALLOW requires its exact deny envelope" });
+          }
+        } else {
+          const hasExplicitDeny = output.reasonCodes.includes("EXPLICIT_DENY");
+          const presentBaselineCodes = baselineCodes.filter((code) => output.reasonCodes.includes(code));
+          const onlyPossibleDenyCodes = output.reasonCodes.every(
+            (code) => code === "EXPLICIT_DENY" || baselineCodes.includes(code as typeof baselineCodes[number]),
+          );
+          if (!onlyPossibleDenyCodes || (!hasExplicitDeny && presentBaselineCodes.length === 0)) {
+            context.addIssue({ code: "custom", path: ["reasonCodes"], message: "Deny requires baseline or explicit-deny codes" });
+          }
+          if (hasExplicitDeny && output.matchedPolicyIds.length === 0) {
+            context.addIssue({ code: "custom", path: ["matchedPolicyIds"], message: "Explicit deny requires a matching grant" });
+          }
+          const expectedPolicyIds = presentBaselineCodes.map((code) => POLICY_REASON_IDS[code]).sort();
+          if (!equalSorted(policyReasonIds, expectedPolicyIds)) {
+            context.addIssue({ code: "custom", path: ["reasonIds"], message: "Policy reason IDs must exactly match baseline reason codes" });
+          }
         }
       }
     }

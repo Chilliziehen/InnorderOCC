@@ -7,7 +7,11 @@ import { describe, expect, it } from "vitest";
 import { authorizationDecisionSchema, authorizationInputSchema } from "../src/index.js";
 
 type JsonObject = Record<string, unknown>;
-type FixtureCase = { name: string; overrides: JsonObject };
+type FixtureCase = {
+  name: string;
+  overrides: JsonObject;
+  grantIdRepeat?: { value: string; count: number };
+};
 type Fixtures = { baseInput: JsonObject; valid: FixtureCase[]; invalid: FixtureCase[] };
 
 const fixtures = JSON.parse(
@@ -40,12 +44,24 @@ function evaluateWithOpa(input: JsonObject): unknown {
   return output.result[0]?.expressions[0]?.value;
 }
 
+function materialize(fixture: FixtureCase): JsonObject {
+  const input = { ...fixtures.baseInput, ...fixture.overrides };
+  if (fixture.grantIdRepeat) {
+    const grants = input.grants as JsonObject[];
+    input.grants = [
+      { ...grants[0], id: fixture.grantIdRepeat.value.repeat(fixture.grantIdRepeat.count) },
+      ...grants.slice(1),
+    ];
+  }
+  return input;
+}
+
 const describeWithOpa = process.env.OPA_PATH ? describe : describe.skip;
 
 describeWithOpa("authorization Zod/OPA parity", () => {
   for (const fixture of fixtures.valid) {
     it(`accepts and evaluates: ${fixture.name}`, () => {
-      const input = { ...fixtures.baseInput, ...fixture.overrides };
+      const input = materialize(fixture);
       expect(authorizationInputSchema.parse(input)).toEqual(input);
       const decision = evaluateWithOpa(input);
       expect(() => authorizationDecisionSchema.parse(decision)).not.toThrow();
@@ -59,7 +75,7 @@ describeWithOpa("authorization Zod/OPA parity", () => {
 
   for (const fixture of fixtures.invalid) {
     it(`fails closed identically: ${fixture.name}`, () => {
-      const input = { ...fixtures.baseInput, ...fixture.overrides };
+      const input = materialize(fixture);
       expect(() => authorizationInputSchema.parse(input)).toThrow();
       expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
     });

@@ -133,6 +133,20 @@ test_release_mismatch_and_cross_release_reuse_are_invalid if {
     }
 }
 
+test_uuid_identity_is_case_insensitive_but_actions_are_not if {
+    mixed := object.union(platform_allow, {
+        "releaseId": upper(platform_release_id),
+        "principalId": upper(principal_id),
+        "entityId": upper(entity_id),
+        "resourceId": upper(resource_id),
+    })
+    mixed_result := decision with input as object.union(base_input, {"grants": [mixed]})
+    mixed_result.allow
+    action_case := object.union(mixed, {"action": "RESOURCE.READ"})
+    action_result := decision with input as object.union(base_input, {"grants": [action_case]})
+    action_result.reasonCodes == ["NO_MATCHING_ALLOW"]
+}
+
 test_layer_outcomes_use_only_bound_release_grants if {
     platform_deny := grant("PLATFORM", "DENY", "platform-deny")
     domain_allow := grant("DOMAIN", "ALLOW", "domain-allow")
@@ -210,8 +224,20 @@ test_duplicate_release_and_grant_ids_deny if {
     duplicate_grant := object.union(base_input, {
         "grants": [platform_allow, object.union(platform_allow, {"effect": "DENY"})],
     })
+    case_duplicate_release := object.union(base_input, {
+        "releases": {"PLATFORM": platform_release_id, "DOMAIN": upper(platform_release_id)},
+    })
     decision with input as duplicate_release == invalid_envelope
     decision with input as duplicate_grant == invalid_envelope
+    decision with input as case_duplicate_release == invalid_envelope
+}
+
+test_grant_id_length_counts_unicode_code_points if {
+    accepted := object.union(platform_allow, {"id": concat("", ["😀" | some _ in numbers.range(1, 200)])})
+    rejected := object.union(platform_allow, {"id": concat("", ["😀" | some _ in numbers.range(1, 257)])})
+    accepted_result := decision with input as object.union(base_input, {"grants": [accepted]})
+    accepted_result.allow
+    decision with input as object.union(base_input, {"grants": [rejected]}) == invalid_envelope
 }
 
 test_types_uuid_and_integer_bounds_deny if {

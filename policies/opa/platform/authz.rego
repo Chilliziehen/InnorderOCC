@@ -166,18 +166,25 @@ matching_grant_refs contains ref if {
 
 grant_matches_layer_release(grant, layer) if {
     grant.layer == layer
-    grant.releaseId == input.releases[layer]
-    value_matches(grant.action, input.action)
-    value_matches(grant.principalId, input.principal.id)
-    value_matches(grant.entityId, input.entity.id)
-    value_matches(grant.resourceId, input.resource.id)
+    lower(grant.releaseId) == lower(input.releases[layer])
+    action_matches(grant.action, input.action)
+    uuid_matches(grant.principalId, input.principal.id)
+    uuid_matches(grant.entityId, input.entity.id)
+    uuid_matches(grant.resourceId, input.resource.id)
 }
 
-value_matches("*", _)
+action_matches("*", _)
 
-value_matches(pattern, value) if {
+action_matches(pattern, value) if {
     pattern != "*"
     pattern == value
+}
+
+uuid_matches("*", _)
+
+uuid_matches(pattern, value) if {
+    pattern != "*"
+    lower(pattern) == lower(value)
 }
 
 grant_ref(grant) := sprintf("grant:%s", [crypto.sha256(grant.id)])
@@ -215,7 +222,7 @@ valid_releases(releases) if {
     is_object(releases)
     object.keys(releases) - {"PLATFORM", "DOMAIN", "CUSTOMER"} == set()
     valid_uuid(releases.PLATFORM)
-    release_ids := [id | some key; id := releases[key]]
+    release_ids := [lower(id) | some key; id := releases[key]]
     every id in release_ids {
         valid_uuid(id)
     }
@@ -277,7 +284,7 @@ valid_grant(grant, releases) if {
     grant.layer in {"PLATFORM", "DOMAIN", "CUSTOMER"}
     grant.layer in object.keys(releases)
     valid_uuid(grant.releaseId)
-    grant.releaseId == releases[grant.layer]
+    lower(grant.releaseId) == lower(releases[grant.layer])
     grant.effect in {"ALLOW", "DENY"}
     valid_action_or_wildcard(grant.action)
     valid_uuid_or_wildcard(grant.principalId)

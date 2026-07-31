@@ -63,6 +63,9 @@ const grantHash = `grant:${"a".repeat(64)}`;
 const otherGrantHash = `grant:${"b".repeat(64)}`;
 const invalidInputPolicyHash = "policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176";
 const principalDisabledPolicyHash = "policy:8941407440a3ec32c44afbc4ab1fb183748dbf7388cf926f594486cc1f8386a3";
+const resourceInactivePolicyHash = "policy:78a11476cd4e8cb5ba4afa073e8195510016228408013d8f27bfaafafad47876";
+const actionForbiddenPolicyHash = "policy:105106f1faa19167cdeb0d067dd88443f361b15f20e14424553e14b7ea7e1a5f";
+const noMatchingAllowPolicyHash = "policy:7ec3d68be5ac070a6d48cb53daaf85bf7b4d76d09985923af422194f7735ab7b";
 
 const authorizationInput = {
   contractVersion: 1,
@@ -164,10 +167,23 @@ describe("authorization contracts", () => {
     ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
   });
 
+  it("counts opaque grant IDs in Unicode code points", () => {
+    const grant = authorizationInput.grants[0];
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      grants: [{ ...grant, id: "😀".repeat(200) }],
+    })).toBeDefined();
+    expect(() => authorizationInputSchema.parse({
+      ...authorizationInput,
+      grants: [{ ...grant, id: "😀".repeat(257) }],
+    })).toThrow();
+  });
+
   it("rejects duplicate releases, duplicate grants, release mismatches, absent layers, and partial wildcards", () => {
     const grant = authorizationInput.grants[0];
     for (const invalid of [
       { ...authorizationInput, releases: { PLATFORM: id, DOMAIN: id } },
+      { ...authorizationInput, releases: { PLATFORM: id, DOMAIN: id.toUpperCase() } },
       { ...authorizationInput, grants: [grant, { ...grant, effect: "DENY" }] },
       {
         ...authorizationInput,
@@ -194,6 +210,18 @@ describe("authorization contracts", () => {
         grants: [{ ...grant, action: "*", principalId: "*", entityId: "*", resourceId: "*" }],
       }),
     ).toBeDefined();
+
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      releases: { ...authorizationInput.releases, PLATFORM: id.toUpperCase() },
+      grants: [{
+        ...grant,
+        releaseId: id,
+        principalId: authorizationInput.principal.id.toUpperCase(),
+        entityId: authorizationInput.entity.id.toUpperCase(),
+        resourceId: authorizationInput.resource.id.toUpperCase(),
+      }],
+    })).toBeDefined();
   });
 
   it("rejects inconsistent, unsorted, duplicate, or unknown decision fields", () => {
@@ -208,6 +236,7 @@ describe("authorization contracts", () => {
       reasonIds: [grantHash, principalDisabledPolicyHash],
       matchedPolicyIds: [grantHash],
     } as const;
+    expect(authorizationDecisionSchema.parse(baseDecision)).toEqual(baseDecision);
     for (const invalid of [
       { ...baseDecision, allow: true },
       { ...baseDecision, reasonCodes: [...baseDecision.reasonCodes].reverse() },
@@ -244,7 +273,7 @@ describe("authorization contracts", () => {
     ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
   });
 
-  it("enforces allow and deny reason semantics", () => {
+  it("accepts exactly possible allow and deny reason semantics", () => {
     const allowDecision = {
       contractVersion: 1,
       requestId: authorizationInput.requestId,
@@ -262,8 +291,27 @@ describe("authorization contracts", () => {
       allow: false,
       reasonCodes: ["EXPLICIT_DENY"],
     } as const;
+    const noMatchingDecision = {
+      ...denyDecision,
+      reasonCodes: ["NO_MATCHING_ALLOW"],
+      reasonIds: [noMatchingAllowPolicyHash],
+      matchedPolicyIds: [],
+    } as const;
+    const baselineDecision = {
+      ...denyDecision,
+      reasonCodes: ["ACTION_FORBIDDEN", "PRINCIPAL_DISABLED", "RESOURCE_INACTIVE"],
+      reasonIds: [
+        grantHash,
+        actionForbiddenPolicyHash,
+        resourceInactivePolicyHash,
+        principalDisabledPolicyHash,
+      ],
+      matchedPolicyIds: [grantHash],
+    } as const;
     expect(authorizationDecisionSchema.parse(allowDecision)).toEqual(allowDecision);
     expect(authorizationDecisionSchema.parse(denyDecision)).toEqual(denyDecision);
+    expect(authorizationDecisionSchema.parse(noMatchingDecision)).toEqual(noMatchingDecision);
+    expect(authorizationDecisionSchema.parse(baselineDecision)).toEqual(baselineDecision);
     expect(authorizationDecisionSchema.parse({
       ...denyDecision,
       reasonCodes: ["PRINCIPAL_DISABLED"],
@@ -275,17 +323,55 @@ describe("authorization contracts", () => {
       { ...allowDecision, reasonCodes: [] },
       { ...allowDecision, reasonCodes: ["ALLOW_GRANT_MATCH", "EXPLICIT_DENY"] },
       { ...allowDecision, matchedPolicyIds: [] },
+      { ...allowDecision, reasonIds: [] },
+      { ...allowDecision, reasonIds: [grantHash, principalDisabledPolicyHash] },
+      { ...allowDecision, reasonIds: [otherGrantHash], matchedPolicyIds: [grantHash] },
       { ...denyDecision, reasonCodes: [] },
       { ...denyDecision, matchedPolicyIds: [] },
-      { ...denyDecision, reasonCodes: ["NO_MATCHING_ALLOW"], matchedPolicyIds: [grantHash] },
+      { ...denyDecision, reasonIds: [grantHash, otherGrantHash] },
+      { ...denyDecision, reasonIds: [otherGrantHash], matchedPolicyIds: [grantHash] },
+      { ...denyDecision, reasonIds: [grantHash, principalDisabledPolicyHash] },
+      { ...noMatchingDecision, reasonCodes: ["NO_MATCHING_ALLOW", "PRINCIPAL_DISABLED"] },
+      { ...noMatchingDecision, reasonCodes: ["EXPLICIT_DENY", "NO_MATCHING_ALLOW"] },
+      { ...noMatchingDecision, decision: "ALLOW", allow: true },
+      { ...noMatchingDecision, reasonIds: [] },
+      { ...noMatchingDecision, reasonIds: [principalDisabledPolicyHash] },
+      { ...noMatchingDecision, reasonIds: [grantHash, noMatchingAllowPolicyHash], matchedPolicyIds: [grantHash] },
       {
         ...denyDecision,
         reasonCodes: ["PRINCIPAL_DISABLED"],
         reasonIds: [grantHash],
       },
+      {
+        ...denyDecision,
+        reasonCodes: ["PRINCIPAL_DISABLED"],
+        reasonIds: [principalDisabledPolicyHash, resourceInactivePolicyHash],
+        matchedPolicyIds: [],
+      },
+      {
+        ...denyDecision,
+        reasonCodes: ["PRINCIPAL_DISABLED", "RESOURCE_INACTIVE"],
+        reasonIds: [principalDisabledPolicyHash],
+        matchedPolicyIds: [],
+      },
       { ...denyDecision, reasonCodes: ["ALLOW_GRANT_MATCH"] },
       { ...denyDecision, matchedPolicyIds: [otherGrantHash], reasonIds: [grantHash] },
     ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
+  });
+
+  it("rejects case-insensitive duplicate release IDs in decisions", () => {
+    const decision = {
+      contractVersion: 1,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: 17,
+      releases: { PLATFORM: id, DOMAIN: id.toUpperCase() },
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["NO_MATCHING_ALLOW"],
+      reasonIds: [noMatchingAllowPolicyHash],
+      matchedPolicyIds: [],
+    } as const;
+    expect(() => authorizationDecisionSchema.parse(decision)).toThrow();
   });
 });
 
