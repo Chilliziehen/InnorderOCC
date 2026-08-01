@@ -240,6 +240,7 @@ for (const routine of [
   'ai.begin_embedding_space_gate',
   'ai.record_embedding_gate_case',
   'ai.finalize_embedding_space_gate',
+  'ai.cleanup_expired_run_artifacts',
 ]) {
   const result = await db.query(`
     SELECT count(*)::integer AS count

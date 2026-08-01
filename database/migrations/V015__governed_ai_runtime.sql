@@ -17,6 +17,11 @@ CREATE TABLE authz.ai_authorization_grant (
     ),
     classification_ceiling text NOT NULL
         CHECK (classification_ceiling IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
+    agent_version_id uuid NOT NULL REFERENCES ai.agent_definition_version(id),
+    model_profile_id uuid NOT NULL REFERENCES ai.model_profile(id),
+    prompt_version_id uuid NOT NULL REFERENCES ai.prompt_template_version(id),
+    package_version_id uuid NOT NULL REFERENCES catalog.package_version(id),
+    embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     issued_at timestamptz NOT NULL,
     expires_at timestamptz NOT NULL,
     consumed_at timestamptz,
@@ -28,7 +33,9 @@ CREATE TABLE authz.ai_authorization_grant (
     CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '5 minutes'),
     CHECK ((consumed_at IS NULL AND run_id IS NULL) OR (consumed_at IS NOT NULL AND run_id IS NOT NULL)),
     CHECK (consumed_at IS NULL OR (consumed_at >= issued_at AND consumed_at < expires_at)),
-    UNIQUE (id, run_id)
+    UNIQUE (id, run_id),
+    UNIQUE (id, agent_version_id, model_profile_id, prompt_version_id,
+            package_version_id, policy_release_id, embedding_space_id)
 );
 
 CREATE TABLE authz.ai_authorized_document (
@@ -40,7 +47,15 @@ CREATE TABLE authz.ai_authorized_document (
 
 ALTER TABLE ai.ai_run
     ADD COLUMN authorization_grant_id uuid UNIQUE REFERENCES authz.ai_authorization_grant(id),
+    ADD COLUMN embedding_space_id uuid REFERENCES ai.embedding_space(id),
     ADD CONSTRAINT uq_ai_run_grant UNIQUE (id, authorization_grant_id);
+ALTER TABLE ai.ai_run
+    ADD CONSTRAINT fk_ai_run_grant_configuration
+    FOREIGN KEY (authorization_grant_id, agent_version_id, model_profile_id, prompt_version_id,
+                 package_version_id, policy_release_id, embedding_space_id)
+    REFERENCES authz.ai_authorization_grant
+        (id, agent_version_id, model_profile_id, prompt_version_id,
+         package_version_id, policy_release_id, embedding_space_id);
 ALTER TABLE authz.ai_authorization_grant
     ADD CONSTRAINT fk_ai_authorization_grant_run
     FOREIGN KEY (run_id) REFERENCES ai.ai_run(id) DEFERRABLE INITIALLY DEFERRED;
@@ -250,6 +265,7 @@ CREATE TABLE ai.embedding_space_gate_evaluation (
     dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
     dataset_content_hash text NOT NULL CHECK (dataset_content_hash ~ '^[0-9a-f]{64}$'),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    document_manifest text NOT NULL CHECK (octet_length(document_manifest) > 0),
     candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     eligible_count bigint NOT NULL CHECK (eligible_count > 0),
@@ -261,7 +277,7 @@ CREATE TABLE ai.embedding_space_gate_evaluation (
     legal_hold_id uuid,
     CHECK (retention_until >= created_at + interval '1 year'),
     UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id),
-    UNIQUE (id, dataset_version_id, dataset_content_hash)
+    UNIQUE (id, dataset_version_id, dataset_content_hash, document_manifest)
 );
 
 CREATE TABLE ai.embedding_space_gate_case_evidence (
@@ -283,6 +299,7 @@ CREATE TABLE ai.embedding_space_gate_result (
     dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
     dataset_content_hash text NOT NULL CHECK (dataset_content_hash ~ '^[0-9a-f]{64}$'),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    document_manifest text NOT NULL CHECK (octet_length(document_manifest) > 0),
     candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     eligible_count bigint NOT NULL CHECK (eligible_count > 0),
@@ -311,8 +328,8 @@ CREATE TABLE ai.embedding_space_gate_result (
         AND recall_sum / recall_count >= minimum_recall_at_10
     )),
     UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id),
-    FOREIGN KEY (id, dataset_version_id, dataset_content_hash)
-        REFERENCES ai.embedding_space_gate_evaluation(id, dataset_version_id, dataset_content_hash)
+    FOREIGN KEY (id, dataset_version_id, dataset_content_hash, document_manifest)
+        REFERENCES ai.embedding_space_gate_evaluation(id, dataset_version_id, dataset_content_hash, document_manifest)
 );
 
 CREATE TABLE ai.legal_hold (
@@ -356,6 +373,85 @@ ALTER TABLE ai.ai_run_artifact
     ADD COLUMN legal_hold_id uuid REFERENCES ai.legal_hold(id),
     ADD CONSTRAINT ck_ai_run_artifact_one_year_retention
         CHECK (retention_until >= created_at + interval '1 year');
+
+CREATE FUNCTION ai.enforce_run_artifact_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    table_owner text;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI run artifact is immutable';
+    END IF;
+    SELECT pg_get_userbyid(relowner) INTO STRICT table_owner
+    FROM pg_class WHERE oid = TG_RELID;
+    IF current_setting('innorder.artifact_cleanup', true) IS DISTINCT FROM 'on'
+       OR current_user IS DISTINCT FROM table_owner THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact deletion requires bounded retention cleanup';
+    END IF;
+    IF OLD.retention_until > statement_timestamp() THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact retention period has not elapsed';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM ai.legal_hold hold_row
+        WHERE hold_row.id = OLD.legal_hold_id AND hold_row.released_at IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM ai.legal_hold_object held
+        JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+        WHERE held.object_kind = 'ARTIFACT' AND held.object_id = OLD.id
+          AND hold_row.released_at IS NULL
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact is under an active legal hold';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_run_artifact_lifecycle
+BEFORE UPDATE OR DELETE ON ai.ai_run_artifact
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_run_artifact_lifecycle();
+
+CREATE FUNCTION ai.cleanup_expired_run_artifacts(p_before timestamptz, p_limit integer)
+RETURNS TABLE (artifact_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_before IS NULL OR p_before > statement_timestamp()
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid artifact cleanup bounds';
+    END IF;
+    PERFORM set_config('innorder.artifact_cleanup', 'on', true);
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT artifact.id
+        FROM ai.ai_run_artifact artifact
+        WHERE artifact.retention_until <= p_before
+          AND artifact.retention_until <= statement_timestamp()
+          AND NOT EXISTS (
+              SELECT 1 FROM ai.legal_hold hold_row
+              WHERE hold_row.id = artifact.legal_hold_id AND hold_row.released_at IS NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM ai.legal_hold_object held
+              JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+              WHERE held.object_kind = 'ARTIFACT' AND held.object_id = artifact.id
+                AND hold_row.released_at IS NULL
+          )
+        ORDER BY artifact.retention_until, artifact.id
+        FOR UPDATE SKIP LOCKED
+        LIMIT p_limit
+    )
+    DELETE FROM ai.ai_run_artifact artifact
+    USING candidates
+    WHERE artifact.id = candidates.id
+    RETURNING artifact.id;
+    PERFORM set_config('innorder.artifact_cleanup', 'off', true);
+END;
+$$;
 
 CREATE FUNCTION ai.enforce_evaluation_dataset_version_lifecycle()
 RETURNS trigger
@@ -646,6 +742,13 @@ DECLARE
     current_release_digest text;
     authorized_ids uuid[];
 BEGIN
+    IF p_token_hash IS NULL OR p_event_id IS NULL OR p_operation IS NULL
+       OR p_authorization_revision IS NULL OR p_policy_release_digest IS NULL
+       OR p_authorized_set_digest IS NULL OR p_context_digest IS NULL OR p_run_id IS NULL
+       OR p_agent_version_id IS NULL OR p_model_profile_id IS NULL
+       OR p_prompt_version_id IS NULL OR p_package_version_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'signed AI grant claims cannot be NULL';
+    END IF;
     SELECT * INTO grant_row
     FROM authz.ai_authorization_grant
     WHERE token_hash = p_token_hash
@@ -659,26 +762,39 @@ BEGIN
     IF transaction_timestamp() < grant_row.issued_at OR transaction_timestamp() >= grant_row.expires_at THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant expired';
     END IF;
-    IF grant_row.event_id <> p_event_id THEN
+    IF grant_row.event_id IS DISTINCT FROM p_event_id THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token event mismatch';
     END IF;
-    IF grant_row.operation <> p_operation THEN
+    IF grant_row.operation IS DISTINCT FROM p_operation THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token operation mismatch';
     END IF;
-    IF grant_row.intended_run_id <> p_run_id OR (grant_row.run_id IS NOT NULL AND grant_row.run_id <> p_run_id) THEN
+    IF grant_row.intended_run_id IS DISTINCT FROM p_run_id
+       OR (grant_row.run_id IS NOT NULL AND grant_row.run_id IS DISTINCT FROM p_run_id) THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token run mismatch';
     END IF;
-    IF grant_row.authorized_set_digest <> p_authorized_set_digest THEN
+    IF grant_row.authorized_set_digest IS DISTINCT FROM p_authorized_set_digest THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token authorized-set digest mismatch';
     END IF;
-    IF grant_row.context_digest <> p_context_digest THEN
+    IF grant_row.context_digest IS DISTINCT FROM p_context_digest THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token context digest mismatch';
     END IF;
-    IF grant_row.policy_release_digest <> p_policy_release_digest THEN
+    IF grant_row.policy_release_digest IS DISTINCT FROM p_policy_release_digest THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token release digest mismatch';
     END IF;
-    IF grant_row.authorization_revision <> p_authorization_revision THEN
+    IF grant_row.authorization_revision IS DISTINCT FROM p_authorization_revision THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token authorization revision mismatch';
+    END IF;
+    IF grant_row.agent_version_id IS DISTINCT FROM p_agent_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token agent version mismatch';
+    END IF;
+    IF grant_row.model_profile_id IS DISTINCT FROM p_model_profile_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token model profile mismatch';
+    END IF;
+    IF grant_row.prompt_version_id IS DISTINCT FROM p_prompt_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token prompt version mismatch';
+    END IF;
+    IF grant_row.package_version_id IS DISTINCT FROM p_package_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token package version mismatch';
     END IF;
     SELECT current_revision INTO STRICT current_auth_revision
     FROM authz.authorization_state WHERE singleton FOR SHARE;
@@ -696,10 +812,13 @@ BEGIN
 
     INSERT INTO ai.ai_run (
         id, agent_version_id, model_profile_id, prompt_version_id, package_version_id,
-        policy_release_id, triggered_by, target_entity_id, status, authorization_grant_id
+        policy_release_id, triggered_by, target_entity_id, status, authorization_grant_id,
+        embedding_space_id
     ) VALUES (
-        p_run_id, p_agent_version_id, p_model_profile_id, p_prompt_version_id, p_package_version_id,
-        grant_row.policy_release_id, grant_row.principal_id, grant_row.target_entity_id, 'QUEUED', grant_row.id
+        grant_row.intended_run_id, grant_row.agent_version_id, grant_row.model_profile_id,
+        grant_row.prompt_version_id, grant_row.package_version_id, grant_row.policy_release_id,
+        grant_row.principal_id, grant_row.target_entity_id, 'QUEUED', grant_row.id,
+        grant_row.embedding_space_id
     );
     UPDATE authz.ai_authorization_grant
     SET consumed_at = transaction_timestamp(), run_id = p_run_id
@@ -715,8 +834,9 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-    IF p_worker_id IS NULL OR btrim(p_worker_id) = '' OR p_limit NOT BETWEEN 1 AND 100
-       OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = ''
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
+       OR p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion claim bounds';
     END IF;
     UPDATE ai.ingestion_attempt attempt
@@ -784,8 +904,9 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-    IF p_worker_id IS NULL OR btrim(p_worker_id) = '' OR p_limit NOT BETWEEN 1 AND 100
-       OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = ''
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
+       OR p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid event claim bounds';
     END IF;
     UPDATE ai.event_consumption
@@ -1106,13 +1227,17 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     grant_operation text;
+    run_model_profile_id uuid;
 BEGIN
-    SELECT grant_row.operation INTO grant_operation
+    SELECT grant_row.operation, run.model_profile_id INTO grant_operation, run_model_profile_id
     FROM ai.ai_run run
     JOIN authz.ai_authorization_grant grant_row ON grant_row.id = run.authorization_grant_id
     WHERE run.id = p_run_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'model invocation requires a governed run';
+    END IF;
+    IF run_model_profile_id IS DISTINCT FROM p_model_profile_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'model profile does not match governed run';
     END IF;
     IF grant_operation <> p_operation THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'invocation operation does not match grant';
@@ -1190,6 +1315,12 @@ DECLARE
 BEGIN
     SELECT * INTO STRICT grant_row FROM authz.ai_authorization_grant
     WHERE run_id = p_run_id AND consumed_at IS NOT NULL;
+    IF NOT EXISTS (
+        SELECT 1 FROM ai.ai_run run
+        WHERE run.id = p_run_id AND run.embedding_space_id = p_embedding_space_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match governed run';
+    END IF;
     SELECT count(*) INTO document_count FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
     INSERT INTO ai.retrieval_trace
         (id, run_id, grant_id, embedding_space_id, query_hash, authorized_set_digest,
@@ -1240,6 +1371,7 @@ DECLARE
     eligible bigint;
     embedded bigint;
     leakage bigint;
+    document_manifest text;
 BEGIN
     SELECT content_hash, status INTO STRICT dataset_content_hash, dataset_status
     FROM ai.evaluation_dataset_version WHERE id = p_dataset_version_id FOR SHARE;
@@ -1247,23 +1379,28 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version is not PUBLISHED';
     END IF;
     SELECT corpus_version, status INTO STRICT candidate_manifest, candidate_status
-    FROM ai.embedding_space WHERE id = p_candidate_embedding_space_id;
-    SELECT status INTO STRICT active_status FROM ai.embedding_space WHERE id = p_expected_active_space_id;
+    FROM ai.embedding_space WHERE id = p_candidate_embedding_space_id FOR UPDATE;
+    SELECT status INTO STRICT active_status FROM ai.embedding_space WHERE id = p_expected_active_space_id FOR SHARE;
     IF candidate_manifest <> p_corpus_manifest_digest OR candidate_status <> 'BUILDING' OR active_status <> 'ACTIVE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
     END IF;
-    WITH eligible_chunks AS (
-        SELECT DISTINCT chunk.id
+    WITH eligible_versions AS MATERIALIZED (
+        SELECT DISTINCT version.id, version.content_hash
         FROM ai.ingestion_job job
         JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
-        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
         WHERE job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    ), eligible_chunks AS (
+        SELECT DISTINCT chunk.id
+        FROM eligible_versions version
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
     )
     SELECT count(*), count(embedding.chunk_id),
            (SELECT count(*) FROM ai.chunk_embedding all_embedding
             LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
-            WHERE all_embedding.embedding_space_id = p_candidate_embedding_space_id AND allowed.id IS NULL)
-    INTO eligible, embedded, leakage
+            WHERE all_embedding.embedding_space_id = p_candidate_embedding_space_id AND allowed.id IS NULL),
+           (SELECT string_agg(version.id::text || ':' || version.content_hash, ',' ORDER BY version.id)
+            FROM eligible_versions version)
+    INTO eligible, embedded, leakage, document_manifest
     FROM eligible_chunks eligible_chunk
     LEFT JOIN ai.chunk_embedding embedding
       ON embedding.chunk_id = eligible_chunk.id AND embedding.embedding_space_id = p_candidate_embedding_space_id;
@@ -1271,9 +1408,9 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: eligible corpus is empty';
     END IF;
     INSERT INTO ai.embedding_space_gate_evaluation
-        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, candidate_embedding_space_id,
+        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, document_manifest, candidate_embedding_space_id,
          expected_active_space_id, eligible_count, embedded_count, leakage_count, evidence_hash)
-    VALUES (p_id, p_dataset_version_id, dataset_content_hash, p_corpus_manifest_digest, p_candidate_embedding_space_id,
+    VALUES (p_id, p_dataset_version_id, dataset_content_hash, p_corpus_manifest_digest, document_manifest, p_candidate_embedding_space_id,
             p_expected_active_space_id, eligible, embedded, leakage, p_evidence_hash);
     RETURN p_id;
 END;
@@ -1322,7 +1459,12 @@ AS $$
 DECLARE
     evaluation ai.embedding_space_gate_evaluation%ROWTYPE;
     current_manifest text;
+    candidate_status text;
     active_status text;
+    current_document_manifest text;
+    current_eligible bigint;
+    current_embedded bigint;
+    current_leakage bigint;
     dataset_content_hash text;
     dataset_status text;
     citation_num bigint;
@@ -1345,12 +1487,56 @@ BEGIN
     IF dataset_content_hash <> evaluation.dataset_content_hash THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version content hash changed';
     END IF;
-    SELECT corpus_version INTO STRICT current_manifest FROM ai.embedding_space
-    WHERE id = evaluation.candidate_embedding_space_id;
+    SELECT corpus_version, status INTO STRICT current_manifest, candidate_status FROM ai.embedding_space
+    WHERE id = evaluation.candidate_embedding_space_id FOR UPDATE;
     SELECT status INTO STRICT active_status FROM ai.embedding_space
-    WHERE id = evaluation.expected_active_space_id;
-    IF current_manifest <> evaluation.corpus_manifest_digest OR active_status <> 'ACTIVE' THEN
+    WHERE id = evaluation.expected_active_space_id FOR SHARE;
+    IF candidate_status <> 'BUILDING' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'candidate embedding space is not BUILDING';
+    END IF;
+    IF current_manifest IS DISTINCT FROM evaluation.corpus_manifest_digest OR active_status <> 'ACTIVE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
+    END IF;
+    PERFORM 1 FROM ai.ingestion_job job
+    WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    FOR SHARE;
+    PERFORM 1
+    FROM ai.ingestion_job job
+    JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+    WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    FOR UPDATE OF version;
+    PERFORM 1
+    FROM ai.ingestion_job job
+    JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+    JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
+    WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    FOR SHARE OF chunk;
+    WITH eligible_versions AS MATERIALIZED (
+        SELECT DISTINCT version.id, version.content_hash
+        FROM ai.ingestion_job job
+        JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+        WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    ), eligible_chunks AS (
+        SELECT DISTINCT chunk.id
+        FROM eligible_versions version
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
+    )
+    SELECT count(*), count(embedding.chunk_id),
+           (SELECT count(*) FROM ai.chunk_embedding all_embedding
+            LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
+            WHERE all_embedding.embedding_space_id = evaluation.candidate_embedding_space_id AND allowed.id IS NULL),
+           (SELECT string_agg(version.id::text || ':' || version.content_hash, ',' ORDER BY version.id)
+            FROM eligible_versions version)
+    INTO current_eligible, current_embedded, current_leakage, current_document_manifest
+    FROM eligible_chunks eligible_chunk
+    LEFT JOIN ai.chunk_embedding embedding
+      ON embedding.chunk_id = eligible_chunk.id
+     AND embedding.embedding_space_id = evaluation.candidate_embedding_space_id;
+    IF current_eligible <> evaluation.eligible_count
+       OR current_embedded <> evaluation.embedded_count
+       OR current_leakage <> evaluation.leakage_count
+       OR current_document_manifest IS DISTINCT FROM evaluation.document_manifest THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'gate corpus snapshot changed';
     END IF;
     SELECT count(*), count(*) FILTER (WHERE input = '{}'::jsonb OR expected_properties = '{}'::jsonb)
     INTO dataset_cases, empty_cases
@@ -1387,11 +1573,12 @@ BEGIN
         AND citation_num::numeric / citation_den >= 0.95
         AND recall_total / cases >= 0.85 THEN 'PASS' ELSE 'FAIL' END;
     INSERT INTO ai.embedding_space_gate_result
-        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, candidate_embedding_space_id,
+        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, document_manifest, candidate_embedding_space_id,
          expected_active_space_id, eligible_count, embedded_count, leakage_count,
          citation_numerator, citation_denominator, recall_sum, recall_count,
          decision, evidence_hash)
     VALUES (evaluation.id, evaluation.dataset_version_id, evaluation.dataset_content_hash, evaluation.corpus_manifest_digest,
+            evaluation.document_manifest,
             evaluation.candidate_embedding_space_id, evaluation.expected_active_space_id,
             evaluation.eligible_count, evaluation.embedded_count, evaluation.leakage_count,
             citation_num, citation_den, recall_total, cases, gate_decision, evaluation.evidence_hash);
@@ -1418,8 +1605,9 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-    IF p_lexical_limit NOT BETWEEN 1 AND 200 OR p_vector_limit NOT BETWEEN 1 AND 200
-       OR p_result_limit NOT BETWEEN 1 AND 100 OR octet_length(p_query) > 8192 THEN
+    IF p_lexical_limit IS NULL OR p_vector_limit IS NULL OR p_result_limit IS NULL
+       OR p_lexical_limit NOT BETWEEN 1 AND 200 OR p_vector_limit NOT BETWEEN 1 AND 200
+       OR p_result_limit NOT BETWEEN 1 AND 100 OR p_query IS NULL OR octet_length(p_query) > 8192 THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bounds';
     END IF;
     IF NOT EXISTS (
@@ -1427,6 +1615,12 @@ BEGIN
         WHERE grant_row.run_id = p_run_id AND grant_row.consumed_at IS NOT NULL
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'run has no consumed AI authorization grant';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM ai.ai_run run
+        WHERE run.id = p_run_id AND run.embedding_space_id = p_space_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match governed run';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM ai.embedding_space WHERE id = p_space_id AND status = 'ACTIVE') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retrieval embedding space is not active';
@@ -1503,10 +1697,12 @@ REVOKE ALL ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bi
 REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FROM PUBLIC, innorder_runtime;
 GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_chunk_embedding(uuid, text, uuid, uuid, integer, text, text, integer, jsonb, uuid, public.vector) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.checkpoint_ingestion_attempt(uuid, text, text, jsonb) TO innorder_ai_runtime;

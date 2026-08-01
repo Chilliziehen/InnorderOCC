@@ -452,7 +452,11 @@ test('binds grant consumption to every signed token claim and 32 KiB canonical c
   assert.match(consume, /grant token authorized-set digest mismatch/iu);
   assert.match(consume, /grant token context digest mismatch/iu);
   assert.match(consume, /grant token run mismatch/iu);
-  assert.match(consume, /authorization_revision <> p_authorization_revision/iu);
+  for (const comparison of [
+    'event_id', 'operation', 'authorization_revision', 'policy_release_digest',
+    'authorized_set_digest', 'context_digest',
+  ]) assert.match(consume, new RegExp(`${comparison} IS DISTINCT FROM p_${comparison}`, 'iu'));
+  assert.match(consume, /signed AI grant claims cannot be NULL/iu);
 });
 
 test('fails embedding gates closed with fixed manifest-bound evidence', () => {
@@ -504,7 +508,7 @@ test('routes AI mutations through bounded functions and retains governed evidenc
 test('requires live LOGIN, denial, concurrency, vector, event, and gate coverage', () => {
   const source = readFileSync(governedPostgresqlTestPath, 'utf8');
   for (const marker of [
-    'innorder_ai_runtime LOGIN PASSWORD', 'aiConnectionEnvironment', 'PGPASSWORD',
+    'innorder_ai_runtime', 'aiConnectionEnvironment', 'PGPASSWORD',
     'knowledge_document', 'recommendation', 'iam.principal', 'occ.business_object',
     'audit.outbox_event', 'flowable', 'expired', 'stale authorization revision',
     'authorized-set digest mismatch', 'grant token event mismatch', 'grant token run mismatch',
@@ -612,4 +616,77 @@ test('preserves deterministic ingestion and provider invocation provenance', () 
   assert.match(live, /chunker-v2/iu);
   assert.match(live, /raw-provider-request-id/iu);
   assert.match(live, /provider_request_id_hash/iu);
+});
+
+test('revalidates gate corpus snapshots under locks before deciding', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const evaluation = sql.match(/CREATE TABLE ai\.embedding_space_gate_evaluation[\s\S]*?\n\);/iu)?.[0] ?? '';
+  assert.match(evaluation, /document_manifest text NOT NULL/iu);
+  const begin = sql.match(/CREATE FUNCTION ai\.begin_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(begin, /candidate_status <> 'BUILDING'/iu);
+  assert.match(begin, /document_manifest/iu);
+  const finalize = sql.match(/CREATE FUNCTION ai\.finalize_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(finalize, /FROM ai\.embedding_space[\s\S]*FOR UPDATE/iu);
+  assert.match(finalize, /candidate_status <> 'BUILDING'/iu);
+  assert.match(finalize, /current_eligible <> evaluation\.eligible_count/iu);
+  assert.match(finalize, /current_embedded <> evaluation\.embedded_count/iu);
+  assert.match(finalize, /current_leakage <> evaluation\.leakage_count/iu);
+  assert.match(finalize, /current_document_manifest IS DISTINCT FROM evaluation\.document_manifest/iu);
+  assert.match(finalize, /gate corpus snapshot changed/iu);
+});
+
+test('protects retained artifacts and exposes only bounded AI cleanup', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.match(sql, /CREATE FUNCTION ai\.enforce_run_artifact_lifecycle\(\)/iu);
+  assert.match(sql, /artifact deletion requires bounded retention cleanup/iu);
+  assert.match(sql, /active legal hold/iu);
+  const cleanup = sql.match(/CREATE FUNCTION ai\.cleanup_expired_run_artifacts\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(cleanup, /p_limit IS NULL/iu);
+  assert.match(cleanup, /p_limit NOT BETWEEN 1 AND 100/iu);
+  assert.match(cleanup, /retention_until <= p_before/iu);
+  assert.match(cleanup, /released_at IS NULL/iu);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ai\.cleanup_expired_run_artifacts\(timestamptz, integer\) TO innorder_ai_runtime/iu);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION ai\.cleanup_expired_run_artifacts\([^;]*TO innorder_runtime/iu);
+});
+
+test('binds governed runs and invocations to immutable grant configuration', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const grant = sql.match(/CREATE TABLE authz\.ai_authorization_grant[\s\S]*?\n\);/iu)?.[0] ?? '';
+  for (const column of ['agent_version_id', 'model_profile_id', 'prompt_version_id', 'package_version_id', 'embedding_space_id']) {
+    assert.match(grant, new RegExp(`\\b${column} uuid NOT NULL`, 'iu'));
+  }
+  const consume = sql.match(/CREATE FUNCTION authz\.consume_ai_authorization_grant\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(consume, /grant_row\.agent_version_id/iu);
+  assert.match(consume, /grant_row\.model_profile_id/iu);
+  const start = sql.match(/CREATE FUNCTION ai\.start_model_invocation\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(start, /run_model_profile_id IS DISTINCT FROM p_model_profile_id/iu);
+  assert.match(start, /model profile does not match governed run/iu);
+});
+
+test('rejects null and out-of-range limits before every bounded LIMIT', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  for (const name of ['claim_ingestion_jobs', 'claim_event_consumptions']) {
+    const fn = sql.match(new RegExp(`CREATE FUNCTION ai\\.${name}\\([\\s\\S]*?\\$\\$;`, 'iu'))?.[0] ?? '';
+    assert.match(fn, /p_limit IS NULL/iu, name);
+    assert.ok(fn.indexOf('p_limit IS NULL') < fn.indexOf('LIMIT p_limit'), name);
+  }
+  const retrieval = sql.match(/CREATE FUNCTION ai\.authorized_hybrid_retrieval\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  for (const limit of ['p_lexical_limit', 'p_vector_limit', 'p_result_limit']) {
+    assert.match(retrieval, new RegExp(`${limit} IS NULL`, 'iu'));
+  }
+  assert.ok(retrieval.indexOf('p_lexical_limit IS NULL') < retrieval.indexOf('LIMIT p_lexical_limit'));
+});
+
+test('keeps every PostgreSQL role password out of psql argv', () => {
+  const compose = readFileSync(composeRolePath, 'utf8');
+  assert.doesNotMatch(compose, /--set=(?:flyway|runtime|ai_runtime)_password=/u);
+  for (const binding of [
+    '\\getenv flyway_password FLYWAY_PASSWORD',
+    '\\getenv runtime_password RUNTIME_PASSWORD',
+    '\\getenv ai_runtime_password AI_RUNTIME_PASSWORD',
+  ]) assert.ok(compose.includes(binding), binding);
+  assert.match(compose, /unset .*PASSWORD/iu);
+  const live = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(live, /psql-argv/iu);
+  assert.match(live, /sentinel/iu);
 });

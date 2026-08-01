@@ -396,8 +396,10 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.ok(compose.services["minio-init"].volumes.includes("./minio/init.sh:/config/init.sh:ro"));
 
   const postgresInit = read("infra/compose/postgres/010-create-roles.sh");
-  assert.match(postgresInit, /--set=flyway_password=/u);
-  assert.match(postgresInit, /--set=runtime_password=/u);
+  assert.doesNotMatch(postgresInit, /--set=(?:flyway|runtime|ai_runtime)_password=/u);
+  assert.match(postgresInit, /\\getenv flyway_password FLYWAY_PASSWORD/u);
+  assert.match(postgresInit, /\\getenv runtime_password RUNTIME_PASSWORD/u);
+  assert.match(postgresInit, /\\getenv ai_runtime_password AI_RUNTIME_PASSWORD/u);
   assert.match(postgresInit, /:'flyway_password'/u);
   assert.match(postgresInit, /:'runtime_password'/u);
   assert.doesNotMatch(postgresInit, /PASSWORD\s+['"]?\$\{/u);

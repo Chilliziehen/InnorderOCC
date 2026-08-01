@@ -1,6 +1,12 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+clear_passwords() {
+  unset admin_password flyway_password runtime_password ai_runtime_password
+  unset FLYWAY_PASSWORD RUNTIME_PASSWORD AI_RUNTIME_PASSWORD
+}
+trap clear_passwords EXIT
+
 read_secret() {
   local path="$1"
   if [[ ! -r "$path" ]]; then
@@ -38,15 +44,22 @@ if [[ "$admin_password" == "$flyway_password" ||
   exit 1
 fi
 
+export FLYWAY_PASSWORD="$flyway_password"
+export RUNTIME_PASSWORD="$runtime_password"
+export AI_RUNTIME_PASSWORD="$ai_runtime_password"
+export AI_RUNTIME_LOGIN="$ai_runtime_login"
+unset admin_password flyway_password runtime_password ai_runtime_password
+
 psql \
   --username "$POSTGRES_USER" \
   --dbname "$POSTGRES_DB" \
   --set=database_name="$POSTGRES_DB" \
-  --set=flyway_password="$flyway_password" \
-  --set=runtime_password="$runtime_password" \
-  --set=ai_runtime_login="$ai_runtime_login" \
-  --set=ai_runtime_password="$ai_runtime_password" <<'SQL'
+  <<'SQL'
 \set ON_ERROR_STOP on
+\getenv flyway_password FLYWAY_PASSWORD
+\getenv runtime_password RUNTIME_PASSWORD
+\getenv ai_runtime_password AI_RUNTIME_PASSWORD
+\getenv ai_runtime_login AI_RUNTIME_LOGIN
 
 SELECT format(
   'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
