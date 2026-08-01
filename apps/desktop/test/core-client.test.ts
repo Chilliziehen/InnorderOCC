@@ -202,4 +202,60 @@ describe("Core client", () => {
       },
     });
   });
+
+  it.each([
+    [401, "application/json", "{"],
+    [403, "text/html", "<html>secret</html>"],
+  ])("makes HTTP %i login failures generic for malformed responses", async (status, contentType, body) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, {
+      status,
+      headers: { "content-type": contentType },
+    }));
+
+    await expect(client(fetchImpl).login({
+      username: "operator",
+      password: "correct horse",
+    })).rejects.toEqual(expect.objectContaining({
+      problem: {
+        code: "AUTHENTICATION_FAILED",
+        status,
+        retryable: false,
+      },
+    }));
+  });
+
+  it("uses HTTP status for login normalization and omits mismatched problem metadata", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      type: "https://core.example.test/problems/auth",
+      title: "Wrong status",
+      status: 500,
+      code: "SECRET_INTERNAL_CODE",
+      correlationId: "22222222-2222-4222-8222-222222222222",
+    }, { status: 401 }));
+
+    await expect(client(fetchImpl).login({
+      username: "operator",
+      password: "correct horse",
+    })).rejects.toEqual(expect.objectContaining({
+      problem: {
+        code: "AUTHENTICATION_FAILED",
+        status: 401,
+        retryable: false,
+      },
+    }));
+  });
+
+  it("rejects Problem Details whose status disagrees with HTTP", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      type: "https://core.example.test/problems/conflict",
+      title: "Wrong status",
+      status: 500,
+      code: "INTERNAL_ERROR",
+      correlationId: "22222222-2222-4222-8222-222222222222",
+    }, { status: 409 }));
+
+    await expect(client(fetchImpl).me()).rejects.toMatchObject({
+      problem: { code: "HTTP_ERROR", status: 409, retryable: false },
+    });
+  });
 });

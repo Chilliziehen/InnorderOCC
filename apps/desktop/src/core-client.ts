@@ -148,16 +148,30 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
       });
       if (operation === "logout" && response.status === 204) return undefined as T;
 
+      if (operation === "login" && (response.status === 401 || response.status === 403)) {
+        let correlationId: string | undefined;
+        try {
+          const value = await readBounded(response, controller);
+          const parsed = problemDetailsSchema.safeParse(value);
+          if (parsed.success && parsed.data.status === response.status) {
+            correlationId = parsed.data.correlationId;
+          }
+        } catch {
+          // Authentication failures remain generic even for malformed responses.
+        }
+        throw new CoreClientError({
+          ...receipt("AUTHENTICATION_FAILED", response.status),
+          ...(correlationId === undefined ? {} : { correlationId }),
+        });
+      }
+
       const value = await readBounded(response, controller);
       if (!response.ok) {
         const parsed = problemDetailsSchema.safeParse(value);
         if (parsed.success) {
           const problem = parsed.data;
-          if (operation === "login" && (problem.status === 401 || problem.status === 403)) {
-            throw new CoreClientError({
-              ...receipt("AUTHENTICATION_FAILED", problem.status),
-              correlationId: problem.correlationId,
-            });
+          if (problem.status !== response.status) {
+            throw new CoreClientError(receipt("HTTP_ERROR", response.status));
           }
           throw new CoreClientError({
             ...receipt(problem.code, problem.status),

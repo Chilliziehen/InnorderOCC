@@ -21,12 +21,19 @@ const token = (suffix: string, expiresIn = 300) => ({
   user,
 });
 
-function harness(initial: string | null = null) {
-  let stored = initial === null ? null : `encrypted:${btoa(initial)}`;
+function harness(
+  initial: string | null = null,
+  timers: Pick<typeof globalThis, "setTimeout" | "clearTimeout"> = globalThis,
+) {
+  const stored = new Map<string, string>();
+  if (initial !== null) stored.set("profile-a", `encrypted:${btoa(initial)}`);
   const vault: CredentialVault = {
-    decrypt: vi.fn(async () => stored === null ? null : atob(stored.slice("encrypted:".length))),
-    encrypt: vi.fn(async (_profileId, value) => { stored = `encrypted:${btoa(value)}`; }),
-    remove: vi.fn(async () => { stored = null; }),
+    decrypt: vi.fn(async (id) => {
+      const value = stored.get(id);
+      return value === undefined ? null : atob(value.slice("encrypted:".length));
+    }),
+    encrypt: vi.fn(async (id, value) => { stored.set(id, `encrypted:${btoa(value)}`); }),
+    remove: vi.fn(async (id) => { stored.delete(id); }),
   };
   let accessToken: string | null = null;
   const core: CoreClient = {
@@ -44,12 +51,16 @@ function harness(initial: string | null = null) {
     getProfileId: () => profileId,
     setAccessToken: (value) => { accessToken = value; },
     now: () => now,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
   });
   return {
     manager,
     core,
     vault,
-    get stored() { return stored; },
+    get stored() { return stored.get(profileId) ?? null; },
+    storedFor(id: string) { return stored.get(id) ?? null; },
+    seedProfile(id: string, value: string) { stored.set(id, `encrypted:${btoa(value)}`); },
     get accessToken() { return accessToken; },
     advance(ms: number) { now += ms; },
     selectProfile(id: string) { profileId = id; },
@@ -186,6 +197,70 @@ describe("Session manager", () => {
     expect(h.stored).toBeNull();
   });
 
+  it("a rejecting refresh from profile A cannot clear authenticated profile B", async () => {
+    const h = harness("A".repeat(43));
+    let rejectA!: (error: Error) => void;
+    vi.mocked(h.core.refresh).mockReturnValueOnce(new Promise((_resolve, reject) => { rejectA = reject; }));
+    const refreshA = h.manager.refresh();
+    await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched();
+    vi.mocked(h.core.login).mockResolvedValue(token("B"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    rejectA(new Error("A refresh failed"));
+
+    await expect(refreshA).rejects.toThrow("A refresh failed");
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-B");
+    expect(h.storedFor("profile-a")).toBeNull();
+    expect(h.storedFor("profile-b")).not.toBeNull();
+  });
+
+  it("a rejecting /me from profile A cannot clear authenticated profile B", async () => {
+    const h = harness("A".repeat(43));
+    let rejectMeA!: (error: Error) => void;
+    vi.mocked(h.core.refresh).mockResolvedValueOnce(token("N"));
+    vi.mocked(h.core.me).mockReturnValueOnce(new Promise((_resolve, reject) => { rejectMeA = reject; }));
+    const refreshA = h.manager.refresh();
+    await vi.waitFor(() => expect(h.core.me).toHaveBeenCalledOnce());
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched();
+    vi.mocked(h.core.login).mockResolvedValue(token("B"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    rejectMeA(new Error("A me failed"));
+
+    await expect(refreshA).rejects.toThrow("A me failed");
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-B");
+    expect(h.storedFor("profile-a")).toBeNull();
+    expect(h.storedFor("profile-b")).not.toBeNull();
+  });
+
+  it("scopes in-flight refresh by profile and generation", async () => {
+    const h = harness("A".repeat(43));
+    let resolveA!: (value: ReturnType<typeof token>) => void;
+    vi.mocked(h.core.refresh)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveA = resolve; }))
+      .mockResolvedValueOnce(token("B"));
+    vi.mocked(h.core.me).mockResolvedValue(user);
+    const refreshA = h.manager.refresh();
+    await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched();
+    h.seedProfile("profile-b", "B".repeat(43));
+    const restoreB = h.manager.restore();
+
+    await expect(restoreB).resolves.toMatchObject({ state: "authenticated" });
+    expect(h.core.refresh).toHaveBeenCalledTimes(2);
+    expect(h.accessToken).toBe("access-B");
+    resolveA(token("N"));
+    await refreshA;
+    expect(h.accessToken).toBe("access-B");
+  });
+
   it("attempts logout revocation but always clears local credentials", async () => {
     const h = harness("R".repeat(43));
     vi.mocked(h.core.logout).mockRejectedValue(new Error("offline"));
@@ -196,5 +271,73 @@ describe("Session manager", () => {
     expect(h.stored).toBeNull();
     expect(h.accessToken).toBeNull();
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+  });
+
+  it("clears logout locally before revocation and cannot later clear profile B", async () => {
+    const h = harness();
+    vi.mocked(h.core.login).mockResolvedValueOnce(token("A")).mockResolvedValueOnce(token("B"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    let rejectLogoutA!: (error: Error) => void;
+    vi.mocked(h.core.logout).mockReturnValue(new Promise((_resolve, reject) => { rejectLogoutA = reject; }));
+
+    const logoutA = h.manager.logout();
+    await vi.waitFor(() => expect(h.core.logout).toHaveBeenCalledOnce());
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+    expect(h.accessToken).toBeNull();
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched();
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    rejectLogoutA(new Error("offline"));
+    await logoutA;
+
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-B");
+    expect(h.storedFor("profile-b")).not.toBeNull();
+  });
+
+  it("chunks long expiry timers at the signed 32-bit timeout maximum", async () => {
+    const callbacks: Array<() => void> = [];
+    const delays: number[] = [];
+    const timers = {
+      setTimeout: ((callback: () => void, delay?: number) => {
+        callbacks.push(callback);
+        delays.push(delay ?? 0);
+        return callbacks.length as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout,
+      clearTimeout: vi.fn<typeof clearTimeout>(),
+    };
+    const h = harness(null, timers);
+    vi.mocked(h.core.login).mockResolvedValue(token("R", 2_147_484));
+
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    expect(delays).toEqual([2_147_483_647]);
+
+    h.advance(2_147_483_647);
+    callbacks[0]?.();
+    expect(delays).toEqual([2_147_483_647, 353]);
+    expect(h.manager.snapshot().state).toBe("authenticated");
+  });
+
+  it("bounds maximum contract expiry to a representable snapshot date", async () => {
+    const delays: number[] = [];
+    const timers = {
+      setTimeout: ((_callback: () => void, delay?: number) => {
+        delays.push(delay ?? 0);
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      }) as typeof setTimeout,
+      clearTimeout: vi.fn<typeof clearTimeout>(),
+    };
+    const h = harness(null, timers);
+    vi.mocked(h.core.login).mockResolvedValue(token("R", Number.MAX_SAFE_INTEGER));
+
+    await expect(h.manager.login({
+      username: "operator",
+      password: "correct horse",
+    })).resolves.toMatchObject({
+      state: "authenticated",
+      expiresAt: "9999-12-31T23:59:59.999Z",
+    });
+    expect(delays).toEqual([2_147_483_647]);
   });
 });
