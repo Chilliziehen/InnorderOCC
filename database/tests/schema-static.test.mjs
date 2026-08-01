@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import './evidence-risk-resource-static.test.mjs';
 
 const root = fileURLToPath(new URL('../migrations/', import.meta.url));
 const runtimeRoleBootstrapPath = fileURLToPath(
@@ -24,6 +25,7 @@ const migrations = [
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V014__evidence_risk_resource.sql',
 ];
 
 function readMigration(name) {
