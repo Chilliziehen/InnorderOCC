@@ -102,7 +102,7 @@ function installOcc(query = vi.fn().mockResolvedValue(unavailable())): OccApi {
     runtime: { statuses: vi.fn().mockResolvedValue([]) },
     workspaces: { query },
     commands: { execute: vi.fn() },
-    uploads: { start: vi.fn(), cancel: vi.fn() },
+    uploads: { start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
     notifications: { list: vi.fn().mockResolvedValue({ items: [] }), subscribe: vi.fn(() => vi.fn()) },
   };
   Object.defineProperty(window, "occ", { configurable: true, value: api });
@@ -322,7 +322,7 @@ describe("authenticated workspace integration", () => {
     };
     const api = installOcc(vi.fn().mockResolvedValue(result));
     const uploadId = "00000000-0000-4000-8000-000000000077";
-    vi.mocked(api.uploads.start).mockResolvedValue({ state: "completed", uploadId, evidenceId: "evidence-17" });
+    vi.mocked(api.uploads.start).mockResolvedValue({ state: "completed", uploadId, evidenceId: "evidence-17", uploadReference: uploadId, quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
     vi.mocked(api.commands.execute).mockResolvedValue({
       state: "completed",
       commandId: "00000000-0000-4000-8000-000000000088",
@@ -337,7 +337,7 @@ describe("authenticated workspace integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
 
     await screen.findByRole("status", { name: "证据上传完成" });
-    expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ targetId: "task-17", fileName: "record.pdf" }));
+    expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-17", fileName: "record.pdf", mediaType: "application/pdf", intentHandle: expect.stringMatching(/^[0-9a-f-]{36}$/i) }));
     fireEvent.click(screen.getByRole("button", { name: "提交证据" }));
     await waitFor(() => expect(api.commands.execute).toHaveBeenCalledWith(expect.objectContaining({
       operation: "submitEvidence",
@@ -379,10 +379,10 @@ describe("authenticated workspace integration", () => {
     Object.defineProperty(file, "arrayBuffer", { value: vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer) });
     fireEvent.change(screen.getByLabelText("选择证据文件"), { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
-    await waitFor(() => expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ targetId: "task-a" })));
+    await waitFor(() => expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-a" })));
     fireEvent.click(screen.getByRole("button", { name: "选择任务：任务 B" }));
 
-    completeUpload({ state: "completed", uploadId: "00000000-0000-4000-8000-000000000077", evidenceId: "evidence-a" });
+    completeUpload({ state: "completed", uploadId: "00000000-0000-4000-8000-000000000077", evidenceId: "evidence-a", uploadReference: "upload-ref-a", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
     await new Promise((resolve) => window.setTimeout(resolve, 0));
 
     expect(screen.queryByRole("status", { name: "证据上传完成" })).not.toBeInTheDocument();

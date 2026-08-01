@@ -91,6 +91,20 @@ describe("preload bridge", () => {
     ]);
   });
 
+  it("validates upload progress and synchronously disposes the listener", () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    const listener = vi.fn();
+    const dispose = api.uploads.subscribeProgress(listener);
+    const wrapped = electronMocks.on.mock.calls.find(([channel]) => channel === DESKTOP_CHANNELS.uploads.progress)?.[1];
+    const progress = { uploadId: "11111111-1111-4111-8111-111111111111", intentHandle: "22222222-2222-4222-8222-222222222222", percent: 50 };
+    wrapped({}, { ...progress, percent: 101 });
+    wrapped({}, progress);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(progress);
+    dispose();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(DESKTOP_CHANNELS.uploads.progress, wrapped);
+  });
+
   it("validates notification events and synchronously disposes the listener", () => {
     const api = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
     const listener = vi.fn();

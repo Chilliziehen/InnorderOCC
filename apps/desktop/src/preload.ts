@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import { DESKTOP_CHANNELS, notificationEventSchema, type OccApi } from "./ipc-contract";
+import { DESKTOP_CHANNELS, notificationEventSchema, uploadProgressSchema, type OccApi } from "./ipc-contract";
 
 function freezeApi<T extends object>(value: T): Readonly<T> {
   for (const child of Object.values(value)) {
@@ -30,6 +30,14 @@ const api: OccApi = freezeApi({
   uploads: {
     start: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.start, input),
     cancel: (uploadId) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.cancel, uploadId),
+    subscribeProgress(listener) {
+      const wrapped = (_event: unknown, input: unknown) => {
+        const parsed = uploadProgressSchema.safeParse(input);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(DESKTOP_CHANNELS.uploads.progress, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.uploads.progress, wrapped);
+    },
   },
   notifications: {
     list: (cursor) => ipcRenderer.invoke(DESKTOP_CHANNELS.notifications.list, cursor),

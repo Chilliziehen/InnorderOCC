@@ -50,6 +50,7 @@ const entries: readonly OperationEntry[] = [
   ["administration", "ingest", ["/knowledge"], "知识导入 API 合同尚未集成"],
   ["administration", "inspect", ["/audit"], "审计查询 API 合同尚未集成"],
   ["settings", "preferences.update", ["/me"], "个人偏好 API 合同尚未集成"],
+  ["system", "notifications.list", ["/notifications"], "通知 API 合同尚未集成"],
 ];
 
 const registry = new Map<string, MainUnavailableOperation>(entries.map(([workspace, operation, resourceGroups, message]) => [
@@ -68,4 +69,12 @@ export function mainUnavailableOperation(
     resourceGroups: [fallbackGroup],
     message: `${operation} API contract is unavailable`,
   };
+}
+
+export function mainUnavailableNotificationList(): MainUnavailableOperation {
+  return mainUnavailableOperation("system", "notifications.list", "/workspaces");
+}
+
+export function mainUnavailableEvidenceUpload(): MainUnavailableOperation {
+  return mainUnavailableOperation("my-work", "submitEvidence", "/commands");
 }

@@ -20,6 +20,7 @@ import {
   createSafeStorageVault,
   registerDesktopIpc,
   sendDesktopNotification,
+  sendDesktopUploadProgress,
 } from "../src/desktop-ipc";
 import { DESKTOP_CHANNELS } from "../src/ipc-contract";
 import { createCommandIntentRegistry } from "../src/command-intents";
@@ -84,7 +85,7 @@ function registeredHandler(channel: string) {
 
 function invokeChannels(): string[] {
   return Object.values(DESKTOP_CHANNELS).flatMap((group) =>
-    Object.values(group).filter((channel) => channel !== DESKTOP_CHANNELS.notifications.event),
+    Object.values(group).filter((channel) => channel !== DESKTOP_CHANNELS.notifications.event && channel !== DESKTOP_CHANNELS.uploads.progress),
   );
 }
 
@@ -220,12 +221,13 @@ describe("desktop IPC", () => {
     const handler = registeredHandler(DESKTOP_CHANNELS.uploads.start);
     const event = { senderFrame: { url: rendererUrl, parent: null } };
     const input = {
-      workspace: "evidence",
-      targetId: "task-1",
+      workspace: "my-work",
+      taskId: "task-1",
       fileName: "evidence.txt",
-      contentType: "text/plain",
+      mediaType: "text/plain",
       size: 1,
       data: new Uint8Array([1]),
+      intentHandle: profileId,
     };
 
     await expect(handler(event, input)).resolves.toMatchObject({ state: "started" });
@@ -301,9 +303,78 @@ describe("desktop IPC", () => {
     expect(sendDesktopNotification({ send }, event)).toBe(false);
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("sends only validated monotonic upload progress on the named channel", () => {
+    const send = vi.fn();
+    const target = { send };
+    const first = { uploadId: profileId, intentHandle: profileId, percent: 25 };
+    expect(sendDesktopUploadProgress(target, first)).toBe(true);
+    expect(sendDesktopUploadProgress(target, { ...first, percent: 20 })).toBe(false);
+    expect(sendDesktopUploadProgress(target, { ...first, percent: 101 })).toBe(false);
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(DESKTOP_CHANNELS.uploads.progress, first);
+  });
 });
 
 describe("desktop main composition", () => {
+  it("uses authenticated scoped cache fallback, purges logout scope, and rejects offline commands first", async () => {
+    const deps = dependencies();
+    const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    const queryResult = { state: "ready" as const, items: [{ id: "risk-1" }], count: 1, fetchedAt: "2026-08-02T00:00:00.000Z" };
+    const readCache = {
+      query: vi.fn((_scope, _query, _authenticated, remote) => remote()),
+      purgeAccount: vi.fn().mockResolvedValue(undefined),
+    };
+    const workspaceQuery = vi.fn().mockResolvedValue(queryResult);
+    const executeCommand = vi.fn();
+    deps.session.login.mockResolvedValue({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: ["occ.read"] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    const api = createDesktopApi({
+      profiles: deps.profiles as never,
+      session: { ...deps.session, profileSwitched: vi.fn().mockResolvedValue(undefined) },
+      statuses: deps.runtime.statuses,
+      clearProfile: vi.fn().mockResolvedValue(undefined),
+      readCache,
+      getCacheScope: () => cacheScope,
+      workspaceQuery,
+      executeCommand,
+      isOnline: () => false,
+    });
+
+    await api.session.login({ username: "user", password: "long-password" });
+    await expect(api.workspaces.query({ workspace: "risks", operation: "risks.query" })).resolves.toEqual(queryResult);
+    expect(readCache.query).toHaveBeenCalledWith(cacheScope, expect.anything(), cacheScope, expect.any(Function));
+    await expect(api.commands.execute({ workspace: "risks", operation: "resolve", payload: {}, idempotencyKey: profileId })).rejects.toThrow("offline");
+    expect(executeCommand).not.toHaveBeenCalled();
+    await api.session.logout();
+    expect(readCache.purgeAccount).toHaveBeenCalledWith(cacheScope);
+  });
+
+  it("closes the authenticated cache gate before profile cleanup completes", async () => {
+    let selected = profile;
+    let releaseCleanup!: () => void;
+    const cleanupBlocked = new Promise<void>((resolve) => void (releaseCleanup = resolve));
+    const profiles = {
+      list: vi.fn().mockResolvedValue([profile]), validate: vi.fn(), save: vi.fn(), remove: vi.fn(),
+      selected: vi.fn(() => selected),
+      select: vi.fn(async () => { selected = { ...profile, id: "22222222-2222-4222-8222-222222222222" }; }),
+    };
+    const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    const session = {
+      restore: vi.fn(), logout: vi.fn(),
+      login: vi.fn().mockResolvedValue({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" }),
+      profileSwitched: vi.fn(async () => cleanupBlocked),
+    };
+    const readCache = { query: vi.fn((_scope, _input, _auth, remote) => remote()), purgeAccount: vi.fn() };
+    const workspaceQuery = vi.fn().mockResolvedValue({ state: "empty", fetchedAt: "2026-08-02T00:00:00.000Z" });
+    const api = createDesktopApi({ profiles: profiles as never, session, statuses: vi.fn(), clearProfile: vi.fn(), readCache, getCacheScope: () => cacheScope, workspaceQuery });
+    await api.session.login({ username: "user", password: "long-password" });
+    const switching = api.profiles.select("22222222-2222-4222-8222-222222222222");
+    await vi.waitFor(() => expect(session.profileSwitched).toHaveBeenCalled());
+    await api.workspaces.query({ workspace: "risks", operation: "risks.query" });
+    expect(readCache.query).not.toHaveBeenCalled();
+    releaseCleanup();
+    await switching;
+  });
   it("returns exact main-safe unavailable metadata for each workspace operation", async () => {
     const deps = dependencies();
     const api = createDesktopApi({

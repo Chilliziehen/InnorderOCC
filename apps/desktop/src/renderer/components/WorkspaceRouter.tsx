@@ -138,7 +138,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
   const [selectedRisk, setSelectedRisk] = useState<string>();
   const [upload, setUpload] = useState<EvidenceUploadState>({ state: "idle" });
   const [uploadReference, setUploadReference] = useState<string>();
-  const uploadRetry = useRef<{ file: File; targetId: string } | undefined>(undefined);
+  const uploadRetry = useRef<{ file: File; targetId: string; intentHandle: string } | undefined>(undefined);
   const uploadSequence = useRef(0);
   const uploadScopeKey = `${scopeKey}:${selectedTaskId ?? ""}`;
   const currentUploadScope = useRef(uploadScopeKey);
@@ -163,6 +163,16 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     setUploadReference(undefined);
     uploadRetry.current = undefined;
   }, [requestKey]);
+
+  useEffect(() => {
+    const subscribe = window.occ?.uploads?.subscribeProgress;
+    if (!callable(subscribe)) return;
+    return subscribe((progress) => {
+      const retry = uploadRetry.current;
+      if (!retry || progress.intentHandle !== retry.intentHandle) return;
+      setUpload({ state: "uploading", fileName: retry.file.name, progress: progress.percent, uploadId: progress.uploadId });
+    });
+  }, []);
 
   useEffect(() => {
     const sequence = ++requestSequence.current;
@@ -248,10 +258,11 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
       ? { state: "unavailable", reason: operation.availability.reason, resourceGroups: [...operation.availability.resourceGroups], message: operation.availability.message }
       : { state: "problem", problem: { title: "命令接口不可用", code: "COMMAND_API_UNAVAILABLE", status: 503 } };
   };
-  const startEvidenceUpload = async (file: File, targetId: string) => {
+  const startEvidenceUpload = async (file: File, targetId: string, retainedIntentHandle?: string) => {
     const sequence = ++uploadSequence.current;
     const initiationScope = uploadScopeKey;
-    uploadRetry.current = { file, targetId };
+    const intentHandle = retainedIntentHandle ?? crypto.randomUUID();
+    uploadRetry.current = { file, targetId, intentHandle };
     const start = window.occ?.uploads?.start;
     if (!callable(start)) {
       setUpload({ state: "failed", fileName: file.name, message: "证据上传接口不可用。", retryable: false });
@@ -260,15 +271,17 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     try {
       const data = new Uint8Array(await file.arrayBuffer());
       if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
-      const receipt = await start({ workspace: "my-work", targetId, fileName: file.name, contentType: file.type, size: file.size, data });
+      const receipt = await start({ workspace: "my-work", taskId: targetId, fileName: file.name, mediaType: file.type, size: file.size, data, intentHandle });
       if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
       if (receipt.state === "completed") {
         setUpload({ state: "accepted", fileName: file.name, evidenceId: receipt.evidenceId });
-        setUploadReference(receipt.uploadId);
+        setUploadReference(receipt.uploadReference);
       } else if (receipt.state === "started") {
         setUpload({ state: "uploading", fileName: file.name, progress: 0, uploadId: receipt.uploadId });
-      } else {
+      } else if (receipt.state === "problem") {
         setUpload({ state: "failed", fileName: file.name, message: "证据上传失败，请重试。", retryable: receipt.problem.retryable === true });
+      } else {
+        setUpload({ state: "failed", fileName: file.name, message: receipt.message, retryable: false });
       }
     } catch {
       if (uploadSequence.current === sequence && currentUploadScope.current === initiationScope) {
@@ -279,7 +292,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
   const archiveUpload = async (file: File): Promise<ArchiveUploadReference> => {
     const start = window.occ?.uploads?.start;
     if (!callable(start)) throw new Error("archive-upload-unavailable");
-    const receipt = await start({ workspace: "domain-design", targetId: "package-import", fileName: file.name, contentType: file.type, size: file.size, data: new Uint8Array(await file.arrayBuffer()) });
+    const receipt = await start({ workspace: "domain-design", taskId: "package-import", fileName: file.name, mediaType: file.type, size: file.size, data: new Uint8Array(await file.arrayBuffer()), intentHandle: crypto.randomUUID() });
     if (receipt.state !== "completed" || !/^[0-9a-f]{64}$/i.test(receipt.evidenceId)) throw new Error("archive-upload-incomplete");
     return { uploadId: receipt.uploadId, sha256: receipt.evidenceId };
   };
@@ -326,7 +339,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     case "overview":
       return <Overview definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />;
     case "my-work":
-      return <MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTaskId ? { selectedId: selectedTaskId } : {})} onSelect={(id) => { if (id !== selectedTaskId) { uploadSequence.current += 1; setUpload({ state: "idle" }); setUploadReference(undefined); uploadRetry.current = undefined; } setSelectedTaskId(id); }} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={false} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
+      return <MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTaskId ? { selectedId: selectedTaskId } : {})} onSelect={(id) => { if (id !== selectedTaskId) { uploadSequence.current += 1; setUpload({ state: "idle" }); setUploadReference(undefined); uploadRetry.current = undefined; } setSelectedTaskId(id); }} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={callable(window.occ?.uploads?.subscribeProgress)} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId, retry.intentHandle); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
     case "processes":
       return <Processes {...common} activeTab={activeTab as ProcessesTab} {...(selectedProcessId ? { selectedId: selectedProcessId } : {})} onSelect={setSelectedProcessId} {...(selectedProcess ? { selectedProcess } : {})} onTabChange={(tab) => changeTab(tab)} />;
     case "interventions":

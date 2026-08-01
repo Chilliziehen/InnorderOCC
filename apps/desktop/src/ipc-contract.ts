@@ -8,7 +8,7 @@ export const DESKTOP_CHANNELS = {
   runtime: { statuses: "system-statuses:get" },
   workspaces: { query: "workspaces:query" },
   commands: { execute: "commands:execute" },
-  uploads: { start: "uploads:start", cancel: "uploads:cancel" },
+  uploads: { start: "uploads:start", cancel: "uploads:cancel", progress: "uploads:progress" },
   notifications: { list: "notifications:list", event: "notifications:event" },
 } as const;
 

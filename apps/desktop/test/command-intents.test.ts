@@ -63,6 +63,20 @@ describe("strict command JSON payloads", () => {
 });
 
 describe("main command intent registry", () => {
+  it("settles accepted intents only when the notification correlation matches", async () => {
+    const correlationId = "77777777-7777-4777-8777-777777777777";
+    const intents = createCommandIntentRegistry();
+    await intents.execute(command(), async () => ({
+      state: "accepted",
+      commandId: keyA,
+      correlationId,
+    }));
+
+    expect(intents.settle(handle, keyB)).toBe(false);
+    expect(intents.settle(handle, correlationId)).toBe(true);
+    expect(intents.settle(handle, correlationId)).toBe(false);
+  });
+
   function registry() {
     const keys = [keyA, keyB];
     return createCommandIntentRegistry({ createIdempotencyKey: () => keys.shift()! });

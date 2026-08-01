@@ -6,10 +6,11 @@ import { z as schema } from "zod";
 
 import {
   commandReceiptSchema, DESKTOP_CHANNELS, evidenceUploadInputSchema,
-  idInputSchema, loginInputSchema, noInputSchema, notificationPageSchema,
+  idInputSchema, loginInputSchema, noInputSchema, notificationListResultSchema,
   notificationEventSchema,
   optionalCursorSchema, profileInputSchema, selectedServerProfileSchema, serverProfileSchema,
   sessionSnapshotSchema, systemStatusesSchema, uploadReceiptSchema,
+  uploadProgressSchema,
   voidOutputSchema, workspaceCommandSchema, workspaceQuerySchema,
   workspaceResultSchema, type OccApi,
 } from "./ipc-contract";
@@ -18,14 +19,16 @@ import type { CredentialVault, SessionManager, VaultCredential } from "./session
 import { serializedSize } from "./serialized-size";
 import { createCommandIntentRegistry, type CommandIntentRegistry, type InternalWorkspaceCommand } from "./command-intents";
 import type { CommandReceipt } from "./desktop-contract";
+import type { ReadCacheScope } from "./read-cache";
 import { mainUnavailableOperation } from "./main-operation-registry";
 
 export const MAX_REQUEST_BYTES = 1024 * 1024;
 export const MAX_UPLOAD_REQUEST_BYTES = 100 * 1024 * 1024 + 64 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const profileListSchema = serverProfileSchema.array();
-type InvokeApi = Omit<OccApi, "notifications" | "commands"> & {
+type InvokeApi = Omit<OccApi, "notifications" | "commands" | "uploads"> & {
   commands: { execute(input: InternalWorkspaceCommand): Promise<CommandReceipt> };
+  uploads: Pick<OccApi["uploads"], "start" | "cancel">;
   notifications: Pick<OccApi["notifications"], "list">;
 };
 
@@ -56,6 +59,23 @@ export function sendDesktopNotification(
   } catch {
     return false;
   }
+}
+
+const progressByTarget = new WeakMap<NotificationTarget, Map<string, number>>();
+
+export function sendDesktopUploadProgress(
+  target: NotificationTarget,
+  input: unknown,
+): boolean {
+  const parsed = uploadProgressSchema.safeParse(input);
+  if (!parsed.success || serializedSize(parsed.data) > MAX_OUTPUT_BYTES) return false;
+  const progress = progressByTarget.get(target) ?? new Map<string, number>();
+  const previous = progress.get(parsed.data.uploadId);
+  if (previous !== undefined && parsed.data.percent < previous) return false;
+  progress.set(parsed.data.uploadId, parsed.data.percent);
+  progressByTarget.set(target, progress);
+  target.send(DESKTOP_CHANNELS.uploads.progress, parsed.data);
+  return true;
 }
 
 interface JsonPersistence {
@@ -183,6 +203,16 @@ interface DesktopApiDependencies {
   session: Pick<SessionManager, "restore" | "login" | "logout" | "profileSwitched">;
   statuses: OccApi["runtime"]["statuses"];
   clearProfile(profileId: string): Promise<void>;
+  readCache?: {
+    query(scope: ReadCacheScope, input: Parameters<OccApi["workspaces"]["query"]>[0], authenticatedScope: ReadCacheScope | null, remote: () => ReturnType<OccApi["workspaces"]["query"]>): ReturnType<OccApi["workspaces"]["query"]>;
+    purgeAccount(scope: ReadCacheScope): Promise<void>;
+  };
+  getCacheScope?: () => ReadCacheScope | null;
+  workspaceQuery?: OccApi["workspaces"]["query"];
+  executeCommand?: (input: InternalWorkspaceCommand) => Promise<CommandReceipt>;
+  isOnline?: () => boolean;
+  uploads?: Pick<OccApi["uploads"], "start" | "cancel">;
+  notifications?: Pick<OccApi["notifications"], "list">;
 }
 
 export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeApi {
@@ -193,10 +223,19 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     return result;
   };
   const cleanup = async (profileId: string) => {
+    authenticatedCacheScope = null;
     await Promise.all([
       dependencies.session.profileSwitched(profileId),
       dependencies.clearProfile(profileId),
     ]);
+  };
+  let authenticatedCacheScope: ReadCacheScope | null = null;
+  const acceptSession = (snapshot: Awaited<ReturnType<SessionManager["login"]>>) => {
+    const candidate = snapshot.state === "authenticated" ? dependencies.getCacheScope?.() : null;
+    authenticatedCacheScope = candidate && snapshot.state === "authenticated" && candidate.principalId === snapshot.user.id
+      ? candidate
+      : null;
+    return snapshot;
   };
   return {
     profiles: {
@@ -225,25 +264,45 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
       }),
     },
     session: {
-      restore: () => transition(() => dependencies.session.restore()),
-      login: (input) => transition(() => dependencies.session.login(input)),
-      logout: () => transition(() => dependencies.session.logout()),
+      restore: () => transition(async () => acceptSession(await dependencies.session.restore())),
+      login: (input) => transition(async () => acceptSession(await dependencies.session.login(input))),
+      logout: () => transition(async () => {
+        const scope = authenticatedCacheScope;
+        try {
+          await dependencies.session.logout();
+        } finally {
+          authenticatedCacheScope = null;
+          if (scope) await dependencies.readCache?.purgeAccount(scope);
+        }
+      }),
     },
     runtime: { statuses: dependencies.statuses },
     workspaces: {
-      query: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/workspaces"),
+      query: async (input) => {
+        if (!dependencies.workspaceQuery) return mainUnavailableOperation(input.workspace, input.operation, "/workspaces");
+        const scope = authenticatedCacheScope;
+        if (dependencies.readCache && scope) {
+          return dependencies.readCache.query(scope, input, scope, () => dependencies.workspaceQuery!(input));
+        }
+        return dependencies.workspaceQuery(input);
+      },
     },
     commands: {
-      execute: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/commands"),
+      execute: async (input) => {
+        if (dependencies.isOnline?.() === false) throw new Error("Command rejected while offline");
+        return dependencies.executeCommand
+          ? dependencies.executeCommand(input)
+          : mainUnavailableOperation(input.workspace, input.operation, "/commands");
+      },
     },
-    uploads: {
+    uploads: dependencies.uploads ?? {
       start: async () => ({
         state: "problem",
         problem: { title: "Upload unavailable", status: 501 },
       }),
       cancel: async () => undefined,
     },
-    notifications: { list: async () => ({ items: [] }) },
+    notifications: dependencies.notifications ?? { list: async () => ({ items: [] }) },
   };
 }
 
@@ -305,7 +364,7 @@ export function registerDesktopIpc(
     { channel: DESKTOP_CHANNELS.commands.execute, input: workspaceCommandSchema, output: commandReceiptSchema, invoke: (input) => commandIntents.execute(input, (command) => api.commands.execute(command)) },
     { channel: DESKTOP_CHANNELS.uploads.start, input: evidenceUploadInputSchema, output: uploadReceiptSchema, invoke: (input) => api.uploads.start(input), maxRequestBytes: MAX_UPLOAD_REQUEST_BYTES },
     { channel: DESKTOP_CHANNELS.uploads.cancel, input: idInputSchema, output: voidOutputSchema, invoke: (id) => api.uploads.cancel(id) },
-    { channel: DESKTOP_CHANNELS.notifications.list, input: optionalCursorSchema, output: notificationPageSchema, invoke: (cursor) => api.notifications.list(cursor) },
+    { channel: DESKTOP_CHANNELS.notifications.list, input: optionalCursorSchema, output: notificationListResultSchema, invoke: (cursor) => api.notifications.list(cursor) },
   ];
   for (const definition of definitions) {
     ipcMain.handle(

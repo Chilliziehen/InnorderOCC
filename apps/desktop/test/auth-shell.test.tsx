@@ -82,7 +82,7 @@ function createOcc(overrides: Partial<{
       ...overrides.workspaces,
     },
     commands: { execute: vi.fn() },
-    uploads: { start: vi.fn(), cancel: vi.fn() },
+    uploads: { start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
     notifications: {
       list: vi.fn().mockResolvedValue({ items: [] }),
       subscribe: vi.fn(() => vi.fn()),

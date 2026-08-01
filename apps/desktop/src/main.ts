@@ -11,7 +11,10 @@ import {
   createDesktopApi,
   createSafeStorageVault,
   registerDesktopIpc,
+  sendDesktopNotification,
+  sendDesktopUploadProgress,
 } from "./desktop-ipc";
+import { createEvidenceUploadService } from "./evidence-upload";
 import {
   applyWindowSecurity,
   createWindowOptions,
@@ -21,6 +24,9 @@ import {
   registerSingleInstanceLifecycle,
 } from "./electron-security";
 import { createProfileStore } from "./profile-store";
+import { createReadCache } from "./read-cache";
+import { createNotificationStream } from "./notification-stream";
+import { mainUnavailableNotificationList } from "./main-operation-registry";
 import { createSessionManager } from "./session-manager";
 import { fetchSystemStatuses } from "./system-status-ipc";
 
@@ -31,6 +37,7 @@ const STATUS_TIMEOUT_MS = 4_000;
 let mainWindow: BrowserWindow | undefined;
 let disposeDesktopIpc: (() => void) | undefined;
 let disposeSession: (() => void) | undefined;
+let disposeReliability: (() => void) | undefined;
 
 function rendererDocumentUrl(): string {
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) return MAIN_WINDOW_VITE_DEV_SERVER_URL;
@@ -80,6 +87,14 @@ if (ownsInstance) void app.whenReady().then(async () => {
     path.join(userData, "credentials.json"),
     fs,
   );
+  const readCachePersistence = createAtomicJsonPersistence(
+    path.join(userData, "workspace-read-cache.json"),
+    fs,
+  );
+  const notificationPersistence = createAtomicJsonPersistence(
+    path.join(userData, "notification-cursors.json"),
+    fs,
+  );
   const profiles = await createProfileStore({
     ...profilePersistence,
     packaged: app.isPackaged,
@@ -106,7 +121,30 @@ if (ownsInstance) void app.whenReady().then(async () => {
     getProfileId: () => selectedProfile().id,
     setAccessToken: (value) => void (accessToken = value),
   });
+  const readCache = createReadCache({ persistence: readCachePersistence });
+  const commandIntents = createCommandIntentRegistry();
+  const notificationStream = createNotificationStream({
+    persistence: notificationPersistence,
+    getAccessToken: () => accessToken,
+    settleCommand: (intentHandle, correlationId) => commandIntents.settle(intentHandle, correlationId),
+    connector: () => { throw new Error("Notification contract unavailable"); },
+  });
+  const disposeNotificationForwarder = notificationStream.subscribe((event) => {
+    if (mainWindow) sendDesktopNotification(mainWindow.webContents, event);
+  });
+  const uploads = createEvidenceUploadService({
+    getProfile: () => ({ origin: selectedProfile().origin, endpointAvailable: false }),
+    getAccessToken: () => accessToken,
+    transport: async () => { throw new Error("Evidence contract unavailable"); },
+    onProgress: (progress) => {
+      if (mainWindow) sendDesktopUploadProgress(mainWindow.webContents, progress);
+    },
+  });
   disposeSession = () => sessionManager.dispose();
+  disposeReliability = () => {
+    disposeNotificationForwarder();
+    notificationStream.dispose();
+  };
   const api = createDesktopApi({
     profiles,
     session: sessionManager,
@@ -115,10 +153,14 @@ if (ownsInstance) void app.whenReady().then(async () => {
       aiBaseUrl: AI_BASE_URL,
       timeoutMs: STATUS_TIMEOUT_MS,
     }),
-    clearProfile: async () => undefined,
+    clearProfile: async (profileId) => {
+      await notificationStream.setSession(null);
+      await readCache.purgeProfile(profileId);
+    },
+    uploads,
+    notifications: { list: async () => mainUnavailableNotificationList() },
   });
 
-  const commandIntents = createCommandIntentRegistry();
   disposeDesktopIpc = registerDesktopIpc(rendererDocumentUrl(), api, { commandIntents });
   mainWindow = createWindow();
 
@@ -134,6 +176,8 @@ app.on("before-quit", () => {
   disposeDesktopIpc = undefined;
   disposeSession?.();
   disposeSession = undefined;
+  disposeReliability?.();
+  disposeReliability = undefined;
 });
 
 app.on("window-all-closed", () => {

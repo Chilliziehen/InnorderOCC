@@ -19,6 +19,7 @@ interface IntentBinding {
   state: "retryable" | "accepted";
   retryableAt?: number;
   acceptedAt?: number;
+  correlationId?: string;
   inFlight?: Promise<CommandReceipt>;
 }
 
@@ -35,7 +36,7 @@ export interface CommandIntentRegistry {
     command: WorkspaceCommand,
     invoke: (command: InternalWorkspaceCommand) => Promise<CommandReceipt>,
   ): Promise<CommandReceipt>;
-  settle(intentHandle: string): boolean;
+  settle(intentHandle: string, correlationId?: string): boolean;
 }
 
 /** Accepted bindings expire after 15 minutes if no terminal notification settles them. */
@@ -131,6 +132,7 @@ export function createCommandIntentRegistry(
           if (receipt.state === "accepted") {
             binding.state = "accepted";
             binding.acceptedAt = now();
+            binding.correlationId = receipt.correlationId;
             delete binding.retryableAt;
           } else if (receipt.state === "problem" && receipt.problem.retryable === true) {
             binding.state = "retryable";
@@ -159,12 +161,13 @@ export function createCommandIntentRegistry(
       }
       return inFlight;
     },
-    settle(intentHandle) {
+    settle(intentHandle, correlationId) {
       const parsed = intentHandleSchema.parse(intentHandle);
       const binding = bindings.get(parsed);
       if (!binding || binding.state !== "accepted" || binding.inFlight !== undefined) {
         return false;
       }
+      if (correlationId !== undefined && binding.correlationId !== correlationId) return false;
       return bindings.delete(parsed);
     },
   };

@@ -170,6 +170,12 @@ const workspaceDataSchema = {
   nextCursor: z.string().min(1).max(2048).optional(),
   fetchedAt: z.iso.datetime({ offset: true }),
 } as const;
+const staleWorkspaceDataSchema = {
+  items: z.array(workspaceItemSchema),
+  count: z.number().int().min(0),
+  nextCursor: z.string().min(1).max(2048).optional(),
+  fetchedAt: z.iso.datetime({ offset: true }),
+} as const;
 export const workspaceResultSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("loading"), label: z.string().trim().min(1).max(256) }).strict(),
   z
@@ -192,7 +198,7 @@ export const workspaceResultSchema = z.discriminatedUnion("state", [
     state: z.literal("error"),
     problem: problemReceiptSchema.extend({ code: z.string().trim().min(1).max(128) }).strict(),
   }).strict(),
-  z.object({ state: z.literal("stale"), ...workspaceDataSchema }).strict(),
+  z.object({ state: z.literal("stale"), ...staleWorkspaceDataSchema }).strict(),
   z.object({ state: z.literal("offline"), ...workspaceDataSchema }).strict(),
   z.object({
     state: z.literal("conflict"),
@@ -260,11 +266,14 @@ export type CommandReceipt = z.infer<typeof commandReceiptSchema>;
 export const evidenceUploadInputSchema = z
   .object({
     workspace: z.string().trim().min(1).max(128),
-    targetId: z.string().min(1).max(256),
+    taskId: z.string().trim().min(1).max(256),
     fileName: z.string().trim().min(1).max(255),
-    contentType: z.string().trim().min(1).max(255),
+    mediaType: z.string().trim().min(1).max(255),
     size: z.number().int().min(1).max(100 * 1024 * 1024),
-    data: z.instanceof(Uint8Array),
+    data: z.union([z.instanceof(Uint8Array), z.instanceof(ArrayBuffer)]).transform((value) =>
+      value instanceof Uint8Array ? value : new Uint8Array(value),
+    ),
+    intentHandle: z.uuid(),
   })
   .strict()
   .refine(({ data, size }) => data.byteLength === size, {
@@ -272,15 +281,37 @@ export const evidenceUploadInputSchema = z
   });
 export type EvidenceUploadInput = z.infer<typeof evidenceUploadInputSchema>;
 
+export const uploadProgressSchema = z.object({
+  uploadId: z.uuid(),
+  intentHandle: z.uuid(),
+  percent: z.number().int().min(0).max(100),
+}).strict();
+export type UploadProgress = z.infer<typeof uploadProgressSchema>;
+
+export const uploadTransportResponseSchema = z.object({
+  evidenceId: z.string().trim().min(1).max(256),
+  uploadReference: z.string().trim().min(1).max(512),
+  quarantineStatus: z.enum(["quarantined", "released", "rejected"]),
+  processingStatus: z.enum(["scanning", "ready", "failed"]),
+  reviewStatus: z.enum(["pending", "accepted", "returned", "rejected"]),
+}).strict();
+export type UploadTransportResponse = z.infer<typeof uploadTransportResponseSchema>;
+
 export const uploadReceiptSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("started"), uploadId: z.uuid() }).strict(),
   z
     .object({
       state: z.literal("completed"),
       uploadId: z.uuid(),
-      evidenceId: z.string().min(1),
+      ...uploadTransportResponseSchema.shape,
     })
     .strict(),
+  z.object({
+    state: z.literal("unavailable"),
+    reason: z.literal("UNAVAILABLE_CONTRACT"),
+    resourceGroups: z.array(z.string().min(1)).min(1),
+    message: z.string().trim().min(1).max(1024),
+  }).strict(),
   z.object({ state: z.literal("problem"), problem: problemReceiptSchema }).strict(),
 ]);
 export type UploadReceipt = z.infer<typeof uploadReceiptSchema>;
@@ -288,12 +319,16 @@ export type UploadReceipt = z.infer<typeof uploadReceiptSchema>;
 export const notificationEventSchema = z
   .object({
     id: z.uuid(),
+    cursor: z.string().min(1).max(2048).optional(),
     type: z.string().min(1).max(256),
     occurredAt: z.iso.datetime({ offset: true }),
     title: z.string().min(1).max(256),
     body: z.string().max(4096).optional(),
     read: z.boolean(),
     data: z.record(z.string(), z.unknown()).optional(),
+    intentHandle: z.uuid().optional(),
+    correlationId: z.uuid().optional(),
+    commandState: z.enum(["completed", "problem"]).optional(),
   })
   .strict();
 export type NotificationEvent = z.infer<typeof notificationEventSchema>;
@@ -305,6 +340,17 @@ export const notificationPageSchema = z
   })
   .strict();
 export type NotificationPage = z.infer<typeof notificationPageSchema>;
+
+export const notificationListResultSchema = z.union([
+  notificationPageSchema,
+  z.object({
+    state: z.literal("unavailable"),
+    reason: z.literal("UNAVAILABLE_CONTRACT"),
+    resourceGroups: z.array(z.string().min(1)).min(1),
+    message: z.string().trim().min(1).max(1024),
+  }).strict(),
+]);
+export type NotificationListResult = z.infer<typeof notificationListResultSchema>;
 
 export interface OccApi {
   profiles: {
@@ -325,9 +371,10 @@ export interface OccApi {
   uploads: {
     start(input: EvidenceUploadInput): Promise<UploadReceipt>;
     cancel(uploadId: string): Promise<void>;
+    subscribeProgress(listener: (progress: UploadProgress) => void): () => void;
   };
   notifications: {
-    list(cursor?: string): Promise<NotificationPage>;
+    list(cursor?: string): Promise<NotificationListResult>;
     subscribe(listener: (event: NotificationEvent) => void): () => void;
   };
 }
