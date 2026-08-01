@@ -30,6 +30,10 @@ const identity: CurrentUser = {
   capabilities: ["occ.read", "occ.execute", "processes.start"],
 };
 const expiresAt = "2026-08-01T13:00:00.000Z";
+const changedIdentity: CurrentUser = {
+  ...identity,
+  capabilities: ["occ.read", "processes.cancel"],
+};
 
 function loginState() {
   return reduceAppState(initialAppState, {
@@ -85,12 +89,72 @@ describe("application state", () => {
     expect(freshnessAgeMs(offline, 8_000)).toBe(7_000);
     expect(canMutate(offline, "processes.start")).toBe(false);
     expect(canMutate(offline)).toBe(false);
+  });
 
-    const reconnected = reduceAppState(offline, { type: "ONLINE", at: 9_000 });
-    expect(reconnected).toMatchObject({
+  it("keeps transport reconnection read-only until a fresh session replaces cached capabilities", () => {
+    const offline = reduceAppState(onlineState(), { type: "OFFLINE", at: 4_000 });
+    const reconnecting = reduceAppState(offline, { type: "ONLINE", at: 9_000 });
+
+    expect(reconnecting).toMatchObject({
+      mode: "reconnecting",
+      cachedIdentity: identity,
+      lastFreshAt: 1_000,
+      staleSince: 4_000,
+    });
+    expect(connectivity(reconnecting)).toBe("checking");
+    expect(freshnessAgeMs(reconnecting, 10_000)).toBe(9_000);
+    expect(canMutate(reconnecting, "processes.start")).toBe(false);
+
+    const validated = reduceAppState(reconnecting, {
+      type: "SESSION_RESTORED",
+      session: {
+        state: "authenticated",
+        user: changedIdentity,
+        expiresAt: "2026-08-01T14:00:00.000Z",
+      },
+      at: 10_000,
+    });
+    expect(validated).toMatchObject({
       mode: "authenticated",
-      identity,
-      lastFreshAt: 9_000,
+      identity: changedIdentity,
+      lastFreshAt: 10_000,
+    });
+    expect(canMutate(validated, "processes.start")).toBe(false);
+    expect(canMutate(validated, "processes.cancel")).toBe(true);
+  });
+
+  it("returns an expired cached session to login when transport reconnects", () => {
+    const offline = reduceAppState(onlineState(), { type: "OFFLINE", at: 4_000 });
+    expect(
+      reduceAppState(offline, {
+        type: "ONLINE",
+        at: Date.parse(expiresAt) + 1,
+      }),
+    ).toEqual({
+      mode: "login",
+      profiles: [profileA, profileB],
+      profile: profileA,
+      notice: "expired",
+    });
+  });
+
+  it("accepts a fresh login while reconnecting", () => {
+    const offline = reduceAppState(onlineState(), { type: "OFFLINE", at: 4_000 });
+    const reconnecting = reduceAppState(offline, { type: "ONLINE", at: 9_000 });
+    const authenticated = reduceAppState(reconnecting, {
+      type: "LOGIN_SUCCEEDED",
+      session: {
+        state: "authenticated",
+        user: changedIdentity,
+        expiresAt: "2026-08-01T14:00:00.000Z",
+      },
+      at: 10_000,
+    });
+
+    expect(authenticated).toMatchObject({
+      mode: "authenticated",
+      identity: changedIdentity,
+      lastFreshAt: 10_000,
     });
   });
 
@@ -100,6 +164,12 @@ describe("application state", () => {
     expect(canMutate(online, "processes.cancel")).toBe(false);
     expect(canMutate(online, "occ.execute")).toBe(false);
     expect(canMutate(online)).toBe(false);
+  });
+
+  it("does not refresh authenticated freshness from transport status alone", () => {
+    const online = onlineState();
+    expect(reduceAppState(online, { type: "ONLINE", at: 20_000 })).toBe(online);
+    expect(freshnessAgeMs(online, 20_000)).toBe(19_000);
   });
 
   it("clears session and cached identity when the profile changes or is removed", () => {

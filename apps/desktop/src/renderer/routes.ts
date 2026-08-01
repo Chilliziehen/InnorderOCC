@@ -304,12 +304,13 @@ export function createHashRouter(target: HashWindow = window): HashRouter {
     },
     subscribe(listener) {
       if (listeners.size === 0) target.addEventListener("hashchange", onHashChange);
-      listeners.add(listener);
+      const subscription = (location: RouteLocation) => listener(location);
+      listeners.add(subscription);
       let subscribed = true;
       return () => {
         if (!subscribed) return;
         subscribed = false;
-        listeners.delete(listener);
+        listeners.delete(subscription);
         if (listeners.size === 0) {
           target.removeEventListener("hashchange", onHashChange);
         }

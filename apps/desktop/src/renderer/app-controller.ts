@@ -38,11 +38,22 @@ export interface OfflineState extends RoutedState {
   staleSince: number;
 }
 
+export interface ReconnectingState extends RoutedState {
+  mode: "reconnecting";
+  profiles: ServerProfile[];
+  profile: ServerProfile;
+  cachedIdentity: CurrentUser;
+  expiresAt: string;
+  lastFreshAt: number;
+  staleSince: number;
+}
+
 export type AppState =
   | BootstrapState
   | LoginState
   | AuthenticatedState
-  | OfflineState;
+  | OfflineState
+  | ReconnectingState;
 
 export type AppEvent =
   | {
@@ -81,7 +92,7 @@ function loginFor(
 }
 
 function authenticate(
-  state: LoginState,
+  state: LoginState | ReconnectingState,
   session: Extract<SessionSnapshot, { state: "authenticated" }>,
   at: number,
 ): AuthenticatedState {
@@ -142,24 +153,31 @@ export function reduceAppState(state: AppState, event: AppEvent): AppState {
       return { ...state, profiles };
     }
     case "SESSION_RESTORED":
-      if (state.mode !== "login") return state;
+      if (state.mode !== "login" && state.mode !== "reconnecting") return state;
       return event.session.state === "authenticated"
         ? authenticate(state, event.session, event.at)
         : loginFor(state, state.profile);
     case "LOGIN_SUCCEEDED":
-      return state.mode === "login"
+      return state.mode === "login" || state.mode === "reconnecting"
         ? authenticate(state, event.session, event.at)
         : state;
     case "LOGOUT":
-      return state.mode === "authenticated" || state.mode === "offline"
+      return state.mode === "authenticated" ||
+        state.mode === "offline" ||
+        state.mode === "reconnecting"
         ? loginFor(state, state.profile)
         : state;
     case "SESSION_EXPIRED":
-      return state.mode === "authenticated" || state.mode === "offline"
+      return state.mode === "authenticated" ||
+        state.mode === "offline" ||
+        state.mode === "reconnecting"
         ? loginFor(state, state.profile, "expired")
         : state;
     case "OFFLINE":
       if (state.mode === "offline") return state;
+      if (state.mode === "reconnecting") {
+        return { ...state, mode: "offline" };
+      }
       if (state.mode !== "authenticated") return state;
       return {
         mode: "offline",
@@ -172,17 +190,19 @@ export function reduceAppState(state: AppState, event: AppEvent): AppState {
         ...(state.route ? { route: state.route } : {}),
       };
     case "ONLINE":
-      if (state.mode === "authenticated") {
-        return { ...state, lastFreshAt: event.at };
+      if (state.mode !== "offline" && state.mode !== "reconnecting") return state;
+      if (Date.parse(state.expiresAt) <= event.at) {
+        return loginFor(state, state.profile, "expired");
       }
-      if (state.mode !== "offline") return state;
+      if (state.mode === "reconnecting") return state;
       return {
-        mode: "authenticated",
+        mode: "reconnecting",
         profiles: state.profiles,
         profile: state.profile,
-        identity: state.cachedIdentity,
+        cachedIdentity: state.cachedIdentity,
         expiresAt: state.expiresAt,
-        lastFreshAt: event.at,
+        lastFreshAt: state.lastFreshAt,
+        staleSince: state.staleSince,
         ...(state.route ? { route: state.route } : {}),
       };
     case "ROUTE_CHANGED":
@@ -199,7 +219,11 @@ export function connectivity(state: AppState): "checking" | "online" | "offline"
 }
 
 export function freshnessAgeMs(state: AppState, now = Date.now()): number | null {
-  if (state.mode !== "authenticated" && state.mode !== "offline") return null;
+  if (
+    state.mode !== "authenticated" &&
+    state.mode !== "offline" &&
+    state.mode !== "reconnecting"
+  ) return null;
   return Math.max(0, now - state.lastFreshAt);
 }
 
