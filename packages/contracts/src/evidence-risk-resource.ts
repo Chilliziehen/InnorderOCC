@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { problemDetailsSchema } from "./problem-details.js";
+
 export const MAX_EVIDENCE_BYTES = 100 * 1024 * 1024;
 export const MAX_EXPANDED_ARCHIVE_BYTES = MAX_EVIDENCE_BYTES * 2;
 export const MAX_SAFE_VERSION = Number.MAX_SAFE_INTEGER;
@@ -7,6 +9,35 @@ export const SHA256_PATTERN = "^[0-9a-f]{64}$";
 export const ISO_OFFSET_INSTANT_PATTERN =
   "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$";
 export const OPAQUE_CURSOR_PATTERN = "^[A-Za-z0-9._~-]{8,2048}$";
+export const EVIDENCE_RANGE_PATTERN =
+  "^bytes=(?:[0-9]{1,16}-[0-9]{0,16}|-[0-9]{1,16})$";
+export const EVIDENCE_CONTENT_RANGE_PATTERN =
+  "^bytes [0-9]{1,16}-[0-9]{1,16}/[0-9]{1,16}$";
+export const EVIDENCE_UNSATISFIED_CONTENT_RANGE_PATTERN =
+  "^bytes \\*/[0-9]{1,16}$";
+
+export const OCC_PROBLEM_CODES = [
+  "OCC-INVALID-REQUEST",
+  "OCC-AUTHENTICATION-REQUIRED",
+  "OCC-FORBIDDEN",
+  "OCC-NOT-FOUND",
+  "OCC-IDEMPOTENCY-CONFLICT",
+  "OCC-VERSION-CONFLICT",
+  "OCC-EVIDENCE-TOO-LARGE",
+  "OCC-EVIDENCE-DIGEST-MISMATCH",
+  "OCC-EVIDENCE-INVALID-CONTENT",
+  "OCC-EVIDENCE-UPLOAD-CONFLICT",
+  "OCC-EVIDENCE-REVIEW-CONFLICT",
+  "OCC-RISK-INVALID-TRANSITION",
+  "OCC-RESOURCE-UNAVAILABLE",
+  "OCC-RESERVATION-CONFLICT",
+  "OCC-INTERNAL-ERROR",
+] as const;
+
+export const occProblemCodeSchema = z.enum(OCC_PROBLEM_CODES);
+export const domainProblemDetailsSchema = problemDetailsSchema
+  .extend({ code: occProblemCodeSchema })
+  .strict();
 
 const boundedText = (maximum: number, minimum = 1) =>
   z.string().trim().min(minimum).max(maximum);
@@ -24,6 +55,44 @@ export const opaqueCursorSchema = z
   .min(8)
   .max(2048)
   .regex(new RegExp(OPAQUE_CURSOR_PATTERN));
+
+const parseSafeRangeInteger = (value: string): number | undefined => {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+};
+
+export const evidenceRangeHeaderSchema = z
+  .string()
+  .max(39)
+  .regex(new RegExp(EVIDENCE_RANGE_PATTERN))
+  .superRefine((value, context) => {
+    const specification = value.slice("bytes=".length);
+    if (specification.startsWith("-")) {
+      const suffixLength = parseSafeRangeInteger(specification.slice(1));
+      if (suffixLength === undefined || suffixLength <= 0) {
+        context.addIssue({ code: "custom", message: "suffix byte range must be a positive safe integer" });
+      }
+      return;
+    }
+    const [startText, endText] = specification.split("-");
+    const start = parseSafeRangeInteger(startText ?? "");
+    const end = endText ? parseSafeRangeInteger(endText) : undefined;
+    if (start === undefined || (endText && end === undefined)) {
+      context.addIssue({ code: "custom", message: "byte range bounds must be safe integers" });
+    } else if (end !== undefined && end < start) {
+      context.addIssue({ code: "custom", message: "byte range end must not precede start" });
+    }
+  });
+
+export const evidenceContentRangeHeaderSchema = z
+  .string()
+  .max(56)
+  .regex(new RegExp(EVIDENCE_CONTENT_RANGE_PATTERN));
+
+export const evidenceUnsatisfiedContentRangeHeaderSchema = z
+  .string()
+  .max(24)
+  .regex(new RegExp(EVIDENCE_UNSATISFIED_CONTENT_RANGE_PATTERN));
 
 export const halfOpenIntervalSchema = z
   .object({
@@ -632,6 +701,25 @@ export const cancelReservationRequestSchema = z
 
 const eventReasonCodeSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 
+export const DOMAIN_EVENT_TYPES = [
+  "EVIDENCE_UPLOAD_FAILED",
+  "EVIDENCE_UPLOAD_CONFIRMED",
+  "EVIDENCE_SUBMITTED",
+  "EVIDENCE_REVIEWED",
+  "RISK_OPENED",
+  "RISK_ACTIONED",
+  "RISK_ESCALATED",
+  "RISK_RESOLVED",
+  "RISK_DISMISSED",
+  "RESOURCE_AVAILABILITY_CHANGED",
+  "RESERVATION_CREATED",
+  "RESERVATION_CHANGED",
+  "RESERVATION_CANCELLED",
+  "RESERVATION_CONFLICTED",
+] as const;
+
+export const domainEventTypeSchema = z.enum(DOMAIN_EVENT_TYPES);
+
 export const evidenceEventPayloadSchema = z
   .object({
     evidenceId: z.uuid(),
@@ -682,7 +770,50 @@ export const reservationEventPayloadSchema = z
   })
   .strict();
 
+const domainEventEnvelope = <T extends string, P extends z.ZodType>(
+  type: T,
+  payload: P,
+) =>
+  z
+    .object({
+      id: z.uuid(),
+      customerInstanceId: z.uuid(),
+      type: z.literal(type),
+      schemaVersion: positiveIntegerSchema,
+      aggregateType: boundedText(256),
+      aggregateId: z.uuid(),
+      aggregateVersion: versionSchema,
+      occurredAt: instantSchema,
+      actorId: z.uuid().optional(),
+      correlationId: z.uuid(),
+      causationId: z.uuid().optional(),
+      payload,
+    })
+    .strict();
+
+export const domainEventEnvelopeSchema = z.discriminatedUnion("type", [
+  domainEventEnvelope("EVIDENCE_UPLOAD_FAILED", evidenceEventPayloadSchema),
+  domainEventEnvelope("EVIDENCE_UPLOAD_CONFIRMED", evidenceEventPayloadSchema),
+  domainEventEnvelope("EVIDENCE_SUBMITTED", evidenceEventPayloadSchema),
+  domainEventEnvelope("EVIDENCE_REVIEWED", evidenceEventPayloadSchema),
+  domainEventEnvelope("RISK_OPENED", riskEventPayloadSchema),
+  domainEventEnvelope("RISK_ACTIONED", riskEventPayloadSchema),
+  domainEventEnvelope("RISK_ESCALATED", riskEventPayloadSchema),
+  domainEventEnvelope("RISK_RESOLVED", riskEventPayloadSchema),
+  domainEventEnvelope("RISK_DISMISSED", riskEventPayloadSchema),
+  domainEventEnvelope("RESOURCE_AVAILABILITY_CHANGED", resourceEventPayloadSchema),
+  domainEventEnvelope("RESERVATION_CREATED", reservationEventPayloadSchema),
+  domainEventEnvelope("RESERVATION_CHANGED", reservationEventPayloadSchema),
+  domainEventEnvelope("RESERVATION_CANCELLED", reservationEventPayloadSchema),
+  domainEventEnvelope("RESERVATION_CONFLICTED", reservationEventPayloadSchema),
+]);
+
 export type OpaqueCursor = z.infer<typeof opaqueCursorSchema>;
+export type EvidenceRangeHeader = z.infer<typeof evidenceRangeHeaderSchema>;
+export type EvidenceContentRangeHeader = z.infer<typeof evidenceContentRangeHeaderSchema>;
+export type EvidenceUnsatisfiedContentRangeHeader = z.infer<typeof evidenceUnsatisfiedContentRangeHeaderSchema>;
+export type OccProblemCode = z.infer<typeof occProblemCodeSchema>;
+export type DomainProblemDetails = z.infer<typeof domainProblemDetailsSchema>;
 export type EvidenceState = z.infer<typeof evidenceStateSchema>;
 export type EvidenceUploadStatus = z.infer<typeof evidenceUploadStatusSchema>;
 export type EvidenceReviewDecision = z.infer<typeof evidenceReviewDecisionSchema>;
@@ -751,3 +882,5 @@ export type EvidenceEventPayload = z.infer<typeof evidenceEventPayloadSchema>;
 export type RiskEventPayload = z.infer<typeof riskEventPayloadSchema>;
 export type ResourceEventPayload = z.infer<typeof resourceEventPayloadSchema>;
 export type ReservationEventPayload = z.infer<typeof reservationEventPayloadSchema>;
+export type DomainEventType = z.infer<typeof domainEventTypeSchema>;
+export type DomainEventEnvelope = z.infer<typeof domainEventEnvelopeSchema>;

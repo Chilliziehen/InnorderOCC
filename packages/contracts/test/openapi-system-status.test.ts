@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
@@ -84,6 +86,7 @@ import {
   riskAdjudicationSchema,
   riskEventPayloadSchema,
   riskMetricsSchema,
+  riskEvaluationSummarySchema,
   riskPageSchema,
   riskSchema,
   resourceEventPayloadSchema,
@@ -91,8 +94,6 @@ import {
   updateResourceRequestSchema,
 } from "../src/evidence-risk-resource.js";
 import {
-  PROBLEM_CODE_MAX_LENGTH,
-  PROBLEM_CODE_MIN_LENGTH,
   PROBLEM_DETAIL_MIN_LENGTH,
   PROBLEM_DETAIL_MAX_LENGTH,
   PROBLEM_STATUS_MAX,
@@ -111,6 +112,7 @@ interface OpenApiSchemaProperty {
   $ref?: string;
   additionalProperties?: boolean;
   const?: string;
+  discriminator?: { mapping?: Record<string, string>; propertyName?: string };
   enum?: string[];
   format?: string;
   items?: OpenApiSchemaProperty;
@@ -132,6 +134,8 @@ interface OpenApiParameter {
 
 interface OpenApiDocument {
   components: {
+    headers?: Record<string, unknown>;
+    parameters?: Record<string, OpenApiParameter>;
     responses?: Record<string, OpenApiResponse>;
     securitySchemes?: Record<string, unknown>;
     schemas: Record<string, OpenApiSchema>;
@@ -177,6 +181,24 @@ const HTTP_METHODS = new Set([
   "head",
   "trace",
 ]);
+
+const createOpenApiSchemaValidator = (
+  schemas: Record<string, OpenApiSchema>,
+  schemaName: string,
+) => {
+  const rewrittenSchemas = JSON.parse(
+    JSON.stringify(schemas).replaceAll(
+      "#/components/schemas/",
+      "#/$defs/",
+    ),
+  ) as Record<string, unknown>;
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  return ajv.compile({
+    $ref: `#/$defs/${schemaName}`,
+    $defs: rewrittenSchemas,
+  });
+};
 
 const expectStrictObjectParity = (
   openApiSchema: OpenApiSchema | undefined,
@@ -235,6 +257,7 @@ describe("OCC Core OpenAPI system status", () => {
       "/api/v1/risks/interventions",
       "/api/v1/risks/adjudications",
       "/api/v1/risks/metrics",
+      "/api/v1/risks/evaluations/latest",
       "/api/v1/resources",
       "/api/v1/resources/{resourceId}",
       "/api/v1/resources/{resourceId}/availability",
@@ -257,6 +280,50 @@ describe("OCC Core OpenAPI system status", () => {
         );
       }
     }
+  });
+
+  it("exposes the latest risk evaluation summary with Zod parity", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const operation = document.paths["/api/v1/risks/evaluations/latest"]?.get;
+
+    expect(operation?.responses?.["200"]?.content?.["application/json"]?.schema?.$ref).toBe(
+      "#/components/schemas/RiskEvaluationSummary",
+    );
+    expectStrictObjectParity(
+      document.components.schemas.RiskEvaluationSummary,
+      riskEvaluationSummarySchema.shape,
+      "RiskEvaluationSummary",
+    );
+  });
+
+  it("documents bounded evidence range requests and partial responses", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const operation = document.paths["/api/v1/evidence/{evidenceId}/download"]?.get;
+    const parameterRefs = operation?.parameters?.map((parameter) => parameter.$ref) ?? [];
+
+    expect(parameterRefs).toContain("#/components/parameters/Range");
+    expect(document.components.parameters?.Range?.required).toBe(false);
+    expect(operation?.responses?.["200"]?.headers).toEqual(expect.objectContaining({
+      "Accept-Ranges": expect.anything(),
+    }));
+    expect(operation?.responses?.["206"]?.headers).toEqual(expect.objectContaining({
+      "Accept-Ranges": expect.anything(),
+      "Content-Range": expect.anything(),
+    }));
+    expect(operation?.responses?.["206"]?.content?.["application/octet-stream"]).toBeDefined();
+    const invalidRangeRef = operation?.responses?.["416"]?.$ref?.replace("#/components/responses/", "");
+    expect(document.components.responses?.[invalidRangeRef ?? ""]?.headers).toEqual(expect.objectContaining({
+      "Accept-Ranges": expect.anything(),
+      "Content-Range": expect.anything(),
+    }));
   });
 
   it("wires domain filters to cursor queries", async () => {
@@ -379,10 +446,101 @@ describe("OCC Core OpenAPI system status", () => {
       "OCC-RESERVATION-CONFLICT",
       "OCC-VERSION-CONFLICT",
     ]));
+    expect(schemas.ProblemDetails?.properties?.code).toEqual({
+      $ref: "#/components/schemas/OccProblemCode",
+    });
     expect(schemas.RiskActionCommandRequest?.oneOf).toHaveLength(6);
     for (const variant of schemas.RiskActionCommandRequest?.oneOf ?? []) {
       expect(variant.type).toBe("object");
       expect(variant.additionalProperties).toBe(false);
+    }
+  });
+
+  it("defines a discriminated strict domain event envelope union", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const domainEnvelope = schemas.DomainEventEnvelope;
+
+    expect(domainEnvelope?.oneOf).toHaveLength(14);
+    expect(domainEnvelope?.discriminator?.propertyName).toBe("type");
+    expect(Object.keys(domainEnvelope?.discriminator?.mapping ?? {})).toHaveLength(14);
+
+    const validateEnvelope = createOpenApiSchemaValidator(schemas, "DomainEventEnvelope");
+    const envelope = {
+      id: "11111111-1111-4111-8111-111111111111",
+      customerInstanceId: "22222222-2222-4222-8222-222222222222",
+      type: "EVIDENCE_SUBMITTED",
+      schemaVersion: 1,
+      aggregateType: "EVIDENCE",
+      aggregateId: "11111111-1111-4111-8111-111111111111",
+      aggregateVersion: 2,
+      occurredAt: "2026-08-01T10:30:00+02:00",
+      correlationId: "22222222-2222-4222-8222-222222222222",
+      payload: {
+        evidenceId: "11111111-1111-4111-8111-111111111111",
+        state: "SUBMITTED",
+        version: 2,
+        evidenceVersion: 1,
+      },
+    };
+    expect(validateEnvelope(envelope), JSON.stringify(validateEnvelope.errors)).toBe(true);
+    for (const forbidden of ["credentials", "token", "unknown"]) {
+      expect(validateEnvelope({ ...envelope, [forbidden]: "secret" })).toBe(false);
+    }
+    expect(validateEnvelope({ ...envelope, type: "RISK_OPENED" })).toBe(false);
+  });
+
+  it("enforces review and adjudication cross-field rules in Zod and OpenAPI", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const validateReview = createOpenApiSchemaValidator(schemas, "ReviewEvidenceRequest");
+    const validateAdjudication = createOpenApiSchemaValidator(schemas, "CreateRiskAdjudicationRequest");
+    const reviewFixtures = [
+      {
+        valid: true,
+        value: { evidenceVersion: 1, decision: "CONDITIONAL", reason: "Follow up.", conditions: [{ code: "FOLLOW_UP", detail: "Add signature." }] },
+      },
+      {
+        valid: true,
+        value: { evidenceVersion: 1, decision: "ACCEPTED", reason: "Complete." },
+      },
+      {
+        valid: false,
+        value: { evidenceVersion: 1, decision: "CONDITIONAL", reason: "Missing conditions." },
+      },
+      {
+        valid: false,
+        value: { evidenceVersion: 1, decision: "REJECTED", reason: "Invalid conditions.", conditions: [{ code: "NO", detail: "Not allowed." }] },
+      },
+    ];
+    const adjudicationBase = {
+      reportingPeriodStart: "2026-07-01",
+      reportingPeriodEnd: "2026-08-01",
+      knownEventKey: "severe:42",
+      targetEntityId: "11111111-1111-4111-8111-111111111111",
+      severeEvent: true,
+      outcome: "MISSED",
+      reason: "No risk opened.",
+    };
+    const adjudicationFixtures = [
+      { valid: true, value: adjudicationBase },
+      { valid: false, value: { ...adjudicationBase, riskId: "22222222-2222-4222-8222-222222222222" } },
+      { valid: true, value: { ...adjudicationBase, outcome: "TRUE_POSITIVE", riskId: "22222222-2222-4222-8222-222222222222" } },
+    ];
+
+    for (const fixture of reviewFixtures) {
+      expect(reviewEvidenceRequestSchema.safeParse(fixture.value).success).toBe(fixture.valid);
+      expect(validateReview(fixture.value), JSON.stringify(validateReview.errors)).toBe(fixture.valid);
+    }
+    for (const fixture of adjudicationFixtures) {
+      expect(createRiskAdjudicationRequestSchema.safeParse(fixture.value).success).toBe(fixture.valid);
+      expect(validateAdjudication(fixture.value), JSON.stringify(validateAdjudication.errors)).toBe(fixture.valid);
     }
   });
 
@@ -564,11 +722,7 @@ describe("OCC Core OpenAPI system status", () => {
         minimum: PROBLEM_STATUS_MIN,
         maximum: PROBLEM_STATUS_MAX,
       },
-      code: {
-        type: "string",
-        minLength: PROBLEM_CODE_MIN_LENGTH,
-        maxLength: PROBLEM_CODE_MAX_LENGTH,
-      },
+      code: { $ref: "#/components/schemas/OccProblemCode" },
       correlationId: { type: "string", format: "uuid" },
       detail: {
         type: "string",
