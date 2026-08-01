@@ -1,5 +1,20 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const metadataMode = vi.hoisted(() => ({ available: false, unavailable: new Set<string>() }));
+
+vi.mock("../src/renderer/workspaces/workspace-definitions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/renderer/workspaces/workspace-definitions")>();
+  return {
+    ...actual,
+    commandFor: (workspace: Parameters<typeof actual.commandFor>[0], operationName: string) => {
+      const operation = actual.commandFor(workspace, operationName);
+      const workspaceId = typeof workspace === "string" ? workspace : workspace.id;
+      if (!operation || !metadataMode.available || metadataMode.unavailable.has(`${workspaceId}:${operationName}`)) return operation;
+      return { ...operation, availability: { state: "available" as const } };
+    },
+  };
+});
 
 import type { CommandReceipt, WorkspaceCommand } from "../src/desktop-contract";
 import { MyWork, type MyWorkProps } from "../src/renderer/workspaces/MyWork";
@@ -12,6 +27,45 @@ const execute = vi.fn(async (_command: WorkspaceCommand): Promise<CommandReceipt
   commandId: "00000000-0000-4000-8000-000000000088",
   correlationId: "00000000-0000-4000-8000-000000000099",
 }));
+
+beforeEach(() => {
+  metadataMode.available = false;
+  metadataMode.unavailable.clear();
+  execute.mockClear();
+});
+
+const allWorkCapabilities = ["tasks.claim", "evidence.submit", "reservations.create", "recommendations.request"];
+const allProcessCapabilities = ["cohorts.create", "processes.start", "processes.suspend", "processes.cancel"];
+
+function selectedTask(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "task-17",
+    evidenceRequirements: ["校准记录 PDF"],
+    acceptedMediaTypes: ["application/pdf"],
+    reviewHistory: [],
+    ...overrides,
+  };
+}
+
+function selectedProcess(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "process-1",
+    expectedVersion: 7,
+    progress: 0,
+    participants: [],
+    tasks: [],
+    evidence: [],
+    risks: [],
+    timeline: [],
+    ...overrides,
+  };
+}
+
+function formFor(buttonName: string): HTMLFormElement {
+  const form = screen.getByRole("button", { name: buttonName }).closest("form");
+  if (!form) throw new Error(`No command form for ${buttonName}`);
+  return form;
+}
 
 function myWorkProps(overrides: Partial<MyWorkProps> = {}): MyWorkProps {
   return {
@@ -67,9 +121,27 @@ describe("My Work workspace", () => {
     for (const tab of WORKSPACE_DEFINITIONS["my-work"].tabs) {
       const control = within(tabs).getByRole("tab", { name: tab.label });
       expect(control).toHaveAttribute("aria-selected", String(tab.id === "available"));
+      expect(control).toHaveAttribute("aria-controls", `my-work-panel-${tab.id}`);
+      expect(control).toHaveAttribute("tabindex", tab.id === "available" ? "0" : "-1");
+      expect(document.getElementById(`my-work-panel-${tab.id}`)).toHaveAttribute("role", "tabpanel");
       fireEvent.click(control);
       expect(onTabChange).toHaveBeenLastCalledWith(tab.id);
     }
+  });
+
+  it("moves tab focus with wrapped arrows, Home, and End", () => {
+    const onTabChange = vi.fn();
+    render(<MyWork {...myWorkProps({ onTabChange })} />);
+    const tabs = screen.getAllByRole("tab");
+
+    tabs[0]!.focus();
+    fireEvent.keyDown(tabs[0]!, { key: "ArrowLeft" });
+    expect(tabs.at(-1)).toHaveFocus();
+    expect(onTabChange).toHaveBeenLastCalledWith("completed");
+    fireEvent.keyDown(tabs.at(-1)!, { key: "Home" });
+    expect(tabs[0]).toHaveFocus();
+    fireEvent.keyDown(tabs[0]!, { key: "End" });
+    expect(tabs.at(-1)).toHaveFocus();
   });
 
   it("uses shared search, state filter, sorting, and refresh callbacks", () => {
@@ -100,6 +172,7 @@ describe("My Work workspace", () => {
       selectedTask: {
         id: "task-17",
         evidenceRequirements: ["校准记录 PDF"],
+        acceptedMediaTypes: ["application/pdf"],
         reservation: "电子实验台，08:00-10:00",
         reviewHistory: [{ id: "review-1", outcome: "RETURNED", occurredAt: "2026-08-01T09:00:00Z", note: "缺少仪器编号" }],
       },
@@ -131,6 +204,7 @@ describe("My Work workspace", () => {
     const retry = screen.getByRole("button", { name: "重试上传" });
     expect(retry).toBeDisabled();
     fireEvent.click(retry);
+    fireEvent.submit(formFor("重试上传"));
     expect(onRetryUpload).not.toHaveBeenCalled();
 
     rerender(<MyWork {...myWorkProps({ upload: { state: "quarantined", fileName: "record.pdf", message: "正在进行安全扫描" } })} />);
@@ -156,7 +230,7 @@ describe("My Work workspace", () => {
     execute.mockClear();
     const { container } = render(<MyWork {...myWorkProps({
       capabilities: ["tasks.claim", "evidence.submit", "reservations.create", "recommendations.request"],
-      selectedTask: { id: "task-17", evidenceRequirements: [], reviewHistory: [] },
+      selectedTask: { id: "task-17", evidenceRequirements: [], acceptedMediaTypes: ["application/pdf"], reviewHistory: [] },
       upload: { state: "uploading", fileName: "record.pdf", progress: 42, uploadId: "upload-17" },
       onStartUpload,
       onCancelUpload,
@@ -172,7 +246,9 @@ describe("My Work workspace", () => {
     }
     expect(screen.getByLabelText("选择证据文件")).toBeDisabled();
     expect(screen.getByRole("button", { name: "开始上传" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "取消上传" })).toBeDisabled();
+    const cancelUpload = screen.getByRole("button", { name: "取消上传" });
+    expect(cancelUpload).toBeDisabled();
+    fireEvent.submit(formFor("取消上传"));
     fireEvent.submit(container.querySelector("form") as HTMLFormElement);
     expect(execute).not.toHaveBeenCalled();
     expect(onStartUpload).not.toHaveBeenCalled();
@@ -187,6 +263,109 @@ describe("My Work workspace", () => {
     })} />);
     expect(screen.getAllByText("离线时更改操作已锁定")).toHaveLength(5);
   });
+
+  it("guards claim in the submit handler until a target task exists", async () => {
+    metadataMode.available = true;
+    render(<MyWork {...myWorkProps({ capabilities: allWorkCapabilities })} />);
+    const claim = screen.getByRole("button", { name: "领取任务" });
+    expect(claim).toBeDisabled();
+    expect(screen.getByText("请选择任务后再领取")).toHaveAttribute("role", "alert");
+    fireEvent.submit(formFor("领取任务"));
+    await waitFor(() => expect(execute).not.toHaveBeenCalled());
+  });
+
+  it("starts and submits only bounded evidence matching task media metadata and an upload reference", async () => {
+    metadataMode.available = true;
+    const onStartUpload = vi.fn();
+    const { rerender } = render(<MyWork {...myWorkProps({
+      capabilities: allWorkCapabilities,
+      selectedTask: selectedTask(),
+      onStartUpload,
+    })} />);
+    const input = screen.getByLabelText("选择证据文件");
+    expect(input).toHaveAttribute("accept", "application/pdf");
+    const file = new File(["pdf"], "record.pdf", { type: "application/pdf" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
+    expect(onStartUpload).toHaveBeenCalledWith(file, "task-17");
+    expect(screen.getByRole("button", { name: "提交证据" })).toBeDisabled();
+    expect(screen.getByText("缺少证据上传引用")).toHaveAttribute("role", "alert");
+    fireEvent.submit(formFor("提交证据"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "提交证据" })).toBeDisabled());
+
+    rerender(<MyWork {...myWorkProps({
+      capabilities: allWorkCapabilities,
+      selectedTask: selectedTask(),
+      uploadReference: "upload-17",
+      onStartUpload,
+    })} />);
+    fireEvent.click(screen.getByRole("button", { name: "提交证据" }));
+    await waitFor(() => expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "submitEvidence",
+      targetId: "task-17",
+      payload: expect.objectContaining({ taskId: "task-17", uploadReference: "upload-17" }),
+    })));
+  });
+
+  it.each([
+    { name: "oversized", type: "application/pdf", size: 100 * 1024 * 1024 + 1, error: "证据文件不得超过 100 MiB" },
+    { name: "wrong-media", type: "image/png", size: 3, error: "文件媒体类型不在任务允许范围内" },
+  ])("rejects $name evidence in UI and forged handlers", async ({ type, size, error }) => {
+    metadataMode.available = true;
+    const onStartUpload = vi.fn();
+    render(<MyWork {...myWorkProps({ capabilities: allWorkCapabilities, selectedTask: selectedTask(), uploadReference: "upload-17", onStartUpload })} />);
+    const file = new File(["bad"], "record.bin", { type });
+    Object.defineProperty(file, "size", { value: size });
+    fireEvent.change(screen.getByLabelText("选择证据文件"), { target: { files: [file] } });
+
+    const start = screen.getByRole("button", { name: "开始上传" });
+    expect(start).toBeDisabled();
+    expect(screen.getAllByText(error).every((element) => element.getAttribute("role") === "alert")).toBe(true);
+    fireEvent.submit(formFor("开始上传"));
+    fireEvent.submit(formFor("提交证据"));
+    await waitFor(() => {
+      expect(onStartUpload).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    });
+  });
+
+  it("requires task, resource, and an ordered reservation interval before execution", async () => {
+    metadataMode.available = true;
+    render(<MyWork {...myWorkProps({ capabilities: allWorkCapabilities, selectedTask: selectedTask() })} />);
+    expect(screen.getByRole("button", { name: "预留资源" })).toBeDisabled();
+    fireEvent.submit(formFor("预留资源"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "预留资源" })).toBeDisabled());
+
+    fireEvent.change(screen.getByLabelText("资源 ID"), { target: { value: "bench-4" } });
+    fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-08-03T10:00" } });
+    fireEvent.change(screen.getByLabelText("结束时间"), { target: { value: "2026-08-03T08:00" } });
+    expect(screen.getByRole("button", { name: "预留资源" })).toBeDisabled();
+    expect(screen.getByText("预留时间范围无效")).toHaveAttribute("role", "alert");
+    fireEvent.submit(formFor("预留资源"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "预留资源" })).toBeDisabled());
+
+    fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-08-03T08:00" } });
+    fireEvent.change(screen.getByLabelText("结束时间"), { target: { value: "2026-08-03T10:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "预留资源" }));
+    await waitFor(() => expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "reserve",
+      targetId: "task-17",
+      payload: { taskId: "task-17", resourceId: "bench-4", startsAt: "2026-08-03T08:00", endsAt: "2026-08-03T10:00" },
+    })));
+  });
+
+  it("guards AI guidance against a missing task even under forced submission", () => {
+    metadataMode.available = true;
+    render(<MyWork {...myWorkProps({ capabilities: allWorkCapabilities })} />);
+    expect(screen.getByRole("button", { name: "请求智能建议" })).toBeDisabled();
+    expect(screen.getByText("请选择任务后再请求智能建议")).toHaveAttribute("role", "alert");
+    fireEvent.submit(formFor("请求智能建议"));
+    expect(execute).not.toHaveBeenCalled();
+  });
 });
 
 describe("Processes workspace", () => {
@@ -197,7 +376,11 @@ describe("Processes workspace", () => {
 
     const tabs = screen.getByRole("tablist", { name: "流程视图" });
     for (const tab of WORKSPACE_DEFINITIONS.processes.tabs) {
-      fireEvent.click(within(tabs).getByRole("tab", { name: tab.label }));
+      const control = within(tabs).getByRole("tab", { name: tab.label });
+      expect(control).toHaveAttribute("aria-controls", `processes-panel-${tab.id}`);
+      expect(control).toHaveAttribute("tabindex", tab.id === "cohorts" ? "0" : "-1");
+      expect(document.getElementById(`processes-panel-${tab.id}`)).toHaveAttribute("role", "tabpanel");
+      fireEvent.click(control);
       expect(onTabChange).toHaveBeenLastCalledWith(tab.id);
     }
     fireEvent.change(screen.getByLabelText("搜索群组"), { target: { value: "2026 春季" } });
@@ -207,6 +390,21 @@ describe("Processes workspace", () => {
       filters: { cohort: "2026 春季", process: "电子模块" },
       sort: "updated-desc",
     });
+  });
+
+  it("moves process tab focus with wrapped arrows, Home, and End", () => {
+    const onTabChange = vi.fn();
+    render(<Processes {...processProps({ onTabChange })} />);
+    const tabs = screen.getAllByRole("tab");
+
+    tabs.at(-1)!.focus();
+    fireEvent.keyDown(tabs.at(-1)!, { key: "ArrowRight" });
+    expect(tabs[0]).toHaveFocus();
+    expect(onTabChange).toHaveBeenLastCalledWith("cohorts");
+    fireEvent.keyDown(tabs[0]!, { key: "End" });
+    expect(tabs.at(-1)).toHaveFocus();
+    fireEvent.keyDown(tabs.at(-1)!, { key: "Home" });
+    expect(tabs[0]).toHaveFocus();
   });
 
   it("presents process progress, participants, tasks, evidence, risks, and timeline semantically", () => {
@@ -219,6 +417,7 @@ describe("Processes workspace", () => {
       },
       selectedProcess: {
         id: "process-1",
+        expectedVersion: 7,
         progress: 65,
         participants: [{ id: "person-1", name: "参与者甲", role: "成员" }],
         tasks: [{ id: "task-1", name: "安全检查", state: "COMPLETED" }],
@@ -241,7 +440,7 @@ describe("Processes workspace", () => {
     execute.mockClear();
     const { container } = render(<Processes {...processProps({
       capabilities: ["cohorts.create", "processes.start", "processes.suspend", "processes.cancel"],
-      selectedProcess: { id: "process-1", progress: 0, participants: [], tasks: [], evidence: [], risks: [], timeline: [] },
+      selectedProcess: { id: "process-1", expectedVersion: 7, progress: 0, participants: [], tasks: [], evidence: [], risks: [], timeline: [] },
     })} />);
 
     expect(screen.getByLabelText("工作区合同不可用")).toHaveTextContent("/cohorts、/processes、/tasks");
@@ -270,5 +469,79 @@ describe("Processes workspace", () => {
       capabilities: ["cohorts.create", "processes.start", "processes.suspend", "processes.cancel"],
     })} />);
     expect(screen.getAllByText("离线时更改操作已锁定")).toHaveLength(4);
+  });
+
+  it("guards cohort creation and process start shapes before callbacks", async () => {
+    metadataMode.available = true;
+    const { rerender } = render(<Processes {...processProps({ capabilities: allProcessCapabilities })} />);
+    expect(screen.getByRole("button", { name: "创建群组" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "启动流程" })).toBeDisabled();
+    fireEvent.submit(formFor("创建群组"));
+    fireEvent.submit(formFor("启动流程"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "创建群组" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "启动流程" })).toBeDisabled();
+    });
+
+    fireEvent.change(screen.getByLabelText("群组名称"), { target: { value: " 2026 春季 " } });
+    fireEvent.click(screen.getByRole("button", { name: "创建群组" }));
+    await waitFor(() => expect(execute).toHaveBeenCalledWith(expect.objectContaining({ operation: "create", payload: { name: "2026 春季" } })));
+
+    execute.mockClear();
+    fireEvent.change(screen.getByLabelText("流程定义"), { target: { value: "electronics-v2" } });
+    expect(screen.getByRole("button", { name: "启动流程" })).toBeDisabled();
+    expect(screen.getByText("请选择要启动的流程")).toHaveAttribute("role", "alert");
+    fireEvent.submit(formFor("启动流程"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "启动流程" })).toBeDisabled());
+
+    rerender(<Processes {...processProps({ capabilities: allProcessCapabilities, selectedProcess: selectedProcess() })} />);
+    fireEvent.click(screen.getByRole("button", { name: "启动流程" }));
+    await waitFor(() => expect(execute).toHaveBeenCalledWith(expect.objectContaining({ operation: "start", targetId: "process-1" })));
+  });
+
+  it("guards suspend and cancel independently with target, reason, and expectedVersion", async () => {
+    metadataMode.available = true;
+    const { rerender } = render(<Processes {...processProps({ capabilities: allProcessCapabilities, selectedProcess: selectedProcess({ expectedVersion: -1 }) })} />);
+    expect(screen.getByRole("button", { name: "暂停流程" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "取消流程" })).toBeDisabled();
+    fireEvent.submit(formFor("暂停流程"));
+    fireEvent.submit(formFor("取消流程"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "暂停流程" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "取消流程" })).toBeDisabled();
+    });
+
+    fireEvent.change(screen.getByLabelText("暂停或取消原因"), { target: { value: " 维护窗口 " } });
+    expect(screen.getAllByText("缺少有效的流程版本").every((element) => element.getAttribute("role") === "alert")).toBe(true);
+    fireEvent.submit(formFor("暂停流程"));
+    fireEvent.submit(formFor("取消流程"));
+    expect(execute).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "暂停流程" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "取消流程" })).toBeDisabled();
+    });
+
+    rerender(<Processes {...processProps({ capabilities: allProcessCapabilities, selectedProcess: selectedProcess() })} />);
+    fireEvent.click(screen.getByRole("button", { name: "暂停流程" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消流程" }));
+    await waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    for (const operation of ["suspend", "cancel"]) {
+      expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+        operation,
+        targetId: "process-1",
+        payload: { reason: "维护窗口", expectedVersion: 7 },
+      }));
+    }
+  });
+
+  it("keeps the shared reason editable when either suspend or cancel remains available", () => {
+    metadataMode.available = true;
+    metadataMode.unavailable.add("processes:suspend");
+    render(<Processes {...processProps({ capabilities: allProcessCapabilities, selectedProcess: selectedProcess() })} />);
+    expect(screen.getByLabelText("暂停或取消原因")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "暂停流程" })).toBeDisabled();
   });
 });
