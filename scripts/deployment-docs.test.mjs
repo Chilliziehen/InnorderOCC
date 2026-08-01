@@ -624,6 +624,12 @@ test("repository sources drive the documented deployment facts", () => {
   ];
   assert.deepEqual(sourceFacts.filter((fact) => !corpus.includes(fact)), []);
   assert.equal(Object.keys(composeModel.services).length, 11);
+  assert.deepEqual(
+    Object.entries(composeModel.services).filter(([, service]) => service.restart === "no").map(([name]) => name).sort(),
+    ["flowable-init", "minio-init", "postgres-init"],
+  );
+  assert.doesNotMatch(corpus, /十服务|十个服务|十个 Compose 服务|十个容器|两个一次性|两个 one-shot|两个 `exited 0`|两 one-shot/u);
+  assert.doesNotMatch(corpus, /minio-volume-init/u);
   assert.equal(composeModel.services.backend, undefined);
   assert.equal(composeModel.networks.backend.internal, true);
   assert.equal(composeModel.services["host-gateway"].ports.length, 8);

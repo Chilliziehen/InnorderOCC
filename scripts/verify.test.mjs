@@ -117,8 +117,8 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /CommandExecutorIntegrationTest/u);
   assert.match(result.stdout, /OutboxPublisherIntegrationTest/u);
   assert.match(result.stdout, /KafkaOutboxEventSenderProtocolIntegrationTest/u);
-  assert.match(result.stdout, /strict Core authorization and real OPA integration/u);
-  assert.match(result.stdout, /enforce Docker integration JUnit results/u);
+  assert.match(result.stdout, /strict complete Core tests with Docker and real OPA/u);
+  assert.match(result.stdout, /enforce complete Core and mandatory integration JUnit results/u);
 });
 
 async function fakeTool(t, cwd, name, exitCode, output = name.startsWith("opa-available") ? "Version: 1.5.1" : "") {
@@ -227,4 +227,71 @@ test("rejects malformed ambiguous or invalid Docker integration JUnit XML", asyn
       `${name} JUnit XML must be rejected`,
     );
   }
+});
+
+test("complete Core JUnit guard discovers every concrete top-level Kotlin test suite", async (t) => {
+  const { assertCompleteCoreJUnitResults, discoverConcreteKotlinTestSuites } = await helpers();
+  const cwd = await temporaryCwd(t);
+  const sourceRoot = join(cwd, "src", "test", "kotlin");
+  const packageRoot = join(sourceRoot, "com", "example");
+  const resultsRoot = join(cwd, "results");
+  await mkdir(packageRoot, { recursive: true });
+  await mkdir(resultsRoot, { recursive: true });
+  await writeFile(join(packageRoot, "AlphaTest.kt"), "package com.example\nclass AlphaTest\n", "utf8");
+  await writeFile(join(packageRoot, "BetaTest.kt"), "package com.example\nclass BetaTest\n", "utf8");
+  await writeFile(join(packageRoot, "InternalTest.kt"), "package com.example\ninternal class InternalTest\n", "utf8");
+  await writeFile(
+    join(packageRoot, "FixturesTest.kt"),
+    "package com.example\nabstract class FixturesTest\nclass Container {\n    class NestedTest\n}\n",
+    "utf8",
+  );
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.AlphaTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"/>',
+    "utf8",
+  );
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.InternalTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"/>',
+    "utf8",
+  );
+
+  assert.deepEqual(discoverConcreteKotlinTestSuites(sourceRoot), [
+    "com.example.AlphaTest",
+    "com.example.BetaTest",
+    "com.example.InternalTest",
+  ]);
+  assert.throws(
+    () => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot),
+    /BetaTest.*missing/u,
+  );
+
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.BetaTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"/>',
+    "utf8",
+  );
+  assert.doesNotThrow(() => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot));
+});
+
+test("complete Core JUnit guard rejects malformed or skipped arbitrary emitted suites", async (t) => {
+  const { assertCompleteCoreJUnitResults } = await helpers();
+  const cwd = await temporaryCwd(t);
+  const sourceRoot = join(cwd, "src", "test", "kotlin");
+  const packageRoot = join(sourceRoot, "com", "example");
+  const resultsRoot = join(cwd, "results");
+  await mkdir(packageRoot, { recursive: true });
+  await mkdir(resultsRoot, { recursive: true });
+  await writeFile(join(packageRoot, "AlphaTest.kt"), "package com.example\nclass AlphaTest\n", "utf8");
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.AlphaTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"/>',
+    "utf8",
+  );
+  const arbitrary = join(resultsRoot, "TEST-com.example.ArbitraryTest.xml");
+  await writeFile(arbitrary, '<testsuite tests="1" skipped="1" failures="0" errors="0"/>', "utf8");
+  assert.throws(() => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot), /skipped 1/u);
+
+  await writeFile(arbitrary, '<testsuite tests="1" skipped="0" failures="0" errors="0">', "utf8");
+  assert.throws(() => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot), /malformed/u);
 });

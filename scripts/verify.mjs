@@ -4,7 +4,13 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { assertJUnitSuiteExecuted, commandForPlatform, runChild, verificationExitCode } from "./verify-process.mjs";
+import {
+  assertCompleteCoreJUnitResults,
+  assertJUnitSuiteExecuted,
+  commandForPlatform,
+  runChild,
+  verificationExitCode,
+} from "./verify-process.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const require = createRequire(import.meta.url);
@@ -33,32 +39,37 @@ async function main() {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const gradle = process.platform === "win32" ? "gradlew.bat" : "./gradlew";
   const npmAuditCache = join(tmpdir(), "innorder-occ-npm-audit-cache");
-  const integrationResults = [
-    "TEST-com.innorder.occ.PlatformSecurityKernelIntegrationTest.xml",
-    "TEST-com.innorder.occ.PostgreSqlFlowableIntegrationTest.xml",
-    "TEST-com.innorder.occ.auth.AccessTokenSecurityTest.xml",
-    "TEST-com.innorder.occ.auth.AuthServicePasswordWorkTest.xml",
-    "TEST-com.innorder.occ.auth.SessionRepositoryIntegrationTest.xml",
-    "TEST-com.innorder.occ.auth.AuthControllerIntegrationTest.xml",
-    "TEST-com.innorder.occ.auth.PasswordServiceTest.xml",
-    "TEST-com.innorder.occ.iam.BootstrapAdministratorIntegrationTest.xml",
-    "TEST-com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest.xml",
-    "TEST-com.innorder.occ.iam.BootstrapSecretReaderTest.xml",
-    "TEST-com.innorder.occ.authz.AuditDataSourceConfigurationTest.xml",
-    "TEST-com.innorder.occ.authz.AuthorizationDecisionValidatorTest.xml",
-    "TEST-com.innorder.occ.authz.AuthorizationServiceIntegrationTest.xml",
-    "TEST-com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest.xml",
-    "TEST-com.innorder.occ.authz.PolicyReleaseIntegrityTest.xml",
-    "TEST-com.innorder.occ.command.CanonicalJsonObjectTest.xml",
-    "TEST-com.innorder.occ.command.CommandExecutorIntegrationTest.xml",
-    "TEST-com.innorder.occ.config.FlowableDatabaseInitializationDependencyDetectorTest.xml",
-    "TEST-com.innorder.occ.events.EventEnvelopeTest.xml",
-    "TEST-com.innorder.occ.events.KafkaOutboxEventSenderTest.xml",
-    "TEST-com.innorder.occ.events.OutboxConfigurationTest.xml",
-    "TEST-com.innorder.occ.events.OutboxPublisherIntegrationTest.xml",
-    "TEST-com.innorder.occ.events.OutboxPropertiesTest.xml",
-    "TEST-com.innorder.occ.events.KafkaOutboxEventSenderProtocolIntegrationTest.xml",
-  ].map((file) => join(root, "services", "core", "build", "test-results", "test", file));
+  const mandatoryIntegrationSuites = [
+    "com.innorder.occ.PlatformSecurityKernelIntegrationTest",
+    "com.innorder.occ.FlowableProductionStartupIntegrationTest",
+    "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
+    "com.innorder.occ.auth.AccessTokenSecurityTest",
+    "com.innorder.occ.auth.AuthControllerIntegrationTest",
+    "com.innorder.occ.auth.AuthServicePasswordWorkTest",
+    "com.innorder.occ.auth.PasswordServiceTest",
+    "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
+    "com.innorder.occ.authz.AuditDataSourceConfigurationTest",
+    "com.innorder.occ.authz.AuthorizationDecisionValidatorTest",
+    "com.innorder.occ.authz.AuthorizationServiceIntegrationTest",
+    "com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest",
+    "com.innorder.occ.authz.PolicyReleaseIntegrityTest",
+    "com.innorder.occ.command.CanonicalJsonObjectTest",
+    "com.innorder.occ.command.CommandExecutorIntegrationTest",
+    "com.innorder.occ.config.FlowableDatabaseInitializationDependencyDetectorTest",
+    "com.innorder.occ.events.EventEnvelopeTest",
+    "com.innorder.occ.events.KafkaOutboxEventSenderProtocolIntegrationTest",
+    "com.innorder.occ.events.KafkaOutboxEventSenderTest",
+    "com.innorder.occ.events.OutboxConfigurationTest",
+    "com.innorder.occ.events.OutboxPublisherIntegrationTest",
+    "com.innorder.occ.events.OutboxPropertiesTest",
+    "com.innorder.occ.iam.BootstrapAdministratorIntegrationTest",
+    "com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest",
+    "com.innorder.occ.iam.BootstrapSecretReaderTest",
+  ];
+  const coreTestSource = join(root, "services", "core", "src", "test", "kotlin");
+  const coreTestResults = join(root, "services", "core", "build", "test-results", "test");
+  const integrationResults = mandatoryIntegrationSuites.map((suite) =>
+    join(coreTestResults, `TEST-${suite}.xml`));
 
   function printable(command, args) {
     return [command, ...args].join(" ");
@@ -186,32 +197,9 @@ async function main() {
   }
 
   if (full) {
-    await run("strict Core authorization and real OPA integration", gradle, [
+    console.log(`[verify] mandatory Core integration suites: ${mandatoryIntegrationSuites.join(", ")}`);
+    await run("strict complete Core tests with Docker and real OPA", gradle, [
       ":services:core:test",
-      "--tests", "com.innorder.occ.PlatformSecurityKernelIntegrationTest",
-      "--tests", "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
-      "--tests", "com.innorder.occ.auth.AccessTokenSecurityTest",
-      "--tests", "com.innorder.occ.auth.AuthServicePasswordWorkTest",
-      "--tests", "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
-      "--tests", "com.innorder.occ.auth.AuthControllerIntegrationTest",
-      "--tests", "com.innorder.occ.auth.PasswordServiceTest",
-      "--tests", "com.innorder.occ.iam.BootstrapAdministratorIntegrationTest",
-      "--tests", "com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest",
-      "--tests", "com.innorder.occ.iam.BootstrapSecretReaderTest",
-      "--tests", "com.innorder.occ.authz.AuditDataSourceConfigurationTest",
-      "--tests", "com.innorder.occ.authz.AuthorizationDecisionValidatorTest",
-      "--tests", "com.innorder.occ.authz.AuthorizationServiceIntegrationTest",
-      "--tests", "com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest",
-      "--tests", "com.innorder.occ.authz.PolicyReleaseIntegrityTest",
-      "--tests", "com.innorder.occ.command.CanonicalJsonObjectTest",
-      "--tests", "com.innorder.occ.command.CommandExecutorIntegrationTest",
-      "--tests", "com.innorder.occ.config.FlowableDatabaseInitializationDependencyDetectorTest",
-      "--tests", "com.innorder.occ.events.EventEnvelopeTest",
-      "--tests", "com.innorder.occ.events.KafkaOutboxEventSenderTest",
-      "--tests", "com.innorder.occ.events.OutboxConfigurationTest",
-      "--tests", "com.innorder.occ.events.OutboxPublisherIntegrationTest",
-      "--tests", "com.innorder.occ.events.OutboxPropertiesTest",
-      "--tests", "com.innorder.occ.events.KafkaOutboxEventSenderProtocolIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
     ], dryRun ? process.env : {
@@ -219,8 +207,11 @@ async function main() {
       OPA_PATH: requiredOpa,
       INNORDER_STRICT_AUTHZ_TESTS: "1",
     });
-    console.log("\n[verify] enforce Docker integration JUnit results");
-    if (!dryRun) integrationResults.forEach((result) => assertJUnitSuiteExecuted(result));
+    console.log("\n[verify] enforce complete Core and mandatory integration JUnit results");
+    if (!dryRun) {
+      assertCompleteCoreJUnitResults(coreTestSource, coreTestResults);
+      integrationResults.forEach((result) => assertJUnitSuiteExecuted(result));
+    }
   }
 
   const label = full ? "full" : local ? "local" : "quick";

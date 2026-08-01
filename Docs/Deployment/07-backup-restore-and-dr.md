@@ -611,7 +611,7 @@ cp -- "$escrow_receipt" "$backup_set/secret-escrow-receipt.txt"
   "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-topics.sh --version
 } >"$backup_set/tool-versions.txt"
 mapfile -t container_ids < <("${compose[@]}" ps -a -q)
-[ "${#container_ids[@]}" -eq 10 ]
+[ "${#container_ids[@]}" -eq 11 ]
 : >"$backup_set/image-identifiers.txt"
 for container_id in "${container_ids[@]}"; do
   container_line=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }} container={{.Id}} image={{.Image}}' "$container_id")
@@ -732,7 +732,7 @@ unset OCC_CONFIRM_BACKUP_QUIESCE
 test -f "$backup_set/COMPLETE"
 ```
 
-随后执行[日常运维检查](06-daily-operations-and-monitoring.md)中的八服务/两 one-shot、HTTP、TCP 和协议验收。`INCOMPLETE` 集合保留供故障分析但不得进入正常保留轮换或作为恢复点。
+随后执行[日常运维检查](06-daily-operations-and-monitoring.md)中的八服务/三 one-shot、HTTP、TCP 和协议验收。`INCOMPLETE` 集合保留供故障分析但不得进入正常保留轮换或作为恢复点。
 
 ## 保留、加密、异地与访问
 
@@ -1269,7 +1269,7 @@ set -euo pipefail
 
 验收使用 restore env 的独立有效端口，至少包括：
 
-- 两个 one-shot 精确 `exited 0`，八个长运行服务 `running healthy`，restart count 可解释。
+- 三个 one-shot 精确 `exited 0`，八个长运行服务 `running healthy`，restart count 可解释。
 - Core readiness HTTP 200 且仅代表 `ping`/`db`；Core/AI status、OPA、MinIO readiness 成功。
 - PostgreSQL 角色连接、备份中的完整 Flyway 历史全成功、八 schema owner、Flowable 表状态与 dump 一致。
 - MinIO 桶名精确、对象键和大小清单一致，选定范围内容 checksum 通过，应用账号仅有桶级访问。

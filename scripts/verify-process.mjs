@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { constants } from "node:os";
+import { join } from "node:path";
 import { SaxesParser } from "saxes";
 
 export class ChildProcessFailure extends Error {
@@ -119,5 +120,45 @@ export function assertJUnitSuiteExecuted(path) {
   const errors = attribute("errors");
   if (tests <= 0 || skipped !== 0 || failures !== 0 || errors !== 0) {
     throw new Error(`Docker integration JUnit suite did not fully execute: tests ${tests}, skipped ${skipped}, failures ${failures}, errors ${errors}`);
+  }
+}
+
+export function discoverConcreteKotlinTestSuites(sourceRoot) {
+  const files = [];
+  function visit(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name.endsWith("Test.kt")) files.push(path);
+    }
+  }
+  visit(sourceRoot);
+
+  const suites = [];
+  for (const path of files) {
+    const source = readFileSync(path, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//gu, "")
+      .replace(/\/\/.*$/gmu, "");
+    const packageName = source.match(/^package\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*$/mu)?.[1];
+    if (!packageName) throw new Error(`Core Kotlin test source has no package: ${path}`);
+    const declarations = source.matchAll(/^((?:(?:public|private|internal|protected|open|final|sealed|data|value|enum|annotation|expect|actual|abstract)\s+)*)class\s+([A-Za-z_]\w*Test)\b/gmu);
+    for (const declaration of declarations) {
+      if (!/\b(?:abstract|sealed|annotation)\b/u.test(declaration[1])) {
+        suites.push(`${packageName}.${declaration[2]}`);
+      }
+    }
+  }
+  return suites.sort();
+}
+
+export function assertCompleteCoreJUnitResults(sourceRoot, resultsRoot) {
+  const expectedSuites = discoverConcreteKotlinTestSuites(sourceRoot);
+  const resultFiles = readdirSync(resultsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^TEST-.+[.]xml$/u.test(entry.name))
+    .map((entry) => join(resultsRoot, entry.name));
+  for (const path of resultFiles) assertJUnitSuiteExecuted(path);
+  const emitted = new Set(resultFiles.map((path) => path.slice(path.lastIndexOf("TEST-") + 5, -4)));
+  for (const suite of expectedSuites) {
+    if (!emitted.has(suite)) throw new Error(`Core JUnit suite ${suite} is missing`);
   }
 }

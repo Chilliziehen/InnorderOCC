@@ -80,7 +80,7 @@ const expectedImages = {
   kafka: "apache/kafka:3.9.1@sha256:4ceccc577f03f51f6af8dbfda55194d0d892f4fa7913ffbded567ce3895622ed",
   minio: "minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
   "minio-init": "minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3",
-  "minio-volume-init": "alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+  "postgres-init": "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9",
   postgres: "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9",
   redis: "redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952",
 };
@@ -189,16 +189,20 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
     "kafka",
     "minio",
     "minio-init",
-    "minio-volume-init",
     "opa",
     "postgres",
+    "postgres-init",
     "redis",
   ]);
   assert.equal(compose.networks.backend.internal, true);
   assert.equal(compose.networks["host-access"].internal, undefined);
+  assert.deepEqual(
+    Object.entries(compose.services).filter(([, service]) => service.restart === "no").map(([name]) => name).sort(),
+    ["flowable-init", "minio-init", "postgres-init"],
+  );
 
   for (const [name, service] of Object.entries(compose.services)) {
-    if (!["flowable-init", "minio-init", "minio-volume-init"].includes(name)) {
+    if (!["flowable-init", "minio-init", "postgres-init"].includes(name)) {
       assert.ok(service.healthcheck?.test, `${name} must have a healthcheck`);
     }
     if (name === "host-gateway") {
@@ -294,7 +298,7 @@ test("Compose wiring follows application config and completion gates", () => {
   assert.equal(flowableInit.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "true");
   assert.equal(flowableInit.environment.SPRING_MAIN_WEB_APPLICATION_TYPE, "none");
   assert.equal(flowableInit.restart, "no");
-  assert.deepEqual(flowableInit.depends_on, { postgres: { condition: "service_healthy" } });
+  assert.deepEqual(flowableInit.depends_on, { "postgres-init": { condition: "service_completed_successfully" } });
   assert.ok(core.healthcheck.test.includes("http://localhost:8080/actuator/health/readiness"));
 
   const opa = compose.services.opa;
@@ -358,6 +362,9 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     postgres_flyway_password: "spring.flyway.password",
     postgres_runtime_password: "spring.datasource.password",
   });
+  assert.deepEqual(secretTargets(compose.services["postgres-init"]), {
+    postgres_admin_password: "postgres_admin_password",
+  });
 
   const consumers = Object.fromEntries(secretNames.map((secret) => [secret, []]));
   for (const [serviceName, service] of Object.entries(compose.services)) {
@@ -369,7 +376,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     minio_app_user: ["core", "minio-init"],
     minio_root_password: ["minio", "minio-init"],
     minio_root_user: ["minio", "minio-init"],
-    postgres_admin_password: ["postgres"],
+    postgres_admin_password: ["postgres", "postgres-init"],
     postgres_flyway_password: ["core", "flowable-init", "postgres"],
     postgres_runtime_password: ["core", "flowable-init", "postgres"],
     redis_password: ["core", "redis"],
@@ -388,7 +395,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS, 3000);
   assert.equal(compose.services.minio.user, "10001:10001");
   assert.ok(compose.services.minio.healthcheck.test.includes("http://localhost:9000/minio/health/ready"));
-  assert.equal(compose.services.minio.depends_on["minio-volume-init"].condition, "service_completed_successfully");
+  assert.equal(compose.services.minio.depends_on["postgres-init"].condition, "service_completed_successfully");
   assert.ok(compose.services.postgres.volumes.includes("./postgres/010-create-roles.sh:/docker-entrypoint-initdb.d/010-create-roles.sh:ro"));
   assert.ok(compose.services["minio-init"].volumes.includes("./minio/init.sh:/config/init.sh:ro"));
 
@@ -507,7 +514,7 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /Docker Hub\s+Registry API/u);
   assert.match(readme, /Docker-Content-Digest/u);
   assert.match(readme, /linux\/amd64/u);
-  assert.match(readme, /Core startup gate is PostgreSQL only/u);
-  assert.match(readme, /MinIO\s+initialization and readiness are independent/u);
+  assert.match(readme, /Flowable initialization completes after the\s+`postgres-init` gate and before Core/u);
+  assert.match(readme, /MinIO bucket initialization remains\s+independent of Core readiness/u);
   assert.doesNotMatch(readme, /Core waits for both MinIO readiness/u);
 });

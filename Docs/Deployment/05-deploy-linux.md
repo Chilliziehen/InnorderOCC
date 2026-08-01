@@ -182,7 +182,7 @@ compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.y
 "${compose[@]}" ps -a
 ```
 
-**注意：** Compose v5 的 `up -d --wait` 可能因成功完成且退出的 `minio-volume-init`/`minio-init`/`flowable-init` 返回非零，即使八个长运行服务均健康。标准流程不用该返回值作最终判定；必须分别检查三个精确退出码和八个健康状态。
+**注意：** Compose v5 的 `up -d --wait` 可能因成功完成且退出的 `postgres-init`/`flowable-init`/`minio-init` 返回非零，即使八个长运行服务均健康。标准流程不用该返回值作最终判定；必须分别检查三个精确退出码和八个健康状态。
 
 ## 状态、一次性任务和健康验收
 
@@ -191,7 +191,7 @@ set -euo pipefail
 : "${OCC_REPOSITORY_ROOT:?必须设置 OCC_REPOSITORY_ROOT}"
 cd -- "$(realpath "$OCC_REPOSITORY_ROOT")"
 compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.yml)
-for service in minio-volume-init minio-init flowable-init; do
+for service in postgres-init flowable-init minio-init; do
   container_id=$("${compose[@]}" ps -a -q "$service")
   test -n "$container_id"
   state=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$container_id")
@@ -215,7 +215,7 @@ done
 "${compose[@]}" ps -a
 ```
 
-**验证：** 精确终态为 `minio-volume-init`、`minio-init` 和 `flowable-init` 各 `exited 0`，其余八个服务各 `running healthy`。任一一次性任务非零时先保存其日志并修复根因；不得改 restart policy 或无限重跑。网关 healthy 不证明上游，Core readiness 只证明 `ping` 与数据库。
+**验证：** 精确终态为 `postgres-init`、`flowable-init` 和 `minio-init` 各 `exited 0`，其余八个服务各 `running healthy`。任一一次性任务非零时先保存其日志并修复根因；不得改 restart policy 或无限重跑。网关 healthy 不证明上游，Core readiness 只证明 `ping` 与数据库。
 
 ## HTTP 探测与有效端口
 
@@ -460,7 +460,7 @@ sudo journalctl --unit innorder-occ.service --since today --no-pager
 sudo /usr/bin/docker compose --env-file /opt/innorder-occ/infra/compose/.env -f /opt/innorder-occ/infra/compose/compose.yml ps -a
 ```
 
-**验证：** unit 为 `active (exited)` 仅证明 `up -d` 零退出；还必须验证两个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议。主机重启后 Docker daemon 先启动，unit 再执行 config/up；重复 `up -d` 是协调操作。若 `.env`、密钥路径或仓库在启动时不可读，unit 应失败而不是启动不完整栈。
+**验证：** unit 为 `active (exited)` 仅证明 `up -d` 零退出；还必须验证三个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议。主机重启后 Docker daemon 先启动，unit 再执行 config/up；重复 `up -d` 是协调操作。若 `.env`、密钥路径或仓库在启动时不可读，unit 应失败而不是启动不完整栈。
 
 显式 Docker daemon 重启会中断全部 OCC 连接。仅在维护窗口、调用方静默、备份状态和恢复责任人确认后，由审批流程设置确认值并验证传播顺序：
 
@@ -493,7 +493,7 @@ sudo /usr/bin/docker compose --env-file /opt/innorder-occ/infra/compose/.env -f 
 unset OCC_CONFIRM_DOCKER_RESTART
 ```
 
-随后必须重新验证两个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议。`PartOf` 只传播 systemd 创建的显式 stop/restart job；Docker daemon 进程崩溃、内核/主机异常或 systemd 外部终止不保证 OCC unit 执行 `ExecStop` 或自动重新执行 `ExecStart`。此类故障恢复 Docker 后，先检查容器和 unit 实际状态，再由操作员执行 `systemctl restart innorder-occ.service` 协调栈并完成全部验收，不能仅凭 `active (exited)` 宣称恢复。
+随后必须重新验证三个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议。`PartOf` 只传播 systemd 创建的显式 stop/restart job；Docker daemon 进程崩溃、内核/主机异常或 systemd 外部终止不保证 OCC unit 执行 `ExecStop` 或自动重新执行 `ExecStart`。此类故障恢复 Docker 后，先检查容器和 unit 实际状态，再由操作员执行 `systemctl restart innorder-occ.service` 协调栈并完成全部验收，不能仅凭 `active (exited)` 宣称恢复。
 
 ### systemd 回退与移除
 

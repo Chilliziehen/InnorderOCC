@@ -60,11 +60,11 @@ function; only the `flowable` schema grants runtime `CREATE`.
 
 MinIO root credentials are mounted only into MinIO and the one-shot `minio-init`
 service. The initializer creates the configured bucket and a bucket-scoped OCC
-account. Core sees only that account. `minio-volume-init` prepares the named
+account. Core sees only that account. `postgres-init` verifies PostgreSQL and prepares the named
 volume as root, while the MinIO server itself runs as UID/GID `10001` and must
-pass `/minio/health/ready`. Core startup gate is PostgreSQL only. MinIO
-initialization and readiness are independent and do not gate Core in this
-foundation.
+pass `/minio/health/ready`. Flowable initialization completes after the
+`postgres-init` gate and before Core; MinIO bucket initialization remains
+independent of Core readiness.
 
 Spring imports mounted secrets with
 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/`. Secret target filenames are
@@ -101,7 +101,8 @@ It receives no secrets or volumes and forwards loopback traffic to the internal
 service endpoints. All published ports bind to `127.0.0.1`; they are not exposed
 to the LAN.
 
-Core owns application migration startup; Compose does not run a competing
-migration process. Default host ports are Core `8080`, AI `3100`, OPA `8181`,
+The controlled Flowable initializer and Core run Flyway sequentially against
+the same history; Core never starts concurrently with the initializer. Default
+host ports are Core `8080`, AI `3100`, OPA `8181`,
 PostgreSQL `5432`, Kafka `9092`, Redis `6379`, MinIO API `9000`, and MinIO
 console `9001`.

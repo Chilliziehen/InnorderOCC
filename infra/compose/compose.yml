@@ -68,12 +68,21 @@ services:
     networks: [backend]
     restart: unless-stopped
 
-  minio-volume-init:
-    image: alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c
+  postgres-init:
+    image: pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9
     user: "0:0"
-    command: ["/bin/sh", "-ec", "chown -R 10001:10001 /data"]
+    entrypoint: ["/bin/sh"]
+    command: ["-ec", "chown -R 10001:10001 /data && export PGPASSWORD=$$(cat /run/secrets/postgres_admin_password) && psql -h postgres -U innorder_admin -d $${POSTGRES_DB} -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-innorder_occ}
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - minio-data:/data
+    secrets:
+      - source: postgres_admin_password
+        target: postgres_admin_password
     networks: [backend]
     restart: "no"
 
@@ -86,7 +95,7 @@ services:
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       HOME: /tmp
     depends_on:
-      minio-volume-init:
+      postgres-init:
         condition: service_completed_successfully
     volumes:
       - minio-data:/data
@@ -231,8 +240,8 @@ services:
       - source: postgres_flyway_password
         target: spring.flyway.password
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
     networks: [backend]
     restart: "no"
 

@@ -201,7 +201,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Compose up -d 创建或启动失败；立即�
 & docker @ComposeArgs ps -a
 ```
 
-**注意：** Compose v5 的 `up -d --wait` 可能因为成功完成的 `minio-volume-init`、`minio-init` 或 `flowable-init` 已退出而返回非零，即使八个长运行服务全部健康。这是一次性容器与 wait 判定的交互，不能把非零直接改写为部署失败，也不能忽略。标准流程使用 `up -d`，随后按下一节分别验证三个精确退出码和八个健康状态；即使使用了 `--wait`，最终结论也只能来自这两组检查。
+**注意：** Compose v5 的 `up -d --wait` 可能因为成功完成的 `postgres-init`、`flowable-init` 或 `minio-init` 已退出而返回非零，即使八个长运行服务全部健康。这是一次性容器与 wait 判定的交互，不能把非零直接改写为部署失败，也不能忽略。标准流程使用 `up -d`，随后按下一节分别验证三个精确退出码和八个健康状态；即使使用了 `--wait`，最终结论也只能来自这两组检查。
 
 ## 状态与一次性任务验收
 
@@ -209,7 +209,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Compose up -d 创建或启动失败；立即�
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$OneShots = 'minio-volume-init','minio-init','flowable-init'
+$OneShots = 'postgres-init','flowable-init','minio-init'
 foreach ($service in $OneShots) {
   $containerId = (& docker @ComposeArgs ps -a -q $service | Select-Object -First 1)
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($containerId)) { throw "$service 容器不存在" }
@@ -221,7 +221,7 @@ foreach ($service in $OneShots) {
 }
 ```
 
-`minio-volume-init` 的零退出证明 `minio-data` 所有权准备命令完成；`minio-init` 的零退出证明建桶、应用用户和策略命令完成；`flowable-init` 的零退出证明 Flowable 私有表初始化完成。非零时不得反复重跑掩盖原因：先保存对应日志并修复根因，再用 `up -d` 协调。
+`postgres-init` 的零退出证明 PostgreSQL 可连接且 `minio-data` 所有权准备完成；`flowable-init` 的零退出证明 Flowable 私有表初始化完成；`minio-init` 的零退出证明建桶、应用用户和策略命令完成。非零时不得反复重跑掩盖原因：先保存对应日志并修复根因，再用 `up -d` 协调。
 
 ### 八个长运行服务的健康状态
 
@@ -431,7 +431,7 @@ if ($LASTEXITCODE -ne 0) { throw '重启后 Compose 协调失败' }
 & docker @ComposeArgs ps -a
 ```
 
-重新执行两个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议验收。恢复失败时不要删除卷；保留 Docker Desktop/WSL2 状态和容器日志，修复 Engine、磁盘、挂载或服务根因后再次 `up -d`。
+重新执行三个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议验收。恢复失败时不要删除卷；保留 Docker Desktop/WSL2 状态和容器日志，修复 Engine、磁盘、挂载或服务根因后再次 `up -d`。
 
 ## 日志与无密钥支持包
 

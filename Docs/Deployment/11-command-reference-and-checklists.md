@@ -161,7 +161,7 @@ Linux：
 set -euo pipefail
 docker context show
 "${compose[@]}" config --quiet
-[ "$("${compose[@]}" config --services | wc -l)" -eq 10 ]
+[ "$("${compose[@]}" config --services | wc -l)" -eq 11 ]
 git rev-parse HEAD
 git status --short
 ```
@@ -209,12 +209,12 @@ set -euo pipefail
 
 ### 精确状态
 
-Windows要求八个长运行服务 `running healthy`、两个 one-shot `exited 0`：
+Windows要求八个长运行服务 `running healthy`、三个 one-shot `exited 0`：
 
 ```powershell
 & docker @ComposeArgs ps -a
 if ($LASTEXITCODE -ne 0) { throw 'Compose 状态失败' }
-foreach ($service in 'minio-volume-init','minio-init','flowable-init') {
+foreach ($service in 'postgres-init','flowable-init','minio-init') {
   $ids = @(& docker @ComposeArgs ps -a -q $service | Where-Object { $_ })
   if ($LASTEXITCODE -ne 0 -or $ids.Count -ne 1) { throw "$service 容器查询失败" }
   $state = & docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' $ids[0]
@@ -234,7 +234,7 @@ Linux：
 ```bash
 set -euo pipefail
 "${compose[@]}" ps -a
-for service in minio-volume-init minio-init flowable-init; do
+for service in postgres-init flowable-init minio-init; do
   id=$("${compose[@]}" ps -a -q "$service")
   [ -n "$id" ] && [ "$(printf '%s\n' "$id" | wc -l)" -eq 1 ]
   [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$id")" = 'exited 0' ]
@@ -736,7 +736,7 @@ trap - EXIT
 - [ ] 八个外部密钥互异、权限合格；`.env` 只有八路径和十二非敏感项，已忽略且 config通过。
 - [ ] `install:verified`、Electron来源守卫、Gradle strict、真实 OPA和 `verify:full` 无失败/跳过。
 - [ ] 六外部镜像 tag+digest和四本地 image ID/revision已记录；构建成功。
-- [ ] `up -d` 后两个 one-shot `exited 0`、八服务 `running healthy`；这些容器状态不是 Core聚合依赖结论。
+- [ ] `up -d` 后三个 one-shot `exited 0`、八服务 `running healthy`；这些容器状态不是 Core聚合依赖结论。
 - [ ] 有效端口 HTTP、八 TCP和 PostgreSQL/Redis/Kafka协议通过；Core readiness仅证明 `ping`/数据库，Core system status顶层及七个规范组件全部为 `READY`。
 - [ ] 回环、防火墙、账号、ACL/mode、日志/证据和备份基线完成安全评审。
 - [ ] 初始完整备份与隔离恢复演练已记录；容量数值未被当作性能/SLA承诺。
@@ -747,7 +747,7 @@ trap - EXIT
 - [ ] `.env`/八密钥路径、权限和 `config --quiet` 通过；未输出路径或值。
 - [ ] 当前/目标 image ID、revision、配置和迁移变更已知；需要时已有备份/审批。
 - [ ] 使用精确启动确认值；命令零退出不单独作为成功结论。
-- [ ] 两 one-shot、八 health、HTTP/TCP/协议和 restart count通过；另行确认 Core system status顶层及七个规范组件全部为 `READY`，不以 readiness替代。
+- [ ] 三 one-shot、八 health、HTTP/TCP/协议和 restart count通过；另行确认 Core system status顶层及七个规范组件全部为 `READY`，不以 readiness替代。
 - [ ] 监听仍为八个 `127.0.0.1`，无直接后端暴露。
 
 ## 班次、每日、每周与每月检查单
@@ -755,7 +755,7 @@ trap - EXIT
 ### 每班
 
 - [ ] 阅读开放事件/变更/风险接受；记录交接时间、人员和下一责任人。
-- [ ] 十服务精确状态、HTTP/TCP/协议、Core聚合顶层/七组件全 `READY`、非计划 restart count和最后正常时间已检查。
+- [ ] 十一服务精确状态、HTTP/TCP/协议、Core聚合顶层/七组件全 `READY`、非计划 restart count和最后正常时间已检查。
 - [ ] 备份新鲜度、checksum/外部复制状态、磁盘/inode和时间同步已检查。
 - [ ] 异常已创建事件，不以自动重启处置。
 
@@ -797,7 +797,7 @@ trap - EXIT
 - [ ] 先恢复密钥/配置和三 PostgreSQL角色/扩展，再 PostgreSQL、MinIO、声明的 Redis/Kafka，最后应用。
 - [ ] Flyway历史/checksum/owner、八 schema、Flowable `ACT_*`、runtime最小 grants通过。
 - [ ] MinIO对象键/大小/抽样内容、桶级 IAM和root/app分离通过。
-- [ ] 八 health、两 one-shot、有效端口 HTTP/TCP/协议通过；Core聚合 status顶层及七个规范组件全部 `READY`。
+- [ ] 八 health、三 one-shot、有效端口 HTTP/TCP/协议通过；Core聚合 status顶层及七个规范组件全部 `READY`。
 - [ ] 实测 RPO/RTO、缺失/偏差、工具版本、人员、退出状态和改进项已记录；隔离数据按审批销毁。
 
 ## 升级检查单
@@ -875,7 +875,7 @@ UTC 开始与结束：
 有效八端口与回环检查：
 备份集合、trust 分类与最近恢复演练：
 执行命令分类及每条退出状态：
-八个长运行服务、两个 one-shot：
+八个长运行服务、三个 one-shot：
 HTTP / TCP / PostgreSQL / Redis / Kafka：
 Flyway / Flowable / MinIO IAM / OPA 结论：
 CPU / 内存 / 磁盘 / inode / 时间：
