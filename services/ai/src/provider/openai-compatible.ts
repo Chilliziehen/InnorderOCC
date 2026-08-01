@@ -57,9 +57,18 @@ type Dependencies = Readonly<{
   maxRequestBytes?: number;
 }>;
 
-const chatUsageSchema = z.object({ prompt_tokens: z.number().int().nonnegative(), completion_tokens: z.number().int().nonnegative(), total_tokens: z.number().int().nonnegative().optional() }).strict()
+const tokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const promptTokenDetailsSchema = z.object({ cached_tokens: tokenCountSchema.optional(), audio_tokens: tokenCountSchema.optional() }).strict();
+const completionTokenDetailsSchema = z.object({
+  reasoning_tokens: tokenCountSchema.optional(), audio_tokens: tokenCountSchema.optional(),
+  accepted_prediction_tokens: tokenCountSchema.optional(), rejected_prediction_tokens: tokenCountSchema.optional(),
+}).strict();
+const chatUsageSchema = z.object({
+  prompt_tokens: tokenCountSchema, completion_tokens: tokenCountSchema, total_tokens: tokenCountSchema.optional(),
+  prompt_tokens_details: promptTokenDetailsSchema.optional(), completion_tokens_details: completionTokenDetailsSchema.optional(),
+}).strict()
   .refine(({ prompt_tokens, completion_tokens, total_tokens }) => total_tokens === undefined || total_tokens === prompt_tokens + completion_tokens);
-const embeddingUsageSchema = z.object({ prompt_tokens: z.number().int().nonnegative(), total_tokens: z.number().int().nonnegative() }).strict()
+const embeddingUsageSchema = z.object({ prompt_tokens: tokenCountSchema, total_tokens: tokenCountSchema }).strict()
   .refine(({ prompt_tokens, total_tokens }) => total_tokens === prompt_tokens);
 const modelMetadataSchema = z.object({
   id: z.string().min(1).max(256),
@@ -74,9 +83,23 @@ const modelMetadataSchema = z.object({
   embedding_dimensions: z.number().int().min(1).max(1_000_000).optional(),
 }).strip();
 const modelsSchema = z.object({ object: z.literal("list").optional(), data: z.array(modelMetadataSchema).min(1).max(10_000) }).strip();
-const chatSchema = z.object({ choices: z.array(z.object({ message: z.object({ content: z.string().min(1).max(1_048_576) }).strict() }).strict()).length(1), usage: chatUsageSchema.optional() }).strict();
-const embeddingItemSchema = z.object({ index: z.number().int().nonnegative(), embedding: z.array(z.number()).min(1).max(1_000_000) }).strict();
-const embeddingSchema = z.object({ data: z.array(embeddingItemSchema).min(1).max(1024), usage: embeddingUsageSchema.optional() }).strict();
+const chatSchema = z.object({
+  id: z.string().min(1).max(256), object: z.literal("chat.completion"), created: tokenCountSchema, model: z.string().min(1).max(256),
+  choices: z.array(z.object({
+    index: tokenCountSchema,
+    finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "function_call"]),
+    logprobs: z.null().optional(),
+    message: z.object({
+      role: z.literal("assistant"), content: z.string().min(1).max(1_048_576),
+      refusal: z.string().max(1_048_576).nullable().optional(),
+    }).strict(),
+  }).strict()).length(1),
+  service_tier: z.string().min(1).max(64).nullable().optional(),
+  system_fingerprint: z.string().min(1).max(256).nullable().optional(),
+  usage: chatUsageSchema.optional(),
+}).strict();
+const embeddingItemSchema = z.object({ object: z.literal("embedding"), index: tokenCountSchema, embedding: z.array(z.number()).min(1).max(1_000_000) }).strict();
+const embeddingSchema = z.object({ object: z.literal("list"), model: z.string().min(1).max(256), data: z.array(embeddingItemSchema).min(1).max(1024), usage: embeddingUsageSchema.optional() }).strict();
 
 const SAFE_SCHEMA_KEYWORDS = new Set([
   "type", "properties", "required", "additionalProperties", "items", "minItems", "maxItems",
@@ -275,7 +298,7 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     const startedAt = this.now().getTime();
     const response = await this.call("POST", "/chat/completions", body, operation);
     const parsed = chatSchema.safeParse(parseJson(response.body));
-    if (!parsed.success) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
+    if (!parsed.success || parsed.data.model !== this.profile.model || parsed.data.choices[0]!.index !== 0) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
     let output: unknown;
     try { output = JSON.parse(parsed.data.choices[0]!.message.content); } catch { throw new ProviderError("OCC-AI-PROVIDER-MALFORMED"); }
     if (output === null || typeof output !== "object" || Array.isArray(output) || !validateOutput(output)) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
@@ -301,7 +324,7 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     const startedAt = this.now().getTime();
     const response = await this.call("POST", "/embeddings", body, operation);
     const parsed = embeddingSchema.safeParse(parseJson(response.body));
-    if (!parsed.success || parsed.data.data.length !== input.inputs.length || parsed.data.data.some((item, index) => item.index !== index || item.embedding.length !== input.dimensions || item.embedding.some((value) => !Number.isFinite(value)))) {
+    if (!parsed.success || parsed.data.model !== this.profile.model || parsed.data.data.length !== input.inputs.length || parsed.data.data.some((item, index) => item.index !== index || item.embedding.length !== input.dimensions || item.embedding.some((value) => !Number.isFinite(value)))) {
       throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     }
     const embeddings = [...parsed.data.data].sort((left, right) => left.index - right.index).map(({ embedding }) => embedding);
