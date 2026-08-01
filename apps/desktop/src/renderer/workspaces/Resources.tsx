@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
@@ -7,31 +7,57 @@ import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolb
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
 
+const identifierSchema = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+const integerCapacitySchema = z.number().int().nonnegative();
+const integerInputSchema = z.string().regex(/^(?:0|[1-9]\d*)$/).transform(Number);
+const positiveIntegerInputSchema = z.string().regex(/^[1-9]\d*$/).transform(Number);
 const reservationSchema = z.object({
-  id: z.string(),
-  start: z.string(),
-  end: z.string(),
-  capacity: z.number().nonnegative(),
-  state: z.string(),
-});
+  id: identifierSchema,
+  start: z.string().datetime({ offset: true }),
+  end: z.string().datetime({ offset: true }),
+  capacity: z.number().int().positive(),
+  state: z.string().trim().min(1).max(64),
+}).refine(({ start, end }) => Date.parse(start) < Date.parse(end));
 
 const conflictSchema = z.object({
   kind: z.enum(["exclusive", "capacity"]),
-  start: z.string(),
-  end: z.string(),
-  capacity: z.number().nonnegative().optional(),
-});
+  start: z.string().datetime({ offset: true }),
+  end: z.string().datetime({ offset: true }),
+  capacity: integerCapacitySchema.optional(),
+}).refine(({ start, end }) => Date.parse(start) < Date.parse(end));
 
 const resourceSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  type: z.string(),
-  state: z.string(),
-  capacity: z.number().nonnegative(),
-  availableCapacity: z.number().nonnegative(),
-  reservation: reservationSchema.optional(),
+  id: identifierSchema,
+  name: z.string().trim().min(1).max(128),
+  type: identifierSchema,
+  state: z.string().trim().min(1).max(64),
+  capacity: integerCapacitySchema,
+  availableCapacity: integerCapacitySchema,
+  reservations: z.array(reservationSchema),
   conflicts: z.array(conflictSchema),
-});
+}).refine(({ capacity, availableCapacity }) => availableCapacity <= capacity);
+
+const createSchema = z.object({
+  name: z.string().trim().min(1).max(128),
+  type: identifierSchema,
+  capacity: integerInputSchema,
+  availableCapacity: integerInputSchema,
+}).refine(({ capacity, availableCapacity }) => availableCapacity <= capacity);
+const changeSchema = z.object({
+  resourceId: identifierSchema,
+  expectedVersion: integerInputSchema,
+  capacity: integerInputSchema,
+  availableCapacity: integerInputSchema,
+}).refine(({ capacity, availableCapacity }) => availableCapacity <= capacity);
+const reserveSchema = z.object({
+  resourceId: identifierSchema,
+  start: z.string().min(1),
+  end: z.string().min(1),
+  capacity: positiveIntegerInputSchema,
+  expectedVersion: integerInputSchema,
+  exclusive: z.boolean(),
+}).refine(({ start, end }) => Number.isFinite(Date.parse(start)) && Date.parse(start) < Date.parse(end));
+const cancelSchema = z.object({ reservationId: identifierSchema, expectedVersion: integerInputSchema });
 
 type Resource = z.infer<typeof resourceSchema>;
 
@@ -60,14 +86,14 @@ function ResourceDetails({ resource, view }: { resource: Resource; view: string 
     return (
       <section role="region" aria-label="资源预留详情">
         <h3>{resource.name}</h3>
-        {resource.reservation ? (
-          <dl>
-            <dt>预留编号</dt><dd>{resource.reservation.id}</dd>
-            <dt>时间区间</dt><dd>{resource.reservation.start} 至 {resource.reservation.end}</dd>
-            <dt>预留容量</dt><dd>{resource.reservation.capacity}</dd>
-            <dt>状态</dt><dd>{resource.reservation.state}</dd>
+        {resource.reservations.length === 0 ? <p>无可见预留</p> : resource.reservations.map((reservation) => (
+          <dl key={reservation.id}>
+            <dt>预留编号</dt><dd>{reservation.id}</dd>
+            <dt>时间区间</dt><dd>{reservation.start} 至 {reservation.end}</dd>
+            <dt>预留容量</dt><dd>{reservation.capacity}</dd>
+            <dt>状态</dt><dd>{reservation.state}</dd>
           </dl>
-        ) : <p>无可见预留</p>}
+        ))}
       </section>
     );
   }
@@ -100,24 +126,49 @@ function ResourceDetails({ resource, view }: { resource: Resource; view: string 
 
 export function Resources({ result, query, capabilities, online, authenticated, onQueryChange, onRefresh, onExecute, onConflictRefresh }: ResourcesProps) {
   const [activeTab, setActiveTab] = useState(definition.tabs[0]!.id);
-  const [createPayload, setCreatePayload] = useState({ name: "", type: "", capacity: 1 });
-  const [changePayload, setChangePayload] = useState({ resourceId: "", expectedVersion: 0, capacity: 1 });
-  const [reservePayload, setReservePayload] = useState({ resourceId: "", start: "", end: "", capacity: 1, exclusive: false });
-  const [cancelPayload, setCancelPayload] = useState({ reservationId: "", expectedVersion: 0 });
+  const [createPayload, setCreatePayload] = useState({ name: "", type: "", capacity: "", availableCapacity: "" });
+  const [changePayload, setChangePayload] = useState({ resourceId: "", expectedVersion: "", capacity: "", availableCapacity: "" });
+  const [reservePayload, setReservePayload] = useState({ resourceId: "", start: "", end: "", capacity: "", expectedVersion: "", exclusive: false });
+  const [cancelPayload, setCancelPayload] = useState({ reservationId: "", expectedVersion: "" });
   const commandProps = { capabilities, online, authenticated, onExecute, onConflictRefresh };
-  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || command.availability.state !== "available" || !capabilities.includes(command.capability);
+  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || !capabilities.includes(command.capability);
   const create = operation("create");
   const change = operation("change");
   const reserve = operation("reserve");
   const cancel = operation("cancel");
+  const createResult = createSchema.safeParse(createPayload);
+  const changeResult = changeSchema.safeParse(changePayload);
+  const reserveResult = reserveSchema.safeParse(reservePayload);
+  const cancelResult = cancelSchema.safeParse(cancelPayload);
+  const selectTab = (index: number, target: HTMLButtonElement) => {
+    const tab = definition.tabs[index]!;
+    setActiveTab(tab.id);
+    const buttons = target.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    buttons?.[index]?.focus();
+  };
+  const handleTabKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next: number | undefined;
+    if (event.key === "ArrowRight") next = (index + 1) % definition.tabs.length;
+    if (event.key === "ArrowLeft") next = (index - 1 + definition.tabs.length) % definition.tabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = definition.tabs.length - 1;
+    if (next === undefined) return;
+    event.preventDefault();
+    selectTab(next, event.currentTarget);
+  };
+  const guardedCommand = (command: WorkspaceOperation, parsed: { success: boolean; data?: Readonly<Record<string, unknown>> }, invalidMessage: string, payload: Readonly<Record<string, unknown>>, targetId?: string) => parsed.success ? (
+    <CommandPanel workspace="resources" command={command} payload={payload} {...(targetId ? { targetId } : {})} {...commandProps} />
+  ) : (
+    <form className="command-panel" onSubmit={(event) => event.preventDefault()}><button type="submit" disabled>{command.label}</button><p>{invalidMessage}</p></form>
+  );
 
   return (
     <section aria-labelledby="resources-title">
       <header><h2 id="resources-title">资源</h2><p>库存、可用容量、预留与冲突</p></header>
       <div role="tablist" aria-label="资源视图">
-        {definition.tabs.map((tab) => <button key={tab.id} id={`resources-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls="resources-panel" onClick={() => setActiveTab(tab.id)}>{tab.label}</button>)}
+        {definition.tabs.map((tab, index) => <button key={tab.id} id={`resources-tab-${tab.id}`} type="button" role="tab" tabIndex={activeTab === tab.id ? 0 : -1} aria-selected={activeTab === tab.id} aria-controls="resources-panel" onKeyDown={(event) => handleTabKey(event, index)} onClick={(event) => selectTab(index, event.currentTarget)}>{tab.label}</button>)}
       </div>
-      <section id="resources-panel" role="tabpanel" aria-label={definition.tabs.find(({ id }) => id === activeTab)?.label}>
+      <section id="resources-panel" role="tabpanel" aria-labelledby={`resources-tab-${activeTab}`}>
         <QueryToolbar definition={definition} value={query} disabled={!online || !authenticated || result.state === "unavailable"} onChange={onQueryChange} onRefresh={onRefresh} />
         <WorkspaceState result={result} itemSchema={resourceSchema} onRetry={onRefresh} onRefresh={onConflictRefresh} renderItem={(item) => <ResourceDetails resource={item} view={activeTab} />} />
       </section>
@@ -128,30 +179,33 @@ export function Resources({ result, query, capabilities, online, authenticated, 
           <h3 id="resource-create-heading">创建资源</h3>
           <label>资源名称<input value={createPayload.name} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, name: event.currentTarget.value })} /></label>
           <label>新资源类型<input value={createPayload.type} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, type: event.currentTarget.value })} /></label>
-          <label>容量<input type="number" min="1" value={createPayload.capacity} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, capacity: event.currentTarget.valueAsNumber })} /></label>
-          <CommandPanel workspace="resources" command={create} payload={createPayload} {...commandProps} />
+          <label>容量<input type="number" min="0" step="1" value={createPayload.capacity} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, capacity: event.currentTarget.value })} /></label>
+          <label>初始可用容量<input type="number" min="0" step="1" value={createPayload.availableCapacity} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, availableCapacity: event.currentTarget.value })} /></label>
+          {guardedCommand(create, createResult, "资源名称、类型与容量无效", createResult.success ? createResult.data : {})}
         </section>
         <section aria-labelledby="resource-change-heading">
           <h3 id="resource-change-heading">变更资源</h3>
           <label>变更资源编号<input value={changePayload.resourceId} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, resourceId: event.currentTarget.value })} /></label>
-          <label>当前版本<input type="number" min="0" value={changePayload.expectedVersion} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, expectedVersion: event.currentTarget.valueAsNumber })} /></label>
-          <label>新容量<input type="number" min="1" value={changePayload.capacity} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, capacity: event.currentTarget.valueAsNumber })} /></label>
-          <CommandPanel workspace="resources" command={change} {...(changePayload.resourceId ? { targetId: changePayload.resourceId } : {})} payload={{ expectedVersion: changePayload.expectedVersion, capacity: changePayload.capacity }} {...commandProps} />
+          <label>当前版本<input type="number" min="0" step="1" value={changePayload.expectedVersion} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, expectedVersion: event.currentTarget.value })} /></label>
+          <label>新容量<input type="number" min="0" step="1" value={changePayload.capacity} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, capacity: event.currentTarget.value })} /></label>
+          <label>新可用容量<input type="number" min="0" step="1" value={changePayload.availableCapacity} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, availableCapacity: event.currentTarget.value })} /></label>
+          {guardedCommand(change, changeResult, "资源编号、版本或容量无效", changeResult.success ? { expectedVersion: changeResult.data.expectedVersion, capacity: changeResult.data.capacity, availableCapacity: changeResult.data.availableCapacity } : {}, changeResult.success ? changeResult.data.resourceId : undefined)}
         </section>
         <section aria-labelledby="resource-reserve-heading">
           <h3 id="resource-reserve-heading">创建预留</h3>
           <label>预留资源编号<input value={reservePayload.resourceId} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, resourceId: event.currentTarget.value })} /></label>
           <label>开始时间<input type="datetime-local" value={reservePayload.start} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, start: event.currentTarget.value })} /></label>
           <label>结束时间<input type="datetime-local" value={reservePayload.end} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, end: event.currentTarget.value })} /></label>
-          <label>预留容量<input type="number" min="1" value={reservePayload.capacity} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, capacity: event.currentTarget.valueAsNumber })} /></label>
+          <label>预留容量<input type="number" min="1" step="1" value={reservePayload.capacity} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, capacity: event.currentTarget.value })} /></label>
+          <label>资源预期版本<input type="number" min="0" step="1" value={reservePayload.expectedVersion} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, expectedVersion: event.currentTarget.value })} /></label>
           <label><input type="checkbox" checked={reservePayload.exclusive} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, exclusive: event.currentTarget.checked })} />独占预留</label>
-          <CommandPanel workspace="resources" command={reserve} {...(reservePayload.resourceId ? { targetId: reservePayload.resourceId } : {})} payload={{ start: reservePayload.start, end: reservePayload.end, capacity: reservePayload.capacity, exclusive: reservePayload.exclusive }} {...commandProps} />
+          {guardedCommand(reserve, reserveResult, "预留资源、时间区间、容量或版本无效", reserveResult.success ? { start: new Date(reserveResult.data.start).toISOString(), end: new Date(reserveResult.data.end).toISOString(), capacity: reserveResult.data.capacity, expectedVersion: reserveResult.data.expectedVersion, exclusive: reserveResult.data.exclusive } : {}, reserveResult.success ? reserveResult.data.resourceId : undefined)}
         </section>
         <section aria-labelledby="resource-cancel-heading">
           <h3 id="resource-cancel-heading">取消预留</h3>
           <label>预留编号<input value={cancelPayload.reservationId} disabled={controlDisabled(cancel)} onChange={(event) => setCancelPayload({ ...cancelPayload, reservationId: event.currentTarget.value })} /></label>
-          <label>预留版本<input type="number" min="0" value={cancelPayload.expectedVersion} disabled={controlDisabled(cancel)} onChange={(event) => setCancelPayload({ ...cancelPayload, expectedVersion: event.currentTarget.valueAsNumber })} /></label>
-          <CommandPanel workspace="resources" command={cancel} {...(cancelPayload.reservationId ? { targetId: cancelPayload.reservationId } : {})} payload={{ expectedVersion: cancelPayload.expectedVersion }} {...commandProps} />
+          <label>预留版本<input type="number" min="0" step="1" value={cancelPayload.expectedVersion} disabled={controlDisabled(cancel)} onChange={(event) => setCancelPayload({ ...cancelPayload, expectedVersion: event.currentTarget.value })} /></label>
+          {guardedCommand(cancel, cancelResult, "预留编号或版本无效", cancelResult.success ? { expectedVersion: cancelResult.data.expectedVersion } : {}, cancelResult.success ? cancelResult.data.reservationId : undefined)}
         </section>
       </section>
     </section>
