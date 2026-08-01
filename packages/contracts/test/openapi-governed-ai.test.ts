@@ -155,20 +155,23 @@ const GOVERNED_SCHEMA_MANIFEST = [
 const SEMANTIC_VALIDATION_IDS = {
   AiGrantClaims: ["grant-lifetime"],
   ProviderTimeouts: ["timeout-order"],
-  CapabilitySnapshot: ["embedding-dimensions-required"],
   ProviderProfile: ["profile-purpose-capability-compatibility"],
   ProviderProfileCreate: ["profile-purpose-capability-compatibility"],
   ProviderProfileUpdate: ["profile-purpose-capability-compatibility"],
-  CapabilityProbe: ["probe-terminal-discriminant"],
-  KnowledgeIngestionJob: ["ingestion-status-discriminant"],
-  KnowledgeGateMetrics: ["gate-threshold-consistency"],
-  KnowledgeGateResult: ["gate-threshold-consistency"],
-  GuidanceStatus: ["guidance-status-discriminant"],
+  KnowledgeIngestionJob: ["ingestion-attempt-and-time-consistency"],
+  KnowledgeGateMetrics: ["gate-arithmetic-consistency"],
+  KnowledgeGateResult: ["gate-arithmetic-consistency"],
   GeneratedRecommendation: ["citation-referential-integrity"],
-  ServiceOperationOutcome: ["operation-outcome-discriminant"],
-  ServiceIngestionOutcome: ["ingestion-outcome-discriminant"],
-  ServiceProviderProbeOutcome: ["probe-outcome-discriminant"],
 } as const;
+
+const EXPRESSIBLE_VALIDATION_SCHEMAS = [
+  "CapabilitySnapshot",
+  "CapabilityProbe",
+  "GuidanceStatus",
+  "ServiceOperationOutcome",
+  "ServiceIngestionOutcome",
+  "ServiceProviderProbeOutcome",
+] as const;
 
 const requiredKeys = (shape: Record<string, { isOptional: () => boolean }>): string[] =>
   Object.entries(shape).filter(([, value]) => !value.isOptional()).map(([key]) => key);
@@ -301,7 +304,9 @@ describe("OCC Core governed AI OpenAPI", () => {
       if (
         typeof expected.pattern === "string" &&
         expectedFormat !== "uuid" &&
-        expectedFormat !== "date-time"
+        expectedFormat !== "date-time" &&
+        expectedFormat !== "cidrv4" &&
+        expectedFormat !== "cidrv6"
       ) {
         expect(typeof actual.pattern, `${path}.pattern`).toBe("string");
         expect(new RegExp(actual.pattern as string).source, `${path}.pattern`).toBe(
@@ -418,13 +423,10 @@ describe("OCC Core governed AI OpenAPI", () => {
     });
   });
 
-  it("keeps CIDR syntax and approved-private containment explicit", () => {
+  it("encodes CIDR syntax and approved-private containment directly", () => {
     for (const name of ["ProviderConfig", "ProviderConfigCreate", "ProviderConfigUpdate"]) {
       const cidrs = document.components.schemas[name]?.properties?.approvedPrivateCidrs;
-      expect(cidrs?.["x-occ-validation"]).toEqual({
-        id: "approved-private-cidr-containment",
-        allowedBlocks: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"],
-      });
+      expect(cidrs?.["x-occ-validation"]).toBeUndefined();
       expect(cidrs?.items).toMatchObject({
         anyOf: [
           { type: "string", format: "cidrv4", pattern: expect.any(String) },
@@ -455,5 +457,12 @@ describe("OCC Core governed AI OpenAPI", () => {
     for (const [name, ids] of Object.entries(SEMANTIC_VALIDATION_IDS)) {
       expect(document.components.schemas[name]?.["x-occ-validation"]).toEqual(ids);
     }
+    for (const name of EXPRESSIBLE_VALIDATION_SCHEMAS) {
+      expect(document.components.schemas[name]?.["x-occ-validation"]).toBeUndefined();
+    }
+    expect(document.components.schemas.KnowledgeIngestionJob?.properties?.sanitizedError?.["x-occ-validation"]).toEqual({
+      id: "utf8-octet-length",
+      maximum: 2048,
+    });
   });
 });

@@ -76,6 +76,8 @@ describe("governed AI provider contracts", () => {
     "192.168.0.0/16",
     "192.168.255.255/32",
     "fc00::/7",
+    "fc00:1::1/128",
+    "fd12:3456:789a:1::1/64",
     "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
   ])("accepts an approved private CIDR wholly inside its containing block: %s", (cidr) => {
     expect(approvedPrivateCidrSchema.parse(cidr)).toBe(cidr);
@@ -341,13 +343,13 @@ describe("governed knowledge contracts", () => {
     })).toBeDefined();
     expect(knowledgeIngestionJobSchema.parse({
       ...job,
-      sanitizedError: "OCC-AI-INGESTION-RETRY",
+      sanitizedError: "LEASE_EXPIRED_RETRY",
     })).toBeDefined();
     expect(knowledgeIngestionJobSchema.parse({
       ...job,
       stage: "COMPLETE",
       status: "FAILED",
-      sanitizedError: "OCC-AI-INGESTION-FAILED",
+      sanitizedError: "LEASE_EXPIRED_MAX_ATTEMPTS",
       completedAt: LATER,
     })).toBeDefined();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, stage: "QUALITY_GATE" })).toThrow();
@@ -361,13 +363,22 @@ describe("governed knowledge contracts", () => {
     })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "COMPLETED", stage: "COMPLETE", completedAt: LATER })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "FAILED", completedAt: LATER })).toThrow();
-    expect(() => knowledgeIngestionJobSchema.parse({
+    expect(knowledgeIngestionJobSchema.parse({
       ...job,
       stage: "COMPLETE",
       status: "FAILED",
       sanitizedError: "parser exploded",
       completedAt: LATER,
-    })).toThrow();
+    })).toBeDefined();
+    for (const sanitizedError of [
+      "password=hunter2",
+      "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+      "token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue",
+      "provider returned sk-abcdefghijklmnopqrstuvwxyz",
+      "AWS key AKIAABCDEFGHIJKLMNOP",
+      "line one\nline two",
+      "é".repeat(1025),
+    ]) expect(() => knowledgeIngestionJobSchema.parse({ ...job, sanitizedError })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({
       ...job,
       producedDocumentVersionId: UUID_2,
