@@ -261,6 +261,58 @@ class EvidenceContentInspectorTest {
     }
 
     @Test
+    fun `ZIP64 extensible sector larger than legacy search bound is detected`() {
+        val nested = zip64(
+            "inside.bin",
+            "payload".toByteArray(),
+            extensibleData = ByteArray(5 * 1024) { index -> (index * 31).toByte() },
+        )
+        assertZipContains(nested, "valid-large-extensible.zip")
+        val bytes = zip("neutral/payload.bin" to nested)
+        val path = write("nested-large-zip64.zip", bytes)
+
+        assertRejected(EvidenceRejectionCode.NESTED_ARCHIVE) {
+            inspector().inspect(request(path, "nested-large-zip64.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))))
+        }
+    }
+
+    @Test
+    fun `central directory digital signature is accepted structurally`() {
+        val variants = listOf(
+            zip64("inside.bin", "payload".toByteArray(), digitalSignature = "signed-directory".toByteArray()),
+            zipWithDigitalSignature("signed-directory".toByteArray()),
+        )
+        variants.forEachIndexed { index, nested ->
+            val bytes = zip("neutral/payload.bin" to nested)
+            val path = write("nested-signed-directory-$index.zip", bytes)
+            assertRejected(EvidenceRejectionCode.NESTED_ARCHIVE) {
+                inspector().inspect(request(path, "nested-signed-directory-$index.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))))
+            }
+        }
+    }
+
+    @Test
+    fun `malformed ZIP64 extensible sector and digital signature stay ordinary binary`() {
+        val malformedRecord = zip64("inside.bin", "payload".toByteArray(), extensibleData = ByteArray(5000)).also { bytes ->
+            val record = bytes.indexOfSignature(byteArrayOf(0x50, 0x4b, 0x06, 0x06))
+            bytes.writeLittleEndianLong(record + 4, 44)
+        }
+        val malformedSignature = zip64("inside.bin", "payload".toByteArray(), digitalSignature = byteArrayOf(1, 2, 3)).also { bytes ->
+            val signature = bytes.indexOfSignature(byteArrayOf(0x50, 0x4b, 0x05, 0x05))
+            bytes.writeLittleEndianShort(signature + 4, 100)
+        }
+
+        listOf(malformedRecord, malformedSignature).forEachIndexed { index, nested ->
+            val bytes = zip("neutral/payload.bin" to nested)
+            val path = write("malformed-zip-extension-$index.zip", bytes)
+            val result = inspector().inspect(
+                request(path, "malformed-zip-extension-$index.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))),
+            )
+            assertThat(result.detectedMediaType).isEqualTo("application/zip")
+        }
+    }
+
+    @Test
     fun `ordinary binary entries containing short archive magic are accepted`() {
         val incidental = byteArrayOf(0x01, 0x02, 0x1f, 0x8b.toByte(), 0x08, 0x00, 0x03, 0x04) +
             "BZh Rar!\u001a\u0007 PK\u0003\u0004".toByteArray(Charsets.ISO_8859_1)
@@ -408,6 +460,12 @@ class EvidenceContentInspectorTest {
     )
 
     private fun write(name: String, bytes: ByteArray): Path = Files.write(tempDirectory.resolve(name), bytes)
+
+    private fun assertZipContains(bytes: ByteArray, fileName: String) {
+        ZipFile(write(fileName, bytes).toFile()).use { archive ->
+            assertThat(archive.getInputStream(archive.getEntry("inside.bin")).readAllBytes()).isEqualTo("payload".toByteArray())
+        }
+    }
 
     private fun assertRejected(code: EvidenceRejectionCode, action: () -> Unit) {
         assertThatThrownBy(action)
@@ -823,7 +881,12 @@ class EvidenceContentInspectorTest {
         private fun ByteArray.readLittleEndianShort(offset: Int): Int =
             (this[offset].toInt() and 0xff) or ((this[offset + 1].toInt() and 0xff) shl 8)
 
-        private fun zip64(name: String, data: ByteArray): ByteArray {
+        private fun zip64(
+            name: String,
+            data: ByteArray,
+            extensibleData: ByteArray = ByteArray(0),
+            digitalSignature: ByteArray? = null,
+        ): ByteArray {
             val output = ByteArrayOutputStream()
             val nameBytes = name.toByteArray()
             val crc = java.util.zip.CRC32().also { it.update(data) }.value
@@ -847,14 +910,28 @@ class EvidenceContentInspectorTest {
             output.write(nameBytes)
             short(0x0001); short(24); long(data.size.toLong()); long(data.size.toLong()); long(0)
             val centralSize = output.size().toLong() - centralOffset
+            digitalSignature?.let {
+                int(0x05054b50); short(it.size); output.write(it)
+            }
 
             val zip64EndOffset = output.size().toLong()
-            int(0x06064b50); long(44); short(45); short(45); int(0); int(0)
+            int(0x06064b50); long(44L + extensibleData.size); short(45); short(45); int(0); int(0)
             long(1); long(1); long(centralSize); long(centralOffset)
+            output.write(extensibleData)
             int(0x07064b50); int(0); long(zip64EndOffset); int(1)
             int(0x06054b50); short(0); short(0); short(0xffff); short(0xffff)
             int(0xffff_ffffL); int(0xffff_ffffL); short(0)
             return output.toByteArray()
+        }
+
+        private fun zipWithDigitalSignature(signature: ByteArray): ByteArray {
+            val ordinary = zip("inside.bin" to "payload".toByteArray())
+            val end = ordinary.indexOfSignature(byteArrayOf(0x50, 0x4b, 0x05, 0x06))
+            val record = ByteArrayOutputStream().also { output ->
+                output.write(byteArrayOf(0x50, 0x4b, 0x05, 0x05, signature.size.toByte(), (signature.size ushr 8).toByte()))
+                output.write(signature)
+            }.toByteArray()
+            return ordinary.copyOfRange(0, end) + record + ordinary.copyOfRange(end, ordinary.size)
         }
 
         private fun ByteArray.writeLittleEndianLong(offset: Int, value: Long) {
