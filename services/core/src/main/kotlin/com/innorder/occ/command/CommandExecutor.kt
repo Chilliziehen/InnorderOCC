@@ -40,7 +40,10 @@ class CommandExecutor(
         validatePreAcquireDataMinimization(metadata, descriptor, sensitiveValues)
         return transactions.execute {
             when (val acquisition = idempotency.acquire(descriptor, metadata.idempotencyKey, fingerprint)) {
-                is IdempotencyAcquisition.Replay -> acquisition.result
+                is IdempotencyAcquisition.Replay -> {
+                    authorize(metadata, descriptor, fingerprint)
+                    idempotency.replay(acquisition.recordId)
+                }
                 is IdempotencyAcquisition.Owner -> executeOwned(
                     metadata, descriptor, fingerprint, sensitiveValues, command, acquisition.recordId,
                 )
@@ -56,18 +59,7 @@ class CommandExecutor(
         command: AuthorizedCommand,
         idempotencyRecordId: UUID,
     ): CommandResult {
-        if (descriptor.changesAuthorizationFacts) authorizationLocks.acquireForChange()
-        val authorization = authorizationService.authorize(
-            AuthorizationRequest(
-                UUID.randomUUID(), descriptor.principalId, descriptor.action, descriptor.entityId, descriptor.resourceId,
-                mapOf(
-                    "commandKey" to descriptor.commandKey,
-                    "expectedVersion" to descriptor.expectedVersion,
-                    "requestDigest" to requestDigest,
-                ),
-                metadata.correlationId,
-            ),
-        )
+        val authorization = authorize(metadata, descriptor, requestDigest)
         val transactionId = UUID.randomUUID()
         val acquired = aggregateLocks.acquire(jdbc, requireNotNull(descriptor.lockPlan))
         val context = CommandContext(
@@ -90,6 +82,25 @@ class CommandExecutor(
         val result = CommandResult(mutation.status, mutation.body, mutation.resourceId, replayed = false)
         idempotency.complete(idempotencyRecordId, result)
         return result
+    }
+
+    private fun authorize(
+        metadata: CommandMetadata,
+        descriptor: CommandDescriptor,
+        requestDigest: String,
+    ): com.innorder.occ.authz.AuthorizationDecisionReference {
+        if (descriptor.changesAuthorizationFacts) authorizationLocks.acquireForChange()
+        return authorizationService.authorize(
+            AuthorizationRequest(
+                UUID.randomUUID(), descriptor.principalId, descriptor.action, descriptor.entityId, descriptor.resourceId,
+                mapOf(
+                    "commandKey" to descriptor.commandKey,
+                    "expectedVersion" to descriptor.expectedVersion,
+                    "requestDigest" to requestDigest,
+                ),
+                metadata.correlationId,
+            ),
+        )
     }
 
     private fun captureDescriptor(metadata: CommandMetadata, command: AuthorizedCommand): CommandDescriptor {
@@ -165,10 +176,11 @@ class CommandExecutor(
             put("changesAuthorizationFacts", descriptor.changesAuthorizationFacts)
             if (descriptor.expectedVersion == null) putNull("expectedVersion") else put("expectedVersion", descriptor.expectedVersion)
             put("principalId", descriptor.principalId.toString())
-            putArray("existingAggregates").also { array -> descriptor.lockPlan?.existing?.forEach {
+            val identityOrder = compareBy<AggregateReference>({ it.type }, { it.id.toString() })
+            putArray("existingAggregates").also { array -> descriptor.lockPlan?.existing?.sortedWith(identityOrder)?.forEach {
                 array.addObject().put("type", it.type).put("id", it.id.toString())
             } }
-            putArray("createdAggregates").also { array -> descriptor.lockPlan?.created?.forEach {
+            putArray("createdAggregates").also { array -> descriptor.lockPlan?.created?.sortedWith(identityOrder)?.forEach {
                 array.addObject().put("type", it.type).put("id", it.id.toString())
             } }
             set<JsonNode>("request", request.toJsonNode())

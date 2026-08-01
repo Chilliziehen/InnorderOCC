@@ -12,7 +12,7 @@ import java.util.UUID
 
 sealed interface IdempotencyAcquisition {
     data class Owner(val recordId: UUID) : IdempotencyAcquisition
-    data class Replay(val result: CommandResult) : IdempotencyAcquisition
+    data class Replay(val recordId: UUID) : IdempotencyAcquisition
 }
 
 @Repository
@@ -43,18 +43,14 @@ class IdempotencyRepository private constructor(
         if (inserted == 1) return IdempotencyAcquisition.Owner(id)
 
         val row = jdbc.queryForObject(
-            """SELECT request_hash, state, response_status, response_body::text, response_digest,
-                      resource_id, expires_at
+            """SELECT id, request_hash, state, expires_at
                FROM audit.idempotency_record
                WHERE principal_id = ? AND command_key = ? AND idempotency_key = ?
                FOR UPDATE""",
             { result, _ -> ExistingRecord(
+                result.getObject("id", UUID::class.java),
                 result.getString("request_hash"),
                 result.getString("state"),
-                result.getObject("response_status", Integer::class.java)?.toInt(),
-                result.getString("response_body"),
-                result.getString("response_digest"),
-                result.getObject("resource_id", UUID::class.java),
                 result.getObject("expires_at", OffsetDateTime::class.java).toInstant(),
             ) },
             descriptor.principalId, descriptor.commandKey, idempotencyKey,
@@ -62,16 +58,33 @@ class IdempotencyRepository private constructor(
         if (!clock.instant().isBefore(row.expiresAt)) throw IdempotencyExpiredException()
         if (row.requestDigest != requestDigest) throw IdempotencyConflictException()
         if (row.state == "IN_PROGRESS") throw IdempotencyInProgressException()
-        if (row.state != "COMPLETED" || row.status !in 100..599 || row.body == null ||
-            row.responseDigest == null || row.resourceId == null
-        ) throw CommandIntegrityException()
+        if (row.state != "COMPLETED") throw CommandIntegrityException()
+        return IdempotencyAcquisition.Replay(row.id)
+    }
+
+    fun replay(recordId: UUID): CommandResult {
+        requireTransaction()
+        val row = jdbc.queryForObject(
+            """SELECT response_status, response_body::text, response_digest, resource_id
+               FROM audit.idempotency_record WHERE id = ?""",
+            { result, _ -> StoredResult(
+                result.getObject("response_status", Integer::class.java)?.toInt(),
+                result.getString("response_body"),
+                result.getString("response_digest"),
+                result.getObject("resource_id", UUID::class.java),
+            ) },
+            recordId,
+        ) ?: throw CommandIntegrityException()
+        if (row.status !in 100..599 || row.body == null || row.responseDigest == null || row.resourceId == null) {
+            throw CommandIntegrityException()
+        }
         val body = try {
             CanonicalJsonObject.parse(row.body.toByteArray(Charsets.UTF_8), CanonicalJsonObject.MAX_BYTES)
         } catch (_: InvalidCommandRequestException) {
             throw CommandIntegrityException()
         }
         if (body.digest != row.responseDigest) throw CommandIntegrityException()
-        return IdempotencyAcquisition.Replay(CommandResult(row.status!!, body, row.resourceId, replayed = true))
+        return CommandResult(row.status!!, body, row.resourceId, replayed = true)
     }
 
     fun complete(recordId: UUID, result: CommandResult) {
@@ -91,13 +104,17 @@ class IdempotencyRepository private constructor(
     }
 
     private data class ExistingRecord(
+        val id: UUID,
         val requestDigest: String,
         val state: String,
+        val expiresAt: java.time.Instant,
+    )
+
+    private data class StoredResult(
         val status: Int?,
         val body: String?,
         val responseDigest: String?,
         val resourceId: UUID?,
-        val expiresAt: java.time.Instant,
     )
 
     companion object {

@@ -104,7 +104,7 @@ class CommandExecutorIntegrationTest {
         assertThat(first.replayed).isFalse()
         assertThat(replay).isEqualTo(first.copy(replayed = true))
         assertThat(executions).hasValue(1)
-        assertThat(snapshots.calls).hasValue(1)
+        assertThat(snapshots.calls).hasValue(2)
         assertThat(jdbc.queryForObject("SELECT value FROM occ.command_kernel_test WHERE id = ?", String::class.java, AGGREGATE_ID)).isEqualTo("after")
         assertThat(jdbc.queryForObject("SELECT row_version FROM occ.command_kernel_test WHERE id = ?", Long::class.java, AGGREGATE_ID)).isEqualTo(4)
         assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE target_entity_id = ?", Long::class.java, RESOURCE_ID)).isEqualTo(1)
@@ -357,7 +357,7 @@ class CommandExecutorIntegrationTest {
             assertThat(results.count { it.replayed }).isEqualTo(19)
             assertThat(results.map { it.body.canonicalText() }).containsOnly("""{"result":"after"}""")
             assertThat(executions).hasValue(1)
-            assertThat(snapshots.calls).hasValue(1)
+            assertThat(snapshots.calls).hasValue(20)
         } finally {
             pool.shutdownNow()
             assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
@@ -923,6 +923,70 @@ class CommandExecutorIntegrationTest {
                 .isInstanceOf(CommandIntegrityException::class.java)
             assertThat(executions).hasValue(countBeforeReplay)
         }
+    }
+
+    @Test
+    fun `replay requires fresh authorization without domain locks or business side effects`() {
+        val key = metadata("reauthorized-replay")
+        val first = executor.execute(key, "{}".toByteArray(), command())
+        val locksAfterOwner = lockOrder.toList()
+
+        configureAuthorization(AuthorizationDecisionValue.DENY)
+        assertThatThrownBy { executor.execute(key, "{}".toByteArray(), command()) }
+            .isInstanceOf(com.innorder.occ.authz.AuthorizationDeniedException::class.java)
+        configureAuthorization(AuthorizationDecisionValue.ERROR)
+        assertThatThrownBy { executor.execute(key, "{}".toByteArray(), command()) }
+            .isInstanceOf(com.innorder.occ.authz.AuthorizationAvailabilityException::class.java)
+        configureAuthorization(AuthorizationDecisionValue.ALLOW)
+        val replay = executor.execute(key, "{}".toByteArray(), command())
+
+        assertThat(replay).isEqualTo(first.copy(replayed = true))
+        assertThat(snapshots.calls).hasValue(4)
+        assertThat(lockOrder).containsExactlyElementsOf(locksAfterOwner)
+        assertThat(executions).hasValue(1)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record", Long::class.java)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, AGGREGATE_ID)).isEqualTo(1)
+    }
+
+    @Test
+    fun `denied replay does not materialize or disclose stored response body`() {
+        val key = metadata("denied-tampered-replay")
+        executor.execute(key, "{}".toByteArray(), command())
+        val admin = JdbcTemplate(adminDataSource())
+        admin.execute("ALTER TABLE audit.idempotency_record DISABLE TRIGGER trg_idempotency_record_lifecycle")
+        try {
+            admin.update(
+                "UPDATE audit.idempotency_record SET response_body = '{\"stored-body-marker\":true}'::jsonb WHERE principal_id = ? AND idempotency_key = ?",
+                PRINCIPAL_ID,
+                key.idempotencyKey,
+            )
+        } finally {
+            admin.execute("ALTER TABLE audit.idempotency_record ENABLE TRIGGER trg_idempotency_record_lifecycle")
+        }
+        configureAuthorization(AuthorizationDecisionValue.DENY)
+
+        assertThatThrownBy { executor.execute(key, "{}".toByteArray(), command()) }
+            .isInstanceOf(com.innorder.occ.authz.AuthorizationDeniedException::class.java)
+            .hasMessageNotContaining("stored-body-marker")
+        assertThat(snapshots.calls).hasValue(2)
+        assertThat(executions).hasValue(1)
+    }
+
+    @Test
+    fun `equivalent lock plan ordering preserves idempotent replay fingerprint`() {
+        jdbc.update("INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'second', 7)", SECOND_AGGREGATE_ID)
+        val primary = AggregateReference("kernel-test", AGGREGATE_ID)
+        val secondary = AggregateReference("kernel-secondary", SECOND_AGGREGATE_ID)
+        fun planned(references: List<AggregateReference>) = object : AuthorizedCommand by command() {
+            override val lockPlan = AggregateLockPlan(existing = references)
+        }
+        val key = metadata("normalized-lock-plan")
+
+        val first = executor.execute(key, "{}".toByteArray(), planned(listOf(primary, secondary)))
+        val replay = executor.execute(key, "{}".toByteArray(), planned(listOf(secondary, primary)))
+
+        assertThat(replay).isEqualTo(first.copy(replayed = true))
+        assertThat(executions).hasValue(1)
     }
 
     private fun metadata(key: String) = CommandMetadata(PRINCIPAL_ID, "test.update", key, 3, CORRELATION_ID)

@@ -133,7 +133,7 @@ class PlatformSecurityKernelIntegrationTest(
         val replay = command(accessToken, administratorId, "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 200)
         assertThat(replay.body).isEqualTo(first.body)
         assertThat(replay.replayed).isTrue()
-        assertCommandState(version = 4, allows = 1, audit = 1, outbox = 1, idempotency = 1)
+        assertCommandState(version = 4, allows = 2, audit = 1, outbox = 1, idempotency = 1)
 
         command(accessToken, administratorId, "kernel-first", 3, """{"value":"different"}""", 409)
         command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 409)
