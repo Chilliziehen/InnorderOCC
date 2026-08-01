@@ -1558,6 +1558,7 @@ components:
     KnowledgeIngestionJob:
       type: object
       additionalProperties: false
+      description: Service maps internal V015 sanitized_error details to stable public OCC-AI codes; persistence text is never serialized.
       x-occ-validation: [ingestion-attempt-and-time-consistency]
       oneOf:
         - properties:
@@ -1567,7 +1568,7 @@ components:
           not:
             anyOf:
               - required: [producedDocumentVersionId]
-              - required: [sanitizedError]
+              - required: [errorCode]
               - required: [completedAt]
               - required: [leaseOwner]
               - required: [leaseExpiresAt]
@@ -1578,7 +1579,7 @@ components:
           not:
             anyOf:
               - required: [producedDocumentVersionId]
-              - required: [sanitizedError]
+              - required: [errorCode]
               - required: [completedAt]
         - properties:
             status:
@@ -1598,13 +1599,13 @@ components:
           required: [status, stage, producedDocumentVersionId, completedAt]
           not:
             anyOf:
-              - required: [sanitizedError]
+              - required: [errorCode]
               - required: [leaseOwner]
               - required: [leaseExpiresAt]
         - properties:
             status:
               const: FAILED
-          required: [status, sanitizedError, completedAt]
+          required: [status, errorCode, completedAt]
           not:
             anyOf:
               - required: [producedDocumentVersionId]
@@ -1678,14 +1679,11 @@ components:
         leaseExpiresAt:
           type: string
           format: date-time
-        sanitizedError:
+        errorCode:
           type: string
-          minLength: 1
-          maxLength: 2048
-          pattern: "^(?!.*(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+\\S+|(?:[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Tt][Oo][Kk][Ee][Nn]|[Rr][Ee][Ff][Rr][Ee][Ss][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll])\\s*[:=]\\s*\\S+|[Ss][Kk]-[A-Za-z0-9_-]{16,}|[Aa][Kk][Ii][Aa][A-Z0-9]{16}|[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}))[^\\x00-\\x1F\\x7F]+$"
-          x-occ-validation:
-            id: utf8-octet-length
-            maximum: 2048
+          minLength: 8
+          maxLength: 119
+          pattern: "^OCC-AI-[A-Z0-9-]{1,112}$"
         createdAt:
           type: string
           format: date-time
@@ -1702,11 +1700,6 @@ components:
       allOf:
         - if:
             properties:
-              decision:
-                const: PASS
-            required: [decision]
-          then:
-            properties:
               coverage:
                 minimum: 1
               leakageCount:
@@ -1715,21 +1708,12 @@ components:
                 minimum: 0.95
               recallAt10Mean:
                 minimum: 0.85
-        - if:
-            anyOf:
-              - properties:
-                  coverage:
-                    exclusiveMaximum: 1
-              - properties:
-                  leakageCount:
-                    exclusiveMinimum: 0
-              - properties:
-                  citationPrecision:
-                    exclusiveMaximum: 0.95
-              - properties:
-                  recallAt10Mean:
-                    exclusiveMaximum: 0.85
+            required: [coverage, leakageCount, citationPrecision, recallAt10Mean]
           then:
+            properties:
+              decision:
+                const: PASS
+          else:
             properties:
               decision:
                 const: FAIL
@@ -1797,11 +1781,6 @@ components:
       allOf:
         - if:
             properties:
-              decision:
-                const: PASS
-            required: [decision]
-          then:
-            properties:
               coverage:
                 minimum: 1
               leakageCount:
@@ -1810,21 +1789,12 @@ components:
                 minimum: 0.95
               recallAt10Mean:
                 minimum: 0.85
-        - if:
-            anyOf:
-              - properties:
-                  coverage:
-                    exclusiveMaximum: 1
-              - properties:
-                  leakageCount:
-                    exclusiveMinimum: 0
-              - properties:
-                  citationPrecision:
-                    exclusiveMaximum: 0.95
-              - properties:
-                  recallAt10Mean:
-                    exclusiveMaximum: 0.85
+            required: [coverage, leakageCount, citationPrecision, recallAt10Mean]
           then:
+            properties:
+              decision:
+                const: PASS
+          else:
             properties:
               decision:
                 const: FAIL

@@ -10,6 +10,7 @@ import {
   capabilityProbeSchema,
   guidanceStatusSchema,
   knowledgeGateMetricsSchema,
+  knowledgeGateResultSchema,
   knowledgeIngestionJobSchema,
   providerConfigCreateSchema,
   serviceIngestionOutcomeSchema,
@@ -152,16 +153,20 @@ describe("OCC Core governed AI OpenAPI AJV parity", () => {
     expectParity("KnowledgeIngestionJob", knowledgeIngestionJobSchema, [
       { ...job, status: "PENDING" },
       { ...job, status: "PROCESSING", leaseOwner: "worker-1", leaseExpiresAt: LATER },
-      { ...job, status: "RETRY", sanitizedError: "LEASE_EXPIRED_RETRY" },
+      { ...job, status: "RETRY", errorCode: "OCC-AI-LEASE-EXPIRED-RETRY" },
       { ...job, status: "COMPLETED", stage: "COMPLETE", producedDocumentVersionId: UUID, completedAt: LATER },
-      { ...job, status: "FAILED", sanitizedError: "LEASE_EXPIRED_MAX_ATTEMPTS", completedAt: LATER },
+      { ...job, status: "FAILED", errorCode: "OCC-AI-MAX-ATTEMPTS", completedAt: LATER },
     ], [
-      { ...job, status: "PENDING", sanitizedError: "unexpected error" },
+      { ...job, status: "PENDING", errorCode: "OCC-AI-UNEXPECTED" },
+      { ...job, status: "RETRY", errorCode: "password=hunter2" },
+      { ...job, status: "RETRY", errorCode: "secretAccessKey=abcdefghijklmnop" },
+      { ...job, status: "RETRY", errorCode: "api_key=sk-abcdefghijklmnopqrstuvwxyz" },
+      { ...job, status: "RETRY", errorCode: "Authorization: Basic dXNlcjpwYXNz" },
+      { ...job, status: "RETRY", errorCode: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz" },
       { ...job, status: "RETRY", sanitizedError: "password=hunter2" },
-      { ...job, status: "RETRY", sanitizedError: "provider returned sk-abcdefghijklmnopqrstuvwxyz" },
       { ...job, status: "RETRY", producedDocumentVersionId: UUID },
-      { ...job, status: "COMPLETED", stage: "COMPLETE", producedDocumentVersionId: UUID, sanitizedError: "unexpected error", completedAt: LATER },
-      { ...job, status: "FAILED", producedDocumentVersionId: UUID, sanitizedError: "failed", completedAt: LATER },
+      { ...job, status: "COMPLETED", stage: "COMPLETE", producedDocumentVersionId: UUID, errorCode: "OCC-AI-UNEXPECTED", completedAt: LATER },
+      { ...job, status: "FAILED", producedDocumentVersionId: UUID, errorCode: "OCC-AI-FAILED", completedAt: LATER },
     ]);
   });
 
@@ -190,10 +195,31 @@ describe("OCC Core governed AI OpenAPI AJV parity", () => {
       decision: "FAIL",
     };
     expectParity("KnowledgeGateMetrics", knowledgeGateMetricsSchema, [gate, failedGate], [
+      { ...gate, decision: "FAIL" },
+      { ...gate, eligibleCount: 0 },
+      { ...gate, citationTotalCount: 0 },
+      { ...gate, recallAt10CaseCount: 0 },
       { ...gate, leakageCount: 1 },
       { ...gate, citationPrecision: 0.94, citationSupportedCount: 94 },
       { ...gate, recallAt10Mean: 0.8, recallAt10Sum: 16 },
     ]);
+
+    const resultFields = {
+      id: UUID,
+      status: "COMPLETED",
+      datasetVersionId: UUID_2,
+      datasetContentHash: SHA,
+      corpusManifestDigest: SHA,
+      documentManifest: `${UUID_3}:${SHA}`,
+      candidateEmbeddingSpaceId: UUID,
+      expectedActiveSpaceId: UUID_2,
+      evidenceHash: SHA,
+      evaluatedAt: LATER,
+    };
+    expectParity("KnowledgeGateResult", knowledgeGateResultSchema,
+      [{ ...gate, ...resultFields }, { ...failedGate, ...resultFields }],
+      [{ ...gate, ...resultFields, decision: "FAIL" }],
+    );
   });
 
   it("matches approved private CIDR boundaries including compressed ULA", () => {

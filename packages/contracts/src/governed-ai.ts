@@ -6,8 +6,6 @@ export const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 export const JWT_MAX_LENGTH = 8192;
 export const SHA256_PATTERN = "^[a-f0-9]{64}$";
 export const STABLE_AI_ERROR_CODE_PATTERN = "^OCC-AI-[A-Z0-9-]{1,112}$";
-export const SANITIZED_AI_ERROR_PATTERN = "^(?!.*(?:[Bb][Ee][Aa][Rr][Ee][Rr]\\s+\\S+|(?:[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Tt][Oo][Kk][Ee][Nn]|[Rr][Ee][Ff][Rr][Ee][Ss][Hh][_-]?[Tt][Oo][Kk][Ee][Nn]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll])\\s*[:=]\\s*\\S+|[Ss][Kk]-[A-Za-z0-9_-]{16,}|[Aa][Kk][Ii][Aa][A-Z0-9]{16}|[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}))[^\\x00-\\x1F\\x7F]+$";
-const utf8Encoder = new TextEncoder();
 
 export const uuidSchema = z.uuid();
 export const sha256Schema = z.string().regex(new RegExp(SHA256_PATTERN));
@@ -20,12 +18,6 @@ export const stableAiErrorCodeSchema = z
   .min(8)
   .max(119)
   .regex(new RegExp(STABLE_AI_ERROR_CODE_PATTERN));
-export const sanitizedAiErrorSchema = z
-  .string()
-  .min(1)
-  .max(2048)
-  .regex(new RegExp(SANITIZED_AI_ERROR_PATTERN))
-  .refine((value) => utf8Encoder.encode(value).length <= 2048);
 
 export const DATA_CLASSIFICATION_ORDER = [
   "PUBLIC",
@@ -323,7 +315,7 @@ export const knowledgeIngestionJobSchema = z
     nextAttemptAt: timestampSchema,
     leaseOwner: z.string().min(1).max(256).optional(),
     leaseExpiresAt: timestampSchema.optional(),
-    sanitizedError: sanitizedAiErrorSchema.optional(),
+    errorCode: stableAiErrorCodeSchema.optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
     completedAt: timestampSchema.optional(),
@@ -344,7 +336,7 @@ export const knowledgeIngestionJobSchema = z
       context.addIssue({ code: "custom", message: "Lease expiry must follow job creation", path: ["leaseExpiresAt"] });
     }
     const produced = job.producedDocumentVersionId !== undefined;
-    const errored = job.sanitizedError !== undefined;
+    const errored = job.errorCode !== undefined;
     if (job.status === "COMPLETED" && (!produced || errored || job.completedAt === undefined || job.stage !== "COMPLETE")) {
       context.addIssue({ code: "custom", message: "Completed jobs require only their produced version", path: ["status"] });
     }

@@ -343,13 +343,13 @@ describe("governed knowledge contracts", () => {
     })).toBeDefined();
     expect(knowledgeIngestionJobSchema.parse({
       ...job,
-      sanitizedError: "LEASE_EXPIRED_RETRY",
+      errorCode: "OCC-AI-LEASE-EXPIRED-RETRY",
     })).toBeDefined();
     expect(knowledgeIngestionJobSchema.parse({
       ...job,
       stage: "COMPLETE",
       status: "FAILED",
-      sanitizedError: "LEASE_EXPIRED_MAX_ATTEMPTS",
+      errorCode: "OCC-AI-MAX-ATTEMPTS",
       completedAt: LATER,
     })).toBeDefined();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, stage: "QUALITY_GATE" })).toThrow();
@@ -363,28 +363,27 @@ describe("governed knowledge contracts", () => {
     })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "COMPLETED", stage: "COMPLETE", completedAt: LATER })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "FAILED", completedAt: LATER })).toThrow();
-    expect(knowledgeIngestionJobSchema.parse({
+    expect(() => knowledgeIngestionJobSchema.parse({
       ...job,
       stage: "COMPLETE",
       status: "FAILED",
-      sanitizedError: "parser exploded",
+      errorCode: "parser exploded",
       completedAt: LATER,
-    })).toBeDefined();
-    for (const sanitizedError of [
+    })).toThrow();
+    for (const errorCode of [
       "password=hunter2",
+      "secretAccessKey=abcdefghijklmnop",
+      "api_key=sk-abcdefghijklmnopqrstuvwxyz",
+      "Authorization: Basic dXNlcjpwYXNz",
       "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
-      "token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue",
-      "provider returned sk-abcdefghijklmnopqrstuvwxyz",
-      "AWS key AKIAABCDEFGHIJKLMNOP",
-      "line one\nline two",
-      "é".repeat(1025),
-    ]) expect(() => knowledgeIngestionJobSchema.parse({ ...job, sanitizedError })).toThrow();
+    ]) expect(() => knowledgeIngestionJobSchema.parse({ ...job, errorCode })).toThrow();
+    expect(() => knowledgeIngestionJobSchema.parse({ ...job, sanitizedError: "password=hunter2" })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({
       ...job,
       producedDocumentVersionId: UUID_2,
       stage: "COMPLETE",
       status: "COMPLETED",
-      sanitizedError: "OCC-AI-UNEXPECTED",
+      errorCode: "OCC-AI-UNEXPECTED",
       completedAt: LATER,
     })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({
@@ -392,7 +391,7 @@ describe("governed knowledge contracts", () => {
       producedDocumentVersionId: UUID_2,
       stage: "COMPLETE",
       status: "FAILED",
-      sanitizedError: "OCC-AI-INGESTION-FAILED",
+      errorCode: "OCC-AI-INGESTION-FAILED",
       completedAt: LATER,
     })).toThrow();
     for (const status of ["PENDING", "PROCESSING"] as const) {
@@ -403,7 +402,7 @@ describe("governed knowledge contracts", () => {
         ...job,
         ...lease,
         status,
-        sanitizedError: "OCC-AI-UNEXPECTED",
+        errorCode: "OCC-AI-UNEXPECTED",
       })).toThrow();
       expect(() => knowledgeIngestionJobSchema.parse({
         ...job,

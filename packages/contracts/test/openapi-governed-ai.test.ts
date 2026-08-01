@@ -52,6 +52,7 @@ import {
 type Schema = {
   "x-occ-validation"?: string[];
   additionalProperties?: boolean;
+  description?: string;
   dependentRequired?: Record<string, string[]>;
   properties?: Record<string, Record<string, unknown>>;
   required?: string[];
@@ -460,9 +461,15 @@ describe("OCC Core governed AI OpenAPI", () => {
     for (const name of EXPRESSIBLE_VALIDATION_SCHEMAS) {
       expect(document.components.schemas[name]?.["x-occ-validation"]).toBeUndefined();
     }
-    expect(document.components.schemas.KnowledgeIngestionJob?.properties?.sanitizedError?.["x-occ-validation"]).toEqual({
-      id: "utf8-octet-length",
-      maximum: 2048,
+    const ingestionJob = document.components.schemas.KnowledgeIngestionJob;
+    expect(ingestionJob?.properties?.sanitizedError).toBeUndefined();
+    expect(ingestionJob?.properties?.errorCode).toMatchObject({
+      type: "string",
+      minLength: 8,
+      maxLength: 119,
+      pattern: STABLE_AI_ERROR_CODE_PATTERN,
     });
+    expect(ingestionJob?.description).toContain("maps internal V015 sanitized_error details");
+    expect(ingestionJob?.description).toContain("never serialized");
   });
 });
