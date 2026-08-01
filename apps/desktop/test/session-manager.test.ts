@@ -25,6 +25,7 @@ const token = (suffix: string, expiresIn = 300) => ({
 function harness(
   initial: string | null = null,
   timers: Pick<typeof globalThis, "setTimeout" | "clearTimeout"> = globalThis,
+  onBackgroundError?: (error: unknown) => void,
 ) {
   const stored = new Map<string, string>();
   let removeGate: Promise<void> | null = null;
@@ -62,6 +63,7 @@ function harness(
     now: () => now,
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
+    ...(onBackgroundError === undefined ? {} : { onBackgroundError }),
   });
   return {
     manager,
@@ -226,6 +228,25 @@ describe("Session manager", () => {
       "profile-a",
       expect.any(String),
     ));
+  });
+
+  it("handles rejected background expiry cleanup and permits a newer session", async () => {
+    const onBackgroundError = vi.fn<(error: unknown) => void>();
+    const h = harness(null, globalThis, onBackgroundError);
+    vi.mocked(h.core.login).mockResolvedValueOnce(token("A", 1)).mockResolvedValueOnce(token("C"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    vi.mocked(h.vault.remove).mockRejectedValueOnce(new Error("background remove failed"));
+    h.advance(1_000);
+
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+    await vi.waitFor(() => expect(onBackgroundError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "background remove failed" }),
+    ));
+    expect(h.accessToken).toBeNull();
+
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-C");
   });
 
   it("proactively expires via an injected scheduler", async () => {

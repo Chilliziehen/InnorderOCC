@@ -27,6 +27,7 @@ interface SessionManagerOptions {
   now?: () => number;
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
+  onBackgroundError?: (error: unknown) => void;
 }
 
 export interface SessionManager {
@@ -91,6 +92,16 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     });
   }
 
+  function runBestEffort(operation: Promise<void>): void {
+    void operation.catch((error: unknown) => {
+      try {
+        options.onBackgroundError?.(error);
+      } catch {
+        // Background cleanup and reporting must never reject without an observer.
+      }
+    });
+  }
+
   function clearMemory(): void {
     if (expiryTimer !== undefined) cancel(expiryTimer);
     expiryTimer = undefined;
@@ -134,7 +145,7 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     if (generation !== expectedGeneration || activeProfileId !== profileId) return;
     const remaining = expiresAtMs - now();
     if (remaining <= 0) {
-      void clearOwned(profileId, expectedGeneration, credentialVersion);
+      runBestEffort(clearOwned(profileId, expectedGeneration, credentialVersion));
       return;
     }
     expiryTimer = schedule(() => {
@@ -294,7 +305,9 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
         const profileId = activeProfileId ?? options.getProfileId();
         const credentialVersion = activeCredentialVersion;
         clearMemory();
-        if (credentialVersion) void removeCredential(profileId, credentialVersion);
+        if (credentialVersion) {
+          runBestEffort(removeCredential(profileId, credentialVersion));
+        }
       }
       return current;
     },
