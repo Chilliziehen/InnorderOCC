@@ -65,7 +65,7 @@ java -version
 
 ## 密钥、umask 与配置文件准备
 
-严格执行[第 03 章 Linux 密钥和配置步骤](03-secrets-and-configuration.md)。八个互异密钥必须位于仓库外持久本地文件系统；目录 `0700`、文件 `0600`，由执行 Compose 的批准身份拥有。`infra/compose/.env` 只能包含八个绝对密钥路径和十二个非敏感覆盖值。
+严格执行[第 03 章 Linux 密钥和配置步骤](03-secrets-and-configuration.md)。九个互异密钥必须位于仓库外持久本地文件系统；目录 `0700`、文件 `0600`，由执行 Compose 的批准身份拥有。`infra/compose/.env` 只能包含九个绝对密钥路径和十二个非敏感覆盖值。
 
 ```bash
 set -euo pipefail
@@ -78,7 +78,7 @@ secret_root=$(realpath "$OCC_SECRET_ROOT")
 case "$secret_root/" in "$repository_root/"*) printf '密钥目录不能位于仓库内\n' >&2; exit 1;; esac
 test "$(stat -c '%u' "$secret_root")" -eq "$(id -u)"
 test "$(stat -c '%a' "$secret_root")" = 700
-expected=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+expected=(cursor-hmac-key postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
 for name in "${expected[@]}"; do
   path="$secret_root/$name"
   test -f "$path" && test ! -L "$path"
@@ -106,7 +106,7 @@ repository_root=$(realpath "$OCC_REPOSITORY_ROOT")
 cd -- "$repository_root"
 declare -A config=()
 declare -A allowed=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue

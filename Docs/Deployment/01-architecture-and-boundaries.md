@@ -91,6 +91,7 @@ Kafka 使用单节点 KRaft：
 
 | Compose secret | 消费服务 | 容器目标 |
 |---|---|---|
+| `cursor_hmac_key` | `core` | `/run/secrets/occ.cursor.secret` |
 | `postgres_admin_password` | `postgres` | `/run/secrets/postgres_admin_password` |
 | `postgres_flyway_password` | `postgres`、`core` | PostgreSQL 初始化文件；Core 的 `/run/secrets/spring.flyway.password` |
 | `postgres_runtime_password` | `postgres`、`core` | PostgreSQL 初始化文件；Core 的 `/run/secrets/spring.datasource.password` |

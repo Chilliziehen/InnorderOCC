@@ -21,7 +21,7 @@
 | 项目 | 内容 | 是否包含敏感值 |
 |---|---|---|
 | 发布来源 | `source-revision.txt`、`source-status.txt` | 否；不复制仓库工作区作为备份 |
-| 配置恢复 | `configuration-paths-only.txt`、`compose-env-paths-only.txt`、`compose-env-nonsecret.txt` | 保存 Compose/env 位置、八个 secret 源路径和十二个非秘密配置；路径按敏感元数据保护，不保存 secret 值 |
+| 配置恢复 | `configuration-paths-only.txt`、`compose-env-paths-only.txt`、`compose-env-nonsecret.txt` | 保存 Compose/env 位置、九个 secret 源路径和十二个非秘密配置；路径按敏感元数据保护，不保存 secret 值 |
 | 密钥托管 | `secret-escrow-receipt.txt` | 只保存外部托管版本/取回收据，不含 secret 值或值散列 |
 | 镜像 | `compose-images.txt`、`image-identifiers.txt` | Compose 镜像清单、实际 image ID、RepoTag/RepoDigest 和本地构建 revision 关联 |
 | PostgreSQL | 精确一个 `occ-*.dump` 与非空 `postgresql-restore-list.txt` | 自定义格式逻辑备份与独立 `pg_restore --list` 结果 |
@@ -31,7 +31,7 @@
 | 策略与工具 | `backup-policy-metadata.txt`、`backup-trust-status.txt`、`tool-versions.txt`、开始/结束 UTC | 记录 source/deployed revision、change ID、政策、保留类别、故障域、信任模式和工具版本 |
 | 完整性 | `backup-artifacts.inventory`、`backup-manifest.sha256`、`COMPLETE` | inventory 与 checksum 只能检测意外损坏；外部模式另由批准验证工具输出 `external-trust-evidence.txt` 控制证据 |
 
-`.env` 不整文件归档：八个 secret **路径**写入 `compose-env-paths-only.txt`，十二个非敏感覆盖写入 `compose-env-nonsecret.txt`。两者合并后必须精确覆盖 `.env.example` 的允许 key；不得把 secret escrow 内容放入同一目录。恢复负责人必须能从独立托管取回与备份时点匹配的凭据，且取回操作有双人审批和审计。
+`.env` 不整文件归档：九个 secret **路径**写入 `compose-env-paths-only.txt`，十二个非敏感覆盖写入 `compose-env-nonsecret.txt`。两者合并后必须精确覆盖 `.env.example` 的允许 key；不得把 secret escrow 内容放入同一目录。cursor HMAC key 与其他 secret 一样只进入独立 escrow，不进入备份包。恢复负责人必须能从独立托管取回与备份时点匹配的凭据，且取回操作有双人审批和审计。
 
 ## 备份会话与安全目标
 
@@ -439,8 +439,8 @@ $revision | Out-File (Join-Path $BackupSet 'source-revision.txt') -Encoding asci
 $status | Out-File (Join-Path $BackupSet 'source-status.txt') -Encoding utf8
 $images | Out-File (Join-Path $BackupSet 'compose-images.txt') -Encoding utf8
 @('compose=infra/compose/compose.yml','env=infra/compose/.env') | Out-File (Join-Path $BackupSet 'configuration-paths-only.txt') -Encoding ascii
-$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=' })
-if ($pathOnlyEnv.Count -ne 8) { throw 'Compose env 必须精确提供八个 secret 路径行' }
+$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(CURSOR_HMAC_KEY_FILE|POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=' })
+if ($pathOnlyEnv.Count -ne 9) { throw 'Compose env 必须精确提供九个 secret 路径行' }
 [IO.File]::WriteAllLines((Join-Path $BackupSet 'compose-env-paths-only.txt'),$pathOnlyEnv,(New-Object Text.UTF8Encoding($false)))
 $nonSecretKeys = @('POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 $nonSecretEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { ($_ -split '=',2)[0] -in $nonSecretKeys })
@@ -592,8 +592,8 @@ revision=$(tr -d '\r\n' <"$backup_set/source-revision.txt")
 [ "$revision" = "${OCC_DEPLOYED_REVISION,,}" ]
 "${compose[@]}" images >"$backup_set/compose-images.txt"
 printf '%s\n' 'compose=infra/compose/compose.yml' 'env=infra/compose/.env' >"$backup_set/configuration-paths-only.txt"
-awk -F= '/^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=/ { print }' infra/compose/.env >"$backup_set/compose-env-paths-only.txt"
-[ "$(wc -l <"$backup_set/compose-env-paths-only.txt")" -eq 8 ]
+awk -F= '/^(CURSOR_HMAC_KEY_FILE|POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=/ { print }' infra/compose/.env >"$backup_set/compose-env-paths-only.txt"
+[ "$(wc -l <"$backup_set/compose-env-paths-only.txt")" -eq 9 ]
 awk -F= '/^(POSTGRES_DB|POSTGRES_PORT|KAFKA_PORT|REDIS_PORT|MINIO_API_PORT|MINIO_CONSOLE_PORT|OPA_PORT|AI_PORT|CORE_PORT|AI_LOG_LEVEL|APP_VERSION|OBJECT_STORAGE_BUCKET)=/ { print }' infra/compose/.env >"$backup_set/compose-env-nonsecret.txt"
 [ "$(wc -l <"$backup_set/compose-env-nonsecret.txt")" -eq 12 ]
 expected_nonsecret_keys=$'AI_LOG_LEVEL\nAI_PORT\nAPP_VERSION\nCORE_PORT\nKAFKA_PORT\nMINIO_API_PORT\nMINIO_CONSOLE_PORT\nOBJECT_STORAGE_BUCKET\nOPA_PORT\nPOSTGRES_DB\nPOSTGRES_PORT\nREDIS_PORT'
@@ -759,7 +759,7 @@ test -f "$backup_set/COMPLETE"
 
 ## 隔离恢复准备
 
-恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 只含指向独立 secret escrow 副本的八个路径和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。
+恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 只含指向独立 secret escrow 副本的九个路径和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。恢复的 `cursor-hmac-key` 必须是 escrow 中与恢复点匹配的 64 字符 ASCII hex；使用新 key 会安全地使备份时点前的 cursor 失效，但必须作为恢复决策记录。
 
 Windows 初始化后先验证所选 `$RestoreSet`，再验证 secret、project 和端口隔离。以下块不启动容器：
 
@@ -867,7 +867,7 @@ $kafkaDisposition = [IO.File]::ReadAllText((Join-Path $RestoreSet 'kafka-disposi
 if ($kafkaDisposition -eq 'cold-archive') { if ($inventory -notcontains 'kafka-data-cold.tar.gz') { throw 'Kafka cold-archive disposition 缺少归档' } } elseif ($kafkaDisposition -eq 'metadata-only') { if ($inventory -contains 'kafka-data-cold.tar.gz') { throw 'Kafka metadata-only disposition 含归档' } } else { throw 'Kafka disposition 无效' }
 
 function Read-OccEnv([string]$Path) {
-  $allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+  $allowed = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
   $result = @{}
   Get-Content -LiteralPath $Path | ForEach-Object {
     if ($_ -and -not $_.StartsWith('#')) {
@@ -886,7 +886,7 @@ if (@($BackupNonSecretConfig.Keys).Count -ne 12) { throw '备份非秘密配置�
 foreach ($key in 'POSTGRES_DB','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET') {
   if (-not $BackupNonSecretConfig.ContainsKey($key) -or $RestoreConfig[$key] -ne $BackupNonSecretConfig[$key]) { throw "恢复配置与备份时点不一致：$key" }
 }
-$secretKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$secretKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
 $rootItem = Get-Item -LiteralPath $RestoreSecretRoot -Force
 if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '恢复 secret root 不能是 reparse point' }
 $rootPrefix = $RestoreSecretRoot.TrimEnd('\') + '\'
@@ -1035,7 +1035,7 @@ kafka_disposition=$(tr -d '\r\n' <"$restore_set/kafka-disposition.txt")
 case "$kafka_disposition" in cold-archive) printf '%s\n' "${inventory[@]}" | grep -Fqx kafka-data-cold.tar.gz;; metadata-only) ! printf '%s\n' "${inventory[@]}" | grep -Fqx kafka-data-cold.tar.gz;; *) exit 1;; esac
 
 declare -A allowed=() production_config=() restore_config=() seen_secret_paths=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 read_occ_env() {
   local path=$1 target_name=$2 key value
   local -n target=$target_name
@@ -1059,7 +1059,7 @@ secret_link_output=$(find "$restore_secret_root" -type l -print -quit 2>&1); sec
 set -e
 [ "$secret_link_exit" -eq 0 ]
 [ -z "$secret_link_output" ] || { printf '恢复 secret root 下存在符号链接：%s\n' "$secret_link_output" >&2; exit 1; }
-secret_keys=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+secret_keys=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
 for key in "${secret_keys[@]}"; do
   raw=${restore_config[$key]:-}; case "$raw" in /*) ;; *) exit 1;; esac
   case "$raw" in */../*|*/..) printf '%s 原始路径含 traversal 段\n' "$key" >&2; exit 1;; esac

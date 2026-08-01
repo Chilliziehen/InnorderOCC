@@ -1,19 +1,20 @@
 # 密钥与配置管理
 
-本章给出当前 Compose 所需的八个文件型密钥、`.env.example` 的全部变量与默认值、权限、生成、验证和协调轮换方法。`.env` 只能保存密钥文件路径及非敏感覆盖值，不能保存密钥内容。
+本章给出当前 Compose 所需的九个文件型密钥、`.env.example` 的全部变量与默认值、权限、生成、验证和协调轮换方法。`.env` 只能保存密钥文件路径及非敏感覆盖值，不能保存密钥内容。
 
 ## 配置模型
 
-Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?message}`，未设置或空值会使配置失败。其余变量使用 `${VAR:-default}`，未设置或空字符串都采用 Compose 默认值。
+Compose 从 `infra/compose/.env` 插值，九个必填变量使用 `${VAR:?message}`，未设置或空值会使配置失败。其余变量使用 `${VAR:-default}`，未设置或空字符串都采用 Compose 默认值。
 
 **安全：** 密钥文件位于仓库外；每个文件只包含一个部署专用非空值，不带引号。文件路径应为稳定的绝对路径。
 
 ## `.env.example` 全部变量与默认值
 
-### 八个必填密钥路径
+### 九个必填密钥路径
 
 | 变量 | `.env.example` 值 | Compose 行为 |
 |---|---|---|
+| `CURSOR_HMAC_KEY_FILE` | 空 | 必填，无默认值 |
 | `POSTGRES_ADMIN_PASSWORD_FILE` | 空 | 必填，无默认值 |
 | `POSTGRES_FLYWAY_PASSWORD_FILE` | 空 | 必填，无默认值 |
 | `POSTGRES_RUNTIME_PASSWORD_FILE` | 空 | 必填，无默认值 |
@@ -44,10 +45,11 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 
 桶名必须为小写 S3 风格名称，不得以点开头或结尾，只能使用小写字母、数字、点和连字符。更改桶名不会迁移旧桶中的对象。
 
-## 八个文件、唯一性和消费者
+## 九个文件、唯一性和消费者
 
 | 主机文件用途 | Compose secret | 消费者 | 最终目标 |
 |---|---|---|---|
+| Cursor HMAC key | `cursor_hmac_key` | `core` | `occ.cursor.secret` |
 | PostgreSQL admin 密码 | `postgres_admin_password` | `postgres` | `/run/secrets/postgres_admin_password` |
 | PostgreSQL Flyway 密码 | `postgres_flyway_password` | `postgres`、`core` | 初始化文件；`spring.flyway.password` |
 | PostgreSQL runtime 密码 | `postgres_runtime_password` | `postgres`、`core` | 初始化文件；`spring.datasource.password` |
@@ -62,7 +64,7 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 - 三个 PostgreSQL 密码必须两两不同；初始化脚本会强制检查。
 - MinIO root 用户名与应用用户名必须不同。
 - MinIO root 密码与应用密码必须不同。
-- 运维基线要求八个值全部独立，禁止跨 PostgreSQL、Redis 和 MinIO 复用。
+- 运维基线要求九个值全部独立，禁止跨 cursor、PostgreSQL、Redis 和 MinIO 复用。
 - 用户名也按不可猜测密钥保管，不写入工单或命令历史。
 
 ## 安全创建目录和权限
@@ -121,6 +123,7 @@ SELinux/AppArmor 或 rootless Docker 环境还需验证 Engine 对文件的实�
 ```powershell
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
 $spec = @(
+  @('cursor-hmac-key', 32)
   @('postgres-admin-password', 32)
   @('postgres-flyway-password', 32)
   @('postgres-runtime-password', 32)
@@ -153,6 +156,7 @@ set +x
 umask 077
 : "${OCC_SECRET_ROOT:?必须设置 OCC_SECRET_ROOT}"
 secret_root=$(realpath "$OCC_SECRET_ROOT")
+openssl rand -hex 32 >"$secret_root/cursor-hmac-key"
 openssl rand -hex 32 >"$secret_root/postgres-admin-password"
 openssl rand -hex 32 >"$secret_root/postgres-flyway-password"
 openssl rand -hex 32 >"$secret_root/postgres-runtime-password"
@@ -164,19 +168,19 @@ openssl rand -hex 32 >"$secret_root/minio-app-password"
 chmod 0600 "$secret_root"/*
 ```
 
-**验证：** 预期文件名必须精确匹配以下八个名称，不能有缺项、额外项、目录或符号链接：`postgres-admin-password`、`postgres-flyway-password`、`postgres-runtime-password`、`redis-password`、`minio-root-user`、`minio-root-password`、`minio-app-user`、`minio-app-password`。每个文件只能有一个非空逻辑值；拒绝首尾空白、换行形成的多行值以及首尾单引号/双引号。两个 MinIO 用户名至少 16 个字符，六个密码至少 32 个字符；八个值全部互异。检查只输出通过结论，不输出值或散列。
+**验证：** 预期文件名必须精确匹配以下九个名称，不能有缺项、额外项、目录或符号链接：`cursor-hmac-key`、`postgres-admin-password`、`postgres-flyway-password`、`postgres-runtime-password`、`redis-password`、`minio-root-user`、`minio-root-password`、`minio-app-user`、`minio-app-password`。每个文件只能有一个非空逻辑值；拒绝首尾空白、换行形成的多行值以及首尾单引号/双引号。cursor key 必须是 `^[0-9a-f]{64}$` 的 ASCII hex，即 32 个随机字节；两个 MinIO 用户名至少 16 个字符，六个密码至少 32 个字符；九个值全部互异。检查只输出通过结论，不输出值或散列。
 
 Windows 目录与文件 ACL 应关闭继承，只允许当前部署身份、`SYSTEM` 和本机 Administrators；目录可由当前身份或本机 Administrators 所有。若 Docker 使用另一个已批准服务 SID，应先将该 SID 加入脚本的允许列表并记录审批，不能放宽为普通用户组。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
-$expectedNames = @('postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password')
-$minimumLengths = @(32,32,32,32,16,32,16,32)
+$expectedNames = @('cursor-hmac-key','postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password')
+$minimumLengths = @(64,32,32,32,32,16,32,16,32)
 $minimumByName = @{}
 for ($index = 0; $index -lt $expectedNames.Count; $index++) { $minimumByName[$expectedNames[$index]] = $minimumLengths[$index] }
 $entries = @(Get-ChildItem -LiteralPath $secretRoot -Force)
-if ($entries.Count -ne 8 -or (Compare-Object $expectedNames @($entries.Name))) { throw '密钥目录必须精确包含八个预期文件' }
+if ($entries.Count -ne 9 -or (Compare-Object $expectedNames @($entries.Name))) { throw '密钥目录必须精确包含九个预期文件' }
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $systemSid = 'S-1-5-18'
 $adminSid = 'S-1-5-32-544'
@@ -199,6 +203,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($value) -or $value -match '[\r\n]' -or $value -ne $value.Trim()) { throw "$name 必须只有一个无首尾空白的非空值" }
     if ($value.StartsWith("'") -or $value.EndsWith("'") -or $value.StartsWith('"') -or $value.EndsWith('"')) { throw "$name 不能带包围引号" }
     if ($value.Length -lt $minimumByName[$name]) { throw "$name 长度低于基线" }
+    if ($name -eq 'cursor-hmac-key' -and $value -notmatch '^[0-9a-f]{64}$') { throw 'cursor-hmac-key 必须是 32 随机字节的 ASCII hex' }
     $acl = Get-Acl -LiteralPath $path
     if (-not $acl.AreAccessRulesProtected) { throw "$name 仍继承 ACL" }
     $allowSids = @($acl.Access | Where-Object AccessControlType -eq 'Allow' | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
@@ -211,21 +216,21 @@ try {
 } finally {
   $sha.Dispose()
 }
-if (($hashes | Sort-Object -Unique).Count -ne 8) { throw '八个密钥值必须全部互异' }
-Write-Output '八个 Windows 密钥文件及 ACL 验证通过'
+if (($hashes | Sort-Object -Unique).Count -ne 9) { throw '九个密钥值必须全部互异' }
+Write-Output '九个 Windows 密钥文件及 ACL 验证通过'
 ```
 
 ```bash
 set -euo pipefail
 : "${OCC_SECRET_ROOT:?必须设置 OCC_SECRET_ROOT}"
 secret_root=$(realpath "$OCC_SECRET_ROOT")
-expected=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
-minimum=(32 32 32 32 16 32 16 32)
+expected=(cursor-hmac-key postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+minimum=(64 32 32 32 32 16 32 16 32)
 test "$(stat -c '%u' "$secret_root")" -eq "$(id -u)"
 test "$(stat -c '%a' "$secret_root")" = 700
 mapfile -t entries < <(find "$secret_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
-test "${#entries[@]}" -eq 8
+test "${#entries[@]}" -eq 9
 test "$(printf '%s\n' "${entries[@]}")" = "$(printf '%s\n' "${wanted[@]}")"
 hashes=()
 for index in "${!expected[@]}"; do
@@ -241,12 +246,13 @@ for index in "${!expected[@]}"; do
   test "$value" = "$trimmed"
   case "$value" in \"*|*\"|\'*|*\') exit 1;; esac
   test "${#value}" -ge "${minimum[$index]}"
+  if [ "${expected[$index]}" = cursor-hmac-key ]; then [[ $value =~ ^[0-9a-f]{64}$ ]] || exit 1; fi
   # Hash the logical value after read removed the single accepted terminal newline.
   hashes+=("$(printf '%s' "$value" | sha256sum | awk '{print $1}')")
   unset value trimmed
 done
-test "$(printf '%s\n' "${hashes[@]}" | sort -u | wc -l)" -eq 8
-printf '八个 Linux 密钥文件、所有者和 0600 权限验证通过\n'
+test "$(printf '%s\n' "${hashes[@]}" | sort -u | wc -l)" -eq 9
+printf '九个 Linux 密钥文件、所有者和 0600 权限验证通过\n'
 ```
 
 散列也属于敏感元数据，不应打印或长期写入普通工单。Compose `config` 只完成插值和结构渲染，不证明这些源文件存在、是普通文件、内容有效或权限安全；必须先运行本节验证。
@@ -260,6 +266,7 @@ printf '八个 Linux 密钥文件、所有者和 0600 权限验证通过\n'
 ```powershell
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
 $lines = @(
+  'CURSOR_HMAC_KEY_FILE=' + (Join-Path $secretRoot 'cursor-hmac-key')
   'POSTGRES_ADMIN_PASSWORD_FILE=' + (Join-Path $secretRoot 'postgres-admin-password')
   'POSTGRES_FLYWAY_PASSWORD_FILE=' + (Join-Path $secretRoot 'postgres-flyway-password')
   'POSTGRES_RUNTIME_PASSWORD_FILE=' + (Join-Path $secretRoot 'postgres-runtime-password')
@@ -291,6 +298,7 @@ $lines = @(
 secret_root=$(realpath "$OCC_SECRET_ROOT")
 umask 077
 {
+  printf 'CURSOR_HMAC_KEY_FILE=%s/cursor-hmac-key\n' "$secret_root"
   printf 'POSTGRES_ADMIN_PASSWORD_FILE=%s/postgres-admin-password\n' "$secret_root"
   printf 'POSTGRES_FLYWAY_PASSWORD_FILE=%s/postgres-flyway-password\n' "$secret_root"
   printf 'POSTGRES_RUNTIME_PASSWORD_FILE=%s/postgres-runtime-password\n' "$secret_root"
@@ -310,7 +318,7 @@ chmod 0600 infra/compose/.env
 
 ### 非敏感值约束
 
-Compose 插值只选择字符串和默认值，不验证端口范围、端口冲突、AI 日志级别、数据库名、版本或完整桶规则。以下 Windows/Bash 验证器还把 `.env.example` 的 20 个变量作为精确允许集合：八个路径 key 必须出现，十二个可选 key 可以缺失或为空，重复 key、未知 key 和 literal credential key 一律失败。应用/初始化脚本会在不同阶段拒绝部分错误值，因此必须在启动前统一验证：
+Compose 插值只选择字符串和默认值，不验证端口范围、端口冲突、AI 日志级别、数据库名、版本或完整桶规则。以下 Windows/Bash 验证器还把 `.env.example` 的 21 个变量作为精确允许集合：九个路径 key 必须出现，十二个可选 key 可以缺失或为空，重复 key、未知 key 和 literal credential key 一律失败。应用/初始化脚本会在不同阶段拒绝部分错误值，因此必须在启动前统一验证：
 
 - `AI_LOG_LEVEL` 只能是 `fatal`、`error`、`warn`、`info`、`debug`、`trace`，默认 `info`，区分大小写。
 - 八个主机端口必须是 `1-65535` 的十进制整数，彼此不同，并在启动前未被监听。
@@ -322,8 +330,8 @@ Windows PowerShell 5.1 的预启动验证：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
-$requiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$allowedKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$requiredPathKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
 $config = @{}
 Get-Content -LiteralPath 'infra/compose/.env' | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -340,6 +348,7 @@ foreach ($key in $requiredPathKeys) { if (-not $config.ContainsKey($key) -or [st
 function Effective([string]$Name, [string]$Default) { if ([string]::IsNullOrEmpty($config[$Name])) { $Default } else { $config[$Name] } }
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
 $secretPathNames = [ordered]@{
+  CURSOR_HMAC_KEY_FILE='cursor-hmac-key'
   POSTGRES_ADMIN_PASSWORD_FILE='postgres-admin-password'; POSTGRES_FLYWAY_PASSWORD_FILE='postgres-flyway-password'
   POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; REDIS_PASSWORD_FILE='redis-password'
   MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'
@@ -378,8 +387,8 @@ Linux Bash 的预启动验证：
 set -euo pipefail
 declare -A config=()
 declare -A allowed=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
-required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue
@@ -392,8 +401,8 @@ while IFS='=' read -r key value || [ -n "$key" ]; do
 done <infra/compose/.env
 for key in "${required_paths[@]}"; do [ -n "${config[$key]:-}" ] || exit 1; done
 secret_root=$(realpath "$OCC_SECRET_ROOT")
-path_names=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
-file_names=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+path_names=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+file_names=(cursor-hmac-key postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
 for index in "${!path_names[@]}"; do
   name=${path_names[$index]}
   [ "${config[$name]:-}" = "$secret_root/${file_names[$index]}" ] || exit 1
@@ -450,7 +459,7 @@ npm run test:infra
 - 服务恰好为十一个，三个一次性服务保留 `restart: "no"`。
 - 只有 `host-gateway` 有 `ports`，且八个绑定都以 `127.0.0.1` 开头。
 - `backend` 仍为 internal，只有网关还连接 `host-access`。
-- 四个卷名不变；八个 secret 的 `file` 指向预期绝对路径。
+- 四个卷名不变；九个 secret 的 `file` 指向预期绝对路径。
 - Core 的数据库用户是 `innorder_runtime`，Flyway 用户是 `innorder_flyway`。
 - Core config tree 的五个目标文件名与 Spring 属性完全一致。
 - `APP_VERSION`、日志级别、桶名和端口覆盖符合变更单。
@@ -479,6 +488,89 @@ npm run test:infra
 每次轮换都应：创建已验证备份；确认维护窗口；生成新的 staged 文件；记录受影响消费者；更新服务端凭据；原子替换受管文件；强制重建消费者；执行验证；在观察期后安全销毁旧值。不要覆盖唯一旧文件后才设计回退。
 
 任何轮换先在同一终端执行[第 11 章会话初始化](11-command-reference-and-checklists.md)，再持有项目全局锁直到服务端、正式文件、消费者和回退验证全部关闭。Windows 执行 `$RotationLifecycleLock = Enter-LifecycleLock`；Linux 执行 `acquire_lifecycle_lock`。锁冲突时停止，不得删除锁文件或换用按轮换编号命名的锁。正常完成后 Windows 执行 `$RotationLifecycleLock.Dispose()`，Linux 执行 `release_lifecycle_lock`；异常退出由进程释放锁，现场保持不变。
+
+### Cursor HMAC key
+
+Cursor key 没有外部服务端状态，只由 Core 读取。轮换会立即使旧 cursor 无效，因此在维护窗口执行；不要与 TTL 变更、升级或其他凭据轮换合并。操作前设置 `OCC_ROTATION_ROOT` 和 `OCC_CURSOR_HMAC_STAGED`，staged 文件必须先通过本章普通文件、权限和 `^[0-9a-f]{64}$` 内容检查，并与当前值不同。
+
+Windows PowerShell 5.1 在项目生命周期锁内复制回退文件、同目录原子替换并验证 Core；失败时仍持锁恢复旧文件：
+
+```powershell
+$RotationLifecycleLock = Enter-LifecycleLock
+try {
+  $formal = Join-Path (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path 'cursor-hmac-key'
+  $staged = (Resolve-Path -LiteralPath $env:OCC_CURSOR_HMAC_STAGED).Path
+  $rotationRoot = (Resolve-Path -LiteralPath $env:OCC_ROTATION_ROOT).Path
+  $old = Join-Path $rotationRoot 'cursor-hmac-key.old'
+  $new = "$formal.new"
+  $value = [IO.File]::ReadAllText($staged)
+  if ($value -notmatch '^[0-9a-f]{64}$' -or $value -eq [IO.File]::ReadAllText($formal)) { throw 'staged cursor key 无效或未变化' }
+  $value = $null
+  Copy-Item -LiteralPath $formal -Destination $old -Force
+  Copy-Item -LiteralPath $staged -Destination $new -Force
+  & icacls.exe $new /inheritance:r | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw '关闭 staged cursor key ACL 继承失败' }
+  & icacls.exe $new /grant:r "$($env:USERNAME):F" 'SYSTEM:F' '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw '设置 staged cursor key ACL 失败' }
+  [IO.File]::Replace($new, $formal, $null, $true)
+  try {
+    & docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up -d --no-deps --force-recreate core
+    if ($LASTEXITCODE -ne 0) { throw 'Core 重建失败' }
+    & docker compose --env-file infra/compose/.env -f infra/compose/compose.yml exec -T core curl -fsS http://localhost:8080/actuator/health/readiness
+    if ($LASTEXITCODE -ne 0) { throw 'Core readiness 失败' }
+  } catch {
+    Copy-Item -LiteralPath $old -Destination "$formal.rollback" -Force
+    & icacls.exe "$formal.rollback" /inheritance:r | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw '关闭 cursor key 回退 ACL 继承失败' }
+    & icacls.exe "$formal.rollback" /grant:r "$($env:USERNAME):F" 'SYSTEM:F' '*S-1-5-32-544:F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw '设置 cursor key 回退 ACL 失败' }
+    [IO.File]::Replace("$formal.rollback", $formal, $null, $true)
+    & docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up -d --no-deps --force-recreate core
+    if ($LASTEXITCODE -ne 0) { throw 'cursor key 回退后 Core 重建失败；保留全部证据并升级事件' }
+    & docker compose --env-file infra/compose/.env -f infra/compose/compose.yml exec -T core curl -fsS http://localhost:8080/actuator/health/readiness
+    if ($LASTEXITCODE -ne 0) { throw 'cursor key 回退后 Core readiness 失败；保留全部证据并升级事件' }
+    throw
+  }
+} finally {
+  if ($RotationLifecycleLock) { $RotationLifecycleLock.Dispose() }
+}
+```
+
+Linux 使用同一全局锁、同目录 `mv` 和独立回退副本：
+
+```bash
+set -euo pipefail
+set +x
+acquire_lifecycle_lock
+trap release_lifecycle_lock EXIT
+: "${OCC_CURSOR_HMAC_STAGED:?必须设置 OCC_CURSOR_HMAC_STAGED}"
+formal="$OCC_SECRET_ROOT/cursor-hmac-key"
+staged=$(realpath "$OCC_CURSOR_HMAC_STAGED")
+rotation_root=$(realpath "$OCC_ROTATION_ROOT")
+old="$rotation_root/cursor-hmac-key.old"
+IFS= read -r value <"$staged" || test -n "$value"
+[[ $value =~ ^[0-9a-f]{64}$ ]]
+IFS= read -r current <"$formal" || test -n "$current"
+[ "$value" != "$current" ]
+unset value current
+install -m 0600 "$formal" "$old"
+install -m 0600 "$staged" "$formal.new"
+mv -f -- "$formal.new" "$formal"
+if ! docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up -d --no-deps --force-recreate core ||
+   ! docker compose --env-file infra/compose/.env -f infra/compose/compose.yml exec -T core curl -fsS http://localhost:8080/actuator/health/readiness; then
+  install -m 0600 "$old" "$formal.rollback"
+  mv -f -- "$formal.rollback" "$formal"
+  if ! docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up -d --no-deps --force-recreate core ||
+     ! docker compose --env-file infra/compose/.env -f infra/compose/compose.yml exec -T core curl -fsS http://localhost:8080/actuator/health/readiness; then
+    printf 'cursor key 回退验证失败；保留全部证据并升级事件\n' >&2
+  fi
+  exit 1
+fi
+release_lifecycle_lock
+trap - EXIT
+```
+
+成功后在批准观察期内保留受限旧文件；确认新 cursor 签发、翻页和新 key 重启稳定后销毁旧值。旧 cursor 在轮换后返回标准 400，客户端必须从第一页重新查询。回退只恢复签名验证能力，不恢复轮换期间已发出的新 cursor。
 
 ### PostgreSQL 三个角色
 
@@ -891,7 +983,7 @@ if ! rm -f -- "$rotation_env"; then printf '临时 env 清理失败，保留证�
 - 在 `.env`、Compose、Dockerfile、源码、Markdown、工单或聊天中写密钥值。
 - 把密钥放入仓库、临时目录、网络共享、同步盘、容器镜像层或 shell 历史。
 - 在命令行参数、进程环境、调试 trace、CI 日志或 `docker inspect` 可见字段中传递值。
-- 复用八个值，或让 MinIO 应用账号等于 root 账号。
+- 复用九个值，或让 MinIO 应用账号等于 root 账号。
 - 授予普通用户、`Everyone` 或世界可读权限。
 - 通过关闭 TLS 校验、改用不受控镜像源或开放公网端口解决部署问题。
 - 只编辑密钥文件而不更新 PostgreSQL/MinIO 持久凭据或不重建消费者。

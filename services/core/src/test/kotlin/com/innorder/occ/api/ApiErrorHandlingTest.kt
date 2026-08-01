@@ -273,6 +273,7 @@ class ApiErrorHandlingTest {
             Triple("/test/invalid-expected-version", 400, "OCC-API-VALIDATION"),
             Triple("/test/invalid-command-request", 400, "OCC-API-VALIDATION"),
             Triple("/test/invalid-command-metadata", 400, "OCC-COMMAND-METADATA"),
+            Triple("/test/invalid-cursor", 400, "OCC-API-REQUEST"),
             Triple("/test/idempotency-conflict", 409, "OCC-COMMAND-IDEMPOTENCY-CONFLICT"),
             Triple("/test/idempotency-in-progress", 409, "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS"),
             Triple("/test/idempotency-expired", 409, "OCC-COMMAND-IDEMPOTENCY-EXPIRED"),
@@ -313,6 +314,23 @@ class ApiErrorHandlingTest {
         val problem = objectMapper.readTree(result.response.contentAsString)
         assertThat(problem["code"].textValue()).isEqualTo("OCC-COMMAND-IDEMPOTENCY-EXPIRED")
         assertThat(problem["detail"].textValue()).isEqualTo("Use a new idempotency key.")
+    }
+
+    @Test
+    fun `invalid cursor maps to generic request problem without crypto or parse details`() {
+        withFailureLogs { events ->
+            val result = mockMvc.get("/test/invalid-cursor").andExpect {
+                status { isBadRequest() }
+                content { contentType(MediaType.APPLICATION_PROBLEM_JSON) }
+                jsonPath("$.code") { value("OCC-API-REQUEST") }
+                jsonPath("$.title") { value("Bad Request") }
+                jsonPath("$.detail") { doesNotExist() }
+            }.andReturn()
+
+            assertStrictProblem(result.response.contentAsString)
+            assertSafe(result.response.contentAsString, "cursor", "HmacSHA256", "signature", "parse", "Base64")
+            assertThat(events).isEmpty()
+        }
     }
 
     @Test
@@ -542,6 +560,9 @@ class ApiErrorHandlingTest {
 
         @GetMapping("/invalid-command-metadata")
         fun invalidCommandMetadata(): Nothing = throw InvalidCommandMetadataException()
+
+        @GetMapping("/invalid-cursor")
+        fun invalidCursor(): Nothing = throw InvalidCursorException()
 
         @GetMapping("/idempotency-conflict")
         fun idempotencyConflict(): Nothing = throw IdempotencyConflictException()

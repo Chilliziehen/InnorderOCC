@@ -16,7 +16,7 @@
 
 ## Windows PowerShell 5.1 会话与有效配置
 
-每个新会话先运行以下块。它只输出非敏感有效端口和数据库/桶名，不输出八个密钥路径。
+每个新会话先运行以下块。它只输出非敏感有效端口和数据库/桶名，不输出九个密钥路径。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -46,8 +46,8 @@ function Enter-LifecycleLock {
     throw '另一个受管 OCC 生命周期操作持有项目全局锁；禁止并发变更'
   }
 }
-$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
-$RequiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$AllowedKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$RequiredPathKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
 $Config = @{}
 Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -60,7 +60,7 @@ Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   }
 }
 foreach ($key in $RequiredPathKeys) { if (-not $Config.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($Config[$key])) { throw "缺少必填路径 key: $key" } }
-$SecretPathNames = [ordered]@{ POSTGRES_ADMIN_PASSWORD_FILE='postgres-admin-password'; POSTGRES_FLYWAY_PASSWORD_FILE='postgres-flyway-password'; POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; REDIS_PASSWORD_FILE='redis-password'; MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'; MINIO_APP_USER_FILE='minio-app-user'; MINIO_APP_PASSWORD_FILE='minio-app-password' }
+$SecretPathNames = [ordered]@{ CURSOR_HMAC_KEY_FILE='cursor-hmac-key'; POSTGRES_ADMIN_PASSWORD_FILE='postgres-admin-password'; POSTGRES_FLYWAY_PASSWORD_FILE='postgres-flyway-password'; POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; REDIS_PASSWORD_FILE='redis-password'; MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'; MINIO_APP_USER_FILE='minio-app-user'; MINIO_APP_PASSWORD_FILE='minio-app-password' }
 foreach ($entry in $SecretPathNames.GetEnumerator()) {
   if ($Config[$entry.Key] -ne (Join-Path $SecretRoot $entry.Value)) { throw "$($entry.Key) 未指向 OCC_SECRET_ROOT 下的预期文件" }
   $source = Get-Item -LiteralPath $Config[$entry.Key] -Force
@@ -111,8 +111,8 @@ release_lifecycle_lock() {
   if [ -n "$lifecycle_lock_fd" ]; then flock -u "$lifecycle_lock_fd"; exec {lifecycle_lock_fd}>&-; lifecycle_lock_fd=; fi
 }
 declare -A config=() allowed=() seen=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
-required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue
@@ -123,8 +123,8 @@ while IFS='=' read -r key value || [ -n "$key" ]; do
   config[$key]=$value
 done <infra/compose/.env
 for key in "${required_paths[@]}"; do [ -n "${config[$key]:-}" ] || exit 1; done
-path_names=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
-file_names=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+path_names=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+file_names=(cursor-hmac-key postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
 for index in "${!path_names[@]}"; do name=${path_names[$index]}; [ "${config[$name]}" = "$secret_root/${file_names[$index]}" ] && [ -f "${config[$name]}" ] && [ ! -L "${config[$name]}" ] && [ -s "${config[$name]}" ] || exit 1; done
 names=(POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT); defaults=(5432 9092 6379 9000 9001 8181 3100 8080)
 for index in "${!names[@]}"; do name=${names[$index]}; port=${config[$name]:-${defaults[$index]}}; [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && [ -z "${seen[$port]:-}" ] || exit 1; seen[$port]=1; done
@@ -744,7 +744,7 @@ trap - EXIT
 ## 每次启动检查单
 
 - [ ] Docker context/Engine、仓库、Compose项目和生命周期所有者正确；无并发 systemd/Docker job。
-- [ ] `.env`/八密钥路径、权限和 `config --quiet` 通过；未输出路径或值。
+- [ ] `.env`/九密钥路径、权限和 `config --quiet` 通过；未输出路径或值。
 - [ ] 当前/目标 image ID、revision、配置和迁移变更已知；需要时已有备份/审批。
 - [ ] 使用精确启动确认值；命令零退出不单独作为成功结论。
 - [ ] 两 one-shot、八 health、HTTP/TCP/协议和 restart count通过；另行确认 Core system status顶层及七个规范组件全部为 `READY`，不以 readiness替代。
@@ -848,7 +848,7 @@ trap - EXIT
 - [ ] 完成[第 10 章安全检查单](10-security-hardening.md)，威胁模型和例外仍与当前用途一致。
 - [ ] 回环/internal网络、防火墙、无远程转发和无后端直曝有主机与Compose双重证据。
 - [ ] Docker=root等价风险、账号分离、最小权限、ACL/mode/MAC和离职撤销通过。
-- [ ] 八密钥互异、最小消费者和协调轮换通过；除第 10 章已记录并接受的 Redis长运行 argv残余风险外，无 env/argv/log/support泄密，且支持包不收集进程命令行。
+- [ ] 九密钥互异、最小消费者和协调轮换通过；除第 10 章已记录并接受的 Redis长运行 argv残余风险外，无 env/argv/log/support泄密，且支持包不收集进程命令行。
 - [ ] npm/Electron/Gradle/image/OPA供应链、漏洞/补丁和实际运行身份通过。
 - [ ] 审计、加密备份、off-host WORM、恢复访问和季度演练通过。
 - [ ] 远程访问、HA或Kubernetes没有被未评审地扩展为“支持”。
