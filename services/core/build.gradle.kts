@@ -1,3 +1,5 @@
+import org.gradle.process.CommandLineArgumentProvider
+
 plugins {
     id("org.springframework.boot")
     id("io.spring.dependency-management")
@@ -56,10 +58,30 @@ tasks.processResources {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
-    inputs.property(
-        "innorderStrictDatabaseTests",
-        providers.environmentVariable("INNORDER_STRICT_DATABASE_TESTS").orElse("0"),
-    )
+    val strictDatabaseTests = providers.environmentVariable("INNORDER_STRICT_DATABASE_TESTS").orElse("0")
+    val verifyDatabaseSelection = providers.environmentVariable("INNORDER_VERIFY_DATABASE_TEST_SELECTION").orElse("0")
+    val requestedArguments = gradle.startParameter.taskRequests.flatMap { it.args }
+    val requestedTestPatterns = buildList {
+        requestedArguments.forEachIndexed { index, argument ->
+            when {
+                argument == "--tests" && index + 1 < requestedArguments.size -> add(requestedArguments[index + 1])
+                argument.startsWith("--tests=") -> add(argument.substringAfter('='))
+            }
+        }
+    }
+    val evidenceDatabaseSelected = requestedTestPatterns.any {
+        it.contains("EvidenceRiskResourcePostgreSqlIntegrationTest")
+    }
+    val evidenceDatabaseRequired = providers.provider {
+        strictDatabaseTests.get() == "1" || evidenceDatabaseSelected
+    }
+
+    inputs.property("innorderStrictDatabaseTests", strictDatabaseTests)
+    inputs.property("innorderVerifyDatabaseTestSelection", verifyDatabaseSelection)
+    inputs.property("innorderEvidenceDatabaseSelected", evidenceDatabaseSelected)
+    jvmArgumentProviders.add(CommandLineArgumentProvider {
+        listOf("-Dinnorder.evidence-risk-resource-postgresql.required=${evidenceDatabaseRequired.get()}")
+    })
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
