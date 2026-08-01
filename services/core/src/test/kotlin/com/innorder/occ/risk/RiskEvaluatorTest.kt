@@ -3,140 +3,195 @@ package com.innorder.occ.risk
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
+import java.util.UUID
 
 class RiskEvaluatorTest {
     private val evaluator = RiskEvaluator()
 
     @Test
-    fun `strict package rule parses immutable governance metadata and sealed triggers`() {
-        val rule = rule(
+    fun `strict package rule parses persistence identity and optional escalation effects`() {
+        val parsed = rule(
             """{"type":"CONSECUTIVE_RETURNS"}""",
-            extra = """"severity":"RED","sla":"PT4H","ownerRelationship":"TEACHER","escalationSteps":[{"after":"PT2H","ownerRelationship":"PROGRAM_LEAD"}],"thresholdKind":"ELAPSED"""",
+            extra = """"severity":"RED","sla":"PT4H","ownerRelationship":"TEACHER","escalationSteps":[{"after":"PT2H","severity":"RED"},{"after":"PT3H","ownerRelationship":"PROGRAM_LEAD"},{"after":"PT4H","ownerRelationship":"DIRECTOR","severity":"RED"}],"thresholdKind":"ELAPSED"""",
         )
 
-        assertThat(rule.packageId).isEqualTo("embedded-medical-device-pilot")
-        assertThat(rule.packageVersion).isEqualTo("1.0.0")
-        assertThat(rule.severity).isEqualTo(RiskSeverity.RED)
-        assertThat(rule.sla).isEqualTo(java.time.Duration.ofHours(4))
-        assertThat(rule.ownerRelationship).isEqualTo("TEACHER")
-        assertThat(rule.escalationSteps.single().ownerRelationship).isEqualTo("PROGRAM_LEAD")
-        assertThat(rule.thresholdKind).isEqualTo(ThresholdKind.ELAPSED)
-        assertThat(rule.zone.id).isEqualTo("Europe/Amsterdam")
-        assertThat(rule.calendar.version).isEqualTo("nl-school-2026-v1")
-        assertThat(rule.trigger).isEqualTo(RiskTrigger.ConsecutiveReturns(2))
+        assertThat(parsed.ruleDefinitionId).isEqualTo(RULE_DEFINITION_ID)
+        assertThat(parsed.packageVersion).isEqualTo("1.0.0")
+        assertThat(parsed.severity).isEqualTo(RiskSeverity.RED)
+        assertThat(parsed.escalationSteps).containsExactly(
+            EscalationStep(Duration.ofHours(2), severity = RiskSeverity.RED),
+            EscalationStep(Duration.ofHours(3), ownerRelationship = "PROGRAM_LEAD"),
+            EscalationStep(Duration.ofHours(4), "DIRECTOR", RiskSeverity.RED),
+        )
+        assertThat(parsed.trigger).isEqualTo(RiskTrigger.ConsecutiveReturns(2))
 
         assertThatThrownBy {
-            RiskRule.parse(ruleJson("""{"type":"EVIDENCE_FAILURE","unexpected":true}"""))
+            rule("""{"type":"EVIDENCE_FAILURE"}""", extra = metadata("[{\"after\":\"PT2H\"}]"))
+        }.isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy {
+            rule("""{"type":"EVIDENCE_FAILURE"}""", extra = metadata("[{\"after\":\"PT2H\",\"severity\":\"RED\",\"unknown\":true}]"))
         }.isInstanceOf(IllegalArgumentException::class.java)
     }
 
     @Test
-    fun `overdue critical work triggers exactly at due instant only while open and critical`() {
-        val rule = rule("""{"type":"OVERDUE_CRITICAL_WORK"}""")
+    fun `risk evaluation facts own ordered distinct UUID provenance`() {
+        val source = mutableListOf(FACT_2, FACT_1)
+        val snapshot = RiskEvaluationFacts(TARGET_ID, source, RiskFactValues.ConsecutiveReturns)
+        source.clear()
+
+        assertThat(snapshot.triggeringFactIds).containsExactly(FACT_2, FACT_1)
+        assertThatThrownBy {
+            RiskEvaluationFacts(TARGET_ID, listOf(FACT_1, FACT_1), RiskFactValues.ConsecutiveReturns)
+        }.isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun `decision contains exact V014 occurrence and risk provenance`() {
+        val decision = evaluate(
+            rule("""{"type":"INACTIVITY"}"""),
+            facts(RiskFactValues.Inactivity(Instant.parse("2026-05-25T10:00:00Z"))),
+            NOW,
+        )!!
+
+        assertThat(decision.ruleDefinitionId).isEqualTo(RULE_DEFINITION_ID)
+        assertThat(decision.targetEntityId).isEqualTo(TARGET_ID)
+        assertThat(decision.evaluatedAt).isEqualTo(NOW)
+        assertThat(decision.detectedAt).isEqualTo(NOW)
+        assertThat(decision.dueAt).isEqualTo(NOW.plus(Duration.ofHours(8)))
+        assertThat(decision.calendarVersion).isEqualTo("nl-school-2026-v1")
+        assertThat(decision.thresholdKind).isEqualTo(ThresholdKind.ELAPSED)
+        assertThat(decision.triggeringFactIds).containsExactly(FACT_1)
+        assertThat(decision.thresholdWindowIdentity).isEqualTo("INACTIVITY|threshold=2026-06-01T10:00:00Z")
+        assertThat(decision.reason).isEqualTo("INACTIVITY")
+    }
+
+    @Test
+    fun `all immediate and elapsed triggers retain threshold boundary semantics`() {
         val due = Instant.parse("2026-06-01T10:00:00Z")
+        val overdue = rule("""{"type":"OVERDUE_CRITICAL_WORK"}""")
+        assertThat(evaluate(overdue, facts(RiskFactValues.CriticalWork(due, true)), due.minusNanos(1))).isNull()
+        assertThat(evaluate(overdue, facts(RiskFactValues.CriticalWork(due, true)), due)).isNotNull()
+        assertThat(evaluate(overdue, facts(RiskFactValues.CriticalWork(due, true, due)), due)).isNull()
 
-        assertThat(evaluate(rule, RiskFact.CriticalWork("task-1", "work-v1", due, true), due.minusNanos(1))).isNull()
-        assertThat(evaluate(rule, RiskFact.CriticalWork("task-1", "work-v1", due, true), due)).isNotNull()
-        assertThat(evaluate(rule, RiskFact.CriticalWork("task-1", "work-v1", due, false), due)).isNull()
-        assertThat(evaluate(rule, RiskFact.CriticalWork("task-1", "work-v1", due, true, due), due)).isNull()
-    }
-
-    @Test
-    fun `consecutive returns defaults to two and triggers at exact threshold`() {
-        val rule = rule("""{"type":"CONSECUTIVE_RETURNS"}""")
-
-        assertThat(evaluate(rule, RiskFact.Returns("submission-1", "review-v1", 1), NOW)).isNull()
-        assertThat(evaluate(rule, RiskFact.Returns("submission-1", "review-v2", 2), NOW)).isNotNull()
-    }
-
-    @Test
-    fun `inactivity defaults to seven elapsed days across daylight saving time`() {
-        val rule = rule("""{"type":"INACTIVITY"}""")
+        val inactive = rule("""{"type":"INACTIVITY"}""")
         val lastActivity = Instant.parse("2026-03-22T09:00:00Z")
-        val threshold = lastActivity.plus(java.time.Duration.ofDays(7))
+        val sevenDays = lastActivity.plus(Duration.ofDays(7))
+        assertThat(evaluate(inactive, facts(RiskFactValues.Inactivity(lastActivity)), sevenDays.minusNanos(1))).isNull()
+        assertThat(evaluate(inactive, facts(RiskFactValues.Inactivity(lastActivity)), sevenDays)).isNotNull()
 
-        assertThat(evaluate(rule, RiskFact.Inactivity("process-1", "activity-v1", lastActivity), threshold.minusNanos(1))).isNull()
-        assertThat(evaluate(rule, RiskFact.Inactivity("process-1", "activity-v1", lastActivity), threshold)).isNotNull()
-        assertThat(threshold.atZone(rule.zone).hour).isEqualTo(11)
+        assertThat(evaluate(rule("""{"type":"EVIDENCE_FAILURE"}"""), facts(RiskFactValues.EvidenceFailure(true)), NOW)).isNotNull()
+        assertThat(evaluate(rule("""{"type":"EVIDENCE_FAILURE"}"""), facts(RiskFactValues.EvidenceFailure(false)), NOW)).isNull()
+        assertThat(evaluate(rule("""{"type":"MISSING_CRITICAL_EVIDENCE"}"""), facts(RiskFactValues.MissingEvidence(true, true)), NOW)).isNotNull()
+        assertThat(evaluate(rule("""{"type":"MISSING_CRITICAL_EVIDENCE"}"""), facts(RiskFactValues.MissingEvidence(false, true)), NOW)).isNull()
     }
 
     @Test
-    fun `blocker triggers only after two business days excluding weekend and package holiday`() {
-        val rule = rule(
-            """{"type":"BLOCKER_AGE"}""",
-            extra = """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":[],"thresholdKind":"BUSINESS"""",
-        )
-        val blocked = Instant.parse("2026-04-02T08:00:00Z") // Thursday 10:00 Amsterdam
-        val exactTwoBusinessDays = Instant.parse("2026-04-07T08:00:00Z") // Friday + Tuesday; Monday is holiday
+    fun `consecutive return occurrence uses threshold facts and survives count growth`() {
+        val rule = rule("""{"type":"CONSECUTIVE_RETURNS"}""")
+        assertThat(evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_1)), NOW)).isNull()
 
-        assertThat(evaluate(rule, RiskFact.Blocker("task-1", "blocker-v1", blocked), exactTwoBusinessDays)).isNull()
-        assertThat(evaluate(rule, RiskFact.Blocker("task-1", "blocker-v1", blocked), exactTwoBusinessDays.plusNanos(1))).isNotNull()
-        assertThat(evaluate(rule, RiskFact.Blocker("task-1", "blocker-v1", blocked, exactTwoBusinessDays), exactTwoBusinessDays.plusNanos(1))).isNull()
+        val atThreshold = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_1)), NOW)!!
+        val reordered = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_1, FACT_2)), NOW)!!
+        val grownStreak = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_1, FACT_3)), NOW.plusSeconds(60))!!
+        val newWindow = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_3)), NOW)!!
+        val newPackageVersion = evaluate(
+            RiskRule.parse(ruleJson("""{"type":"CONSECUTIVE_RETURNS"}""").replace("1.0.0", "1.0.1")),
+            facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_1)),
+            NOW,
+        )!!
+        val newCalendarVersion = evaluate(
+            RiskRule.parse(ruleJson("""{"type":"CONSECUTIVE_RETURNS"}""").replace("nl-school-2026-v1", "nl-school-2026-v2")),
+            facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_1)),
+            NOW,
+        )!!
+
+        assertThat(atThreshold.occurrenceKey).matches("^[0-9a-f]{64}${'$'}")
+        assertThat(atThreshold.triggeringFactIds).containsExactly(FACT_1, FACT_2)
+        assertThat(reordered.occurrenceKey).isEqualTo(atThreshold.occurrenceKey)
+        assertThat(grownStreak.occurrenceKey).isEqualTo(atThreshold.occurrenceKey)
+        assertThat(grownStreak.triggeringFactIds).containsExactly(FACT_1, FACT_2)
+        assertThat(newWindow.occurrenceKey).isNotEqualTo(atThreshold.occurrenceKey)
+        assertThat(newWindow.thresholdWindowIdentity).isNotEqualTo(atThreshold.thresholdWindowIdentity)
+        assertThat(newPackageVersion.occurrenceKey).isNotEqualTo(atThreshold.occurrenceKey)
+        assertThat(newCalendarVersion.occurrenceKey).isNotEqualTo(atThreshold.occurrenceKey)
     }
 
     @Test
-    fun `evidence failure and missing critical evidence trigger immediately`() {
-        val failureRule = rule("""{"type":"EVIDENCE_FAILURE"}""")
-        val missingRule = rule("""{"type":"MISSING_CRITICAL_EVIDENCE"}""")
+    fun `business calendar preserves local threshold time across DST`() {
+        val calendar = BusinessCalendar("nl-school-2026-v1", emptySet())
+        val fridayTenAmsterdam = Instant.parse("2026-03-27T09:00:00Z")
 
-        assertThat(evaluate(failureRule, RiskFact.EvidenceFailure("evidence-1", "scan-v1", true), NOW)).isNotNull()
-        assertThat(evaluate(failureRule, RiskFact.EvidenceFailure("evidence-1", "scan-v1", false), NOW)).isNull()
-        assertThat(evaluate(missingRule, RiskFact.MissingEvidence("task-1", "requirement-v1", true, true), NOW)).isNotNull()
-        assertThat(evaluate(missingRule, RiskFact.MissingEvidence("task-1", "requirement-v1", true, false), NOW)).isNull()
+        val mondayTenAmsterdam = calendar.thresholdAfter(fridayTenAmsterdam, 1, ZoneId.of("Europe/Amsterdam"))
+
+        assertThat(mondayTenAmsterdam).isEqualTo(Instant.parse("2026-03-30T08:00:00Z"))
+        assertThat(Duration.between(fridayTenAmsterdam, mondayTenAmsterdam)).isEqualTo(Duration.ofHours(71))
     }
 
     @Test
-    fun `resource conflict triggers from now through exact twenty four hour boundary`() {
+    fun `blocker excludes weekend and holiday and triggers strictly after boundary`() {
+        val rule = businessRule()
+        val blocked = Instant.parse("2026-04-02T08:00:00Z")
+        val exactBoundary = Instant.parse("2026-04-07T08:00:00Z")
+        val snapshot = facts(RiskFactValues.Blocker(blocked))
+
+        assertThat(evaluate(rule, snapshot, exactBoundary)).isNull()
+        assertThat(evaluate(rule, snapshot, exactBoundary.plusNanos(1))).isNotNull()
+    }
+
+    @Test
+    fun `resource conflict window includes exact lower and upper boundaries`() {
         val rule = rule("""{"type":"RESOURCE_CONFLICT"}""")
 
-        assertThat(evaluate(rule, RiskFact.ResourceConflict("reservation-1", "conflict-v1", NOW.minusNanos(1)), NOW)).isNull()
-        assertThat(evaluate(rule, RiskFact.ResourceConflict("reservation-1", "conflict-v1", NOW.plus(java.time.Duration.ofHours(24))), NOW)).isNotNull()
-        assertThat(evaluate(rule, RiskFact.ResourceConflict("reservation-1", "conflict-v1", NOW.plus(java.time.Duration.ofHours(24)).plusNanos(1)), NOW)).isNull()
+        assertThat(evaluate(rule, facts(RiskFactValues.ResourceConflict(NOW.minusNanos(1))), NOW)).isNull()
+        assertThat(evaluate(rule, facts(RiskFactValues.ResourceConflict(NOW)), NOW)).isNotNull()
+        assertThat(evaluate(rule, facts(RiskFactValues.ResourceConflict(NOW.plus(Duration.ofHours(24)))), NOW)).isNotNull()
+        assertThat(evaluate(rule, facts(RiskFactValues.ResourceConflict(NOW.plus(Duration.ofHours(24)).plusNanos(1))), NOW)).isNull()
     }
 
     @Test
-    fun `occurrence key is canonical stable and package version sensitive`() {
-        val fact = RiskFact.Returns("submission-1", "review-v2", 2)
-        val first = evaluate(rule("""{"type":"CONSECUTIVE_RETURNS"}"""), fact, NOW)!!
-        val repeated = evaluate(rule("""{"type":"CONSECUTIVE_RETURNS"}"""), fact, NOW.plusSeconds(60))!!
-        val newFact = evaluate(rule("""{"type":"CONSECUTIVE_RETURNS"}"""), fact.copy(factVersion = "review-v3"), NOW)!!
-        val newPackage = evaluate(rule("""{"type":"CONSECUTIVE_RETURNS"}"""), fact, NOW, packageVersion = "1.0.1")!!
-
-        assertThat(first.occurrenceKey).matches("^[0-9a-f]{64}${'$'}")
-        assertThat(repeated.occurrenceKey).isEqualTo(first.occurrenceKey)
-        assertThat(newFact.occurrenceKey).isNotEqualTo(first.occurrenceKey)
-        assertThat(newPackage.occurrenceKey).isNotEqualTo(first.occurrenceKey)
+    fun `strict rules reject malformed IANA calendar and version definitions`() {
+        assertThatThrownBy { RiskRule.parse(ruleJson("""{"type":"INACTIVITY"}""").replace("Europe/Amsterdam", "+02:00")) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy { RiskRule.parse(ruleJson("""{"type":"INACTIVITY"}""").replace("nl-school-2026-v1", "")) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy { RiskRule.parse(ruleJson("""{"type":"INACTIVITY"}""").replace("2026-04-06", "2026-02-30")) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy { RiskRule.parse(ruleJson("""{"type":"INACTIVITY"}""").replace("1.0.0", "version one")) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy {
+            RiskRule.parse(ruleJson("""{"type":"INACTIVITY"}""").replace("[\"2026-04-06\"]", "[\"2026-04-06\",\"2026-04-06\"]"))
+        }.isInstanceOf(IllegalArgumentException::class.java)
     }
 
-    private fun evaluate(
-        rule: RiskRule,
-        fact: RiskFact,
-        at: Instant,
-        packageVersion: String? = null,
-    ): RiskDecision? {
-        val effectiveRule = if (packageVersion == null) rule else RiskRule.parse(
-            ruleJson(rule.trigger.toJson(), packageVersion),
-        )
-        return evaluator.evaluate(effectiveRule, fact, at)
-    }
+    private fun evaluate(rule: RiskRule, facts: RiskEvaluationFacts, at: Instant): RiskDecision? =
+        evaluator.evaluate(rule, facts, at)
 
-    private fun rule(trigger: String, extra: String = DEFAULT_METADATA): RiskRule =
-        RiskRule.parse(ruleJson(trigger, extra = extra))
+    private fun facts(values: RiskFactValues, ids: List<UUID> = listOf(FACT_1)): RiskEvaluationFacts =
+        RiskEvaluationFacts(TARGET_ID, ids, values)
 
-    private fun ruleJson(
-        trigger: String,
-        packageVersion: String = "1.0.0",
-        extra: String = DEFAULT_METADATA,
-    ): String = """{"packageId":"embedded-medical-device-pilot","packageVersion":"$packageVersion","ruleId":"risk-rule-1",$extra,"zone":"Europe/Amsterdam","calendar":{"version":"nl-school-2026-v1","holidays":["2026-04-06"]},"trigger":$trigger}"""
+    private fun rule(trigger: String, extra: String = DEFAULT_METADATA): RiskRule = RiskRule.parse(ruleJson(trigger, extra = extra))
 
-    private fun RiskTrigger.toJson(): String = when (this) {
-        is RiskTrigger.ConsecutiveReturns -> """{"type":"CONSECUTIVE_RETURNS","threshold":$threshold}"""
-        else -> error("Only used by the occurrence-key test")
-    }
+    private fun businessRule(): RiskRule = rule(
+        """{"type":"BLOCKER_AGE"}""",
+        extra = """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":[],"thresholdKind":"BUSINESS"""",
+    )
+
+    private fun ruleJson(trigger: String, extra: String = DEFAULT_METADATA): String =
+        """{"packageId":"embedded-medical-device-pilot","packageVersion":"1.0.0","ruleDefinitionId":"$RULE_DEFINITION_ID","ruleId":"risk-rule-1",$extra,"zone":"Europe/Amsterdam","calendar":{"version":"nl-school-2026-v1","holidays":["2026-04-06"]},"trigger":$trigger}"""
+
+    private fun metadata(steps: String): String =
+        """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":$steps,"thresholdKind":"ELAPSED""""
 
     companion object {
         private val NOW = Instant.parse("2026-06-01T10:00:00Z")
+        private val RULE_DEFINITION_ID = UUID.fromString("10000000-0000-0000-0000-000000000001")
+        private val TARGET_ID = UUID.fromString("20000000-0000-0000-0000-000000000001")
+        private val FACT_1 = UUID.fromString("30000000-0000-0000-0000-000000000001")
+        private val FACT_2 = UUID.fromString("30000000-0000-0000-0000-000000000002")
+        private val FACT_3 = UUID.fromString("30000000-0000-0000-0000-000000000003")
         private const val DEFAULT_METADATA = """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":[],"thresholdKind":"ELAPSED""""
     }
 }

@@ -7,7 +7,7 @@ import java.time.ZoneId
 import java.util.Collections
 
 class BusinessCalendar(version: String, holidays: Set<LocalDate>) {
-    val version: String = version.requireValue("calendar version")
+    val version: String = version.requireVersion("calendar version")
     val holidays: Set<LocalDate> = Collections.unmodifiableSet(holidays.toSet())
 
     fun thresholdAfter(start: Instant, businessDays: Int, zone: ZoneId): Instant {
@@ -28,4 +28,8 @@ class BusinessCalendar(version: String, holidays: Set<LocalDate>) {
 
 internal fun String.requireValue(name: String): String = also {
     require(isNotBlank()) { "$name must not be blank" }
+}
+
+internal fun String.requireVersion(name: String): String = requireValue(name).also {
+    require(it.matches(Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))) { "$name is malformed" }
 }
