@@ -6,6 +6,7 @@ import {
   Interventions,
   interventionCommandPayloadSchemas,
   interventionItemSchema,
+  reviewTargetGateReason,
   type InterventionsProps,
 } from "../src/renderer/workspaces/Interventions";
 import {
@@ -128,10 +129,10 @@ describe("Interventions", () => {
     for (const label of ["有条件接受后续要求", "有条件接受到期日", "退回原因"]) expect(screen.getByLabelText(label)).toBeInTheDocument();
   });
 
-  it("gates every review command to a selected validated review before any submit handler exists", () => {
+  it("shows real unavailable contract reasons before target validation and blocks forged submit", () => {
     const onExecute = vi.fn();
     const { container } = render(<Interventions {...interventionProps({
-      result: interventionItems,
+      result: unavailableInterventions,
       selectedItemId: "i-2",
       capabilities: ["evidence.review", "interventions.resolve"],
       onExecute,
@@ -140,11 +141,31 @@ describe("Interventions", () => {
     for (const label of ["接受", "有条件接受", "拒绝", "退回"]) {
       const button = within(actions).getByRole("button", { name: label });
       expect(button).toBeDisabled();
-      expect(document.getElementById(button.getAttribute("aria-describedby")!)).toHaveTextContent("仅证据审核事项可执行审核操作");
+      expect(document.getElementById(button.getAttribute("aria-describedby")!)).toHaveTextContent(label === "退回" ? "介入退回 API 合同尚未集成" : "证据审核 API 合同尚未集成");
     }
-    expect(container.querySelectorAll("section[aria-label='介入操作'] form.command-panel")).toHaveLength(0);
-    fireEvent.submit(actions);
+    const forms = container.querySelectorAll("section[aria-label='介入操作'] form.command-panel");
+    expect(forms).toHaveLength(4);
+    for (const form of forms) fireEvent.submit(form);
     expect(onExecute).not.toHaveBeenCalled();
+  });
+
+  it("preserves canonical capability and offline precedence before target validation", () => {
+    const { rerender } = render(<Interventions {...interventionProps({ result: interventionItems, selectedItemId: "i-2" })} />);
+    expect(document.getElementById(screen.getByRole("button", { name: "接受" }).getAttribute("aria-describedby")!)).toHaveTextContent("缺少能力：evidence.review");
+    expect(document.getElementById(screen.getByRole("button", { name: "退回" }).getAttribute("aria-describedby")!)).toHaveTextContent("缺少能力：interventions.resolve");
+
+    rerender(<Interventions {...interventionProps({ result: interventionItems, selectedItemId: "i-2", online: false, capabilities: ["evidence.review", "interventions.resolve"] })} />);
+    expect(screen.getAllByText("离线时更改操作已锁定")).toHaveLength(4);
+    expect(screen.queryByText("仅证据审核事项可执行审核操作")).not.toBeInTheDocument();
+  });
+
+  it("applies review target validation only when the operation is otherwise available", () => {
+    expect(reviewTargetGateReason({ operationAvailable: false, online: true, authenticated: true, capable: true, selectedType: "recommendation" })).toBeUndefined();
+    expect(reviewTargetGateReason({ operationAvailable: true, online: false, authenticated: true, capable: true, selectedType: "recommendation" })).toBeUndefined();
+    expect(reviewTargetGateReason({ operationAvailable: true, online: true, authenticated: true, capable: false, selectedType: "recommendation" })).toBeUndefined();
+    expect(reviewTargetGateReason({ operationAvailable: true, online: true, authenticated: true, capable: true, selectedType: "recommendation" })).toBe("仅证据审核事项可执行审核操作");
+    expect(reviewTargetGateReason({ operationAvailable: true, online: true, authenticated: true, capable: true })).toBe("请选择证据审核事项");
+    expect(reviewTargetGateReason({ operationAvailable: true, online: true, authenticated: true, capable: true, selectedType: "review" })).toBeUndefined();
   });
 
   it("strictly validates each intervention operation payload", () => {
@@ -199,7 +220,7 @@ describe("Interventions", () => {
 
   it("retains exact unavailable and shared error/conflict reasons", () => {
     const onRefresh = vi.fn();
-    const { rerender } = render(<Interventions {...interventionProps({ result: interventionItems, selectedItemId: "i-1", capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
+    const { rerender } = render(<Interventions {...interventionProps({ result: unavailableInterventions, capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
     expect(document.getElementById(screen.getByRole("button", { name: "接受" }).getAttribute("aria-describedby")!)).toHaveTextContent("证据审核 API 合同尚未集成");
     rerender(<Interventions {...interventionProps({ result: { state: "error", problem: { title: "查询失败", code: "QUERY_FAILED", status: 503, correlationId } }, onRefresh })} />);
     fireEvent.click(screen.getByRole("button", { name: "重试" }));

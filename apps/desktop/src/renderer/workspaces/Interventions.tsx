@@ -46,6 +46,17 @@ export const interventionCommandPayloadSchemas = {
 
 type InterventionItem = z.infer<typeof interventionItemSchema>;
 
+export function reviewTargetGateReason({ operationAvailable, online, authenticated, capable, selectedType }: {
+  readonly operationAvailable: boolean;
+  readonly online: boolean;
+  readonly authenticated: boolean;
+  readonly capable: boolean;
+  readonly selectedType?: InterventionItem["type"];
+}): string | undefined {
+  if (!operationAvailable || !authenticated || !online || !capable || selectedType === "review") return undefined;
+  return selectedType ? "仅证据审核事项可执行审核操作" : "请选择证据审核事项";
+}
+
 export interface InterventionsProps {
   readonly result: WorkspaceResult;
   readonly query: WorkspaceQueryValue;
@@ -76,11 +87,12 @@ function Recommendation({ recommendation }: { readonly recommendation: NonNullab
   }
 }
 
-function WorkspaceAction({ command, schema, payload, targetId, capabilities, online, authenticated, onExecute, onRefresh }: {
+function WorkspaceAction({ command, schema, payload, targetId, targetGateReason, capabilities, online, authenticated, onExecute, onRefresh }: {
   readonly command: WorkspaceOperation;
   readonly schema: z.ZodType<Record<string, unknown>>;
   readonly payload: Record<string, unknown>;
   readonly targetId?: string;
+  readonly targetGateReason?: string;
   readonly capabilities: readonly string[];
   readonly online: boolean;
   readonly authenticated: boolean;
@@ -89,6 +101,10 @@ function WorkspaceAction({ command, schema, payload, targetId, capabilities, onl
 }) {
   const parsed = schema.safeParse(payload);
   const operationBlocksFirst = command.availability.state === "unavailable" || !online || !authenticated || !capabilities.includes(command.capability);
+  if (!operationBlocksFirst && targetGateReason) {
+    const reasonId = `interventions-${command.operation}-review-target-reason`;
+    return <div><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{targetGateReason}</p></div>;
+  }
   if (!operationBlocksFirst && (!targetId || !parsed.success)) {
     const reasonId = `interventions-${command.operation}-form-reason`;
     return <div><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{targetId ? "请完成必填操作字段" : "请选择介入事项"}</p></div>;
@@ -131,12 +147,14 @@ export function Interventions({ result, query, activeTab, selectedItemId, capabi
   );
   const action = (operation: keyof typeof interventionCommandPayloadSchemas, payload: Record<string, unknown>) => {
     const command = definition.commands.find((entry) => entry.operation === operation)!;
-    if (!selectedReview) {
-      const reasonId = `interventions-${operation}-review-target-reason`;
-      const reason = selectedItem ? "仅证据审核事项可执行审核操作" : "请选择证据审核事项";
-      return <div key={operation}><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{reason}</p></div>;
-    }
-    return <WorkspaceAction key={operation} command={command} schema={interventionCommandPayloadSchemas[operation]} payload={payload} targetId={selectedReview.id} capabilities={capabilities} online={mutationOnline} authenticated={authenticated} onExecute={onExecute} onRefresh={onRefresh} />;
+    const targetGateReason = reviewTargetGateReason({
+      operationAvailable: command.availability.state === "available",
+      online: mutationOnline,
+      authenticated,
+      capable: capabilities.includes(command.capability),
+      ...(selectedItem ? { selectedType: selectedItem.type } : {}),
+    });
+    return <WorkspaceAction key={operation} command={command} schema={interventionCommandPayloadSchemas[operation]} payload={payload} {...(selectedReview ? { targetId: selectedReview.id } : {})} {...(targetGateReason ? { targetGateReason } : {})} capabilities={capabilities} online={mutationOnline} authenticated={authenticated} onExecute={onExecute} onRefresh={onRefresh} />;
   };
   const reviewPayload = {
     evidenceVersion: selectedReview?.evidenceVersion ?? Number.NaN,
