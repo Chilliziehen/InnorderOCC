@@ -22,6 +22,11 @@ import javax.sql.DataSource
 class EvidenceRiskResourcePostgreSqlIntegrationTest {
     @Test
     fun `Flyway applies V014 and keeps trigger functions outside the runtime API`() {
+        if (System.getenv("INNORDER_VERIFY_DATABASE_TEST_SELECTION") == "1") {
+            assertThat(System.getProperty(REQUIRED_PROPERTY))
+                .describedAs("explicit Gradle selection requires Docker")
+                .isEqualTo("true")
+        }
         assertThat(flywayJdbc.queryForObject(
             "SELECT success FROM flyway_schema_history WHERE version::integer = 14",
             Boolean::class.java,
@@ -372,9 +377,12 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
 
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
+        private const val REQUIRED_PROPERTY = "innorder.evidence-risk-resource-postgresql.required"
         @JvmStatic
         fun dockerAvailableOrRequired(): Boolean =
-            System.getenv("INNORDER_STRICT_DATABASE_TESTS") == "1" || DockerClientFactory.instance().isDockerAvailable
+            System.getenv("INNORDER_STRICT_DATABASE_TESTS") == "1" ||
+                System.getProperty(REQUIRED_PROPERTY) == "true" ||
+                DockerClientFactory.instance().isDockerAvailable
 
         @Container
         @JvmStatic
