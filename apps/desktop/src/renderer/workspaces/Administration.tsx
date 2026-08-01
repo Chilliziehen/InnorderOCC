@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
@@ -44,6 +44,18 @@ const administrationItemSchema = z.object({
   updatedAt: z.string(),
 }).strict();
 
+function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number, select: (id: string) => void) {
+  let next: number | undefined;
+  if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+  if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = tabs.length - 1;
+  if (next === undefined) return;
+  event.preventDefault();
+  select(tabs[next]!.id);
+  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
+}
+
 export function Administration({
   result,
   query,
@@ -66,7 +78,7 @@ export function Administration({
       <h1 id="administration-title">管理</h1>
       {connectivity === "reconnecting" ? <p>重新连接时更改操作已锁定</p> : null}
       <div role="tablist" aria-label="管理分类">
-        {tabs.map((tab) => (
+        {tabs.map((tab, index) => (
           <button
             type="button"
             role="tab"
@@ -76,6 +88,7 @@ export function Administration({
             tabIndex={active.id === tab.id ? 0 : -1}
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(event) => moveTab(event, index, setActiveTab)}
           >
             {tab.label}
           </button>

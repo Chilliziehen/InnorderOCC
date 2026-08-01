@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CommandReceipt, ProfileInput, ServerProfile, WorkspaceCommand } from "../src/desktop-contract";
@@ -26,6 +26,13 @@ const execute = async (_command: WorkspaceCommand): Promise<CommandReceipt> => (
   commandId: "00000000-0000-4000-8000-000000000003",
   correlationId: "00000000-0000-4000-8000-000000000004",
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
 
 describe("Administration", () => {
   const renderAdministration = (overrides = {}) => render(<Administration
@@ -85,22 +92,38 @@ describe("Administration", () => {
     expect(onExecute).not.toHaveBeenCalled();
     expect(screen.getAllByText("重新连接时更改操作已锁定").length).toBeGreaterThan(0);
   });
+
+  it("supports wrapping Arrow keys plus Home and End in its tablist", () => {
+    renderAdministration();
+    const first = screen.getByRole("tab", { name: "人员" });
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "审计" })).toHaveFocus();
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("审计");
+    fireEvent.keyDown(screen.getByRole("tab", { name: "审计" }), { key: "Home" });
+    expect(first).toHaveFocus();
+    fireEvent.keyDown(first, { key: "End" });
+    expect(screen.getByRole("tab", { name: "审计" })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "审计" }), { key: "ArrowRight" });
+    expect(first).toHaveFocus();
+  });
 });
 
 describe("Settings", () => {
   const callbacks = () => ({
-    onSelect: vi.fn(async (_id: string) => undefined),
-    onSave: vi.fn(async (_input: ProfileInput) => undefined),
-    onRemove: vi.fn(async (_id: string) => undefined),
-    onPreferencesChange: vi.fn(async (_preferences: { theme: string; reducedMotion: boolean }) => undefined),
-    onLogout: vi.fn(async () => undefined),
+    onSelect: vi.fn(async (_id: string): Promise<void> => undefined),
+    onSave: vi.fn(async (_input: ProfileInput): Promise<void> => undefined),
+    onRemove: vi.fn(async (_id: string): Promise<void> => undefined),
+    onPreferencesChange: vi.fn(async (_preferences: { theme: string; reducedMotion: boolean }): Promise<void> => undefined),
+    onLogout: vi.fn(async (): Promise<void> => undefined),
   });
 
-  it("selects and edits profiles through explicit callbacks", () => {
+  it("selects and edits profiles through explicit callbacks", async () => {
     const handlers = callbacks();
     render(<Settings profiles={[current, secondary]} current={current} connectivity="online" {...handlers} />);
     fireEvent.click(screen.getByRole("button", { name: "使用 Production" }));
     expect(handlers.onSelect).toHaveBeenCalledWith(secondary.id);
+    await waitFor(() => expect(screen.getByRole("button", { name: "使用 Production" })).toBeEnabled());
 
     fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "Pilot updated" } });
     fireEvent.submit(screen.getByRole("form", { name: "编辑服务器配置" }));
@@ -121,7 +144,7 @@ describe("Settings", () => {
     expect(handlers.onRemove).toHaveBeenCalledWith(current.id);
   });
 
-  it.each(["offline", "reconnecting"] as const)("handler-guards every mutation while %s", (connectivity) => {
+  it.each(["offline", "reconnecting"] as const)("guards remote mutations but permits local logout while %s", (connectivity) => {
     const handlers = callbacks();
     const { container } = render(<Settings profiles={[current, secondary]} current={current} connectivity={connectivity} {...handlers} />);
     fireEvent.click(screen.getByRole("button", { name: "使用 Production" }));
@@ -136,21 +159,101 @@ describe("Settings", () => {
     expect(handlers.onSave).not.toHaveBeenCalled();
     expect(handlers.onRemove).not.toHaveBeenCalled();
     expect(handlers.onPreferencesChange).not.toHaveBeenCalled();
-    expect(handlers.onLogout).not.toHaveBeenCalled();
+    expect(handlers.onLogout).toHaveBeenCalledOnce();
     expect(screen.getByRole("status")).toHaveTextContent(connectivity === "offline" ? "离线" : "重新连接");
   });
 
-  it("updates preferences, logs out, and exposes no certificate-store or shell controls", () => {
+  it("shows the exact unavailable preferences contract and guards its handler", () => {
     const handlers = callbacks();
     render(<Settings profiles={[secondary]} current={secondary} connectivity="online" {...handlers} />);
     fireEvent.click(screen.getByRole("tab", { name: "偏好" }));
+    expect(screen.getByText("个人偏好 API 合同尚未集成")).toBeInTheDocument();
+    expect(screen.getByText("所需 API：/me")).toBeInTheDocument();
+    expect(screen.getByLabelText("主题")).toBeDisabled();
     fireEvent.change(screen.getByLabelText("主题"), { target: { value: "dark" } });
-    expect(handlers.onPreferencesChange).toHaveBeenCalledWith({ theme: "dark", reducedMotion: false });
     fireEvent.click(screen.getByLabelText("减少动态效果"));
-    expect(handlers.onPreferencesChange).toHaveBeenLastCalledWith({ theme: "dark", reducedMotion: true });
+    fireEvent.submit(screen.getByRole("form", { name: "偏好设置" }));
+    expect(handlers.onPreferencesChange).not.toHaveBeenCalled();
+  });
+
+  it("logs out online and exposes no certificate-store or shell controls", () => {
+    const handlers = callbacks();
+    render(<Settings profiles={[secondary]} current={secondary} connectivity="online" {...handlers} />);
     fireEvent.click(screen.getByRole("tab", { name: "会话" }));
     fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
     expect(handlers.onLogout).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: /证书|certificate|shell|终端/i })).not.toBeInTheDocument();
+  });
+
+  it("bounds profile selection and reports rejection without raw detail", async () => {
+    const handlers = callbacks();
+    const selection = deferred<void>();
+    handlers.onSelect.mockReturnValueOnce(selection.promise);
+    render(<Settings profiles={[current, secondary]} current={current} connectivity="online" {...handlers} />);
+    fireEvent.click(screen.getByRole("button", { name: "使用 Production" }));
+    expect(screen.getByRole("button", { name: "正在选择 Production" })).toBeDisabled();
+    selection.reject(new Error("token raw-selection-secret"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法选择服务器配置");
+    expect(document.body).not.toHaveTextContent("raw-selection-secret");
+    expect(screen.getByRole("button", { name: "使用 Production" })).toBeEnabled();
+  });
+
+  it("bounds profile save and catches callback failures", async () => {
+    const handlers = callbacks();
+    const saving = deferred<void>();
+    handlers.onSave.mockReturnValueOnce(saving.promise);
+    render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
+    fireEvent.submit(screen.getByRole("form", { name: "编辑服务器配置" }));
+    expect(screen.getByRole("button", { name: "正在保存" })).toBeDisabled();
+    saving.reject(new Error("raw-save-secret"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法保存服务器配置");
+    expect(document.body).not.toHaveTextContent("raw-save-secret");
+    expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
+  });
+
+  it("keeps removal open on failure and closes it only after success", async () => {
+    const handlers = callbacks();
+    handlers.onRemove.mockRejectedValueOnce(new Error("raw-remove-secret")).mockResolvedValueOnce(undefined);
+    render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
+    fireEvent.click(screen.getByRole("button", { name: "移除 Pilot" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法移除服务器配置");
+    expect(screen.getByRole("dialog", { name: "确认移除配置" })).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("raw-remove-secret");
+    fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("manages modal focus, traps Tab, restores the trigger, and makes background inert", async () => {
+    const handlers = callbacks();
+    render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
+    const trigger = screen.getByRole("button", { name: "移除 Pilot" });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "确认移除配置" });
+    const confirm = within(dialog).getByRole("button", { name: "确认移除" });
+    const cancel = within(dialog).getByRole("button", { name: "取消" });
+    await waitFor(() => expect(confirm).toHaveFocus());
+    expect(screen.getByTestId("settings-background")).toHaveAttribute("inert");
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("supports wrapping Arrow keys plus Home and End in settings tabs", () => {
+    const handlers = callbacks();
+    render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
+    const profile = screen.getByRole("tab", { name: "服务器配置" });
+    profile.focus();
+    fireEvent.keyDown(profile, { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "会话" })).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "会话" }), { key: "Home" });
+    expect(profile).toHaveFocus();
+    fireEvent.keyDown(profile, { key: "End" });
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("会话");
+    fireEvent.keyDown(screen.getByRole("tab", { name: "会话" }), { key: "ArrowRight" });
+    expect(profile).toHaveFocus();
   });
 });
