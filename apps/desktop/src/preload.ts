@@ -1,9 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import { DESKTOP_CHANNELS, notificationEventSchema, type OccApi } from "./ipc-contract";
-import { serializedSize } from "./serialized-size";
-
-const MAX_NOTIFICATION_BYTES = 2 * 1024 * 1024;
 
 function freezeApi<T extends object>(value: T): Readonly<T> {
   for (const child of Object.values(value)) {
@@ -37,13 +34,8 @@ const api: OccApi = freezeApi({
     list: (cursor) => ipcRenderer.invoke(DESKTOP_CHANNELS.notifications.list, cursor),
     subscribe(listener) {
       const wrapped = (_event: unknown, input: unknown) => {
-        try {
-          if (serializedSize(input) > MAX_NOTIFICATION_BYTES) return;
-          const parsed = notificationEventSchema.safeParse(input);
-          if (parsed.success) listener(parsed.data);
-        } catch {
-          // Malformed or unserializable events do not cross the preload boundary.
-        }
+        const parsed = notificationEventSchema.safeParse(input);
+        if (parsed.success) listener(parsed.data);
       };
       ipcRenderer.on(DESKTOP_CHANNELS.notifications.event, wrapped);
       return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.notifications.event, wrapped);

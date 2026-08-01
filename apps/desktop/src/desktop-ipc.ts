@@ -7,6 +7,7 @@ import { z as schema } from "zod";
 import {
   commandReceiptSchema, DESKTOP_CHANNELS, evidenceUploadInputSchema,
   idInputSchema, loginInputSchema, noInputSchema, notificationPageSchema,
+  notificationEventSchema,
   optionalCursorSchema, profileInputSchema, serverProfileSchema,
   sessionSnapshotSchema, systemStatusesSchema, uploadReceiptSchema,
   voidOutputSchema, workspaceCommandSchema, workspaceQuerySchema,
@@ -31,6 +32,25 @@ interface HandlerDefinition<I, O> {
 }
 
 let activeRegistration: (() => void) | undefined;
+
+interface NotificationTarget {
+  send(channel: string, event: unknown): void;
+}
+
+export function sendDesktopNotification(
+  target: NotificationTarget,
+  input: unknown,
+): boolean {
+  try {
+    if (serializedSize(input) > MAX_OUTPUT_BYTES) return false;
+    const parsed = notificationEventSchema.safeParse(input);
+    if (!parsed.success) return false;
+    target.send(DESKTOP_CHANNELS.notifications.event, parsed.data);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface JsonPersistence {
   read(): Promise<unknown>;

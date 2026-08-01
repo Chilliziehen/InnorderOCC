@@ -1,4 +1,4 @@
-import { serialize } from "node:v8";
+import { readFileSync } from "node:fs";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -118,30 +118,13 @@ describe("preload bridge", () => {
     );
   });
 
-  it("counts structured-clone-visible undefined fields toward the notification limit", () => {
-    const api = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
-    const listener = vi.fn();
-    api.notifications.subscribe(listener);
-    const wrapped = electronMocks.on.mock.calls[0]?.[1];
-    const padding = Object.fromEntries(
-      Array.from({ length: 100_000 }, (_, index) => [
-        `padding-${index.toString().padStart(6, "0")}-abcdefghij`,
-        undefined,
-      ]),
+  it("imports no Node modules into the sandboxed preload graph", () => {
+    const source = readFileSync("src/preload.ts", "utf8");
+    const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map(
+      ([, specifier]) => specifier,
     );
-    const event = {
-      id: "33333333-3333-4333-8333-333333333333",
-      type: "task.updated",
-      occurredAt: "2026-08-01T12:00:00.000Z",
-      title: "Task updated",
-      read: false,
-      data: padding,
-    };
-    expect(JSON.stringify(event).length).toBeLessThan(1024);
-    expect(serialize(event).byteLength).toBeGreaterThan(2 * 1024 * 1024);
 
-    wrapped({}, event);
-
-    expect(listener).not.toHaveBeenCalled();
+    expect(imports).toEqual(["electron", "./ipc-contract"]);
+    expect(source).not.toMatch(/node:v8|require\(["']node:/);
   });
 });

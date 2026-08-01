@@ -19,6 +19,7 @@ import {
   createDesktopApi,
   createSafeStorageVault,
   registerDesktopIpc,
+  sendDesktopNotification,
 } from "../src/desktop-ipc";
 import { DESKTOP_CHANNELS } from "../src/ipc-contract";
 
@@ -159,6 +160,43 @@ describe("desktop IPC", () => {
     expect(electronMocks.removeHandler).toHaveBeenCalledTimes(replacedBeforeThisTest + count);
     disposeSecond();
     expect(electronMocks.removeHandler).toHaveBeenCalledTimes(replacedBeforeThisTest + count * 2);
+  });
+
+  it("sends validated notifications on the canonical event channel", () => {
+    const send = vi.fn();
+    const event = {
+      id: "33333333-3333-4333-8333-333333333333",
+      type: "task.updated",
+      occurredAt: "2026-08-01T12:00:00.000Z",
+      title: "Task updated",
+      read: false,
+    };
+
+    expect(sendDesktopNotification({ send }, event)).toBe(true);
+    expect(send).toHaveBeenCalledWith(DESKTOP_CHANNELS.notifications.event, event);
+  });
+
+  it("rejects notifications whose structured-clone size exceeds 2 MiB", () => {
+    const send = vi.fn();
+    const padding = Object.fromEntries(
+      Array.from({ length: 100_000 }, (_, index) => [
+        `padding-${index.toString().padStart(6, "0")}-abcdefghij`,
+        undefined,
+      ]),
+    );
+    const event = {
+      id: "33333333-3333-4333-8333-333333333333",
+      type: "task.updated",
+      occurredAt: "2026-08-01T12:00:00.000Z",
+      title: "Task updated",
+      read: false,
+      data: padding,
+    };
+    expect(JSON.stringify(event).length).toBeLessThan(1024);
+    expect(serialize(event).byteLength).toBeGreaterThan(2 * 1024 * 1024);
+
+    expect(sendDesktopNotification({ send }, event)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
   });
 });
 
