@@ -303,6 +303,28 @@ describe("route manifest", () => {
       path: "/unknown",
     });
   });
+
+  it.each(["__proto__", "constructor", "toString"])(
+    "default-denies inherited registry name %s",
+    (path) => {
+      expect(routePathFromHash(`#${path}`)).toBeNull();
+      expect(resolveRoute(path, ["occ.read", "occ.admin"])).toEqual({
+        kind: "not-found",
+        path,
+      });
+      expect(canAccessRoute(path, ["occ.read", "occ.admin"])).toBe(false);
+      expect(canRunQuery(path, ["occ.read", "occ.admin"])).toBe(false);
+      expect(canRunCommand(path, "start", ["occ.execute", "processes.start"])).toBe(false);
+
+      const target = {
+        location: { hash: "#/overview" },
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      };
+      expect(createHashRouter(target).set(path)).toBe(false);
+      expect(target.location.hash).toBe("#/overview");
+    },
+  );
 });
 
 describe("hash router", () => {

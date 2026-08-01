@@ -210,7 +210,9 @@ const routesByPath = Object.freeze(
 
 function canonicalRoute(route: Pick<AppRoute, "path"> | string): AppRoute | undefined {
   const path = typeof route === "string" ? route : route.path;
-  return routesByPath[path as RoutePath];
+  return Object.hasOwn(routesByPath, path)
+    ? routesByPath[path as RoutePath]
+    : undefined;
 }
 
 function hasCapability(capabilities: readonly string[], required: string): boolean {
