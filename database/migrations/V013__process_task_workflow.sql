@@ -729,6 +729,7 @@ BEGIN
               WHERE reservation.resource_id = resource.id
                 AND reservation.task_id = p_task_id
                 AND reservation.state IN ('PENDING', 'CONFIRMED')
+                AND reservation.time_range @> transaction_timestamp()
           );
     ELSIF p_provider_key = 'process' OR p_provider_key LIKE 'process.%' THEN
         SELECT process.row_version INTO current_version
@@ -741,6 +742,65 @@ BEGIN
     RETURN current_version;
 END;
 $$;
+
+CREATE FUNCTION occ.lock_resource_reservation_tasks()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM 1
+    FROM occ.task_projection task
+    WHERE task.id IN (
+        CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN OLD.task_id END,
+        CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN NEW.task_id END
+    )
+    ORDER BY task.id
+    FOR UPDATE;
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE TRIGGER trg_resource_reservation_task_lock
+BEFORE INSERT OR UPDATE OR DELETE ON occ.resource_reservation
+FOR EACH ROW EXECUTE FUNCTION occ.lock_resource_reservation_tasks();
+
+CREATE FUNCTION occ.mark_resource_reservation_provider_stale()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    old_task_id uuid := CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN OLD.task_id END;
+    old_resource_id uuid := CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN OLD.resource_id END;
+    new_task_id uuid := CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN NEW.task_id END;
+    new_resource_id uuid := CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN NEW.resource_id END;
+BEGIN
+    IF TG_OP = 'UPDATE'
+       AND NEW.state IS NOT DISTINCT FROM OLD.state
+       AND NEW.resource_id IS NOT DISTINCT FROM OLD.resource_id
+       AND NEW.task_id IS NOT DISTINCT FROM OLD.task_id
+       AND NEW.time_range IS NOT DISTINCT FROM OLD.time_range THEN
+        RETURN NEW;
+    END IF;
+
+    UPDATE occ.task_gate_provider_state provider
+    SET status = 'STALE',
+        safe_failure_code = NULL,
+        refreshed_at = greatest(provider.refreshed_at, transaction_timestamp())
+    FROM occ.task_projection task,
+         (VALUES (old_task_id, old_resource_id), (new_task_id, new_resource_id)) affected(task_id, resource_id)
+    WHERE task.id = affected.task_id
+      AND task.state IN ('AVAILABLE', 'CLAIMED')
+      AND provider.task_id = affected.task_id
+      AND provider.source_entity_id = affected.resource_id
+      AND (provider.provider_key = 'resource' OR provider.provider_key LIKE 'resource.%')
+      AND provider.status = 'READY';
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE TRIGGER trg_resource_reservation_provider_stale
+AFTER INSERT OR UPDATE OR DELETE ON occ.resource_reservation
+FOR EACH ROW EXECUTE FUNCTION occ.mark_resource_reservation_provider_stale();
 
 CREATE FUNCTION occ.enforce_task_gate_requirement()
 RETURNS trigger
@@ -933,12 +993,27 @@ BEGIN
     FOR UPDATE;
 
     IF NEW.fact_kind = 'DECIDED' THEN
+        IF task_state <> 'CLAIMED' THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review decision requires a claimed task';
+        END IF;
         SELECT * INTO STRICT submission
         FROM occ.task_review_projection_fact
         WHERE id = NEW.submission_fact_id AND fact_kind = 'SUBMITTED';
         IF submission.task_id IS DISTINCT FROM NEW.task_id
            OR submission.review_sequence IS DISTINCT FROM NEW.review_sequence THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'decision must match its submission task and sequence';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM occ.task_review_projection_fact decided
+            WHERE decided.submission_fact_id = submission.id
+              AND decided.fact_kind = 'DECIDED'
+        ) OR EXISTS (
+            SELECT 1 FROM occ.task_review_projection_fact later
+            WHERE later.task_id = NEW.task_id
+              AND later.fact_kind = 'SUBMITTED'
+              AND later.review_sequence > submission.review_sequence
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'decision requires the current pending submission';
         END IF;
     ELSE
         IF task_state <> 'CLAIMED' OR task_assignee_id IS NULL

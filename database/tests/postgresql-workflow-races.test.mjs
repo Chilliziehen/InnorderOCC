@@ -78,8 +78,16 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('6a000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:requirement-race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000004', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:source-first-race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000005', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:review-race', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000006', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:reservation-cancel-first', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000007', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:reservation-complete-first', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000008', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:review-cancel-first', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000009', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:review-decision-first', 'ACTIVE'),
         ('6e000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-one', 'ACTIVE'),
-        ('6e000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-two', 'ACTIVE');
+        ('6e000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-two', 'ACTIVE'),
+        ('6e000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-cancel-first', 'ACTIVE'),
+        ('6e000000-0000-7000-8000-000000000004', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-decision-first', 'ACTIVE'),
+        ('6f000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'resource:cancel-first', 'ACTIVE'),
+        ('6f000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'resource:complete-first', 'ACTIVE');
       INSERT INTO iam.principal (id, principal_kind, display_name, status) VALUES
         ('67000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', 'USER', 'Participant', 'ACTIVE');
@@ -149,6 +157,16 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     await pool.query(`INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
       VALUES ('6a000000-0000-7000-8000-000000000005', $1, 'review-work', 'Review work', 'review-race-task', 'review-race-execution', 'AVAILABLE')`, [processId]);
+    for (const [id, key] of [
+      ['6a000000-0000-7000-8000-000000000006', 'reservation-cancel-first'],
+      ['6a000000-0000-7000-8000-000000000007', 'reservation-complete-first'],
+      ['6a000000-0000-7000-8000-000000000008', 'review-cancel-first'],
+      ['6a000000-0000-7000-8000-000000000009', 'review-decision-first'],
+    ]) {
+      await pool.query(`INSERT INTO occ.task_projection
+        (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
+        VALUES ($1, $2, $3, $3, $3 || '-task', $3 || '-execution', 'AVAILABLE')`, [id, processId, key]);
+    }
     const claims = await Promise.all([
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000001', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
@@ -162,16 +180,46 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       WHERE id='6a000000-0000-7000-8000-000000000004'`);
     await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
       WHERE id='6a000000-0000-7000-8000-000000000005'`);
+    await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
+      WHERE id IN ('6a000000-0000-7000-8000-000000000006', '6a000000-0000-7000-8000-000000000007',
+        '6a000000-0000-7000-8000-000000000008', '6a000000-0000-7000-8000-000000000009')`);
     await pool.query(`INSERT INTO occ.evidence (id, task_id, requirement_id, state, created_by) VALUES
       ('6e000000-0000-7000-8000-000000000001', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002'),
-      ('6e000000-0000-7000-8000-000000000002', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002');
+      ('6e000000-0000-7000-8000-000000000002', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002'),
+      ('6e000000-0000-7000-8000-000000000003', '6a000000-0000-7000-8000-000000000008', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002'),
+      ('6e000000-0000-7000-8000-000000000004', '6a000000-0000-7000-8000-000000000009', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002');
       INSERT INTO occ.evidence_version (id, evidence_id, version, object_key, sha256, mime_type, size_bytes, submitted_by) VALUES
       ('6e100000-0000-7000-8000-000000000001', '6e000000-0000-7000-8000-000000000001', 1, 'race-review-one', repeat('d',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002'),
-      ('6e100000-0000-7000-8000-000000000002', '6e000000-0000-7000-8000-000000000002', 1, 'race-review-two', repeat('e',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002');
+      ('6e100000-0000-7000-8000-000000000002', '6e000000-0000-7000-8000-000000000002', 1, 'race-review-two', repeat('e',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002'),
+      ('6e100000-0000-7000-8000-000000000003', '6e000000-0000-7000-8000-000000000003', 1, 'race-review-cancel-first', repeat('1',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002'),
+      ('6e100000-0000-7000-8000-000000000004', '6e000000-0000-7000-8000-000000000004', 1, 'race-review-decision-first', repeat('2',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002');
       INSERT INTO audit.idempotency_record
         (id, principal_id, command_key, idempotency_key, request_hash, state, expires_at) VALUES
       ('6e200000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-one', repeat('f',64), 'IN_PROGRESS', now()+interval '1 hour'),
-      ('6e200000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-two', repeat('0',64), 'IN_PROGRESS', now()+interval '1 hour')`);
+      ('6e200000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-two', repeat('0',64), 'IN_PROGRESS', now()+interval '1 hour'),
+      ('6e200000-0000-7000-8000-000000000003', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-cancel-first', repeat('3',64), 'IN_PROGRESS', now()+interval '1 hour'),
+      ('6e200000-0000-7000-8000-000000000004', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-decision-first', repeat('4',64), 'IN_PROGRESS', now()+interval '1 hour');
+      INSERT INTO occ.task_review_projection_fact
+        (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id) VALUES
+      ('6e300000-0000-7000-8000-000000000003', '6a000000-0000-7000-8000-000000000008', 'SUBMITTED', 1,
+        '6e000000-0000-7000-8000-000000000003', '6e100000-0000-7000-8000-000000000003', '6e200000-0000-7000-8000-000000000003', '67000000-0000-7000-8000-000000000002'),
+      ('6e300000-0000-7000-8000-000000000004', '6a000000-0000-7000-8000-000000000009', 'SUBMITTED', 1,
+        '6e000000-0000-7000-8000-000000000004', '6e100000-0000-7000-8000-000000000004', '6e200000-0000-7000-8000-000000000004', '67000000-0000-7000-8000-000000000002');
+      INSERT INTO occ.managed_resource (id, resource_type, capacity, state) VALUES
+      ('6f000000-0000-7000-8000-000000000001', 'race-resource', 1, 'AVAILABLE'),
+      ('6f000000-0000-7000-8000-000000000002', 'race-resource', 1, 'AVAILABLE')`);
+    await pool.query(`INSERT INTO occ.resource_reservation
+      (id, resource_id, requester_entity_id, process_instance_id, task_id, time_range, capacity, state) VALUES
+      ('6f100000-0000-7000-8000-000000000001', '6f000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000002', $1,
+        '6a000000-0000-7000-8000-000000000006', tstzrange(now()-interval '1 hour', now()+interval '1 hour', '[)'), 1, 'CONFIRMED'),
+      ('6f100000-0000-7000-8000-000000000002', '6f000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', $1,
+        '6a000000-0000-7000-8000-000000000007', tstzrange(now()-interval '1 hour', now()+interval '1 hour', '[)'), 1, 'CONFIRMED')`, [processId]);
+    await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key) VALUES
+      ('6a000000-0000-7000-8000-000000000006', 'resource.capacity'),
+      ('6a000000-0000-7000-8000-000000000007', 'resource.capacity');
+      INSERT INTO occ.task_gate_provider_state (task_id, provider_key, status, source_entity_id, source_row_version) VALUES
+      ('6a000000-0000-7000-8000-000000000006', 'resource.capacity', 'READY', '6f000000-0000-7000-8000-000000000001', 0),
+      ('6a000000-0000-7000-8000-000000000007', 'resource.capacity', 'READY', '6f000000-0000-7000-8000-000000000002', 0)`);
     const firstReview = await pool.connect();
     const outOfOrderReview = await pool.connect();
     try {
@@ -206,6 +254,124 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       FROM occ.task_review_projection_fact WHERE task_id='6a000000-0000-7000-8000-000000000005'`);
     assert.deepEqual(reviewRaceState.rows, [{ review_sequence: '1', fact_kind: 'SUBMITTED' }],
       'review stream serializes submissions and rejects an out-of-order sequence');
+
+    const cancelReservationFirst = await pool.connect();
+    const completeAfterReservationCancel = await pool.connect();
+    try {
+      await cancelReservationFirst.query('BEGIN');
+      await cancelReservationFirst.query(`UPDATE occ.resource_reservation SET state='CANCELLED'
+        WHERE id='6f100000-0000-7000-8000-000000000001'`);
+      await completeAfterReservationCancel.query('BEGIN');
+      await completeAfterReservationCancel.query(`SET LOCAL application_name='completion-after-reservation-cancel'`);
+      const completion = completeAfterReservationCancel.query(`UPDATE occ.task_projection SET state='COMPLETED', completed_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000006'`);
+      const completionResult = completion.then(() => ({ error: null }), (error) => ({ error }));
+      await waitForBlockedApplications(pool, ['completion-after-reservation-cancel']);
+      await cancelReservationFirst.query('COMMIT');
+      assert.match((await completionResult).error?.message ?? '', /gate|provider|resource|reservation/i);
+      await completeAfterReservationCancel.query('ROLLBACK');
+    } finally {
+      await cancelReservationFirst.query('ROLLBACK').catch(() => {});
+      await completeAfterReservationCancel.query('ROLLBACK').catch(() => {});
+      cancelReservationFirst.release();
+      completeAfterReservationCancel.release();
+    }
+    const reservationCancelFirstState = await pool.query(`SELECT task.state AS task_state, reservation.state AS reservation_state, provider.status AS provider_status
+      FROM occ.task_projection task
+      JOIN occ.resource_reservation reservation ON reservation.task_id=task.id
+      JOIN occ.task_gate_provider_state provider ON provider.task_id=task.id
+      WHERE task.id='6a000000-0000-7000-8000-000000000006'`);
+    assert.deepEqual(reservationCancelFirstState.rows,
+      [{ task_state: 'CLAIMED', reservation_state: 'CANCELLED', provider_status: 'STALE' }],
+      'reservation cancellation first marks the provider stale and rejects completion');
+
+    const completeBeforeReservationCancel = await pool.connect();
+    const cancelReservationAfterCompletion = await pool.connect();
+    try {
+      await completeBeforeReservationCancel.query('BEGIN');
+      await completeBeforeReservationCancel.query(`UPDATE occ.task_projection SET state='COMPLETED', completed_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000007'`);
+      await cancelReservationAfterCompletion.query('BEGIN');
+      await cancelReservationAfterCompletion.query(`SET LOCAL application_name='reservation-cancel-after-completion'`);
+      const cancellation = cancelReservationAfterCompletion.query(`UPDATE occ.resource_reservation SET state='CANCELLED'
+        WHERE id='6f100000-0000-7000-8000-000000000002'`);
+      await waitForBlockedApplications(pool, ['reservation-cancel-after-completion']);
+      await completeBeforeReservationCancel.query('COMMIT');
+      await cancellation;
+      await cancelReservationAfterCompletion.query('COMMIT');
+    } finally {
+      await completeBeforeReservationCancel.query('ROLLBACK').catch(() => {});
+      await cancelReservationAfterCompletion.query('ROLLBACK').catch(() => {});
+      completeBeforeReservationCancel.release();
+      cancelReservationAfterCompletion.release();
+    }
+    const reservationCompleteFirstState = await pool.query(`SELECT task.state AS task_state, reservation.state AS reservation_state, provider.status AS provider_status
+      FROM occ.task_projection task
+      JOIN occ.resource_reservation reservation ON reservation.task_id=task.id
+      JOIN occ.task_gate_provider_state provider ON provider.task_id=task.id
+      WHERE task.id='6a000000-0000-7000-8000-000000000007'`);
+    assert.deepEqual(reservationCompleteFirstState.rows,
+      [{ task_state: 'COMPLETED', reservation_state: 'CANCELLED', provider_status: 'READY' }],
+      'completion first permits later reservation cancellation without rewriting the terminal provider');
+
+    const cancelReviewFirst = await pool.connect();
+    const decideAfterReviewCancel = await pool.connect();
+    try {
+      await cancelReviewFirst.query('BEGIN');
+      await cancelReviewFirst.query(`UPDATE occ.task_projection SET state='CANCELLED', cancelled_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000008'`);
+      await decideAfterReviewCancel.query('BEGIN');
+      await decideAfterReviewCancel.query(`SET LOCAL application_name='review-decision-after-cancel'`);
+      const decision = decideAfterReviewCancel.query(`INSERT INTO occ.task_review_projection_fact
+        (id, task_id, fact_kind, review_sequence, submission_fact_id, review_id, review_version, decision)
+        VALUES ('6e300000-0000-7000-8000-000000000005', '6a000000-0000-7000-8000-000000000008', 'DECIDED', 1,
+          '6e300000-0000-7000-8000-000000000003', '6e400000-0000-7000-8000-000000000001', 1, 'REJECTED')`);
+      const decisionResult = decision.then(() => ({ error: null }), (error) => ({ error }));
+      await waitForBlockedApplications(pool, ['review-decision-after-cancel']);
+      await cancelReviewFirst.query('COMMIT');
+      assert.match((await decisionResult).error?.message ?? '', /claimed|terminal|cancel|review/i);
+      await decideAfterReviewCancel.query('ROLLBACK');
+    } finally {
+      await cancelReviewFirst.query('ROLLBACK').catch(() => {});
+      await decideAfterReviewCancel.query('ROLLBACK').catch(() => {});
+      cancelReviewFirst.release();
+      decideAfterReviewCancel.release();
+    }
+    const reviewCancelFirstState = await pool.query(`SELECT task.state AS task_state,
+      count(decision.id)::int AS decision_count FROM occ.task_projection task
+      LEFT JOIN occ.task_review_projection_fact decision ON decision.task_id=task.id AND decision.fact_kind='DECIDED'
+      WHERE task.id='6a000000-0000-7000-8000-000000000008' GROUP BY task.state`);
+    assert.deepEqual(reviewCancelFirstState.rows, [{ task_state: 'CANCELLED', decision_count: 0 }],
+      'task cancellation first rejects the review decision without appending a fact');
+
+    const decideReviewFirst = await pool.connect();
+    const cancelAfterReviewDecision = await pool.connect();
+    try {
+      await decideReviewFirst.query('BEGIN');
+      await decideReviewFirst.query(`INSERT INTO occ.task_review_projection_fact
+        (id, task_id, fact_kind, review_sequence, submission_fact_id, review_id, review_version, decision)
+        VALUES ('6e300000-0000-7000-8000-000000000006', '6a000000-0000-7000-8000-000000000009', 'DECIDED', 1,
+          '6e300000-0000-7000-8000-000000000004', '6e400000-0000-7000-8000-000000000002', 1, 'ACCEPTED')`);
+      await cancelAfterReviewDecision.query('BEGIN');
+      await cancelAfterReviewDecision.query(`SET LOCAL application_name='task-cancel-after-review-decision'`);
+      const cancellation = cancelAfterReviewDecision.query(`UPDATE occ.task_projection SET state='CANCELLED', cancelled_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000009'`);
+      await waitForBlockedApplications(pool, ['task-cancel-after-review-decision']);
+      await decideReviewFirst.query('COMMIT');
+      await cancellation;
+      await cancelAfterReviewDecision.query('COMMIT');
+    } finally {
+      await decideReviewFirst.query('ROLLBACK').catch(() => {});
+      await cancelAfterReviewDecision.query('ROLLBACK').catch(() => {});
+      decideReviewFirst.release();
+      cancelAfterReviewDecision.release();
+    }
+    const reviewDecisionFirstState = await pool.query(`SELECT task.state AS task_state,
+      count(decision.id)::int AS decision_count FROM occ.task_projection task
+      LEFT JOIN occ.task_review_projection_fact decision ON decision.task_id=task.id AND decision.fact_kind='DECIDED'
+      WHERE task.id='6a000000-0000-7000-8000-000000000009' GROUP BY task.state`);
+    assert.deepEqual(reviewDecisionFirstState.rows, [{ task_state: 'CANCELLED', decision_count: 1 }],
+      'review decision first remains immutable after task cancellation');
     await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
       VALUES ('6a000000-0000-7000-8000-000000000001', 'process.lifecycle')`);
     await pool.query(`INSERT INTO occ.task_gate_provider_state

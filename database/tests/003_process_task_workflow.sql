@@ -376,7 +376,26 @@ VALUES
   ('59000000-0000-7000-8000-000000000001', 'evidence.required'),
   ('59000000-0000-7000-8000-000000000001', 'resource.capacity'),
   ('59000000-0000-7000-8000-000000000001', 'process.lifecycle'),
-  ('59000000-0000-7000-8000-000000000002', 'unknown.provider');
+  ('59000000-0000-7000-8000-000000000002', 'unknown.provider'),
+  ('59000000-0000-7000-8000-000000000002', 'resource.capacity');
+UPDATE occ.resource_reservation
+SET time_range = tstzrange(transaction_timestamp() + interval '1 hour', transaction_timestamp() + interval '2 hours', '[)')
+WHERE id = '5a000000-0000-7000-8000-000000000021';
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+    VALUES ('59000000-0000-7000-8000-000000000002', 'resource.capacity', 'READY',
+      '5a000000-0000-7000-8000-000000000013', 1)$$,
+  '23514', 'future reservation cannot make a resource provider ready');
+UPDATE occ.resource_reservation
+SET time_range = tstzrange(transaction_timestamp() - interval '2 hours', transaction_timestamp() - interval '1 hour', '[)')
+WHERE id = '5a000000-0000-7000-8000-000000000021';
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+    VALUES ('59000000-0000-7000-8000-000000000002', 'resource.capacity', 'READY',
+      '5a000000-0000-7000-8000-000000000013', 1)$$,
+  '23514', 'expired reservation cannot make a resource provider ready');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.task_gate_provider_state (task_id, provider_key, status)
     VALUES ('59000000-0000-7000-8000-000000000001', 'evidence.required', 'READY')$$,
@@ -624,7 +643,7 @@ SELECT pg_temp.assert_raises(
       (id, task_id, fact_kind, review_sequence, submission_fact_id, review_id, review_version, decision)
     VALUES ('5e000000-0000-7000-8000-000000000003', '59000000-0000-7000-8000-000000000002',
       'DECIDED', 1, '5e000000-0000-7000-8000-000000000001', '5e000000-0000-7000-8000-000000000021', 1, 'REJECTED')$$,
-  '23505', 'one submission has one decision');
+  '23514', 'decision requires the current pending submission');
 SELECT pg_temp.assert_raises(
   $$DELETE FROM occ.task_review_projection_fact WHERE id = '5e000000-0000-7000-8000-000000000002'$$,
   '55000', 'review facts are append only');
