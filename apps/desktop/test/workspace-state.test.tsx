@@ -83,7 +83,7 @@ describe("workspace production definitions", () => {
       overview: { tabs: ["attention", "deadlines", "risks", "health"], filters: ["severity"], sorts: ["priority-desc", "due-asc"], columns: ["item", "type", "status", "dueAt"] },
       "my-work": { tabs: ["available", "claimed", "blocked", "pending-review", "returned", "completed"], filters: ["state"], sorts: ["due-asc", "updated-desc"], columns: ["task", "process", "state", "dueAt"] },
       processes: { tabs: ["cohorts", "processes", "participants", "tasks", "timeline"], filters: ["status", "participant", "timeline"], sorts: ["updated-desc", "started-desc"], columns: ["process", "cohort", "owner", "status"] },
-      interventions: { tabs: ["reviews", "exceptions", "policy", "ai"], filters: ["type", "status"], sorts: ["created-desc", "priority-desc"], columns: ["item", "type", "owner", "status"] },
+      interventions: { tabs: ["reviews", "exceptions", "failed-automation", "policy", "ai"], filters: ["type", "status"], sorts: ["created-desc", "priority-desc"], columns: ["item", "type", "owner", "status"] },
       risks: { tabs: ["open", "mine", "resolved"], filters: ["severity", "sla", "owner", "status"], sorts: ["severity-desc", "updated-desc", "sla-asc"], columns: ["risk", "severity", "owner", "status"] },
       resources: { tabs: ["inventory", "reservations", "conflicts"], filters: ["type", "availability", "conflict"], sorts: ["name-asc", "availability-desc"], columns: ["resource", "type", "availability", "reservation"] },
       "domain-design": { tabs: ["drafts", "versions", "validation", "releases"], filters: ["status", "validation"], sorts: ["updated-desc", "name-asc"], columns: ["package", "version", "validation", "status"] },
@@ -91,6 +91,15 @@ describe("workspace production definitions", () => {
       system: { tabs: ["services", "dependencies", "delivery"], filters: ["state"], sorts: ["service-asc", "state-asc"], columns: ["service", "version", "state", "freshness"] },
       settings: { tabs: ["profile", "trust", "preferences", "session"], filters: [], sorts: ["name-asc"], columns: ["profile", "environment", "origin", "trust"] },
     });
+  });
+
+  it("defines complete canonical intervention and risk filter choices", () => {
+    const interventionType = WORKSPACE_DEFINITIONS.interventions.filters.find(({ key }) => key === "type")!;
+    const riskSla = WORKSPACE_DEFINITIONS.risks.filters.find(({ key }) => key === "sla")!;
+    const riskOwner = WORKSPACE_DEFINITIONS.risks.filters.find(({ key }) => key === "owner")!;
+    expect(interventionType.options.map(({ value }) => value)).toEqual(["review", "exception", "failed-automation", "policy", "recommendation"]);
+    expect(riskSla.options.map(({ value }) => value)).toEqual(["on-track", "due-soon", "overdue"]);
+    expect(riskOwner.options.map(({ value }) => value)).toEqual(["mine", "unassigned"]);
   });
 
   it("recursively freezes every metadata branch", () => {

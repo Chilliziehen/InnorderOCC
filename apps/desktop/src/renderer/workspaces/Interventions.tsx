@@ -1,54 +1,48 @@
-import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
+import { useRef, useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
+import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
 import { CommandPanel } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
-import { WORKSPACE_DEFINITIONS, type WorkspaceDefinition } from "./workspace-definitions";
+import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
 
-export type InterventionTab = "evidence-reviews" | "exceptions" | "failed-automation" | "policy-blocks" | "ai-recommendations";
+export type InterventionTab = "reviews" | "exceptions" | "failed-automation" | "policy" | "ai";
 
-const interventionTabs: readonly { id: InterventionTab; label: string }[] = [
-  { id: "evidence-reviews", label: "证据审核" },
-  { id: "exceptions", label: "异常" },
-  { id: "failed-automation", label: "自动化失败" },
-  { id: "policy-blocks", label: "策略阻断" },
-  { id: "ai-recommendations", label: "智能建议" },
-];
-
-const interventionDefinition: WorkspaceDefinition = {
-  ...WORKSPACE_DEFINITIONS.interventions,
-  tabs: interventionTabs,
-  filters: [
-    {
-      key: "type",
-      label: "介入类型",
-      options: [
-        { value: "review", label: "证据审核" },
-        { value: "exception", label: "异常" },
-        { value: "failed-automation", label: "自动化失败" },
-        { value: "policy", label: "策略阻断" },
-        { value: "recommendation", label: "智能建议" },
-      ],
-    },
-    WORKSPACE_DEFINITIONS.interventions.filters[1]!,
-  ],
-};
-
+const requiredText = z.string().trim().min(1);
+const version = z.number().int().min(0);
 const recommendationSchema = z.discriminatedUnion("state", [
-  z.object({ state: z.literal("cited"), summary: z.string(), citations: z.array(z.string()).min(1) }).strict(),
-  z.object({ state: z.literal("stale"), summary: z.string(), asOf: z.iso.datetime({ offset: true }) }).strict(),
-  z.object({ state: z.literal("unavailable"), reason: z.string() }).strict(),
+  z.object({ state: z.literal("cited"), summary: requiredText, citations: z.array(requiredText).min(1) }).strict(),
+  z.object({ state: z.literal("uncited-rejected"), summary: requiredText, reason: requiredText }).strict(),
+  z.object({ state: z.literal("stale"), summary: requiredText, asOf: z.iso.datetime({ offset: true }) }).strict(),
+  z.object({ state: z.literal("disabled"), reason: requiredText }).strict(),
+  z.object({ state: z.literal("unavailable"), reason: requiredText }).strict(),
 ]);
 
 export const interventionItemSchema = z.object({
-  id: z.string().min(1),
-  item: z.string().min(1),
+  id: requiredText,
+  item: requiredText,
   type: z.enum(["review", "exception", "failed-automation", "policy", "recommendation"]),
-  owner: z.string().min(1).nullable(),
-  status: z.string().min(1),
+  owner: requiredText.nullable(),
+  status: requiredText,
+  version,
+  evidenceVersion: version.optional(),
   recommendation: recommendationSchema.optional(),
-}).strict();
+}).strict().superRefine((item, context) => {
+  if (item.type === "recommendation" && !item.recommendation) {
+    context.addIssue({ code: "custom", path: ["recommendation"], message: "Recommendation state is required" });
+  }
+  if (item.type === "review" && item.evidenceVersion === undefined) {
+    context.addIssue({ code: "custom", path: ["evidenceVersion"], message: "Evidence version is required" });
+  }
+});
+
+export const interventionCommandPayloadSchemas = {
+  accept: z.object({ evidenceVersion: version, expectedVersion: version }).strict(),
+  conditional: z.object({ evidenceVersion: version, expectedVersion: version, followUp: requiredText, dueAt: requiredText }).strict(),
+  reject: z.object({ evidenceVersion: version, expectedVersion: version }).strict(),
+  return: z.object({ expectedVersion: version, reason: requiredText }).strict(),
+} as const;
 
 type InterventionItem = z.infer<typeof interventionItemSchema>;
 
@@ -61,63 +55,103 @@ export interface InterventionsProps {
   readonly online: boolean;
   readonly authenticated: boolean;
   readonly onTabChange: (tab: InterventionTab) => void;
+  readonly onSelectItem: (itemId: string) => void;
   readonly onQueryChange: (query: WorkspaceQueryValue) => void;
   readonly onRefresh: () => void;
   readonly onExecute: (intent: WorkspaceCommand) => Promise<CommandReceipt>;
 }
 
-function Recommendation({ item }: { readonly item: InterventionItem }) {
-  const recommendation = item.recommendation;
-  if (!recommendation) return null;
+function Recommendation({ recommendation }: { readonly recommendation: NonNullable<InterventionItem["recommendation"]> }) {
   switch (recommendation.state) {
     case "cited":
-      return <section aria-label="有引用的智能建议"><strong>有引用</strong><p>{recommendation.summary}</p><ul>{recommendation.citations.map((citation) => <li key={citation}><cite>{citation}</cite></li>)}</ul></section>;
+      return <section aria-label="有引用的智能建议"><strong>建议已生成</strong><p>状态：有引用</p><p>{recommendation.summary}</p><ul>{recommendation.citations.map((citation) => <li key={citation}><cite>{citation}</cite></li>)}</ul></section>;
+    case "uncited-rejected":
+      return <section aria-label="无引用建议已拒绝"><strong>建议未采用</strong><p>{recommendation.summary}</p><p>{recommendation.reason}</p></section>;
     case "stale":
-      return <section aria-label="过期的智能建议"><strong>建议已过期</strong><p>{recommendation.summary}</p><time dateTime={recommendation.asOf}>依据时间 {new Date(recommendation.asOf).toLocaleString("zh-CN")}</time></section>;
+      return <section aria-label="过期的智能建议"><strong>建议已生成</strong><p>状态：已过期</p><p>{recommendation.summary}</p><time dateTime={recommendation.asOf}>依据时间 {new Date(recommendation.asOf).toLocaleString("zh-CN")}</time></section>;
+    case "disabled":
+      return <section aria-label="智能建议已禁用"><strong>智能建议已禁用</strong><p>{recommendation.reason}</p></section>;
     case "unavailable":
       return <section aria-label="智能建议不可用"><strong>智能建议不可用</strong><p>{recommendation.reason}</p></section>;
   }
 }
 
-function InterventionRow(item: InterventionItem) {
-  return (
-    <article aria-label={item.item}>
-      <h3>{item.item}</h3>
-      <dl>
-        <dt>类型</dt><dd>{item.type}</dd>
-        <dt>处理人</dt><dd>{item.owner ?? "未分派"}</dd>
-        <dt>状态</dt><dd>{item.status}</dd>
-      </dl>
-      <Recommendation item={item} />
-    </article>
-  );
+function WorkspaceAction({ command, schema, payload, targetId, capabilities, online, authenticated, onExecute, onRefresh }: {
+  readonly command: WorkspaceOperation;
+  readonly schema: z.ZodType<Record<string, unknown>>;
+  readonly payload: Record<string, unknown>;
+  readonly targetId?: string;
+  readonly capabilities: readonly string[];
+  readonly online: boolean;
+  readonly authenticated: boolean;
+  readonly onExecute: (intent: WorkspaceCommand) => Promise<CommandReceipt>;
+  readonly onRefresh: () => void;
+}) {
+  const parsed = schema.safeParse(payload);
+  const operationBlocksFirst = command.availability.state === "unavailable" || !online || !authenticated || !capabilities.includes(command.capability);
+  if (!operationBlocksFirst && (!targetId || !parsed.success)) {
+    const reasonId = `interventions-${command.operation}-form-reason`;
+    return <div><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{targetId ? "请完成必填操作字段" : "请选择介入事项"}</p></div>;
+  }
+  return <CommandPanel workspace="interventions" command={command} capabilities={capabilities} online={online} authenticated={authenticated} payload={parsed.success ? parsed.data : {}} {...(targetId ? { targetId } : {})} onExecute={onExecute} onConflictRefresh={onRefresh} />;
 }
 
-export function Interventions({ result, query, activeTab, selectedItemId, capabilities, online, authenticated, onTabChange, onQueryChange, onRefresh, onExecute }: InterventionsProps) {
-  const readOnly = !online || result.state === "offline" || result.state === "stale";
+export function Interventions({ result, query, activeTab, selectedItemId, capabilities, online, authenticated, onTabChange, onSelectItem, onQueryChange, onRefresh, onExecute }: InterventionsProps) {
+  const definition = WORKSPACE_DEFINITIONS.interventions;
+  const tabs = definition.tabs as readonly { readonly id: InterventionTab; readonly label: string }[];
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [evidenceVersion, setEvidenceVersion] = useState("");
+  const [expectedVersion, setExpectedVersion] = useState("");
+  const [followUp, setFollowUp] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [returnReason, setReturnReason] = useState("");
+  const mutationOnline = online && result.state !== "offline" && result.state !== "stale";
+  const numberValue = (value: string) => value === "" ? Number.NaN : Number(value);
+  const selectTab = (index: number) => {
+    const tab = tabs[index];
+    if (!tab) return;
+    onTabChange(tab.id);
+    tabRefs.current[index]?.focus();
+  };
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next: number | undefined;
+    if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+    if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = tabs.length - 1;
+    if (next !== undefined) { event.preventDefault(); selectTab(next); }
+  };
+  const renderItem = (item: InterventionItem) => (
+    <article aria-label={item.item}>
+      <button type="button" aria-pressed={selectedItemId === item.id} onClick={() => onSelectItem(item.id)}>选择介入事项：{item.item}</button>
+      <dl><dt>类型</dt><dd>{item.type}</dd><dt>处理人</dt><dd>{item.owner ?? "未分派"}</dd><dt>状态</dt><dd>{item.status}</dd><dt>版本</dt><dd>{item.version}</dd></dl>
+      {item.recommendation ? <Recommendation recommendation={item.recommendation} /> : null}
+    </article>
+  );
+  const action = (operation: keyof typeof interventionCommandPayloadSchemas, payload: Record<string, unknown>) => {
+    const command = definition.commands.find((entry) => entry.operation === operation)!;
+    return <WorkspaceAction key={operation} command={command} schema={interventionCommandPayloadSchemas[operation]} payload={payload} {...(selectedItemId ? { targetId: selectedItemId } : {})} capabilities={capabilities} online={mutationOnline} authenticated={authenticated} onExecute={onExecute} onRefresh={onRefresh} />;
+  };
+  const reviewPayload = { evidenceVersion: numberValue(evidenceVersion), expectedVersion: numberValue(expectedVersion) };
+
   return (
     <section aria-labelledby="interventions-title">
       <header><h1 id="interventions-title">人工介入中心</h1></header>
       <div role="tablist" aria-label="介入队列">
-        {interventionTabs.map((tab) => <button type="button" role="tab" aria-selected={activeTab === tab.id} key={tab.id} onClick={() => onTabChange(tab.id)}>{tab.label}</button>)}
+        {tabs.map((tab, index) => <button ref={(node) => { tabRefs.current[index] = node; }} id={`interventions-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls="interventions-panel" tabIndex={activeTab === tab.id ? 0 : -1} key={tab.id} onClick={() => onTabChange(tab.id)} onKeyDown={(event) => onTabKeyDown(event, index)}>{tab.label}</button>)}
       </div>
-      <QueryToolbar definition={interventionDefinition} value={query} disabled={readOnly} onChange={onQueryChange} onRefresh={onRefresh} />
-      <WorkspaceState result={result} itemSchema={interventionItemSchema} onRetry={onRefresh} onRefresh={onRefresh} renderItem={InterventionRow} />
+      <div id="interventions-panel" role="tabpanel" aria-labelledby={`interventions-tab-${activeTab}`}>
+        <QueryToolbar definition={definition} value={query} onChange={onQueryChange} onRefresh={onRefresh} />
+        <WorkspaceState result={result} itemSchema={interventionItemSchema} onRetry={onRefresh} onRefresh={onRefresh} renderItem={renderItem} />
+      </div>
       <section aria-label="介入操作">
-        {WORKSPACE_DEFINITIONS.interventions.commands.map((command) => (
-          <CommandPanel
-            key={command.operation}
-            workspace="interventions"
-            command={command}
-            capabilities={capabilities}
-            online={online && !readOnly}
-            authenticated={authenticated}
-            payload={{}}
-            {...(selectedItemId ? { targetId: selectedItemId } : {})}
-            onExecute={onExecute}
-            onConflictRefresh={onRefresh}
-          />
-        ))}
+        <fieldset disabled={!mutationOnline}><legend>证据审核版本</legend><label>证据版本<input type="number" min="0" value={evidenceVersion} onChange={(event) => setEvidenceVersion(event.currentTarget.value)} /></label><label>预期版本<input type="number" min="0" value={expectedVersion} onChange={(event) => setExpectedVersion(event.currentTarget.value)} /></label></fieldset>
+        {action("accept", reviewPayload)}
+        <fieldset disabled={!mutationOnline}><legend>有条件接受要求</legend><label>有条件接受后续要求<textarea value={followUp} onChange={(event) => setFollowUp(event.currentTarget.value)} /></label><label>有条件接受到期日<input type="date" value={dueAt} onChange={(event) => setDueAt(event.currentTarget.value)} /></label></fieldset>
+        {action("conditional", { ...reviewPayload, followUp, dueAt })}
+        {action("reject", reviewPayload)}
+        <fieldset disabled={!mutationOnline}><legend>退回要求</legend><label>退回原因<textarea value={returnReason} onChange={(event) => setReturnReason(event.currentTarget.value)} /></label></fieldset>
+        {action("return", { expectedVersion: numberValue(expectedVersion), reason: returnReason })}
       </section>
     </section>
   );

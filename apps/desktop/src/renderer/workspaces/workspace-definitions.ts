@@ -72,14 +72,14 @@ const uiDefinitions: Record<WorkspaceId, WorkspaceUiDefinition> = {
     columns: [{ key: "process", label: "流程" }, { key: "cohort", label: "群组" }, { key: "owner", label: "负责人" }, { key: "status", label: "状态" }],
   },
   interventions: {
-    tabs: [{ id: "reviews", label: "证据审核" }, { id: "exceptions", label: "异常" }, { id: "policy", label: "策略阻断" }, { id: "ai", label: "智能建议" }],
-    filters: [filter("type", "介入类型", [option("review", "审核"), option("exception", "异常"), option("policy", "策略")]), filter("status", "状态", [option("open", "待处理"), option("resolved", "已处理")])],
+    tabs: [{ id: "reviews", label: "证据审核" }, { id: "exceptions", label: "异常" }, { id: "failed-automation", label: "自动化失败" }, { id: "policy", label: "策略阻断" }, { id: "ai", label: "智能建议" }],
+    filters: [filter("type", "介入类型", [option("review", "证据审核"), option("exception", "异常"), option("failed-automation", "自动化失败"), option("policy", "策略阻断"), option("recommendation", "智能建议")]), filter("status", "状态", [option("open", "待处理"), option("resolved", "已处理")])],
     sortOptions: [option("created-desc", "最新进入"), option("priority-desc", "优先级")],
     columns: [{ key: "item", label: "介入事项" }, { key: "type", label: "类型" }, { key: "owner", label: "处理人" }, { key: "status", label: "状态" }],
   },
   risks: {
     tabs: [{ id: "open", label: "未解决" }, { id: "mine", label: "我的风险" }, { id: "resolved", label: "已解决" }],
-    filters: [filter("severity", "严重性", [option("critical", "严重"), option("high", "高"), option("medium", "中"), option("low", "低")]), filter("sla", "SLA", [option("overdue", "已逾期"), option("due-soon", "即将到期")]), filter("owner", "负责人", []), filter("status", "状态", [option("open", "未解决"), option("resolved", "已解决")])],
+    filters: [filter("severity", "严重性", [option("critical", "严重"), option("high", "高"), option("medium", "中"), option("low", "低")]), filter("sla", "SLA", [option("on-track", "正常"), option("due-soon", "即将到期"), option("overdue", "已逾期")]), filter("owner", "负责人", [option("mine", "由我负责"), option("unassigned", "未分派")]), filter("status", "状态", [option("open", "未解决"), option("resolved", "已解决")])],
     sortOptions: [option("severity-desc", "严重性"), option("updated-desc", "最近更新"), option("sla-asc", "SLA 时限")],
     columns: [{ key: "risk", label: "风险" }, { key: "severity", label: "严重性" }, { key: "owner", label: "负责人" }, { key: "status", label: "状态" }],
   },
