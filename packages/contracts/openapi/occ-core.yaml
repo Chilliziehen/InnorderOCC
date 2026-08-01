@@ -322,7 +322,7 @@ paths:
       operationId: completeTask
       parameters: [*taskId, *idempotencyKey]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CompleteTaskRequest" } } } }
-      responses: { "200": { description: Task completed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }, "400": { $ref: '#/components/responses/WorkflowError' }, "401": { $ref: '#/components/responses/WorkflowError' }, "403": { $ref: '#/components/responses/WorkflowError' }, "404": { $ref: '#/components/responses/WorkflowError' }, "409": { $ref: '#/components/responses/WorkflowError' }, "503": { $ref: '#/components/responses/WorkflowError' }, "500": { $ref: '#/components/responses/WorkflowError' } }
+      responses: { "200": { description: Task completed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }, "400": { $ref: '#/components/responses/WorkflowError' }, "401": { $ref: '#/components/responses/WorkflowError' }, "403": { $ref: '#/components/responses/WorkflowError' }, "404": { $ref: '#/components/responses/WorkflowError' }, "409": { $ref: '#/components/responses/TaskBlocked' }, "503": { $ref: '#/components/responses/TaskGateUnavailable' }, "500": { $ref: '#/components/responses/WorkflowError' } }
   /api/v1/tasks/{taskId}/fail:
     post:
       operationId: failTask
@@ -373,6 +373,18 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/ProblemDetails"
+    TaskBlocked:
+      description: Authorized blocker details prevent task completion
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/TaskBlockedProblem"
+    TaskGateUnavailable:
+      description: Authorized provider details are unavailable or stale
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/TaskGateUnavailableProblem"
     BadRequest:
       description: Invalid request
       content:
@@ -398,6 +410,44 @@ components:
           schema:
             $ref: "#/components/schemas/ProblemDetails"
   schemas:
+    ProblemCode:
+      type: string
+      enum:
+        - OCC-API-VALIDATION
+        - OCC-API-AUTHENTICATION
+        - OCC-AUTH-INVALID-CREDENTIALS
+        - OCC-API-FORBIDDEN
+        - OCC-API-CONFLICT
+        - OCC-COMMAND-IDEMPOTENCY-KEY
+        - OCC-COMMAND-IDEMPOTENCY-CONFLICT
+        - OCC-COMMAND-METADATA
+        - OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS
+        - OCC-COMMAND-IDEMPOTENCY-EXPIRED
+        - OCC-COMMAND-INTEGRITY
+        - OCC-COMMAND-OPTIMISTIC-CONFLICT
+        - OCC-AUTHZ-UNAVAILABLE
+        - OCC-API-INTERNAL
+        - OCC-API-REQUEST
+        - AUTH_INVALID_CREDENTIALS
+        - UNICODE_DETAIL
+        - OCC_INVALID_REQUEST
+        - OCC_INVALID_CURSOR
+        - OCC_UNAUTHENTICATED
+        - OCC_FORBIDDEN
+        - OCC_NOT_FOUND
+        - OCC_IDEMPOTENCY_CONFLICT
+        - OCC_DUPLICATE_COHORT_CODE
+        - OCC_STALE_VERSION
+        - OCC_CLAIM_CONFLICT
+        - OCC_PARTICIPANT_PROCESS_EXISTS
+        - OCC_INVALID_TRANSITION
+        - OCC_PROCESS_NOT_RUNNING
+        - OCC_TASK_BLOCKED
+        - OCC_WAIT_NOT_ACTIVE
+        - OCC_TASK_GATE_UNAVAILABLE
+        - OCC_AUTHORIZATION_UNAVAILABLE
+        - OCC_WORKFLOW_UNAVAILABLE
+        - OCC_INTERNAL_ERROR
     ProblemDetails:
       type: object
       additionalProperties: false
@@ -420,9 +470,7 @@ components:
           minimum: 400
           maximum: 599
         code:
-          type: string
-          minLength: 1
-          maxLength: 128
+          $ref: "#/components/schemas/ProblemCode"
         correlationId:
           type: string
           format: uuid
@@ -580,6 +628,235 @@ components:
         payload:
           type: object
           additionalProperties: true
+    CohortCreatedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.created }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortCreatedPayload" } } }] }
+    CohortUpdatedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.updated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortUpdatedPayload" } } }] }
+    CohortOwnerTransferredEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.owner-transferred }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortOwnerTransferredPayload" } } }] }
+    CohortMemberAddedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-added }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberAddedPayload" } } }] }
+    CohortMemberRemovedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-removed }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberRemovedPayload" } } }] }
+    CohortActivatedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.activated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortActivatedPayload" } } }] }
+    CohortArchivedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.archived }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortArchivedPayload" } } }] }
+    ProcessStartedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.started }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessStartedPayload" } } }] }
+    ProcessSuspendedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.suspended }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessSuspendedPayload" } } }] }
+    ProcessResumedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.resumed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessResumedPayload" } } }] }
+    ProcessTransferredEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.transferred }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessTransferredPayload" } } }] }
+    ProcessCompletedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.completed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCompletedPayload" } } }] }
+    ProcessCancelledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCancelledPayload" } } }] }
+    ProcessFailedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.failed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessFailedPayload" } } }] }
+    ProcessProjectionReconciledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessProjectionReconciledPayload" } } }] }
+    TaskAvailableEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.available }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAvailablePayload" } } }] }
+    TaskClaimedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.claimed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskClaimedPayload" } } }] }
+    TaskAssigneeChangedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.assignee-changed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAssigneeChangedPayload" } } }] }
+    TaskBlockedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.blocked }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskBlockedPayload" } } }] }
+    TaskPendingReviewEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.pending-review }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskPendingReviewPayload" } } }] }
+    TaskReturnedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.returned }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskReturnedPayload" } } }] }
+    TaskCompletedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.completed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCompletedPayload" } } }] }
+    TaskCancelledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCancelledPayload" } } }] }
+    TaskFailedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.failed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskFailedPayload" } } }] }
+    TaskProjectionReconciledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskProjectionReconciledPayload" } } }] }
+    CohortCreatedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, packageVersionId, ownerPrincipalId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        packageVersionId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+        status: { const: DRAFT }
+    CohortUpdatedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/CohortStatus" }
+    CohortOwnerTransferredPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, previousOwnerPrincipalId, ownerPrincipalId]
+      properties:
+        cohortId: { type: string, format: uuid }
+        previousOwnerPrincipalId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+    CohortMemberAddedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, principalId, role]
+      properties:
+        cohortId: { type: string, format: uuid }
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [OWNER, TEACHER, PARTICIPANT] }
+    CohortMemberRemovedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, principalId, role]
+      properties:
+        cohortId: { type: string, format: uuid }
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [OWNER, TEACHER, PARTICIPANT] }
+    CohortActivatedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        status: { const: ACTIVE }
+    CohortArchivedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        status: { const: ARCHIVED }
+    ProcessStartedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, cohortId, participantId, packageVersionId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        participantId: { type: string, format: uuid }
+        packageVersionId: { type: string, format: uuid }
+        state: { const: RUNNING }
+    ProcessSuspendedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { const: SUSPENDED }
+    ProcessResumedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { const: RUNNING }
+    ProcessTransferredPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, previousParticipantId, participantId]
+      properties:
+        processId: { type: string, format: uuid }
+        previousParticipantId: { type: string, format: uuid }
+        participantId: { type: string, format: uuid }
+    ProcessCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { const: COMPLETED }
+    ProcessCancelledPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state, code]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { const: CANCELLED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    ProcessFailedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state, code]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { const: FAILED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    ProcessProjectionReconciledPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, repairedTaskIds]
+      properties:
+        processId: { type: string, format: uuid }
+        repairedTaskIds: { type: array, maxItems: 1000, items: { type: string, format: uuid } }
+    TaskAvailablePayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, cohortId, activityKey]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+    TaskClaimedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, assigneeId]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+    TaskAssigneeChangedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId]
+      anyOf:
+        - required: [previousAssigneeId]
+        - required: [assigneeId]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        previousAssigneeId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+    TaskBlockedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, blockerCodes]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        blockerCodes: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BlockerCode" } }
+    TaskPendingReviewPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, evidenceVersionId, reviewSequence]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        evidenceVersionId: { type: string, format: uuid }
+        reviewSequence: { $ref: "#/components/schemas/SafeVersion" }
+    TaskReturnedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, assigneeId, decision]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+        decision: { type: string, enum: [REJECTED, CONDITIONAL] }
+    TaskCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, state]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        state: { const: COMPLETED }
+    TaskCancelledPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, state, code]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        state: { const: CANCELLED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    TaskFailedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, state, code]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        state: { const: FAILED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    TaskProjectionReconciledPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
     SafeVersion:
       type: integer
       format: int64
@@ -616,6 +893,7 @@ components:
     CreateCohortRequest:
       type: object
       additionalProperties: false
+      x-occ-cross-field-constraint: endDate-gte-startDate
       required: [code, name, packageVersionId, ownerPrincipalId, startDate]
       properties:
         code: { type: string, minLength: 1, maxLength: 64, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
@@ -627,7 +905,12 @@ components:
     UpdateCohortRequest:
       type: object
       additionalProperties: false
+      x-occ-cross-field-constraint: endDate-gte-startDate
       required: [expectedVersion]
+      anyOf:
+        - required: [name]
+        - required: [startDate]
+        - required: [endDate]
       properties:
         expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
         name: { type: string, minLength: 1, maxLength: 256 }
@@ -851,22 +1134,22 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/ProcessTask" } }
         page: { $ref: "#/components/schemas/CursorPageInfo" }
-    TimelineEntry: &timelineEntry
+    ProcessTimelineEntry:
       type: object
       additionalProperties: false
       required: [id, type, occurredAt]
       properties:
         id: { type: string, format: uuid }
-        type: { type: string, minLength: 1, maxLength: 128 }
+        type: { type: string, enum: [STARTED, SUSPENDED, RESUMED, TRANSFERRED, COMPLETED, CANCELLED, FAILED, WAIT_RELEASED, PROJECTION_RECONCILED] }
         occurredAt: { type: string, format: date-time }
         actorId: { type: string, format: uuid }
-        code: { type: string, minLength: 1, maxLength: 128 }
-    ProcessTimelinePage: &timelinePage
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    ProcessTimelinePage:
       type: object
       additionalProperties: false
       required: [items, page]
       properties:
-        items: { type: array, items: { $ref: "#/components/schemas/TimelineEntry" } }
+        items: { type: array, items: { $ref: "#/components/schemas/ProcessTimelineEntry" } }
         page: { $ref: "#/components/schemas/CursorPageInfo" }
     TaskBlocker:
       type: object
@@ -933,7 +1216,23 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/TaskSummary" } }
         page: { $ref: "#/components/schemas/CursorPageInfo" }
-    TaskHistoryPage: *timelinePage
+    TaskHistoryEntry:
+      type: object
+      additionalProperties: false
+      required: [id, type, occurredAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [AVAILABLE, CLAIMED, ASSIGNEE_CHANGED, BLOCKED, UNBLOCKED, PENDING_REVIEW, RETURNED, COMPLETED, CANCELLED, FAILED, PROJECTION_RECONCILED] }
+        occurredAt: { type: string, format: date-time }
+        actorId: { type: string, format: uuid }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    TaskHistoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TaskHistoryEntry" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
     TaskBlockerPage:
       type: object
       additionalProperties: false
@@ -966,7 +1265,35 @@ components:
       additionalProperties: false
       required: [items, page]
       properties:
-        items: { type: array, items: { $ref: "#/components/schemas/EventEnvelope" } }
+        items:
+          type: array
+          items:
+            oneOf:
+              - { $ref: "#/components/schemas/CohortCreatedEvent" }
+              - { $ref: "#/components/schemas/CohortUpdatedEvent" }
+              - { $ref: "#/components/schemas/CohortOwnerTransferredEvent" }
+              - { $ref: "#/components/schemas/CohortMemberAddedEvent" }
+              - { $ref: "#/components/schemas/CohortMemberRemovedEvent" }
+              - { $ref: "#/components/schemas/CohortActivatedEvent" }
+              - { $ref: "#/components/schemas/CohortArchivedEvent" }
+              - { $ref: "#/components/schemas/ProcessStartedEvent" }
+              - { $ref: "#/components/schemas/ProcessSuspendedEvent" }
+              - { $ref: "#/components/schemas/ProcessResumedEvent" }
+              - { $ref: "#/components/schemas/ProcessTransferredEvent" }
+              - { $ref: "#/components/schemas/ProcessCompletedEvent" }
+              - { $ref: "#/components/schemas/ProcessCancelledEvent" }
+              - { $ref: "#/components/schemas/ProcessFailedEvent" }
+              - { $ref: "#/components/schemas/ProcessProjectionReconciledEvent" }
+              - { $ref: "#/components/schemas/TaskAvailableEvent" }
+              - { $ref: "#/components/schemas/TaskClaimedEvent" }
+              - { $ref: "#/components/schemas/TaskAssigneeChangedEvent" }
+              - { $ref: "#/components/schemas/TaskBlockedEvent" }
+              - { $ref: "#/components/schemas/TaskPendingReviewEvent" }
+              - { $ref: "#/components/schemas/TaskReturnedEvent" }
+              - { $ref: "#/components/schemas/TaskCompletedEvent" }
+              - { $ref: "#/components/schemas/TaskCancelledEvent" }
+              - { $ref: "#/components/schemas/TaskFailedEvent" }
+              - { $ref: "#/components/schemas/TaskProjectionReconciledEvent" }
         page: { $ref: "#/components/schemas/CursorPageInfo" }
     TaskGateUnavailableProblem:
       type: object

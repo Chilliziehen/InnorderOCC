@@ -46,8 +46,6 @@ import {
   EVENT_TYPE_MIN_LENGTH,
 } from "../src/events.js";
 import {
-  PROBLEM_CODE_MAX_LENGTH,
-  PROBLEM_CODE_MIN_LENGTH,
   PROBLEM_DETAIL_MAX_LENGTH,
   PROBLEM_STATUS_MAX,
   PROBLEM_STATUS_MIN,
@@ -458,7 +456,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/boundary",
       title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH),
       status: PROBLEM_STATUS_MAX,
-      code: "C".repeat(PROBLEM_CODE_MAX_LENGTH),
+      code: "AUTH_INVALID_CREDENTIALS",
       correlationId: id,
       detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
       currentVersion: 0,
@@ -470,8 +468,7 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH + 1) },
       { ...boundaryProblem, status: PROBLEM_STATUS_MIN - 1 },
       { ...boundaryProblem, status: PROBLEM_STATUS_MAX + 1 },
-      { ...boundaryProblem, code: "C".repeat(PROBLEM_CODE_MIN_LENGTH - 1) },
-      { ...boundaryProblem, code: "C".repeat(PROBLEM_CODE_MAX_LENGTH + 1) },
+      { ...boundaryProblem, code: "UNKNOWN_PROBLEM_CODE" },
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
       { ...boundaryProblem, currentVersion: -1 },
       { ...boundaryProblem, currentVersion: 1.5 },

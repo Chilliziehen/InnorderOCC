@@ -12,6 +12,14 @@ import {
   uuidSchema,
 } from "./workflow-common.js";
 
+export const COHORT_DATE_ORDER_CONSTRAINT = "endDate-gte-startDate";
+
+const hasValidDateOrder = (value: {
+  startDate?: string | undefined;
+  endDate?: string | null | undefined;
+}): boolean =>
+  value.startDate === undefined || value.endDate === undefined || value.endDate === null || value.endDate >= value.startDate;
+
 export const cohortStatusSchema = z.enum(["DRAFT", "ACTIVE", "ARCHIVED"]);
 export const cohortMemberRoleSchema = z.enum(["OWNER", "TEACHER", "PARTICIPANT"]);
 
@@ -25,9 +33,9 @@ export const createCohortRequestSchema = z
     endDate: dateSchema.optional(),
   })
   .strict()
-  .refine((value) => value.endDate === undefined || value.endDate >= value.startDate, {
+  .refine(hasValidDateOrder, {
     path: ["endDate"],
-    message: "endDate must not precede startDate",
+    message: COHORT_DATE_ORDER_CONSTRAINT,
   });
 
 export const updateCohortRequestSchema = z
@@ -40,6 +48,10 @@ export const updateCohortRequestSchema = z
   .strict()
   .refine((value) => value.name !== undefined || value.startDate !== undefined || value.endDate !== undefined, {
     message: "at least one update is required",
+  })
+  .refine(hasValidDateOrder, {
+    path: ["endDate"],
+    message: COHORT_DATE_ORDER_CONSTRAINT,
   });
 
 export const addCohortMemberRequestSchema = z

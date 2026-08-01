@@ -14,12 +14,18 @@ export type {
 
 export {
   problemDetailsSchema,
+  problemCodeSchema,
+  platformProblemCodeSchema,
   taskBlockedProblemDetailsSchema,
   taskGateUnavailableProblemDetailsSchema,
   workflowErrorCodeSchema,
+  PLATFORM_PROBLEM_CODES,
+  WORKFLOW_ERROR_CODES,
 } from "./problem-details.js";
 export type {
   ProblemDetails,
+  PlatformProblemCode,
+  ProblemCode,
   TaskBlockedProblemDetails,
   TaskGateUnavailableProblemDetails,
   WorkflowErrorCode,

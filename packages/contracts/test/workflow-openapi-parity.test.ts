@@ -5,10 +5,15 @@ import { parse } from "yaml";
 
 import {
   blockerCodeSchema,
+  COHORT_DATE_ORDER_CONSTRAINT,
   cohortStatusSchema,
   gateProviderStatusSchema,
+  problemCodeSchema,
+  processTimelineTypeSchema,
   processStateSchema,
+  taskTimelineTypeSchema,
   taskPresentationStateSchema,
+  workflowEventSchemas,
 } from "../src/index.js";
 
 type Schema = {
@@ -18,6 +23,10 @@ type Schema = {
   enum?: string[];
   format?: string;
   items?: Schema;
+  allOf?: Schema[];
+  anyOf?: Schema[];
+  oneOf?: Schema[];
+  const?: unknown;
   maxLength?: number;
   maximum?: number;
   minLength?: number;
@@ -25,6 +34,7 @@ type Schema = {
   properties?: Record<string, Schema>;
   required?: string[];
   type?: string;
+  [key: `x-${string}`]: unknown;
 };
 type Parameter = { in?: string; name?: string; required?: boolean; schema?: Schema };
 type Response = { $ref?: string; headers?: Record<string, Schema>; content?: Record<string, { schema?: Schema }> };
@@ -142,7 +152,12 @@ describe("workflow OpenAPI surface", () => {
           const response = operation.responses?.[status];
           const component = response?.$ref?.replace("#/components/responses/", "");
           const resolved = component ? document.components.responses[component] : response;
-          expect(resolved?.content?.["application/problem+json"]?.schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+          const expectedSchema = path === "/api/v1/tasks/{taskId}/complete" && status === "409"
+            ? "TaskBlockedProblem"
+            : path === "/api/v1/tasks/{taskId}/complete" && status === "503"
+              ? "TaskGateUnavailableProblem"
+              : "ProblemDetails";
+          expect(resolved?.content?.["application/problem+json"]?.schema?.$ref).toBe(`#/components/schemas/${expectedSchema}`);
         }
       }
     }
@@ -158,6 +173,8 @@ describe("workflow OpenAPI schema parity", () => {
     expect(document.components.schemas.GateProviderStatus.enum).toEqual(gateProviderStatusSchema.options);
     expect(document.components.schemas.SafeVersion).toEqual({ type: "integer", format: "int64", minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
     expect(document.components.schemas.PageSize).toEqual({ type: "integer", minimum: 1, maximum: 100, default: 25 });
+    expect(document.components.schemas.ProblemCode.enum).toEqual(problemCodeSchema.options);
+    expect(document.components.schemas.ProblemDetails.properties?.code).toEqual({ $ref: "#/components/schemas/ProblemCode" });
   });
 
   it("keeps all workflow object schemas closed with exact required fields", () => {
@@ -234,5 +251,66 @@ describe("workflow OpenAPI schema parity", () => {
         ],
       },
     });
+  });
+
+  it("uses separate strict process and task history entry enums", () => {
+    const processEntry = document.components.schemas.ProcessTimelineEntry;
+    const taskEntry = document.components.schemas.TaskHistoryEntry;
+    expect(processEntry.additionalProperties).toBe(false);
+    expect(taskEntry.additionalProperties).toBe(false);
+    expect(processEntry.properties?.type).toEqual({ type: "string", enum: processTimelineTypeSchema.options });
+    expect(taskEntry.properties?.type).toEqual({ type: "string", enum: taskTimelineTypeSchema.options });
+    expect(document.components.schemas.ProcessTimelinePage.properties?.items?.items?.$ref).toBe("#/components/schemas/ProcessTimelineEntry");
+    expect(document.components.schemas.TaskHistoryPage.properties?.items?.items?.$ref).toBe("#/components/schemas/TaskHistoryEntry");
+  });
+
+  it("binds cohort update alternatives and date-order extensions to Zod", () => {
+    const create = document.components.schemas.CreateCohortRequest;
+    const update = document.components.schemas.UpdateCohortRequest;
+    expect(create["x-occ-cross-field-constraint"]).toBe(COHORT_DATE_ORDER_CONSTRAINT);
+    expect(update["x-occ-cross-field-constraint"]).toBe(COHORT_DATE_ORDER_CONSTRAINT);
+    expect(update.anyOf).toEqual([
+      { required: ["name"] },
+      { required: ["startDate"] },
+      { required: ["endDate"] },
+    ]);
+  });
+
+  it("enumerates all 25 strict typed workflow event schemas", () => {
+    const types = Object.keys(workflowEventSchemas);
+    const eventName = (type: string) => type
+      .split(/[.-]/)
+      .map((part) => `${part[0].toUpperCase()}${part.slice(1)}`)
+      .join("");
+    const expectedRefs = types.map((type) => ({ $ref: `#/components/schemas/${eventName(type)}Event` }));
+    expect(document.components.schemas.WorkflowEventPage.properties?.items?.items?.oneOf).toEqual(expectedRefs);
+
+    for (const type of types) {
+      const name = eventName(type);
+      const aggregateType = type.startsWith("cohort.") ? "COHORT" : type.startsWith("process.") ? "PROCESS" : "TASK";
+      const event = document.components.schemas[`${name}Event`];
+      const payload = document.components.schemas[`${name}Payload`];
+      const zodPayload = (workflowEventSchemas[type as keyof typeof workflowEventSchemas] as unknown as {
+        shape: { payload: { shape: Record<string, { isOptional: () => boolean }> } };
+      }).shape.payload;
+      const zodPayloadFields = Object.keys(zodPayload.shape);
+      const zodRequiredFields = Object.entries(zodPayload.shape)
+        .filter(([, field]) => !field.isOptional())
+        .map(([field]) => field);
+      expect(event.allOf?.[0]).toEqual({ $ref: "#/components/schemas/EventEnvelope" });
+      expect(event.allOf?.[1]?.properties?.type).toEqual({ const: type });
+      expect(event.allOf?.[1]?.properties?.schemaVersion).toEqual({ const: 1 });
+      expect(event.allOf?.[1]?.properties?.aggregateType).toEqual({ const: aggregateType });
+      expect(event.allOf?.[1]?.properties?.payload).toEqual({ $ref: `#/components/schemas/${name}Payload` });
+      expect(event.allOf?.[1]?.required).toEqual(["type", "schemaVersion", "aggregateType", "payload"]);
+      expect(payload.type).toBe("object");
+      expect(payload.additionalProperties).toBe(false);
+      expect(Object.keys(payload.properties ?? {})).toEqual(zodPayloadFields);
+      expect(payload.required ?? []).toEqual(zodRequiredFields);
+    }
+    expect(document.components.schemas.TaskAssigneeChangedPayload.anyOf).toEqual([
+      { required: ["previousAssigneeId"] },
+      { required: ["assigneeId"] },
+    ]);
   });
 });

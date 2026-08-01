@@ -10,6 +10,7 @@ import {
   cohortListQuerySchema,
   cohortPageSchema,
   cohortStatusSchema,
+  COHORT_DATE_ORDER_CONSTRAINT,
   completeTaskRequestSchema,
   createCohortRequestSchema,
   eventCatchUpQuerySchema,
@@ -47,6 +48,7 @@ import {
   updateCohortRequestSchema,
   workflowEventPageSchema,
   workflowErrorCodeSchema,
+  problemCodeSchema,
 } from "../src/index.js";
 
 const id = "550e8400-e29b-41d4-a716-446655440000";
@@ -137,6 +139,21 @@ describe("cohort contracts", () => {
     expect(cohortPageSchema.parse({ items: [cohort], page: {} })).toBeDefined();
     expect(() => cohortPageSchema.parse({ items: [], page: {}, total: 0 })).toThrow();
   });
+
+  it("requires an update field and enforces the shared cohort date-order constraint", () => {
+    expect(COHORT_DATE_ORDER_CONSTRAINT).toBe("endDate-gte-startDate");
+    expect(() => updateCohortRequestSchema.parse({ expectedVersion: 1 })).toThrow();
+    for (const update of [{ name: "Renamed" }, { startDate: "2026-08-02" }, { endDate: null }]) {
+      expect(updateCohortRequestSchema.parse({ expectedVersion: 1, ...update })).toBeDefined();
+    }
+    expect(() => createCohortRequestSchema.parse({
+      code: "pilot", name: "Pilot", packageVersionId: id, ownerPrincipalId: otherId,
+      startDate: "2026-08-02", endDate: "2026-08-01",
+    })).toThrow();
+    expect(() => updateCohortRequestSchema.parse({
+      expectedVersion: 1, startDate: "2026-08-02", endDate: "2026-08-01",
+    })).toThrow();
+  });
 });
 
 describe("process contracts", () => {
@@ -226,6 +243,18 @@ describe("workflow Problem Details", () => {
     expect(workflowErrorCodeSchema.parse("OCC_INVALID_REQUEST")).toBe("OCC_INVALID_REQUEST");
     expect(workflowErrorCodeSchema.parse("OCC_WORKFLOW_UNAVAILABLE")).toBe("OCC_WORKFLOW_UNAVAILABLE");
     expect(() => workflowErrorCodeSchema.parse("FLOWABLE_FAILURE")).toThrow();
+  });
+
+  it("restricts base Problem Details to compatible platform, auth, and workflow codes", () => {
+    for (const code of [
+      "OCC-API-VALIDATION",
+      "OCC-AUTH-INVALID-CREDENTIALS",
+      "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+      "AUTH_INVALID_CREDENTIALS",
+      "UNICODE_DETAIL",
+      "OCC_TASK_BLOCKED",
+    ]) expect(problemCodeSchema.parse(code)).toBe(code);
+    expect(() => problemCodeSchema.parse("ARBITRARY_ERROR")).toThrow();
   });
 
   it("allows provider and blocker details only in their authorized strict errors", () => {

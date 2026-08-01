@@ -12,41 +12,27 @@ export const PROBLEM_CODE_MAX_LENGTH = 128;
 export const PROBLEM_DETAIL_MIN_LENGTH = 0;
 export const PROBLEM_DETAIL_MAX_LENGTH = 4096;
 
-export const problemDetailsSchema = z
-  .object({
-    type: z.url(),
-    title: z
-      .string()
-      .refine((value) =>
-        hasUnicodeCodePointLengthWithin(
-          value,
-          PROBLEM_TITLE_MIN_LENGTH,
-          PROBLEM_TITLE_MAX_LENGTH,
-        ),
-      ),
-    status: z.number().int().min(PROBLEM_STATUS_MIN).max(PROBLEM_STATUS_MAX),
-    code: z
-      .string()
-      .min(PROBLEM_CODE_MIN_LENGTH)
-      .max(PROBLEM_CODE_MAX_LENGTH),
-    correlationId: z.uuid(),
-    detail: z
-      .string()
-      .refine((value) =>
-        hasUnicodeCodePointLengthWithin(
-          value,
-          PROBLEM_DETAIL_MIN_LENGTH,
-          PROBLEM_DETAIL_MAX_LENGTH,
-        ),
-      )
-      .optional(),
-    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
-  })
-  .strict();
+export const PLATFORM_PROBLEM_CODES = [
+  "OCC-API-VALIDATION",
+  "OCC-API-AUTHENTICATION",
+  "OCC-AUTH-INVALID-CREDENTIALS",
+  "OCC-API-FORBIDDEN",
+  "OCC-API-CONFLICT",
+  "OCC-COMMAND-IDEMPOTENCY-KEY",
+  "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
+  "OCC-COMMAND-METADATA",
+  "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
+  "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
+  "OCC-COMMAND-INTEGRITY",
+  "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+  "OCC-AUTHZ-UNAVAILABLE",
+  "OCC-API-INTERNAL",
+  "OCC-API-REQUEST",
+  "AUTH_INVALID_CREDENTIALS",
+  "UNICODE_DETAIL",
+] as const;
 
-export type ProblemDetails = z.infer<typeof problemDetailsSchema>;
-
-export const workflowErrorCodeSchema = z.enum([
+export const WORKFLOW_ERROR_CODES = [
   "OCC_INVALID_REQUEST",
   "OCC_INVALID_CURSOR",
   "OCC_UNAUTHENTICATED",
@@ -65,7 +51,45 @@ export const workflowErrorCodeSchema = z.enum([
   "OCC_AUTHORIZATION_UNAVAILABLE",
   "OCC_WORKFLOW_UNAVAILABLE",
   "OCC_INTERNAL_ERROR",
+] as const;
+
+export const platformProblemCodeSchema = z.enum(PLATFORM_PROBLEM_CODES);
+export const workflowErrorCodeSchema = z.enum(WORKFLOW_ERROR_CODES);
+export const problemCodeSchema = z.enum([
+  ...PLATFORM_PROBLEM_CODES,
+  ...WORKFLOW_ERROR_CODES,
 ]);
+
+export const problemDetailsSchema = z
+  .object({
+    type: z.url(),
+    title: z
+      .string()
+      .refine((value) =>
+        hasUnicodeCodePointLengthWithin(
+          value,
+          PROBLEM_TITLE_MIN_LENGTH,
+          PROBLEM_TITLE_MAX_LENGTH,
+        ),
+      ),
+    status: z.number().int().min(PROBLEM_STATUS_MIN).max(PROBLEM_STATUS_MAX),
+    code: problemCodeSchema,
+    correlationId: z.uuid(),
+    detail: z
+      .string()
+      .refine((value) =>
+        hasUnicodeCodePointLengthWithin(
+          value,
+          PROBLEM_DETAIL_MIN_LENGTH,
+          PROBLEM_DETAIL_MAX_LENGTH,
+        ),
+      )
+      .optional(),
+    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  })
+  .strict();
+
+export type ProblemDetails = z.infer<typeof problemDetailsSchema>;
 
 export const taskBlockedProblemDetailsSchema = problemDetailsSchema
   .extend({
@@ -84,5 +108,7 @@ export const taskGateUnavailableProblemDetailsSchema = problemDetailsSchema
   .strict();
 
 export type WorkflowErrorCode = z.infer<typeof workflowErrorCodeSchema>;
+export type PlatformProblemCode = z.infer<typeof platformProblemCodeSchema>;
+export type ProblemCode = z.infer<typeof problemCodeSchema>;
 export type TaskBlockedProblemDetails = z.infer<typeof taskBlockedProblemDetailsSchema>;
 export type TaskGateUnavailableProblemDetails = z.infer<typeof taskGateUnavailableProblemDetailsSchema>;

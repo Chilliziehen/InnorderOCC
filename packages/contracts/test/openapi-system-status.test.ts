@@ -45,8 +45,6 @@ import {
   EVENT_TYPE_MIN_LENGTH,
 } from "../src/events.js";
 import {
-  PROBLEM_CODE_MAX_LENGTH,
-  PROBLEM_CODE_MIN_LENGTH,
   PROBLEM_DETAIL_MIN_LENGTH,
   PROBLEM_DETAIL_MAX_LENGTH,
   PROBLEM_STATUS_MAX,
@@ -204,9 +202,14 @@ describe("OCC Core OpenAPI system status", () => {
       maxLength: LOGIN_PASSWORD_MAX_CODE_POINTS,
     });
 
-    for (const response of Object.values(document.components.responses ?? {})) {
+    for (const [name, response] of Object.entries(document.components.responses ?? {})) {
+      const expectedSchema = name === "TaskBlocked"
+        ? "TaskBlockedProblem"
+        : name === "TaskGateUnavailable"
+          ? "TaskGateUnavailableProblem"
+          : "ProblemDetails";
       expect(response.content?.["application/problem+json"]?.schema?.$ref).toBe(
-        "#/components/schemas/ProblemDetails",
+        `#/components/schemas/${expectedSchema}`,
       );
     }
   });
@@ -228,7 +231,7 @@ describe("OCC Core OpenAPI system status", () => {
       Object.keys(document.paths["/api/v1/auth/logout"]?.post?.responses ?? {}),
     ).toEqual(expect.arrayContaining(["400", "401", "500"]));
 
-    for (const pathItem of Object.values(document.paths)) {
+    for (const [path, pathItem] of Object.entries(document.paths)) {
       for (const [method, operation] of Object.entries(pathItem)) {
         if (!HTTP_METHODS.has(method)) continue;
 
@@ -237,7 +240,7 @@ describe("OCC Core OpenAPI system status", () => {
         );
         expect(errorResponses.length).toBeGreaterThan(0);
 
-        for (const [, response] of errorResponses) {
+        for (const [status, response] of errorResponses) {
           const componentName = response.$ref?.replace(
             "#/components/responses/",
             "",
@@ -245,9 +248,14 @@ describe("OCC Core OpenAPI system status", () => {
           const resolvedResponse = componentName
             ? document.components.responses?.[componentName]
             : response;
+          const expectedSchema = path === "/api/v1/tasks/{taskId}/complete" && status === "409"
+            ? "TaskBlockedProblem"
+            : path === "/api/v1/tasks/{taskId}/complete" && status === "503"
+              ? "TaskGateUnavailableProblem"
+              : "ProblemDetails";
           expect(
             resolvedResponse?.content?.["application/problem+json"]?.schema?.$ref,
-          ).toBe("#/components/schemas/ProblemDetails");
+          ).toBe(`#/components/schemas/${expectedSchema}`);
         }
       }
     }
@@ -273,11 +281,7 @@ describe("OCC Core OpenAPI system status", () => {
         minimum: PROBLEM_STATUS_MIN,
         maximum: PROBLEM_STATUS_MAX,
       },
-      code: {
-        type: "string",
-        minLength: PROBLEM_CODE_MIN_LENGTH,
-        maxLength: PROBLEM_CODE_MAX_LENGTH,
-      },
+      code: { $ref: "#/components/schemas/ProblemCode" },
       correlationId: { type: "string", format: "uuid" },
       detail: {
         type: "string",
