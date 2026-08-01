@@ -142,12 +142,13 @@ class EvidenceContentInspectorTest {
 
         val clean = "clean".toByteArray()
         val cleanPath = write("clean.txt", clean)
-        val crashing = EvidenceContentInspector(MalwareScanner { throw IllegalStateException("adapter output") }, clock)
+        val crashing = EvidenceContentInspector(MalwareScanner { throw IllegalStateException("adapter output") }, DeterministicParserSandbox(clock), clock)
         assertRejected(EvidenceRejectionCode.SCANNER_ERROR) {
             crashing.inspect(request(cleanPath, "clean.txt", clean, textPolicy()))
         }
         val codeInjecting = EvidenceContentInspector(
             MalwareScanner { throw EvidenceRejectedException(EvidenceRejectionCode.PDF_ACTIVE_CONTENT) },
+            DeterministicParserSandbox(clock),
             clock,
         )
         assertRejected(EvidenceRejectionCode.SCANNER_ERROR) {
@@ -179,6 +180,7 @@ class EvidenceContentInspectorTest {
                 Thread.sleep(5_000)
                 ScanResult(ScanStatus.CLEAN, "late-scanner", "1", "late")
             },
+            DeterministicParserSandbox(systemClock),
             systemClock,
         )
         val started = Instant.now()
@@ -201,7 +203,7 @@ class EvidenceContentInspectorTest {
         val expiringClock = StepClock(clock.instant(), expireAfterCalls = 3)
 
         assertRejected(EvidenceRejectionCode.DEADLINE_EXCEEDED) {
-            EvidenceContentInspector(DeterministicMalwareScanner(), expiringClock).inspect(
+            EvidenceContentInspector(DeterministicMalwareScanner(), DeterministicParserSandbox(expiringClock), expiringClock).inspect(
                 request(path, "deadline.txt", bytes, textPolicy()),
             )
         }
@@ -218,6 +220,31 @@ class EvidenceContentInspectorTest {
         }
     }
 
+    @ParameterizedTest(name = "rejects OOXML bypass {0}")
+    @MethodSource("ooxmlActiveContentBypasses")
+    fun `OOXML active content declarations and internal relationships fail closed`(
+        name: String,
+        bytes: ByteArray,
+        code: EvidenceRejectionCode,
+    ) {
+        val path = write("$name.docx", bytes)
+
+        assertRejected(code) {
+            inspector().inspect(request(path, "$name.docx", bytes, permissivePolicy()))
+        }
+    }
+
+    @ParameterizedTest(name = "rejects prefixed {0}")
+    @MethodSource("prefixedArchiveMagic")
+    fun `nested archive signatures are detected after bounded executable prefixes`(type: String, nestedBytes: ByteArray) {
+        val bytes = zip("neutral/payload.bin" to nestedBytes)
+        val path = write("prefixed-$type.zip", bytes)
+
+        assertRejected(EvidenceRejectionCode.NESTED_ARCHIVE) {
+            inspector().inspect(request(path, "prefixed-$type.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))))
+        }
+    }
+
     @Test
     fun `deadline is enforced during bounded OOXML parsing before scanning`() {
         val mainXml = ("<root>" + "<node/>".repeat(200) + "</root>").toByteArray()
@@ -230,6 +257,7 @@ class EvidenceContentInspectorTest {
                 scannerCalled.set(true)
                 ScanResult(ScanStatus.CLEAN, "test", "1", "clean")
             },
+            DeterministicParserSandbox(expiringClock),
             expiringClock,
         )
 
@@ -239,7 +267,24 @@ class EvidenceContentInspectorTest {
         assertThat(scannerCalled).isFalse()
     }
 
-    private fun inspector() = EvidenceContentInspector(DeterministicMalwareScanner(), clock)
+    @Test
+    fun `inspector delegates hostile formats without direct parsing`() {
+        val malformedPdf = "%PDF-1.7\nnot structurally valid".toByteArray()
+        val path = write("delegated.pdf", malformedPdf)
+        val requests = mutableListOf<ParserSandboxRequest>()
+        val acceptingSandbox = ParserSandbox { request ->
+            requests += request
+            ParserSandboxResult.Accepted("application/pdf")
+        }
+
+        val result = EvidenceContentInspector(DeterministicMalwareScanner(), acceptingSandbox, clock)
+            .inspect(request(path, "delegated.pdf", malformedPdf, permissivePolicy()))
+
+        assertThat(result.detectedMediaType).isEqualTo("application/pdf")
+        assertThat(requests).hasSize(1)
+    }
+
+    private fun inspector() = EvidenceContentInspector(DeterministicMalwareScanner(), DeterministicParserSandbox(clock), clock)
 
     private fun request(path: Path, name: String, bytes: ByteArray, policy: EvidencePolicy) = InspectionRequest(
         path = path,
@@ -355,6 +400,66 @@ class EvidenceContentInspectorTest {
             Arguments.of("tar", ByteArray(512).apply { "ustar\u0000".toByteArray().copyInto(this, 257) }),
             Arguments.of("xz", byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00)),
             Arguments.of("bzip2", "BZh9".toByteArray()),
+        )
+
+        @JvmStatic
+        fun prefixedArchiveMagic(): Stream<Arguments> {
+            val prefix = "MZ".toByteArray() + ByteArray(37) { 0x41 }
+            return Stream.of(
+                Arguments.of("self-extracting-zip", prefix + zip("inside.txt" to "x".toByteArray())),
+                Arguments.of("gzip", prefix + byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00)),
+                Arguments.of("7z", prefix + byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)),
+                Arguments.of("rar", prefix + "Rar!\u001a\u0007\u0001\u0000".toByteArray(Charsets.ISO_8859_1)),
+            )
+        }
+
+        @JvmStatic
+        fun ooxmlActiveContentBypasses(): Stream<Arguments> = Stream.of(
+            Arguments.of(
+                "default-vba",
+                ooxmlBypass(defaultContentType = "application/vnd.ms-office.vbaProject"),
+                EvidenceRejectionCode.OOXML_MACRO,
+            ),
+            Arguments.of(
+                "default-ole",
+                ooxmlBypass(defaultContentType = "application/vnd.openxmlformats-officedocument.oleObject"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
+            Arguments.of(
+                "default-active-x",
+                ooxmlBypass(defaultContentType = "application/vnd.ms-office.activeX+xml"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
+            Arguments.of(
+                "default-package",
+                ooxmlBypass(defaultContentType = "application/vnd.openxmlformats-officedocument.package"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
+            Arguments.of(
+                "relationship-vba",
+                ooxmlBypass(relationshipType = "http://schemas.microsoft.com/office/2006/relationships/vbaProject"),
+                EvidenceRejectionCode.OOXML_MACRO,
+            ),
+            Arguments.of(
+                "relationship-ole",
+                ooxmlBypass(relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
+            Arguments.of(
+                "relationship-active-x",
+                ooxmlBypass(relationshipType = "http://schemas.microsoft.com/office/2006/relationships/activeXControl"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
+            Arguments.of(
+                "relationship-package",
+                ooxmlBypass(relationshipType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
+            Arguments.of(
+                "relationship-target",
+                ooxmlBypass(relationshipTarget = "hidden/embeddings/payload.dat"),
+                EvidenceRejectionCode.OOXML_ACTIVE_CONTENT,
+            ),
         )
 
         private fun minimalPdf(extra: String = ""): ByteArray = traditionalPdf(
@@ -488,6 +593,31 @@ class EvidenceContentInspectorTest {
             )
             rootRelationships?.let { entries += "_rels/.rels" to it }
             return zip(*entries.toTypedArray())
+        }
+
+        private fun ooxmlBypass(
+            defaultContentType: String? = null,
+            relationshipType: String? = null,
+            relationshipTarget: String = "neutral/payload.dat",
+        ): ByteArray {
+            val default = defaultContentType?.let { "<Default Extension=\"dat\" ContentType=\"$it\"/>" }.orEmpty()
+            val types = """<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">$default<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>""".toByteArray()
+            val maliciousRelationship = relationshipType?.let {
+                """<Relationship Id="active" Target="$relationshipTarget" Type="$it"/>"""
+            }.orEmpty()
+            val relationships = """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Target="word/document.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/>$maliciousRelationship</Relationships>""".toByteArray()
+            val partRelationships = if (relationshipType == null && relationshipTarget != "neutral/payload.dat") {
+                """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="active" Target="$relationshipTarget" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/></Relationships>""".toByteArray()
+            } else {
+                """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>""".toByteArray()
+            }
+            return zip(
+                "[Content_Types].xml" to types,
+                "_rels/.rels" to relationships,
+                "word/document.xml" to "<document/>".toByteArray(),
+                "word/_rels/document.xml.rels" to partRelationships,
+                "neutral/payload.dat" to "payload".toByteArray(),
+            )
         }
 
         private fun rootRelationships(target: String) = """<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="$target" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/></Relationships>""".toByteArray()
