@@ -404,12 +404,15 @@ class EvidenceContentInspectorTest {
 
         @JvmStatic
         fun prefixedArchiveMagic(): Stream<Arguments> {
-            val prefix = "MZ".toByteArray() + ByteArray(37) { 0x41 }
+            val prefix = "MZ".toByteArray() + ByteArray(2048) { ((it * 31) xor (it ushr 3)).toByte() }
+            val tar = ByteArray(512).apply { "ustar\u0000".toByteArray().copyInto(this, 257) }
             return Stream.of(
                 Arguments.of("self-extracting-zip", prefix + zip("inside.txt" to "x".toByteArray())),
+                Arguments.of("empty-zip", prefix + zip()),
                 Arguments.of("gzip", prefix + byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00)),
                 Arguments.of("7z", prefix + byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)),
                 Arguments.of("rar", prefix + "Rar!\u001a\u0007\u0001\u0000".toByteArray(Charsets.ISO_8859_1)),
+                Arguments.of("tar", prefix + tar),
             )
         }
 
