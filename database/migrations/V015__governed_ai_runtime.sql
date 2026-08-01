@@ -96,8 +96,10 @@ CREATE TABLE ai.ingestion_job (
     document_id uuid REFERENCES ai.knowledge_document(id),
     produced_document_version_id uuid REFERENCES ai.knowledge_document_version(id),
     source_version text NOT NULL,
-    content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
-    parser_version text NOT NULL,
+    source_object_hash text NOT NULL CHECK (source_object_hash ~ '^[0-9a-f]{64}$'),
+    normalized_content_hash text NOT NULL CHECK (normalized_content_hash ~ '^[0-9a-f]{64}$'),
+    parser_version text NOT NULL CHECK (octet_length(parser_version) BETWEEN 1 AND 128 AND parser_version !~ '[[:cntrl:]]'),
+    chunker_version text NOT NULL CHECK (octet_length(chunker_version) BETWEEN 1 AND 128 AND chunker_version !~ '[[:cntrl:]]'),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
     checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(checkpoint)),
     stage text NOT NULL CHECK (stage IN ('DISCOVER', 'FETCH', 'PARSE', 'CHUNK', 'EMBED', 'COMPLETE')),
@@ -113,7 +115,7 @@ CREATE TABLE ai.ingestion_job (
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     completed_at timestamptz,
-    UNIQUE (source_id, source_version, content_hash, parser_version),
+    UNIQUE (source_id, source_version, source_object_hash, normalized_content_hash, parser_version, chunker_version),
     CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
     CHECK (lease_expires_at IS NULL OR lease_expires_at > created_at),
     CHECK (status <> 'FAILED' OR (sanitized_error IS NOT NULL AND completed_at IS NOT NULL)),
@@ -184,7 +186,7 @@ CREATE TABLE ai.model_invocation (
     operation text NOT NULL,
     request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
     response_hash text CHECK (response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'),
-    provider_request_id text,
+    provider_request_id_hash text CHECK (provider_request_id_hash IS NULL OR provider_request_id_hash ~ '^[0-9a-f]{64}$'),
     capability_hash text NOT NULL CHECK (capability_hash ~ '^[0-9a-f]{64}$'),
     input_tokens bigint NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
     output_tokens bigint NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
@@ -436,8 +438,10 @@ BEGIN
     IF NEW.id IS DISTINCT FROM OLD.id OR NEW.source_id IS DISTINCT FROM OLD.source_id
        OR NEW.document_id IS DISTINCT FROM OLD.document_id
        OR NEW.source_version IS DISTINCT FROM OLD.source_version
-       OR NEW.content_hash IS DISTINCT FROM OLD.content_hash
+       OR NEW.source_object_hash IS DISTINCT FROM OLD.source_object_hash
+       OR NEW.normalized_content_hash IS DISTINCT FROM OLD.normalized_content_hash
        OR NEW.parser_version IS DISTINCT FROM OLD.parser_version
+       OR NEW.chunker_version IS DISTINCT FROM OLD.chunker_version
        OR NEW.corpus_manifest_digest IS DISTINCT FROM OLD.corpus_manifest_digest
        OR NEW.created_at IS DISTINCT FROM OLD.created_at
        OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts THEN
@@ -611,7 +615,8 @@ CREATE INDEX ix_event_consumption_claim ON ai.event_consumption (next_attempt_at
 CREATE INDEX ix_event_consumption_stale_lease ON ai.event_consumption (lease_expires_at) WHERE status = 'PROCESSING';
 CREATE INDEX ix_event_consumption_dead ON ai.event_consumption (created_at) WHERE status = 'DEAD';
 CREATE INDEX ix_model_invocation_run ON ai.model_invocation (run_id, started_at);
-CREATE INDEX ix_model_invocation_provider_request ON ai.model_invocation (provider_request_id) WHERE provider_request_id IS NOT NULL;
+CREATE INDEX ix_model_invocation_provider_request_hash ON ai.model_invocation (provider_request_id_hash)
+WHERE provider_request_id_hash IS NOT NULL;
 CREATE INDEX ix_retrieval_trace_run ON ai.retrieval_trace (run_id, created_at);
 CREATE INDEX ix_retrieval_hit_document ON ai.retrieval_hit (document_version_id, chunk_id);
 CREATE INDEX ix_legal_hold_object_lookup ON ai.legal_hold_object (object_kind, object_id) INCLUDE (fact_key);
@@ -815,7 +820,7 @@ $$;
 
 CREATE FUNCTION ai.persist_ingestion_document_version(
     p_job_id uuid, p_worker_id text, p_document_version_id uuid, p_version integer,
-    p_object_key text, p_content_hash text, p_mime_type text, p_data_classification text
+    p_object_key text, p_normalized_content_hash text, p_mime_type text, p_data_classification text
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -830,12 +835,12 @@ BEGIN
        OR job.lease_expires_at <= transaction_timestamp() OR job.document_id IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
     END IF;
-    IF p_content_hash <> job.content_hash THEN
-        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'ingestion content hash does not match claimed job';
+    IF p_normalized_content_hash <> job.normalized_content_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'normalized ingestion content hash does not match claimed job';
     END IF;
     INSERT INTO ai.knowledge_document_version
         (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
-    VALUES (p_document_version_id, job.document_id, p_version, p_object_key, p_content_hash,
+    VALUES (p_document_version_id, job.document_id, p_version, p_object_key, p_normalized_content_hash,
             p_mime_type, job.parser_version, p_data_classification);
     UPDATE ai.ingestion_job SET produced_document_version_id = p_document_version_id
     WHERE id = p_job_id;
@@ -1120,7 +1125,7 @@ END;
 $$;
 
 CREATE FUNCTION ai.finalize_model_invocation(
-    p_id uuid, p_status text, p_response_hash text, p_provider_request_id text,
+    p_id uuid, p_status text, p_response_hash text, p_provider_request_id_hash text,
     p_input_tokens bigint, p_output_tokens bigint, p_cost numeric,
     p_latency_ms integer, p_sanitized_error text
 )
@@ -1133,8 +1138,11 @@ BEGIN
     IF p_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid terminal invocation status';
     END IF;
+    IF p_provider_request_id_hash IS NOT NULL AND p_provider_request_id_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'provider request id hash must be lowercase SHA-256';
+    END IF;
     UPDATE ai.model_invocation
-    SET status = p_status, response_hash = p_response_hash, provider_request_id = p_provider_request_id,
+    SET status = p_status, response_hash = p_response_hash, provider_request_id_hash = p_provider_request_id_hash,
         input_tokens = p_input_tokens, output_tokens = p_output_tokens, cost = p_cost,
         latency_ms = p_latency_ms, sanitized_error = p_sanitized_error,
         completed_at = statement_timestamp()

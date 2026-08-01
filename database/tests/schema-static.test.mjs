@@ -357,7 +357,7 @@ test('defines deterministic workers, durable event consumption, traces, and gate
     'source_version', 'content_hash', 'checkpoint', 'stage', 'lease_owner',
     'lease_expires_at', 'next_attempt_at', 'sanitized_error', 'corpus_manifest_digest',
     'consumer_key', 'event_id', 'schema_version', 'aggregate_version', 'DEAD',
-    'provider_request_id', 'capability_hash', 'request_hash', 'response_hash',
+    'provider_request_id_hash', 'capability_hash', 'request_hash', 'response_hash',
     'lexical_score', 'vector_score', 'fused_score', 'injection_detected',
     'eligible_count', 'embedded_count', 'leakage_count', 'citation_numerator',
     'citation_denominator', 'citation_precision', 'recall_sum', 'recall_count',
@@ -366,7 +366,7 @@ test('defines deterministic workers, durable event consumption, traces, and gate
   for (const index of [
     'ix_ingestion_job_claim', 'ix_ingestion_job_stale_lease', 'ix_event_consumption_claim',
     'ix_event_consumption_stale_lease', 'ix_model_invocation_run',
-    'ix_model_invocation_provider_request', 'ix_retrieval_trace_run',
+    'ix_model_invocation_provider_request_hash', 'ix_retrieval_trace_run',
     'ix_retrieval_hit_document', 'ix_ai_authorized_document_version',
   ]) assert.match(sql, new RegExp(`CREATE (?:UNIQUE )?INDEX ${index}\\b`, 'iu'), index);
   assert.match(sql, /CREATE TRIGGER trg_ingestion_job_lifecycle/iu);
@@ -584,4 +584,32 @@ test('binds gate metrics to every case in an immutable published dataset version
   assert.match(live, /partial evidence cannot finalize a complete evaluation dataset/iu);
   assert.match(live, /dataset version is not PUBLISHED/iu);
   assert.match(live, /dataset version content hash changed/iu);
+});
+
+test('preserves deterministic ingestion and provider invocation provenance', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const ingestion = sql.match(/CREATE TABLE ai\.ingestion_job[\s\S]*?\n\);/iu)?.[0] ?? '';
+  for (const column of ['source_object_hash', 'normalized_content_hash', 'parser_version', 'chunker_version']) {
+    assert.match(ingestion, new RegExp(`\\b${column}\\b`, 'iu'));
+  }
+  assert.match(ingestion,
+    /UNIQUE \(source_id, source_version, source_object_hash, normalized_content_hash, parser_version, chunker_version\)/iu);
+  assert.doesNotMatch(ingestion, /\n\s*content_hash text/iu);
+  const persist = sql.match(/CREATE FUNCTION ai\.persist_ingestion_document_version\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(persist, /p_normalized_content_hash/iu);
+  assert.match(persist, /job\.normalized_content_hash/iu);
+  assert.match(sql, /NEW\.chunker_version IS DISTINCT FROM OLD\.chunker_version/iu);
+
+  const invocation = sql.match(/CREATE TABLE ai\.model_invocation[\s\S]*?\n\);/iu)?.[0] ?? '';
+  assert.match(invocation, /provider_request_id_hash text[\s\S]*\^\[0-9a-f\]\{64\}\$/iu);
+  assert.doesNotMatch(invocation, /\n\s*provider_request_id text/iu);
+  const finalize = sql.match(/CREATE FUNCTION ai\.finalize_model_invocation\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(finalize, /p_provider_request_id_hash text/iu);
+  assert.doesNotMatch(finalize, /p_provider_request_id text[,)]/iu);
+  assert.match(finalize, /provider request id hash must be lowercase SHA-256/iu);
+
+  const live = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(live, /chunker-v2/iu);
+  assert.match(live, /raw-provider-request-id/iu);
+  assert.match(live, /provider_request_id_hash/iu);
 });

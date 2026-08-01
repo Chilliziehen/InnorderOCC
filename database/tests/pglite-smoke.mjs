@@ -253,6 +253,21 @@ for (const routine of [
 }
 console.log('passed V015 governed AI contracts');
 
+const provenanceColumns = await db.query(`
+  SELECT table_name, column_name
+  FROM information_schema.columns
+  WHERE table_schema = 'ai'
+    AND ((table_name = 'ingestion_job' AND column_name IN
+      ('source_object_hash', 'normalized_content_hash', 'parser_version', 'chunker_version'))
+      OR (table_name = 'model_invocation' AND column_name = 'provider_request_id_hash'))
+`);
+if (provenanceColumns.rows.length !== 5) throw new Error('V015 provenance columns are incomplete');
+const rawProviderColumn = await db.query(`
+  SELECT count(*)::integer AS count FROM information_schema.columns
+  WHERE table_schema = 'ai' AND table_name = 'model_invocation' AND column_name = 'provider_request_id'
+`);
+if (rawProviderColumn.rows[0]?.count !== 0) throw new Error('raw provider request ID column must not exist');
+
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
                WHERE id = '90000000-0000-7000-8000-000000000011'`);

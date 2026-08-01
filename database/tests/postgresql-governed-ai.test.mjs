@@ -252,17 +252,19 @@ function fixtureSql(prefix) {
       ('${id('000000000041')}', '${id('000000000017')}'),
       ('${id('000000000042')}', '${id('000000000017')}');
     INSERT INTO ai.ingestion_job
-      (id, source_id, document_id, source_version, content_hash, parser_version,
+      (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+       parser_version, chunker_version,
        corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
     VALUES ('${id('000000000026')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
-            repeat('8', 64), '1', repeat('9', 64), '{}', 'FETCH', 'PENDING',
+            repeat('7', 64), repeat('8', 64), 'parser-v1', 'chunker-v1', repeat('9', 64), '{}', 'FETCH', 'PENDING',
             now() - interval '1 hour', now() - interval '1 hour');
     INSERT INTO ai.ingestion_job
-      (id, source_id, document_id, source_version, content_hash, parser_version,
+      (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+       parser_version, chunker_version,
        corpus_manifest_digest, checkpoint, stage, status, attempts, max_attempts,
        lease_owner, lease_expires_at, created_at, updated_at)
     VALUES ('${id('000000000058')}', '${id('000000000014')}', '${id('000000000036')}', 'crashed',
-            repeat('d', 64), '1', repeat('9', 64), '{}', 'FETCH', 'PROCESSING', 1, 1,
+            repeat('c', 64), repeat('d', 64), 'parser-v1', 'chunker-v1', repeat('9', 64), '{}', 'FETCH', 'PROCESSING', 1, 1,
             'crashed-worker', now() - interval '1 minute', now() - interval '1 hour', now() - interval '1 hour');
     INSERT INTO ai.ingestion_attempt
       (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at, started_at)
@@ -373,8 +375,16 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     '${id('000000000008')}', 'WRITE', repeat('1',64), repeat('2',64));`, /invocation operation does not match grant/iu);
   assert.equal(execAiSql(`SELECT ai.start_model_invocation('${id('000000000043')}', '${id('000000000030')}',
     '${id('000000000008')}', 'RETRIEVE', repeat('1',64), repeat('2',64));`), id('000000000043'));
+  expectAiFailure(`SELECT ai.finalize_model_invocation('${id('000000000043')}', 'COMPLETED', repeat('3',64),
+    'raw-provider-request-id', 10, 2, 0.01, 12, NULL);`, /provider request id hash must be lowercase SHA-256/iu);
   execAiSql(`SELECT ai.finalize_model_invocation('${id('000000000043')}', 'COMPLETED', repeat('3',64),
-    'provider-request', 10, 2, 0.01, 12, NULL);`);
+    repeat('a',64), 10, 2, 0.01, 12, NULL);`);
+  assert.equal(execAiSql(`SELECT provider_request_id_hash FROM ai.model_invocation
+    WHERE id = '${id('000000000043')}';`), 'a'.repeat(64));
+  assert.equal(execSql(`SELECT count(*) FROM information_schema.columns WHERE table_schema = 'ai'
+    AND table_name = 'model_invocation' AND column_name = 'provider_request_id';`), '0');
+  assert.doesNotMatch(execAiSql(`SELECT to_jsonb(invocation)::text FROM ai.model_invocation invocation
+    WHERE id = '${id('000000000043')}';`), /raw-provider-request-id/iu);
   assert.equal(execAiSql(`SELECT ai.persist_run_artifact('${id('000000000044')}', '${id('000000000030')}',
     'TRACE', 'artifact-${fixture}', repeat('4',64), 'INTERNAL');`), id('000000000044'));
 
@@ -431,16 +441,31 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   'SUCCEEDED|COMPLETE|true');
 
   execSql(`INSERT INTO ai.ingestion_job
-    (id, source_id, document_id, source_version, content_hash, parser_version,
+    (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+     parser_version, chunker_version,
      corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
     VALUES ('${id('000000000070')}', '${id('000000000014')}', '${id('000000000036')}', 'failure',
-      repeat('f',64), '1', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
+      repeat('e',64), repeat('f',64), 'parser-v1', 'chunker-v1', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('failure-worker', 1, interval '30 seconds');`), '1');
   assert.equal(execAiSql(`SELECT ai.fail_ingestion_job('${id('000000000070')}', 'failure-worker',
     'sanitized failure', interval '1 minute');`), 'RETRY');
   assert.equal(execAiSql(`SELECT status || '|' || sanitized_error || '|' || (completed_at IS NOT NULL)
     FROM ai.ingestion_attempt WHERE job_id = '${id('000000000070')}';`),
   'FAILED|sanitized failure|true');
+  execSql(`INSERT INTO ai.ingestion_job
+    (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+     parser_version, chunker_version, corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
+    VALUES ('${id('000000000079')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
+      repeat('7',64), repeat('8',64), 'parser-v1', 'chunker-v2', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
+  assert.equal(execSql(`SELECT string_agg(chunker_version, ',' ORDER BY chunker_version)
+    FROM ai.ingestion_job WHERE source_id = '${id('000000000014')}' AND source_version = 'v1';`),
+  'chunker-v1,chunker-v2');
+  expectSqlFailure(`INSERT INTO ai.ingestion_job
+    (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+     parser_version, chunker_version, corpus_manifest_digest, checkpoint, stage, status)
+    VALUES ('${id('00000000007a')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
+      repeat('7',64), repeat('8',64), 'parser-v1', 'chunker-v1', repeat('9',64), '{}', 'FETCH', 'PENDING');`,
+  /duplicate key value violates unique constraint/iu);
   expectAiFailure(`SELECT * FROM ai.authorized_hybrid_retrieval('${id('000000000030')}',
     '${id('000000000029')}', 'candidate', '[1,0,0]'::public.vector, 10, 10, 10);`,
   /retrieval embedding space is not active/iu);
