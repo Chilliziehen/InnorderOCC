@@ -597,7 +597,7 @@ test('preserves deterministic ingestion and provider invocation provenance', () 
     assert.match(ingestion, new RegExp(`\\b${column}\\b`, 'iu'));
   }
   assert.match(ingestion,
-    /UNIQUE \(source_id, source_version, source_object_hash, normalized_content_hash, parser_version, chunker_version\)/iu);
+    /UNIQUE \(source_id, source_version, source_object_hash, normalized_content_hash,[\s\S]*parser_version, chunker_version, candidate_embedding_space_id\)/iu);
   assert.doesNotMatch(ingestion, /\n\s*content_hash text/iu);
   const persist = sql.match(/CREATE FUNCTION ai\.persist_ingestion_document_version\([\s\S]*?\$\$;/iu)?.[0] ?? '';
   assert.match(persist, /p_normalized_content_hash/iu);
@@ -689,4 +689,44 @@ test('keeps every PostgreSQL role password out of psql argv', () => {
   const live = readFileSync(governedPostgresqlTestPath, 'utf8');
   assert.match(live, /psql-argv/iu);
   assert.match(live, /sentinel/iu);
+});
+
+test('serializes ingestion and gates candidate-first with ordered job locks', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const ingestion = sql.match(/CREATE TABLE ai\.ingestion_job[\s\S]*?\n\);/iu)?.[0] ?? '';
+  assert.match(ingestion, /candidate_embedding_space_id uuid NOT NULL REFERENCES ai\.embedding_space\(id\)/iu);
+  assert.match(sql, /NEW\.candidate_embedding_space_id IS DISTINCT FROM OLD\.candidate_embedding_space_id/iu);
+  for (const name of [
+    'claim_ingestion_jobs', 'persist_ingestion_document_version', 'persist_ingestion_chunk_embedding',
+    'checkpoint_ingestion_attempt', 'finalize_ingestion_job', 'fail_ingestion_job',
+    'begin_embedding_space_gate', 'finalize_embedding_space_gate',
+  ]) {
+    const fn = sql.match(new RegExp(`CREATE FUNCTION (?:ai\\.)${name}\\([\\s\\S]*?\\$\\$;`, 'iu'))?.[0] ?? '';
+    const spaceLock = fn.search(/FROM ai\.embedding_space[\s\S]{0,200}FOR UPDATE/iu);
+    const jobReadAfterSpace = fn.indexOf('FROM ai.ingestion_job', spaceLock);
+    const jobLock = fn.indexOf('FOR UPDATE', jobReadAfterSpace);
+    assert.ok(spaceLock >= 0 && jobReadAfterSpace > spaceLock && jobLock > jobReadAfterSpace,
+      `${name} must lock candidate before ingestion job`);
+  }
+  const claim = sql.match(/CREATE FUNCTION ai\.claim_ingestion_jobs\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(claim, /ORDER BY job\.id[\s\S]*FOR UPDATE/iu);
+  assert.match(sql, /ingestion completion is blocked by finalized gate/iu);
+});
+
+test('serializes legal hold placement and cleanup run-first without dangling targets', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const hold = sql.match(/CREATE FUNCTION ai\.validate_legal_hold_object_target\(\)[\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(hold, /FROM ai\.ai_run[\s\S]*FOR UPDATE/iu);
+  assert.match(hold, /FROM ai\.ai_run_artifact[\s\S]*FOR UPDATE/iu);
+  assert.ok(hold.indexOf('FROM ai.ai_run') < hold.indexOf('FROM ai.ai_run_artifact'));
+  assert.match(hold, /legal hold target does not exist/iu);
+  const cleanup = sql.match(/CREATE FUNCTION ai\.cleanup_expired_run_artifacts\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(cleanup, /FROM ai\.ai_run run[\s\S]*FOR UPDATE/iu);
+  assert.match(cleanup, /FROM ai\.ai_run_artifact artifact[\s\S]*FOR UPDATE/iu);
+  assert.ok(cleanup.indexOf('FROM ai.ai_run run') < cleanup.indexOf('FROM ai.ai_run_artifact artifact'));
+  assert.match(cleanup, /held\.object_kind = 'RUN'/iu);
+  const live = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(live, /deadlock regression/iu);
+  assert.match(live, /dangling legal hold/iu);
+  assert.match(live, /SET LOCAL lock_timeout/iu);
 });

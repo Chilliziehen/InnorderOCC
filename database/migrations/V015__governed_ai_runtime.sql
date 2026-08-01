@@ -115,6 +115,7 @@ CREATE TABLE ai.ingestion_job (
     normalized_content_hash text NOT NULL CHECK (normalized_content_hash ~ '^[0-9a-f]{64}$'),
     parser_version text NOT NULL CHECK (octet_length(parser_version) BETWEEN 1 AND 128 AND parser_version !~ '[[:cntrl:]]'),
     chunker_version text NOT NULL CHECK (octet_length(chunker_version) BETWEEN 1 AND 128 AND chunker_version !~ '[[:cntrl:]]'),
+    candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
     checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(checkpoint)),
     stage text NOT NULL CHECK (stage IN ('DISCOVER', 'FETCH', 'PARSE', 'CHUNK', 'EMBED', 'COMPLETE')),
@@ -130,7 +131,8 @@ CREATE TABLE ai.ingestion_job (
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     completed_at timestamptz,
-    UNIQUE (source_id, source_version, source_object_hash, normalized_content_hash, parser_version, chunker_version),
+    UNIQUE (source_id, source_version, source_object_hash, normalized_content_hash,
+            parser_version, chunker_version, candidate_embedding_space_id),
     CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
     CHECK (lease_expires_at IS NULL OR lease_expires_at > created_at),
     CHECK (status <> 'FAILED' OR (sanitized_error IS NOT NULL AND completed_at IS NOT NULL)),
@@ -353,6 +355,47 @@ CREATE TABLE ai.legal_hold_object (
     PRIMARY KEY (hold_id, object_kind, object_id, fact_key)
 );
 
+CREATE FUNCTION ai.validate_legal_hold_object_target()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    target_run_id uuid;
+BEGIN
+    IF NEW.object_kind = 'RUN' THEN
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'ARTIFACT' THEN
+        SELECT run_id INTO target_run_id FROM ai.ai_run_artifact WHERE id = NEW.object_id;
+        IF target_run_id IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
+        END IF;
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = target_run_id FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
+        END IF;
+        PERFORM 1 FROM ai.ai_run_artifact artifact
+        WHERE artifact.id = NEW.object_id AND artifact.run_id = target_run_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'TRACE' THEN
+        PERFORM 1 FROM ai.retrieval_trace WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'INVOCATION' THEN
+        PERFORM 1 FROM ai.model_invocation WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'GATE_RESULT' THEN
+        PERFORM 1 FROM ai.embedding_space_gate_result WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'AUTHORIZATION_GRANT' THEN
+        PERFORM 1 FROM authz.ai_authorization_grant WHERE id = NEW.object_id FOR UPDATE;
+    END IF;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_legal_hold_object_target
+BEFORE INSERT ON ai.legal_hold_object
+FOR EACH ROW EXECUTE FUNCTION ai.validate_legal_hold_object_target();
+
 ALTER TABLE ai.model_invocation
     ADD CONSTRAINT fk_model_invocation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
 ALTER TABLE ai.retrieval_trace
@@ -402,6 +445,11 @@ BEGIN
         JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
         WHERE held.object_kind = 'ARTIFACT' AND held.object_id = OLD.id
           AND hold_row.released_at IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM ai.legal_hold_object held
+        JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+        WHERE held.object_kind = 'RUN' AND held.object_id = OLD.run_id
+          AND hold_row.released_at IS NULL
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact is under an active legal hold';
     END IF;
@@ -419,37 +467,68 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    candidate record;
+    artifact_row ai.ai_run_artifact%ROWTYPE;
+    target_run_id uuid;
 BEGIN
     IF p_before IS NULL OR p_before > statement_timestamp()
        OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid artifact cleanup bounds';
     END IF;
-    PERFORM set_config('innorder.artifact_cleanup', 'on', true);
-    RETURN QUERY
-    WITH candidates AS (
-        SELECT artifact.id
-        FROM ai.ai_run_artifact artifact
-        WHERE artifact.retention_until <= p_before
-          AND artifact.retention_until <= statement_timestamp()
+    FOR candidate IN
+        SELECT candidate_artifact.id
+        FROM ai.ai_run_artifact candidate_artifact
+        WHERE candidate_artifact.retention_until <= p_before
+          AND candidate_artifact.retention_until <= statement_timestamp()
           AND NOT EXISTS (
               SELECT 1 FROM ai.legal_hold hold_row
-              WHERE hold_row.id = artifact.legal_hold_id AND hold_row.released_at IS NULL
+              WHERE hold_row.id = candidate_artifact.legal_hold_id AND hold_row.released_at IS NULL
           )
           AND NOT EXISTS (
               SELECT 1 FROM ai.legal_hold_object held
               JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
-              WHERE held.object_kind = 'ARTIFACT' AND held.object_id = artifact.id
+              WHERE held.object_kind = 'ARTIFACT' AND held.object_id = candidate_artifact.id
                 AND hold_row.released_at IS NULL
           )
-        ORDER BY artifact.retention_until, artifact.id
-        FOR UPDATE SKIP LOCKED
+          AND NOT EXISTS (
+              SELECT 1 FROM ai.legal_hold_object held
+              JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+              WHERE held.object_kind = 'RUN' AND held.object_id = candidate_artifact.run_id
+                AND hold_row.released_at IS NULL
+          )
+        ORDER BY candidate_artifact.run_id, candidate_artifact.id
         LIMIT p_limit
-    )
-    DELETE FROM ai.ai_run_artifact artifact
-    USING candidates
-    WHERE artifact.id = candidates.id
-    RETURNING artifact.id;
-    PERFORM set_config('innorder.artifact_cleanup', 'off', true);
+    LOOP
+        SELECT run_id INTO target_run_id FROM ai.ai_run_artifact WHERE id = candidate.id;
+        CONTINUE WHEN target_run_id IS NULL;
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = target_run_id FOR UPDATE;
+        CONTINUE WHEN NOT FOUND;
+        SELECT * INTO artifact_row FROM ai.ai_run_artifact artifact
+        WHERE artifact.id = candidate.id AND artifact.run_id = target_run_id FOR UPDATE;
+        CONTINUE WHEN NOT FOUND;
+        CONTINUE WHEN artifact_row.retention_until > p_before
+                   OR artifact_row.retention_until > statement_timestamp();
+        CONTINUE WHEN EXISTS (
+            SELECT 1 FROM ai.legal_hold hold_row
+            WHERE hold_row.id = artifact_row.legal_hold_id AND hold_row.released_at IS NULL
+        ) OR EXISTS (
+            SELECT 1 FROM ai.legal_hold_object held
+            JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+            WHERE held.object_kind = 'ARTIFACT' AND held.object_id = artifact_row.id
+              AND hold_row.released_at IS NULL
+        ) OR EXISTS (
+            SELECT 1 FROM ai.legal_hold_object held
+            JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+            WHERE held.object_kind = 'RUN' AND held.object_id = target_run_id
+              AND hold_row.released_at IS NULL
+        );
+        PERFORM set_config('innorder.artifact_cleanup', 'on', true);
+        DELETE FROM ai.ai_run_artifact WHERE id = artifact_row.id;
+        PERFORM set_config('innorder.artifact_cleanup', 'off', true);
+        artifact_id := artifact_row.id;
+        RETURN NEXT;
+    END LOOP;
 END;
 $$;
 
@@ -538,6 +617,7 @@ BEGIN
        OR NEW.normalized_content_hash IS DISTINCT FROM OLD.normalized_content_hash
        OR NEW.parser_version IS DISTINCT FROM OLD.parser_version
        OR NEW.chunker_version IS DISTINCT FROM OLD.chunker_version
+       OR NEW.candidate_embedding_space_id IS DISTINCT FROM OLD.candidate_embedding_space_id
        OR NEW.corpus_manifest_digest IS DISTINCT FROM OLD.corpus_manifest_digest
        OR NEW.created_at IS DISTINCT FROM OLD.created_at
        OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts THEN
@@ -833,19 +913,49 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    target_job_ids uuid[];
+    target_space_id uuid;
 BEGIN
     IF p_worker_id IS NULL OR btrim(p_worker_id) = ''
        OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
        OR p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion claim bounds';
     END IF;
+    SELECT array_agg(selected.id ORDER BY selected.id) INTO target_job_ids
+    FROM (
+        SELECT job.id
+        FROM ai.ingestion_job job
+        WHERE (job.status IN ('PENDING', 'RETRY')
+               AND job.next_attempt_at <= transaction_timestamp()
+               AND job.attempts < job.max_attempts)
+           OR (job.status = 'PROCESSING' AND job.lease_expires_at <= transaction_timestamp())
+        ORDER BY job.id
+        LIMIT p_limit
+    ) selected;
+    IF target_job_ids IS NULL THEN
+        RETURN;
+    END IF;
+    FOR target_space_id IN
+        SELECT DISTINCT job.candidate_embedding_space_id
+        FROM ai.ingestion_job job WHERE job.id = ANY(target_job_ids)
+        ORDER BY job.candidate_embedding_space_id
+    LOOP
+        PERFORM 1 FROM ai.embedding_space space
+        WHERE space.id = target_space_id FOR UPDATE;
+    END LOOP;
+    PERFORM 1 FROM ai.ingestion_job job
+    WHERE job.id = ANY(target_job_ids)
+    ORDER BY job.id
+    FOR UPDATE;
     UPDATE ai.ingestion_attempt attempt
     SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
         completed_at = statement_timestamp()
     FROM ai.ingestion_job job
     WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
       AND attempt.status = 'RUNNING' AND job.status = 'PROCESSING'
-      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts >= job.max_attempts;
+      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts >= job.max_attempts
+      AND job.id = ANY(target_job_ids);
 
     UPDATE ai.ingestion_attempt attempt
     SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_RETRY',
@@ -853,27 +963,29 @@ BEGIN
     FROM ai.ingestion_job job
     WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
       AND attempt.status = 'RUNNING' AND job.status = 'PROCESSING'
-      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts < job.max_attempts;
+      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts < job.max_attempts
+      AND job.id = ANY(target_job_ids);
 
     UPDATE ai.ingestion_job
     SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
         completed_at = statement_timestamp(), lease_owner = NULL, lease_expires_at = NULL,
         updated_at = statement_timestamp()
     WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
-      AND attempts >= max_attempts;
+      AND attempts >= max_attempts AND id = ANY(target_job_ids);
 
     UPDATE ai.ingestion_job
     SET status = 'RETRY', sanitized_error = 'LEASE_EXPIRED_RETRY',
         lease_owner = NULL, lease_expires_at = NULL, updated_at = statement_timestamp()
     WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
-      AND attempts < max_attempts;
+      AND attempts < max_attempts AND id = ANY(target_job_ids);
 
     RETURN QUERY
     WITH candidates AS (
         SELECT id FROM ai.ingestion_job
-        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp()
+        WHERE id = ANY(target_job_ids)
+          AND status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp()
           AND attempts < max_attempts
-        ORDER BY next_attempt_at, created_at
+        ORDER BY id
         FOR UPDATE SKIP LOCKED
         LIMIT p_limit
     ), claimed AS (
@@ -950,7 +1062,11 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     job ai.ingestion_job%ROWTYPE;
+    candidate_id uuid;
 BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
     SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
     IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
        OR job.lease_expires_at <= transaction_timestamp() OR job.document_id IS NULL THEN
@@ -958,6 +1074,14 @@ BEGIN
     END IF;
     IF p_normalized_content_hash <> job.normalized_content_hash THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'normalized ingestion content hash does not match claimed job';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM ai.embedding_space_gate_result gate_result
+        WHERE gate_result.candidate_embedding_space_id = candidate_id
+          AND gate_result.corpus_manifest_digest = job.corpus_manifest_digest
+          AND gate_result.decision = 'PASS'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion mutation is blocked by finalized gate';
     END IF;
     INSERT INTO ai.knowledge_document_version
         (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
@@ -984,7 +1108,11 @@ DECLARE
     version_document_id uuid;
     space_manifest text;
     space_status text;
+    candidate_id uuid;
 BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
     SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
     IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
        OR job.lease_expires_at <= transaction_timestamp() THEN
@@ -992,6 +1120,17 @@ BEGIN
     END IF;
     IF p_document_version_id <> job.produced_document_version_id THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'chunk must use the produced document version for the claimed job';
+    END IF;
+    IF p_embedding_space_id IS DISTINCT FROM candidate_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match claimed ingestion job';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM ai.embedding_space_gate_result gate_result
+        WHERE gate_result.candidate_embedding_space_id = candidate_id
+          AND gate_result.corpus_manifest_digest = job.corpus_manifest_digest
+          AND gate_result.decision = 'PASS'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion mutation is blocked by finalized gate';
     END IF;
     SELECT document_id INTO STRICT version_document_id
     FROM ai.knowledge_document_version WHERE id = p_document_version_id;
@@ -1023,7 +1162,13 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    candidate_id uuid;
 BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
     UPDATE ai.ingestion_attempt attempt
     SET stage = p_stage, checkpoint = p_checkpoint
     FROM ai.ingestion_job job
@@ -1045,7 +1190,23 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    candidate_id uuid;
+    job_manifest text;
 BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    SELECT corpus_manifest_digest INTO STRICT job_manifest
+    FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    IF EXISTS (
+        SELECT 1 FROM ai.embedding_space_gate_result gate_result
+        WHERE gate_result.candidate_embedding_space_id = candidate_id
+          AND gate_result.corpus_manifest_digest = job_manifest
+          AND gate_result.decision = 'PASS'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion completion is blocked by finalized gate';
+    END IF;
     UPDATE ai.ingestion_attempt attempt
     SET status = 'SUCCEEDED', stage = 'COMPLETE', checkpoint = p_checkpoint,
         completed_at = statement_timestamp(), sanitized_error = NULL
@@ -1079,10 +1240,15 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
     next_status text;
+    candidate_id uuid;
 BEGIN
-    IF p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
+    IF p_retry_after IS NULL OR p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion retry bound';
     END IF;
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
     UPDATE ai.ingestion_attempt attempt
     SET status = 'FAILED', sanitized_error = p_sanitized_error,
         completed_at = statement_timestamp()
@@ -1384,6 +1550,10 @@ BEGIN
     IF candidate_manifest <> p_corpus_manifest_digest OR candidate_status <> 'BUILDING' OR active_status <> 'ACTIVE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
     END IF;
+    PERFORM 1 FROM ai.ingestion_job job
+    WHERE job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY job.id
+    FOR UPDATE;
     WITH eligible_versions AS MATERIALIZED (
         SELECT DISTINCT version.id, version.content_hash
         FROM ai.ingestion_job job
@@ -1499,7 +1669,8 @@ BEGIN
     END IF;
     PERFORM 1 FROM ai.ingestion_job job
     WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
-    FOR SHARE;
+    ORDER BY job.id
+    FOR UPDATE;
     PERFORM 1
     FROM ai.ingestion_job job
     JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id

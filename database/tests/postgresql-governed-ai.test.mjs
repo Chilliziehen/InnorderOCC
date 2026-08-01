@@ -201,7 +201,10 @@ function fixtureSql(prefix) {
       ('${id('000000000075')}', 'test.retired.${prefix}', 'Retired dataset'),
       ('${id('000000000500')}', 'test.embedding-drift.${prefix}', 'Embedding drift dataset'),
       ('${id('000000000502')}', 'test.corpus-drift.${prefix}', 'Corpus drift dataset'),
-      ('${id('000000000504')}', 'test.status-drift.${prefix}', 'Status drift dataset');
+      ('${id('000000000504')}', 'test.status-drift.${prefix}', 'Status drift dataset'),
+      ('${id('000000000520')}', 'test.completion-race.${prefix}', 'Completion race dataset'),
+      ('${id('000000000522')}', 'test.deadlock.${prefix}', 'Deadlock dataset'),
+      ('${id('000000000524')}', 'test.final-pass.${prefix}', 'Final pass dataset');
     INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status) VALUES
       ('${id('000000000063')}', '${id('000000000060')}', 1, repeat('3', 64), 'DRAFT'),
       ('${id('000000000064')}', '${id('000000000061')}', 1, repeat('4', 64), 'DRAFT'),
@@ -210,17 +213,23 @@ function fixtureSql(prefix) {
       ('${id('000000000077')}', '${id('000000000075')}', 1, repeat('7', 64), 'DRAFT'),
       ('${id('000000000501')}', '${id('000000000500')}', 1, repeat('8', 64), 'DRAFT'),
       ('${id('000000000503')}', '${id('000000000502')}', 1, repeat('9', 64), 'DRAFT'),
-      ('${id('000000000505')}', '${id('000000000504')}', 1, repeat('a', 64), 'DRAFT');
+      ('${id('000000000505')}', '${id('000000000504')}', 1, repeat('a', 64), 'DRAFT'),
+      ('${id('000000000521')}', '${id('000000000520')}', 1, repeat('b', 64), 'DRAFT'),
+      ('${id('000000000523')}', '${id('000000000522')}', 1, repeat('c', 64), 'DRAFT'),
+      ('${id('000000000525')}', '${id('000000000524')}', 1, repeat('d', 64), 'DRAFT');
     INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties) VALUES
       ${cases('000000000013', 100, 30)},
       ${cases('00000000003b', 130, 20)},
       ${cases('000000000063', 200, 1)},
       ${cases('000000000064', 300, 19)},
-      ${cases('000000000065', 400, 20, 19)};
+      ${cases('000000000065', 400, 20, 19)},
+      ${cases('000000000525', 700, 20)};
     UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
     WHERE id IN ('${id('000000000013')}', '${id('00000000003b')}', '${id('000000000063')}',
                  '${id('000000000064')}', '${id('000000000065')}', '${id('000000000077')}',
                  '${id('000000000501')}', '${id('000000000503')}', '${id('000000000505')}');
+    UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
+    WHERE id IN ('${id('000000000521')}', '${id('000000000523')}', '${id('000000000525')}');
     UPDATE ai.evaluation_dataset_version SET status = 'RETIRED' WHERE id = '${id('000000000077')}';
 
     INSERT INTO ai.knowledge_source
@@ -277,23 +286,31 @@ function fixtureSql(prefix) {
       ('${id('000000000042')}', '${id('000000000017')}');
     INSERT INTO ai.ingestion_job
       (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
-       parser_version, chunker_version,
+       parser_version, chunker_version, candidate_embedding_space_id,
        corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
     VALUES ('${id('000000000026')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
-            repeat('7', 64), repeat('8', 64), 'parser-v1', 'chunker-v1', repeat('9', 64), '{}', 'FETCH', 'PENDING',
+            repeat('7', 64), repeat('8', 64), 'parser-v1', 'chunker-v1', '${id('000000000029')}', repeat('9', 64), '{}', 'FETCH', 'PENDING',
             now() - interval '1 hour', now() - interval '1 hour');
     INSERT INTO ai.ingestion_job
       (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
-       parser_version, chunker_version,
+       parser_version, chunker_version, candidate_embedding_space_id,
        corpus_manifest_digest, checkpoint, stage, status, attempts, max_attempts,
        lease_owner, lease_expires_at, created_at, updated_at)
     VALUES ('${id('000000000058')}', '${id('000000000014')}', '${id('000000000036')}', 'crashed',
-            repeat('c', 64), repeat('d', 64), 'parser-v1', 'chunker-v1', repeat('9', 64), '{}', 'FETCH', 'PROCESSING', 1, 1,
+            repeat('c', 64), repeat('d', 64), 'parser-v1', 'chunker-v1', '${id('000000000029')}', repeat('9', 64), '{}', 'FETCH', 'PROCESSING', 1, 1,
             'crashed-worker', now() - interval '1 minute', now() - interval '1 hour', now() - interval '1 hour');
     INSERT INTO ai.ingestion_attempt
       (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at, started_at)
     VALUES ('${id('000000000059')}', '${id('000000000058')}', 1, 'crashed-worker', 'FETCH', '{}',
             'RUNNING', now() - interval '1 minute', now() - interval '1 hour');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+       parser_version, chunker_version, candidate_embedding_space_id, corpus_manifest_digest,
+       checkpoint, stage, status, attempts, max_attempts, created_at, updated_at)
+    VALUES ('${id('000000000024')}', '${id('000000000014')}', '${id('000000000036')}', 'exhausted-pending',
+            repeat('a', 64), repeat('b', 64), 'parser-v1', 'chunker-v1', '${id('000000000029')}',
+            repeat('9', 64), '{}', 'FETCH', 'PENDING', 1, 1,
+            now() - interval '2 hours', now() - interval '2 hours');
     CREATE TABLE flowable.governed_secret (id integer PRIMARY KEY);
     INSERT INTO flowable.governed_secret VALUES (1);
   `;
@@ -497,6 +514,43 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     WHERE id = '${id('000000000514')}';`);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10);`), '1');
 
+  execSql(`INSERT INTO ai.legal_hold (id, hold_key, reason, placed_by) VALUES
+      ('${id('000000000517')}', 'artifact-race-${fixture}', 'artifact race', '${id('000000000005')}'),
+      ('${id('000000000518')}', 'run-race-${fixture}', 'run race', '${id('000000000005')}');
+    INSERT INTO ai.ai_run_artifact
+      (id, run_id, artifact_kind, object_key, sha256, data_classification, retention_until, created_at)
+    VALUES
+      ('${id('000000000515')}', '${id('000000000510')}', 'TRACE', 'artifact-race-${fixture}', repeat('7',64),
+       'INTERNAL', now() - interval '1 year', now() - interval '2 years'),
+      ('${id('000000000516')}', '${id('000000000510')}', 'TRACE', 'run-race-${fixture}', repeat('8',64),
+       'INTERNAL', now() - interval '1 year', now() - interval '2 years');`);
+  const cleanupWins = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 1);
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const lateArtifactHold = await runSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    INSERT INTO ai.legal_hold_object (hold_id, object_kind, object_id)
+    VALUES ('${id('000000000517')}', 'ARTIFACT', '${id('000000000515')}'); COMMIT;`);
+  const cleanupWinsResult = await cleanupWins;
+  assert.equal(cleanupWinsResult.code, 0, cleanupWinsResult.stderr);
+  assert.notEqual(lateArtifactHold.code, 0, 'dangling legal hold was accepted after artifact cleanup');
+  assert.match(lateArtifactHold.stderr, /legal hold target does not exist/iu);
+  assert.equal(execSql(`SELECT count(*) FROM ai.legal_hold_object
+    WHERE hold_id = '${id('000000000517')}';`), '0');
+
+  const runHoldWins = runSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    INSERT INTO ai.legal_hold_object (hold_id, object_kind, object_id)
+    VALUES ('${id('000000000518')}', 'RUN', '${id('000000000510')}');
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const blockedCleanup = await runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10); COMMIT;`);
+  const runHoldResult = await runHoldWins;
+  assert.equal(runHoldResult.code, 0, runHoldResult.stderr);
+  assert.equal(blockedCleanup.code, 0, blockedCleanup.stderr);
+  assert.match(blockedCleanup.stdout, /0/iu);
+  assert.equal(execSql(`SELECT count(*) FROM ai.ai_run_artifact WHERE id = '${id('000000000516')}';`), '1');
+
   const hits = execAiSql(`SELECT string_agg(chunk_id::text, ',') FROM ai.authorized_hybrid_retrieval(
     '${id('000000000030')}', '${id('000000000009')}', 'allowed', '[1,0,0]'::public.vector, 10, 10, 10);`);
   assert.match(hits, /000000000021/);
@@ -525,10 +579,11 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   }
   expectAiFailure(`SELECT * FROM ai.claim_ingestion_jobs('worker-a', 1, NULL);`, /invalid ingestion claim bounds/iu);
   expectAiFailure(`SELECT * FROM ai.claim_event_consumptions('event-worker', 1, NULL);`, /invalid event claim bounds/iu);
-  const claimed = execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('worker-a', 10, interval '30 seconds');`);
+  const claimed = execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('worker-a', 1, interval '30 seconds');`);
   assert.equal(claimed, '1');
   assert.equal(execAiSql(`SELECT status || '|' || worker_id FROM ai.ingestion_attempt
     WHERE job_id = '${id('000000000026')}' AND attempt_number = 1;`), 'RUNNING|worker-a');
+  assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('lease-cleaner', 10, interval '30 seconds');`), '0');
   assert.equal(execAiSql(`SELECT status || '|' || sanitized_error || '|' || (completed_at IS NOT NULL)
     FROM ai.ingestion_job WHERE id = '${id('000000000058')}';`),
   'FAILED|LEASE_EXPIRED_MAX_ATTEMPTS|true');
@@ -553,7 +608,7 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`, /produced document version/iu);
   expectAiFailure(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
     '${id('000000000037')}', '${id('00000000004e')}', 0, 'active', repeat('e',64), 1,
-    '{}', '${id('000000000009')}', '[1,0,0]'::public.vector);`, /embedding space is not BUILDING/iu);
+    '{}', '${id('000000000009')}', '[1,0,0]'::public.vector);`, /embedding space does not match claimed ingestion job/iu);
   execAiSql(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
     '${id('000000000037')}', '${id('000000000038')}', 0, 'candidate knowledge', repeat('9',64),
     2, '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`);
@@ -562,12 +617,69 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     FROM ai.ingestion_attempt WHERE job_id = '${id('000000000026')}' AND attempt_number = 2;`),
   'SUCCEEDED|COMPLETE|true');
 
+  execSql(`INSERT INTO ai.knowledge_document_version
+      (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
+    VALUES ('${id('000000000601')}', '${id('000000000036')}', 3, 'completion-race-${fixture}',
+      repeat('1',64), 'text/plain', 'parser-v1', 'PUBLIC');
+    INSERT INTO ai.knowledge_chunk
+      (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
+    VALUES ('${id('000000000602')}', '${id('000000000601')}', 0, 'completion race chunk', repeat('2',64), 3, '{}');
+    INSERT INTO ai.chunk_embedding (embedding_space_id, chunk_id, embedding)
+    VALUES ('${id('000000000029')}', '${id('000000000602')}', '[1,0,0]');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, produced_document_version_id, source_version,
+       source_object_hash, normalized_content_hash, parser_version, chunker_version,
+       candidate_embedding_space_id, corpus_manifest_digest, checkpoint, stage, status,
+       attempts, lease_owner, lease_expires_at, created_at, updated_at)
+    VALUES ('${id('000000000600')}', '${id('000000000014')}', '${id('000000000036')}',
+      '${id('000000000601')}', 'completion-race', repeat('3',64), repeat('1',64),
+      'parser-v1', 'chunker-v1', '${id('000000000029')}', repeat('9',64), '{}', 'EMBED',
+      'PROCESSING', 1, 'completion-worker', now() + interval '5 minutes', now(), now());
+    INSERT INTO ai.ingestion_attempt
+      (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at)
+    VALUES ('${id('000000000603')}', '${id('000000000600')}', 1, 'completion-worker', 'EMBED', '{}',
+      'RUNNING', now() + interval '5 minutes');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
+       parser_version, chunker_version, candidate_embedding_space_id, corpus_manifest_digest,
+       checkpoint, stage, status, attempts, lease_owner, lease_expires_at, created_at, updated_at)
+    VALUES ('${id('000000000604')}', '${id('000000000014')}', '${id('000000000036')}', 'deadlock-race',
+      repeat('4',64), repeat('5',64), 'parser-v1', 'chunker-v1', '${id('000000000029')}',
+      repeat('9',64), '{}', 'FETCH', 'PROCESSING', 1, 'deadlock-worker', now() + interval '5 minutes', now(), now());
+    INSERT INTO ai.ingestion_attempt
+      (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at)
+    VALUES ('${id('000000000605')}', '${id('000000000604')}', 1, 'deadlock-worker', 'FETCH', '{}',
+      'RUNNING', now() + interval '5 minutes');`);
+
+  const gateHoldsCandidate = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT ai.begin_embedding_space_gate('${id('000000000610')}', '${id('000000000521')}',
+      '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('4',64));
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const completionWaits = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT ai.finalize_ingestion_job('${id('000000000600')}', 'completion-worker', '{"done":true}'); COMMIT;`);
+  const [gateLockResult, completionResult] = await Promise.all([gateHoldsCandidate, completionWaits]);
+  assert.equal(gateLockResult.code, 0, gateLockResult.stderr);
+  assert.equal(completionResult.code, 0, completionResult.stderr);
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000610')}');`, /gate corpus snapshot changed/iu);
+
+  const deadlockGate = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT ai.begin_embedding_space_gate('${id('000000000611')}', '${id('000000000523')}',
+      '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('5',64));
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const deadlockWorker = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT ai.checkpoint_ingestion_attempt('${id('000000000604')}', 'deadlock-worker', 'PARSE', '{"race":true}'); COMMIT;`);
+  const [deadlockGateResult, deadlockWorkerResult] = await Promise.all([deadlockGate, deadlockWorker]);
+  assert.equal(deadlockGateResult.code, 0, `deadlock regression gate failed: ${deadlockGateResult.stderr}`);
+  assert.equal(deadlockWorkerResult.code, 0, `deadlock regression worker failed: ${deadlockWorkerResult.stderr}`);
+
   execSql(`INSERT INTO ai.ingestion_job
     (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
-     parser_version, chunker_version,
+     parser_version, chunker_version, candidate_embedding_space_id,
      corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
     VALUES ('${id('000000000070')}', '${id('000000000014')}', '${id('000000000036')}', 'failure',
-      repeat('e',64), repeat('f',64), 'parser-v1', 'chunker-v1', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
+      repeat('e',64), repeat('f',64), 'parser-v1', 'chunker-v1', '${id('000000000029')}', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('failure-worker', 1, interval '30 seconds');`), '1');
   assert.equal(execAiSql(`SELECT ai.fail_ingestion_job('${id('000000000070')}', 'failure-worker',
     'sanitized failure', interval '1 minute');`), 'RETRY');
@@ -576,17 +688,17 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   'FAILED|sanitized failure|true');
   execSql(`INSERT INTO ai.ingestion_job
     (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
-     parser_version, chunker_version, corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
+     parser_version, chunker_version, candidate_embedding_space_id, corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
     VALUES ('${id('000000000079')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
-      repeat('7',64), repeat('8',64), 'parser-v1', 'chunker-v2', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
+      repeat('7',64), repeat('8',64), 'parser-v1', 'chunker-v2', '${id('000000000029')}', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
   assert.equal(execSql(`SELECT string_agg(chunker_version, ',' ORDER BY chunker_version)
     FROM ai.ingestion_job WHERE source_id = '${id('000000000014')}' AND source_version = 'v1';`),
   'chunker-v1,chunker-v2');
   expectSqlFailure(`INSERT INTO ai.ingestion_job
     (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
-     parser_version, chunker_version, corpus_manifest_digest, checkpoint, stage, status)
+     parser_version, chunker_version, candidate_embedding_space_id, corpus_manifest_digest, checkpoint, stage, status)
     VALUES ('${id('00000000007a')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
-      repeat('7',64), repeat('8',64), 'parser-v1', 'chunker-v1', repeat('9',64), '{}', 'FETCH', 'PENDING');`,
+      repeat('7',64), repeat('8',64), 'parser-v1', 'chunker-v1', '${id('000000000029')}', repeat('9',64), '{}', 'FETCH', 'PENDING');`,
   /duplicate key value violates unique constraint/iu);
   expectAiFailure(`SELECT * FROM ai.authorized_hybrid_retrieval('${id('000000000030')}',
     '${id('000000000029')}', 'candidate', '[1,0,0]'::public.vector, 10, 10, 10);`,
@@ -705,6 +817,33 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('c',64));`);
   execAiSql(gateEvidence(id('000000000047'), 130, 20, 18, 20, 0.84));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000047')}');`), 'FAIL');
+
+  execSql(`INSERT INTO ai.knowledge_document_version
+      (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
+    VALUES ('${id('000000000528')}', '${id('000000000036')}', 4, 'post-pass-${fixture}',
+      repeat('6',64), 'text/plain', 'parser-v1', 'PUBLIC');
+    INSERT INTO ai.knowledge_chunk
+      (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
+    VALUES ('${id('000000000529')}', '${id('000000000528')}', 0, 'post pass chunk', repeat('7',64), 3, '{}');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, produced_document_version_id, source_version,
+       source_object_hash, normalized_content_hash, parser_version, chunker_version,
+       candidate_embedding_space_id, corpus_manifest_digest, checkpoint, stage, status,
+       attempts, lease_owner, lease_expires_at, created_at, updated_at)
+    VALUES ('${id('000000000527')}', '${id('000000000014')}', '${id('000000000036')}',
+      '${id('000000000528')}', 'post-pass', repeat('8',64), repeat('6',64), 'parser-v1', 'chunker-v1',
+      '${id('000000000029')}', repeat('9',64), '{}', 'CHUNK', 'PROCESSING', 1, 'post-pass-worker',
+      now() + interval '5 minutes', now(), now());
+    INSERT INTO ai.ingestion_attempt
+      (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at)
+    VALUES ('${id('000000000530')}', '${id('000000000527')}', 1, 'post-pass-worker', 'CHUNK', '{}',
+      'RUNNING', now() + interval '5 minutes');`);
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000526')}', '${id('000000000525')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('6',64));`);
+  execAiSql(gateEvidence(id('000000000526'), 700, 20, 1, 1, 1));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000526')}');`), 'PASS');
+  expectAiFailure(`SELECT ai.finalize_ingestion_job('${id('000000000527')}', 'post-pass-worker', '{}');`,
+    /ingestion completion is blocked by finalized gate/iu);
   expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('000000000048')}', '${id('000000000013')}',
     '${id('000000000029')}', repeat('8',64), '${id('000000000009')}', repeat('e',64));`, /stale corpus manifest/iu);
   assert.equal(execAiSql(`SELECT minimum_coverage || '|' || maximum_leakage || '|' ||
