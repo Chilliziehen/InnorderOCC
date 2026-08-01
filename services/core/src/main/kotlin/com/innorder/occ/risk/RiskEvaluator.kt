@@ -2,6 +2,7 @@ package com.innorder.occ.risk
 
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.time.DateTimeException
 import java.time.Duration
 import java.time.Instant
 import java.util.Collections
@@ -66,7 +67,7 @@ class RiskEvaluator {
             targetEntityId = facts.targetEntityId,
             severity = rule.severity,
             reason = evaluation.reason,
-            dueAt = at.plus(rule.sla),
+            dueAt = at.checkedPlus(rule.sla, "risk SLA"),
             ownerRelationship = rule.ownerRelationship,
             escalationSteps = rule.escalationSteps,
             evaluatedAt = at,
@@ -79,13 +80,15 @@ class RiskEvaluator {
         )
     }
 
-    private fun evaluateTrigger(rule: RiskRule, facts: RiskEvaluationFacts, at: Instant): TriggerEvaluation? =
-        when (val trigger = rule.trigger) {
-            RiskTrigger.OverdueCriticalWork -> (facts.values as? RiskFactValues.CriticalWork)?.takeIf {
-                it.critical && it.completedAt == null && at >= it.dueAt
+    private fun evaluateTrigger(rule: RiskRule, facts: RiskEvaluationFacts, at: Instant): TriggerEvaluation? {
+        require(matches(rule.trigger, facts.values)) { "risk rule and fact values do not match" }
+        return when (val trigger = rule.trigger) {
+            RiskTrigger.OverdueCriticalWork -> (facts.values as RiskFactValues.CriticalWork).takeIf {
+                it.critical && (it.completedAt == null || it.completedAt > at) && at >= it.dueAt
             }?.let { evaluation(facts, "OVERDUE_CRITICAL_WORK", "OVERDUE_CRITICAL_WORK|due=${it.dueAt}") }
-            is RiskTrigger.ConsecutiveReturns -> (facts.values as? RiskFactValues.ConsecutiveReturns)?.let {
-                facts.triggeringFactIds.takeIf { ids -> ids.size >= trigger.threshold }?.take(trigger.threshold)?.let { ids ->
+            is RiskTrigger.ConsecutiveReturns -> (facts.values as RiskFactValues.ConsecutiveReturns).let {
+                facts.triggeringFactIds.takeIf { ids -> ids.size >= trigger.threshold }?.let { ids ->
+                    require(ids.size == trigger.threshold) { "return facts must identify the exact threshold crossing" }
                     val canonicalIds = ids.sortedBy(UUID::toString).joinToString(",")
                     TriggerEvaluation(
                         "CONSECUTIVE_RETURNS",
@@ -94,28 +97,39 @@ class RiskEvaluator {
                     )
                 }
             }
-            is RiskTrigger.Inactivity -> (facts.values as? RiskFactValues.Inactivity)?.takeIf {
-                at >= it.lastActivityAt.plus(Duration.ofDays(trigger.elapsedDays))
+            is RiskTrigger.Inactivity -> (facts.values as RiskFactValues.Inactivity).takeIf {
+                at >= it.lastActivityAt.checkedPlus(Duration.ofDays(trigger.elapsedDays), "inactivity threshold")
             }?.let {
-                val threshold = it.lastActivityAt.plus(Duration.ofDays(trigger.elapsedDays))
+                val threshold = it.lastActivityAt.checkedPlus(Duration.ofDays(trigger.elapsedDays), "inactivity threshold")
                 evaluation(facts, "INACTIVITY", "INACTIVITY|threshold=$threshold")
             }
-            is RiskTrigger.BlockerAge -> (facts.values as? RiskFactValues.Blocker)?.let {
+            is RiskTrigger.BlockerAge -> (facts.values as RiskFactValues.Blocker).let {
                 val threshold = rule.calendar.thresholdAfter(it.blockedAt, trigger.businessDays, rule.zone)
-                it.takeIf { value -> value.resolvedAt == null && at > threshold }
+                it.takeIf { value -> (value.resolvedAt == null || value.resolvedAt > at) && at > threshold }
                     ?.let { evaluation(facts, "BLOCKER_AGE", "BLOCKER_AGE|threshold=$threshold") }
             }
-            RiskTrigger.EvidenceFailure -> (facts.values as? RiskFactValues.EvidenceFailure)?.takeIf { it.failed }
+            RiskTrigger.EvidenceFailure -> (facts.values as RiskFactValues.EvidenceFailure).takeIf { it.failed }
                 ?.let { evaluation(facts, "EVIDENCE_FAILURE", "EVIDENCE_FAILURE|failed") }
-            RiskTrigger.MissingCriticalEvidence -> (facts.values as? RiskFactValues.MissingEvidence)?.takeIf {
+            RiskTrigger.MissingCriticalEvidence -> (facts.values as RiskFactValues.MissingEvidence).takeIf {
                 it.critical && it.missing
             }?.let { evaluation(facts, "MISSING_CRITICAL_EVIDENCE", "MISSING_CRITICAL_EVIDENCE|missing") }
-            is RiskTrigger.ResourceConflict -> (facts.values as? RiskFactValues.ResourceConflict)?.takeIf {
-                it.startsAt >= at && it.startsAt <= at.plus(trigger.within)
+            is RiskTrigger.ResourceConflict -> (facts.values as RiskFactValues.ResourceConflict).takeIf {
+                it.startsAt >= at && it.startsAt <= at.checkedPlus(trigger.within, "conflict window")
             }?.let {
                 evaluation(facts, "RESOURCE_CONFLICT", "RESOURCE_CONFLICT|starts=${it.startsAt}|within=${trigger.within}")
             }
         }
+    }
+
+    private fun matches(trigger: RiskTrigger, values: RiskFactValues): Boolean = when (trigger) {
+        RiskTrigger.OverdueCriticalWork -> values is RiskFactValues.CriticalWork
+        is RiskTrigger.ConsecutiveReturns -> values is RiskFactValues.ConsecutiveReturns
+        is RiskTrigger.Inactivity -> values is RiskFactValues.Inactivity
+        is RiskTrigger.BlockerAge -> values is RiskFactValues.Blocker
+        RiskTrigger.EvidenceFailure -> values is RiskFactValues.EvidenceFailure
+        RiskTrigger.MissingCriticalEvidence -> values is RiskFactValues.MissingEvidence
+        is RiskTrigger.ResourceConflict -> values is RiskFactValues.ResourceConflict
+    }
 
     private fun evaluation(facts: RiskEvaluationFacts, reason: String, window: String): TriggerEvaluation =
         TriggerEvaluation(reason, window, facts.triggeringFactIds)
@@ -148,4 +162,12 @@ class RiskEvaluator {
         val windowIdentity: String,
         val triggeringFactIds: List<UUID>,
     )
+}
+
+private fun Instant.checkedPlus(duration: Duration, operation: String): Instant = try {
+    plus(duration)
+} catch (exception: DateTimeException) {
+    throw IllegalArgumentException("$operation arithmetic overflow", exception)
+} catch (exception: ArithmeticException) {
+    throw IllegalArgumentException("$operation arithmetic overflow", exception)
 }

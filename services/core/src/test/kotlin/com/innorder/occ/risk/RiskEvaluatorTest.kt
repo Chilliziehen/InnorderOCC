@@ -89,13 +89,12 @@ class RiskEvaluatorTest {
     }
 
     @Test
-    fun `consecutive return occurrence uses threshold facts and survives count growth`() {
+    fun `consecutive return occurrence requires the exact threshold crossing facts`() {
         val rule = rule("""{"type":"CONSECUTIVE_RETURNS"}""")
         assertThat(evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_1)), NOW)).isNull()
 
         val atThreshold = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_1)), NOW)!!
         val reordered = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_1, FACT_2)), NOW)!!
-        val grownStreak = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_1, FACT_3)), NOW.plusSeconds(60))!!
         val newWindow = evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, listOf(FACT_2, FACT_3)), NOW)!!
         val newPackageVersion = evaluate(
             RiskRule.parse(ruleJson("""{"type":"CONSECUTIVE_RETURNS"}""").replace("1.0.0", "1.0.1")),
@@ -111,12 +110,60 @@ class RiskEvaluatorTest {
         assertThat(atThreshold.occurrenceKey).matches("^[0-9a-f]{64}${'$'}")
         assertThat(atThreshold.triggeringFactIds).containsExactly(FACT_1, FACT_2)
         assertThat(reordered.occurrenceKey).isEqualTo(atThreshold.occurrenceKey)
-        assertThat(grownStreak.occurrenceKey).isEqualTo(atThreshold.occurrenceKey)
-        assertThat(grownStreak.triggeringFactIds).containsExactly(FACT_1, FACT_2)
+        listOf(
+            listOf(FACT_1, FACT_2, FACT_3),
+            listOf(FACT_3, FACT_2, FACT_1),
+            listOf(FACT_2, FACT_3, FACT_1),
+        ).forEach { extraFacts ->
+            assertThatThrownBy { evaluate(rule, facts(RiskFactValues.ConsecutiveReturns, extraFacts), NOW) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+        }
         assertThat(newWindow.occurrenceKey).isNotEqualTo(atThreshold.occurrenceKey)
         assertThat(newWindow.thresholdWindowIdentity).isNotEqualTo(atThreshold.thresholdWindowIdentity)
         assertThat(newPackageVersion.occurrenceKey).isNotEqualTo(atThreshold.occurrenceKey)
         assertThat(newCalendarVersion.occurrenceKey).isNotEqualTo(atThreshold.occurrenceKey)
+    }
+
+    @Test
+    fun `historical replay ignores completion and resolution after evaluation instant`() {
+        val evaluatedAt = Instant.parse("2026-06-01T12:00:00Z")
+        val futureStateChange = evaluatedAt.plusSeconds(1)
+        val due = evaluatedAt.minusSeconds(1)
+        assertThat(
+            evaluate(
+                rule("""{"type":"OVERDUE_CRITICAL_WORK"}"""),
+                facts(RiskFactValues.CriticalWork(due, true, completedAt = futureStateChange)),
+                evaluatedAt,
+            ),
+        ).isNotNull()
+
+        val blockerRule = businessRule()
+        val blockedAt = Instant.parse("2026-05-28T10:00:00Z")
+        assertThat(
+            evaluate(
+                blockerRule,
+                facts(RiskFactValues.Blocker(blockedAt, resolvedAt = futureStateChange)),
+                evaluatedAt,
+            ),
+        ).isNotNull()
+        assertThat(evaluate(blockerRule, facts(RiskFactValues.Blocker(blockedAt, evaluatedAt)), evaluatedAt)).isNull()
+    }
+
+    @Test
+    fun `every rule rejects a mismatched fact value type`() {
+        listOf(
+            rule("""{"type":"OVERDUE_CRITICAL_WORK"}""") to RiskFactValues.Inactivity(NOW),
+            rule("""{"type":"CONSECUTIVE_RETURNS"}""") to RiskFactValues.EvidenceFailure(true),
+            rule("""{"type":"INACTIVITY"}""") to RiskFactValues.ConsecutiveReturns,
+            businessRule() to RiskFactValues.ResourceConflict(NOW),
+            rule("""{"type":"EVIDENCE_FAILURE"}""") to RiskFactValues.MissingEvidence(true, true),
+            rule("""{"type":"MISSING_CRITICAL_EVIDENCE"}""") to RiskFactValues.CriticalWork(NOW, true),
+            rule("""{"type":"RESOURCE_CONFLICT"}""") to RiskFactValues.Blocker(NOW),
+        ).forEach { (riskRule, mismatchedValues) ->
+            assertThatThrownBy { evaluate(riskRule, facts(mismatchedValues), NOW) }
+                .describedAs("${riskRule.trigger} with $mismatchedValues")
+                .isInstanceOf(IllegalArgumentException::class.java)
+        }
     }
 
     @Test
@@ -187,6 +234,60 @@ class RiskEvaluatorTest {
                 .describedAs(trigger)
                 .isInstanceOf(IllegalArgumentException::class.java)
         }
+    }
+
+    @Test
+    fun `operational maxima accept boundary and reject larger or primitive limit values`() {
+        assertThat(rule("""{"type":"INACTIVITY","elapsedDays":${RiskRule.MAX_ELAPSED_DAYS}}""").trigger)
+            .isEqualTo(RiskTrigger.Inactivity(RiskRule.MAX_ELAPSED_DAYS))
+        assertThat(rule("""{"type":"BLOCKER_AGE","businessDays":${RiskRule.MAX_BUSINESS_DAYS}}""", BUSINESS_METADATA).trigger)
+            .isEqualTo(RiskTrigger.BlockerAge(RiskRule.MAX_BUSINESS_DAYS))
+        assertThat(RiskRule.parse(ruleJson("""{"type":"INACTIVITY"}""").replace("PT8H", "P365D")).sla)
+            .isEqualTo(RiskRule.MAX_SLA)
+        assertThat(rule("""{"type":"EVIDENCE_FAILURE"}""", metadata("[{\"after\":\"P365D\",\"severity\":\"RED\"}]")).escalationSteps.single().after)
+            .isEqualTo(RiskRule.MAX_ESCALATION_DELAY)
+        assertThat(rule("""{"type":"RESOURCE_CONFLICT","within":"P30D"}""").trigger)
+            .isEqualTo(RiskTrigger.ResourceConflict(RiskRule.MAX_CONFLICT_WINDOW))
+
+        listOf(
+            ruleJson("""{"type":"INACTIVITY","elapsedDays":${RiskRule.MAX_ELAPSED_DAYS + 1}}"""),
+            ruleJson("""{"type":"INACTIVITY","elapsedDays":${Long.MAX_VALUE}}"""),
+            ruleJson("""{"type":"BLOCKER_AGE","businessDays":${RiskRule.MAX_BUSINESS_DAYS + 1}}""", BUSINESS_METADATA),
+            ruleJson("""{"type":"BLOCKER_AGE","businessDays":${Int.MAX_VALUE}}""", BUSINESS_METADATA),
+            ruleJson("""{"type":"INACTIVITY"}""").replace("PT8H", "P366D"),
+            ruleJson("""{"type":"INACTIVITY"}""").replace("PT8H", "PT${Long.MAX_VALUE}S"),
+            ruleJson("""{"type":"EVIDENCE_FAILURE"}""", metadata("[{\"after\":\"P366D\",\"severity\":\"RED\"}]")),
+            ruleJson("""{"type":"EVIDENCE_FAILURE"}""", metadata("[{\"after\":\"PT${Long.MAX_VALUE}S\",\"severity\":\"RED\"}]")),
+            ruleJson("""{"type":"RESOURCE_CONFLICT","within":"P31D"}"""),
+            ruleJson("""{"type":"RESOURCE_CONFLICT","within":"PT${Long.MAX_VALUE}S"}"""),
+        ).forEach { json ->
+            assertThatThrownBy { RiskRule.parse(json) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+        }
+    }
+
+    @Test
+    fun `evaluation rejects instant arithmetic overflow explicitly`() {
+        assertThatThrownBy {
+            evaluate(rule("""{"type":"EVIDENCE_FAILURE"}"""), facts(RiskFactValues.EvidenceFailure(true)), Instant.MAX)
+        }.isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy {
+            evaluate(
+                rule("""{"type":"INACTIVITY"}"""),
+                facts(RiskFactValues.Inactivity(Instant.MAX.minusSeconds(1))),
+                Instant.MAX,
+            )
+        }.isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy {
+            evaluate(
+                rule("""{"type":"RESOURCE_CONFLICT"}"""),
+                facts(RiskFactValues.ResourceConflict(Instant.MAX)),
+                Instant.MAX.minusSeconds(1),
+            )
+        }.isInstanceOf(IllegalArgumentException::class.java)
+        assertThatThrownBy {
+            BusinessCalendar("calendar-v1", emptySet()).thresholdAfter(Instant.MAX, 1, ZoneId.of("Europe/Amsterdam"))
+        }.isInstanceOf(IllegalArgumentException::class.java)
     }
 
     private fun evaluate(rule: RiskRule, facts: RiskEvaluationFacts, at: Instant): RiskDecision? =
