@@ -45,9 +45,26 @@ function loginState() {
   });
 }
 
+function startSessionOperation(
+  state: AppState,
+  operation: "restore" | "login",
+  generation = state.sessionGeneration + 1,
+) {
+  const profileId = state.mode === "bootstrap" ? profileA.id : state.profile.id;
+  return reduceAppState(state, {
+    type: "SESSION_OPERATION_STARTED",
+    operation,
+    profileId,
+    generation,
+  });
+}
+
 function onlineState() {
-  return reduceAppState(loginState(), {
+  const requested = startSessionOperation(loginState(), "restore");
+  return reduceAppState(requested, {
     type: "SESSION_RESTORED",
+    profileId: profileA.id,
+    generation: requested.sessionGeneration,
     session: { state: "authenticated", user: identity, expiresAt },
     at: 1_000,
   });
@@ -71,7 +88,12 @@ function reconnectingState() {
 
 describe("application state", () => {
   it("moves from bootstrap to login when profiles load", () => {
-    expect(initialAppState).toEqual({ mode: "bootstrap", profiles: [] });
+    expect(initialAppState).toEqual({
+      mode: "bootstrap",
+      profiles: [],
+      sessionGeneration: 0,
+      sessionOperation: null,
+    });
     expect(loginState()).toMatchObject({
       mode: "login",
       profile: profileA,
@@ -86,13 +108,110 @@ describe("application state", () => {
       identity,
       lastFreshAt: 1_000,
     });
+    const requested = startSessionOperation(loginState(), "login");
     expect(
-      reduceAppState(loginState(), {
+      reduceAppState(requested, {
         type: "LOGIN_SUCCEEDED",
+        profileId: profileA.id,
+        generation: requested.sessionGeneration,
         session: { state: "authenticated", user: identity, expiresAt },
         at: 2_000,
       }),
     ).toMatchObject({ mode: "authenticated", lastFreshAt: 2_000 });
+  });
+
+  it("rejects a delayed session result from the previously selected profile", () => {
+    const requestedA = startSessionOperation(loginState(), "restore", 10);
+    const selectedB = reduceAppState(requestedA, {
+      type: "PROFILE_SELECTED",
+      profile: profileB,
+    });
+    const delayedA = reduceAppState(selectedB, {
+      type: "SESSION_RESTORED",
+      profileId: profileA.id,
+      generation: requestedA.sessionGeneration,
+      session: { state: "authenticated", user: identity, expiresAt },
+      at: 1_000,
+    });
+
+    expect(delayedA).toBe(selectedB);
+    expect(delayedA).toMatchObject({ mode: "login", profile: profileB });
+  });
+
+  it("accepts only the latest session request generation for the current profile", () => {
+    const login = loginState();
+    const first = reduceAppState(login, {
+      type: "SESSION_OPERATION_STARTED",
+      operation: "login",
+      profileId: profileA.id,
+      generation: 10,
+    });
+    const latest = reduceAppState(first, {
+      type: "SESSION_OPERATION_STARTED",
+      operation: "login",
+      profileId: profileA.id,
+      generation: 11,
+    });
+    const delayed = reduceAppState(latest, {
+      type: "LOGIN_SUCCEEDED",
+      profileId: profileA.id,
+      generation: 10,
+      session: { state: "authenticated", user: identity, expiresAt },
+      at: 1_000,
+    });
+
+    expect(delayed).toBe(latest);
+    expect(
+      reduceAppState(latest, {
+        type: "LOGIN_SUCCEEDED",
+        profileId: profileA.id,
+        generation: 11,
+        session: { state: "authenticated", user: changedIdentity, expiresAt },
+        at: 1_000,
+      }),
+    ).toMatchObject({ mode: "authenticated", identity: changedIdentity });
+  });
+
+  it("ignores delayed terminal session events from a previous profile", () => {
+    const selectedB = reduceAppState(onlineState(), {
+      type: "PROFILE_SELECTED",
+      profile: profileB,
+    });
+    const requestedB = startSessionOperation(selectedB, "login");
+    const authenticatedB = reduceAppState(requestedB, {
+      type: "LOGIN_SUCCEEDED",
+      profileId: profileB.id,
+      generation: requestedB.sessionGeneration,
+      session: { state: "authenticated", user: changedIdentity, expiresAt },
+      at: 1_000,
+    });
+
+    for (const type of ["LOGOUT", "SESSION_EXPIRED"] as const) {
+      expect(
+        reduceAppState(authenticatedB, {
+          type,
+          profileId: profileA.id,
+          generation: onlineState().sessionGeneration,
+        }),
+      ).toBe(authenticatedB);
+    }
+  });
+
+  it("rejects expired restored and login snapshots", () => {
+    for (const type of ["SESSION_RESTORED", "LOGIN_SUCCEEDED"] as const) {
+      const operation = type === "SESSION_RESTORED" ? "restore" : "login";
+      const requested = startSessionOperation(loginState(), operation);
+      const result = reduceAppState(requested, {
+        type,
+        profileId: profileA.id,
+        generation: requested.sessionGeneration,
+        session: { state: "authenticated", user: identity, expiresAt },
+        at: Date.parse(expiresAt),
+      });
+
+      expect(result).toMatchObject({ mode: "login", notice: "expired" });
+      expect(canMutate(result, "processes.start")).toBe(false);
+    }
   });
 
   it("uses cached identity offline, reports age, and locks all mutations", () => {
@@ -123,8 +242,11 @@ describe("application state", () => {
     expect(freshnessAgeMs(reconnecting, 10_000)).toBe(9_000);
     expect(canMutate(reconnecting, "processes.start")).toBe(false);
 
-    const validated = reduceAppState(reconnecting, {
+    const requested = startSessionOperation(reconnecting, "restore");
+    const validated = reduceAppState(requested, {
       type: "SESSION_RESTORED",
+      profileId: profileA.id,
+      generation: requested.sessionGeneration,
       session: {
         state: "authenticated",
         user: changedIdentity,
@@ -153,14 +275,19 @@ describe("application state", () => {
       profiles: [profileA, profileB],
       profile: profileA,
       notice: "expired",
+      sessionGeneration: 3,
+      sessionOperation: null,
     });
   });
 
   it("accepts a fresh login while reconnecting", () => {
     const offline = reduceAppState(onlineState(), { type: "OFFLINE", at: 4_000 });
     const reconnecting = reduceAppState(offline, { type: "ONLINE", at: 9_000 });
-    const authenticated = reduceAppState(reconnecting, {
+    const requested = startSessionOperation(reconnecting, "login");
+    const authenticated = reduceAppState(requested, {
       type: "LOGIN_SUCCEEDED",
+      profileId: profileA.id,
+      generation: requested.sessionGeneration,
       session: {
         state: "authenticated",
         user: changedIdentity,
@@ -199,26 +326,46 @@ describe("application state", () => {
       mode: "login",
       profiles: [profileA, profileB],
       profile: profileB,
+      sessionGeneration: 3,
+      sessionOperation: null,
     });
 
     const removed = reduceAppState(onlineState(), {
       type: "PROFILE_REMOVED",
       profileId: profileA.id,
     });
-    expect(removed).toEqual({ mode: "bootstrap", profiles: [profileB] });
+    expect(removed).toEqual({
+      mode: "bootstrap",
+      profiles: [profileB],
+      sessionGeneration: 3,
+      sessionOperation: null,
+    });
   });
 
   it("returns to login on logout and shows an expiry notice on expiry", () => {
-    expect(reduceAppState(onlineState(), { type: "LOGOUT" })).toEqual({
+    const online = onlineState();
+    expect(reduceAppState(online, {
+      type: "LOGOUT",
+      profileId: profileA.id,
+      generation: online.sessionGeneration,
+    })).toEqual({
       mode: "login",
       profiles: [profileA, profileB],
       profile: profileA,
+      sessionGeneration: 3,
+      sessionOperation: null,
     });
-    expect(reduceAppState(onlineState(), { type: "SESSION_EXPIRED" })).toEqual({
+    expect(reduceAppState(online, {
+      type: "SESSION_EXPIRED",
+      profileId: profileA.id,
+      generation: online.sessionGeneration,
+    })).toEqual({
       mode: "login",
       profiles: [profileA, profileB],
       profile: profileA,
       notice: "expired",
+      sessionGeneration: 3,
+      sessionOperation: null,
     });
   });
 
@@ -239,7 +386,12 @@ describe("application state", () => {
       profiles: [profileA],
       selectedProfileId: null,
     });
-    expect(bootstrap).toEqual({ mode: "bootstrap", profiles: [profileA] });
+    expect(bootstrap).toEqual({
+      mode: "bootstrap",
+      profiles: [profileA],
+      sessionGeneration: 1,
+      sessionOperation: null,
+    });
     expect(reduceAppState(bootstrap, { type: "OFFLINE", at: 1_000 })).toBe(bootstrap);
     expect(connectivity(bootstrap)).toBe("checking");
     expect(freshnessAgeMs(bootstrap, 2_000)).toBeNull();
@@ -256,7 +408,8 @@ describe("application state", () => {
     type Expected = AppState["mode"] | "same";
     type MatrixCase = {
       name: string;
-      event: AppEvent;
+      prepare?: (state: AppState) => AppState;
+      event: AppEvent | ((state: AppState) => AppEvent);
       expected: Record<AppState["mode"], Expected>;
       verify?: (result: AppState, sourceMode: AppState["mode"], expected: Expected) => void;
     };
@@ -321,8 +474,41 @@ describe("application state", () => {
         },
       },
       {
+        name: "session operation started",
+        event: {
+          type: "SESSION_OPERATION_STARTED",
+          operation: "restore",
+          profileId: profileA.id,
+          generation: 100,
+        },
+        expected: {
+          ...unchanged,
+          login: "login",
+          reconnecting: "reconnecting",
+        },
+        verify(result, _sourceMode, expected) {
+          if (expected !== "same") {
+            expect(result).toMatchObject({
+              sessionGeneration: 100,
+              sessionOperation: "restore",
+            });
+          }
+        },
+      },
+      {
         name: "anonymous session restored",
-        event: { type: "SESSION_RESTORED", session: { state: "anonymous" }, at: 10_000 },
+        prepare(state) {
+          return state.mode === "login" || state.mode === "reconnecting"
+            ? startSessionOperation(state, "restore", 100)
+            : state;
+        },
+        event: (state) => ({
+          type: "SESSION_RESTORED",
+          profileId: state.mode === "bootstrap" ? profileA.id : state.profile.id,
+          generation: state.sessionGeneration,
+          session: { state: "anonymous" },
+          at: 10_000,
+        }),
         expected: {
           ...unchanged,
           login: "login",
@@ -337,11 +523,18 @@ describe("application state", () => {
       },
       {
         name: "authenticated session restored",
-        event: {
+        prepare(state) {
+          return state.mode === "login" || state.mode === "reconnecting"
+            ? startSessionOperation(state, "restore", 100)
+            : state;
+        },
+        event: (state) => ({
           type: "SESSION_RESTORED",
+          profileId: state.mode === "bootstrap" ? profileA.id : state.profile.id,
+          generation: state.sessionGeneration,
           session: { state: "authenticated", user: changedIdentity, expiresAt },
           at: 10_000,
-        },
+        }),
         expected: {
           ...unchanged,
           login: "authenticated",
@@ -355,11 +548,18 @@ describe("application state", () => {
       },
       {
         name: "login succeeded",
-        event: {
+        prepare(state) {
+          return state.mode === "login" || state.mode === "reconnecting"
+            ? startSessionOperation(state, "login", 100)
+            : state;
+        },
+        event: (state) => ({
           type: "LOGIN_SUCCEEDED",
+          profileId: state.mode === "bootstrap" ? profileA.id : state.profile.id,
+          generation: state.sessionGeneration,
           session: { state: "authenticated", user: changedIdentity, expiresAt },
           at: 10_000,
-        },
+        }),
         expected: {
           ...unchanged,
           login: "authenticated",
@@ -373,7 +573,11 @@ describe("application state", () => {
       },
       {
         name: "logout",
-        event: { type: "LOGOUT" },
+        event: (state) => ({
+          type: "LOGOUT",
+          profileId: state.mode === "bootstrap" ? profileA.id : state.profile.id,
+          generation: state.sessionGeneration,
+        }),
         expected: {
           ...unchanged,
           authenticated: "login",
@@ -386,7 +590,11 @@ describe("application state", () => {
       },
       {
         name: "session expired",
-        event: { type: "SESSION_EXPIRED" },
+        event: (state) => ({
+          type: "SESSION_EXPIRED",
+          profileId: state.mode === "bootstrap" ? profileA.id : state.profile.id,
+          generation: state.sessionGeneration,
+        }),
         expected: {
           ...unchanged,
           authenticated: "login",
@@ -437,8 +645,12 @@ describe("application state", () => {
         [AppState["mode"], () => AppState]
       >) {
         it(`${testCase.name} from ${mode}`, () => {
-          const state = createState();
-          const result = reduceAppState(state, testCase.event);
+          const initial = createState();
+          const state = testCase.prepare?.(initial) ?? initial;
+          const event = typeof testCase.event === "function"
+            ? testCase.event(state)
+            : testCase.event;
+          const result = reduceAppState(state, event);
           const expected = testCase.expected[mode];
           if (expected === "same") expect(result).toBe(state);
           else expect(result.mode).toBe(expected);

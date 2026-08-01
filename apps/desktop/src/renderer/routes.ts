@@ -40,7 +40,7 @@ export interface AppRoute {
   unavailableResourceGroups: readonly string[];
 }
 
-export const ROUTES: readonly AppRoute[] = [
+const ROUTE_DEFINITIONS: readonly AppRoute[] = [
   {
     path: "/overview",
     label: "总览",
@@ -194,25 +194,38 @@ export const ROUTES: readonly AppRoute[] = [
   },
 ] as const;
 
+export const ROUTES: readonly AppRoute[] = Object.freeze(
+  ROUTE_DEFINITIONS.map((route) => Object.freeze({
+    ...route,
+    commandCapabilities: Object.freeze({ ...route.commandCapabilities }),
+    unavailableResourceGroups: Object.freeze([...route.unavailableResourceGroups]),
+  })),
+);
+
 export const DEFAULT_ROUTE_PATH: RoutePath = "/overview";
 
-const routesByPath = new Map<string, AppRoute>(
-  ROUTES.map((route) => [route.path, route]),
-);
+const routesByPath = Object.freeze(
+  Object.fromEntries(ROUTES.map((route) => [route.path, route])),
+) as Readonly<Partial<Record<RoutePath, AppRoute>>>;
+
+function canonicalRoute(route: Pick<AppRoute, "path"> | string): AppRoute | undefined {
+  const path = typeof route === "string" ? route : route.path;
+  return routesByPath[path as RoutePath];
+}
 
 function hasCapability(capabilities: readonly string[], required: string): boolean {
   return capabilities.includes(required);
 }
 
 export function isRoutePath(path: string): path is RoutePath {
-  return routesByPath.has(path);
+  return canonicalRoute(path) !== undefined;
 }
 
 export function canAccessRoute(
   path: string,
   capabilities: readonly string[],
 ): boolean {
-  const route = routesByPath.get(path);
+  const route = canonicalRoute(path);
   return route !== undefined && (
     route.accessCapability === null ||
     hasCapability(capabilities, route.accessCapability)
@@ -224,18 +237,19 @@ export function visibleRoutes(capabilities: readonly string[]): AppRoute[] {
 }
 
 export function canRunQuery(
-  route: AppRoute,
+  route: Pick<AppRoute, "path"> | string,
   capabilities: readonly string[],
 ): boolean {
-  return hasCapability(capabilities, route.queryCapability);
+  const canonical = canonicalRoute(route);
+  return canonical !== undefined && hasCapability(capabilities, canonical.queryCapability);
 }
 
 export function canRunCommand(
-  route: AppRoute,
+  route: Pick<AppRoute, "path"> | string,
   operation: string,
   capabilities: readonly string[],
 ): boolean {
-  const required = route.commandCapabilities[operation];
+  const required = canonicalRoute(route)?.commandCapabilities[operation];
   return required !== undefined && hasCapability(capabilities, required);
 }
 
@@ -248,7 +262,7 @@ export function resolveRoute(
   path: string,
   capabilities: readonly string[],
 ): RouteResolution {
-  const route = routesByPath.get(path);
+  const route = canonicalRoute(path);
   if (!route) return { kind: "not-found", path };
   if (!canAccessRoute(path, capabilities)) {
     return { kind: "access-denied", path: route.path };
