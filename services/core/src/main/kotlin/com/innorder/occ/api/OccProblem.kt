@@ -102,6 +102,16 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun invalidRiskRequest(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 400, "invalid-risk-request", "Invalid risk request", "OCC-RISK-REQUEST")
 
+    fun reservationConflict(
+        request: HttpServletRequest,
+        resourceId: String,
+        start: String,
+        end: String,
+    ): ResponseEntity<OccProblem> = response(
+        request, 409, "reservation-conflict", "Reservation conflict", "OCC-RESERVATION-CONFLICT",
+        "Resource $resourceId is unavailable for interval [$start,$end).",
+    )
+
     fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
 
