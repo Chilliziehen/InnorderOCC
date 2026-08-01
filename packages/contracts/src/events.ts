@@ -52,13 +52,19 @@ export const eventEnvelopeSchema = z
 
 export type EventEnvelope = z.infer<typeof eventEnvelopeSchema>;
 
-const strictPayload = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
+const strictPayload = <const PayloadShape extends z.ZodRawShape>(shape: PayloadShape) =>
+  z.object(shape).strict();
 
-const typedEvent = <T extends string, A extends "COHORT" | "PROCESS" | "TASK">(
-  type: T,
-  aggregateType: A,
+const typedEvent = <
+  const Type extends string,
+  const AggregateType extends "COHORT" | "PROCESS" | "TASK",
+  const PayloadShape extends z.ZodRawShape,
+  PayloadSchema extends z.ZodObject<PayloadShape>,
+>(
+  type: Type,
+  aggregateType: AggregateType,
   aggregateIdKey: "cohortId" | "processId" | "taskId",
-  payload: z.ZodObject<z.ZodRawShape>,
+  payload: PayloadSchema,
 ) => eventEnvelopeSchema
   .extend({
     type: z.literal(type),
@@ -68,7 +74,13 @@ const typedEvent = <T extends string, A extends "COHORT" | "PROCESS" | "TASK">(
   })
   .strict()
   .refine(
-    (event) => event.aggregateId === event.payload[aggregateIdKey],
+    (event) => {
+      const candidate = event as unknown as {
+        aggregateId: string;
+        payload: Record<string, unknown>;
+      };
+      return candidate.aggregateId === candidate.payload[aggregateIdKey];
+    },
     { path: ["payload", aggregateIdKey], message: "payload aggregate ID must match envelope" },
   );
 
