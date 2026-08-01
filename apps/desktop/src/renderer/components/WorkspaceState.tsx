@@ -1,21 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { z } from "zod";
 
-interface DataResult {
-  readonly items: readonly unknown[];
-  readonly count: number;
-  readonly fetchedAt: string;
-  readonly nextCursor?: string;
-}
+import type { WorkspaceResult } from "../../desktop-contract";
 
-export type WorkspaceStateResult =
-  | { readonly state: "loading"; readonly label: string }
-  | ({ readonly state: "ready" } & DataResult)
-  | { readonly state: "empty"; readonly fetchedAt: string; readonly nextCommand?: { readonly label: string; readonly permitted: boolean } }
-  | { readonly state: "problem"; readonly problem: { readonly title: string; readonly detail?: string; readonly code?: string; readonly status: number; readonly correlationId?: string } }
-  | ({ readonly state: "stale" | "offline" } & DataResult)
-  | { readonly state: "conflict"; readonly currentVersion: string; readonly correlationId?: string }
-  | { readonly state: "unavailable"; readonly reason: "UNAVAILABLE_CONTRACT"; readonly resourceGroups: readonly string[]; readonly message: string };
+type DataResult = Extract<WorkspaceResult, { items: readonly unknown[] }>;
 
 export interface WorkspaceColumn {
   readonly key: string;
@@ -23,7 +11,7 @@ export interface WorkspaceColumn {
 }
 
 interface WorkspaceStateProps<Item> {
-  readonly result: WorkspaceStateResult;
+  readonly result: WorkspaceResult;
   readonly itemSchema: z.ZodType<Item>;
   readonly columns?: readonly WorkspaceColumn[];
   readonly unavailableControls?: readonly string[];
@@ -32,6 +20,19 @@ interface WorkspaceStateProps<Item> {
   readonly onRetry?: () => void;
   readonly onRefresh?: () => void;
   readonly renderItem?: (item: Item) => ReactNode;
+}
+
+function announcementText(result: WorkspaceResult): string {
+  switch (result.state) {
+    case "loading": return result.label;
+    case "ready": return "数据已更新";
+    case "empty": return "没有结果";
+    case "error": return "查询失败";
+    case "stale": return "数据已过期，只读";
+    case "offline": return "离线，只读";
+    case "conflict": return "版本冲突";
+    case "unavailable": return "工作区合同不可用";
+  }
 }
 
 function ageLabel(fetchedAt: string, now: number): string {
@@ -61,7 +62,7 @@ function ValidatedData<Item>({
 }) {
   const parsed = result.items.map((item) => itemSchema.safeParse(item));
   if (parsed.some(({ success }) => !success)) {
-    return <section role="alert"><strong>数据格式无效</strong><p>响应未通过工作区数据校验。</p></section>;
+    return <section role="region" aria-label="数据校验错误"><strong>数据格式无效</strong><p>响应未通过工作区数据校验。</p></section>;
   }
   const items = parsed.map((entry) => entry.data as Item);
   return (
@@ -89,37 +90,43 @@ function ValidatedData<Item>({
 }
 
 export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableControls = [], now = Date.now(), onNextCommand, onRetry, onRefresh, renderItem }: WorkspaceStateProps<Item>) {
-  let announcement: string = result.state;
+  const [announcement, setAnnouncement] = useState({ text: "", sequence: 0 });
   let content: ReactNode;
+
+  useEffect(() => {
+    setAnnouncement((current) => ({
+      text: announcementText(result),
+      sequence: current.sequence + 1,
+    }));
+  }, [result]);
+
+  const announceAction = (text: string) => {
+    setAnnouncement((current) => ({ text, sequence: current.sequence + 1 }));
+  };
 
   switch (result.state) {
     case "loading":
-      announcement = result.label;
-      content = <section role="status" aria-label={result.label} aria-busy="true"><progress aria-label={result.label} /> <span>{result.label}</span></section>;
+      content = <section role="region" aria-label={result.label} aria-busy="true"><progress aria-label={result.label} /> <span>{result.label}</span></section>;
       break;
     case "ready":
-      announcement = "数据已更新";
       content = <ValidatedData result={result} itemSchema={itemSchema} {...(columns ? { columns } : {})} {...(renderItem ? { renderItem } : {})} />;
       break;
     case "empty":
-      announcement = "没有结果";
       content = <section><strong>没有结果</strong>{result.nextCommand?.permitted && onNextCommand ? <button type="button" onClick={onNextCommand}>{result.nextCommand.label}</button> : null}</section>;
       break;
-    case "problem":
-      announcement = "查询失败";
+    case "error":
       content = (
-        <section role="alert">
+        <section role="region" aria-label="查询错误">
           <strong>{result.problem.title}</strong>
           {result.problem.code ? <span>错误代码 {result.problem.code}</span> : null}
           <span>HTTP {result.problem.status}</span>
           {result.problem.correlationId ? <code>{result.problem.correlationId}</code> : null}
-          {onRetry ? <button type="button" onClick={onRetry}>重试</button> : null}
+          {onRetry ? <button type="button" onClick={() => { announceAction("正在重试查询"); onRetry(); }}>重试</button> : null}
         </section>
       );
       break;
     case "stale":
     case "offline":
-      announcement = result.state === "offline" ? "离线，只读" : "数据已过期，只读";
       content = (
         <section>
           <strong>{result.state === "offline" ? "离线数据，只读" : "过期数据，只读"}</strong>
@@ -128,13 +135,11 @@ export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableC
       );
       break;
     case "conflict":
-      announcement = "版本冲突";
-      content = <section role="alert"><strong>版本冲突</strong><span>当前版本 {result.currentVersion}</span>{result.correlationId ? <code>{result.correlationId}</code> : null}{onRefresh ? <button type="button" onClick={onRefresh}>刷新当前版本</button> : null}</section>;
+      content = <section role="region" aria-label="版本冲突"><strong>版本冲突</strong><span>当前版本 {result.currentVersion}</span>{result.correlationId ? <code>{result.correlationId}</code> : null}{onRefresh ? <button type="button" onClick={() => { announceAction("正在刷新当前版本"); onRefresh(); }}>刷新当前版本</button> : null}</section>;
       break;
     case "unavailable":
-      announcement = "工作区合同不可用";
       content = (
-        <section role="status">
+        <section aria-label="工作区合同不可用">
           <strong>{result.reason}</strong>
           <p>{result.message}</p>
           <p>所需 API：{result.resourceGroups.join("、")}</p>
@@ -144,5 +149,5 @@ export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableC
       break;
   }
 
-  return <div className="workspace-state">{content}<span className="sr-only" aria-live="polite" data-testid="workspace-state-announcement">{announcement}</span></div>;
+  return <div className="workspace-state">{content}<span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="workspace-state-announcement">{announcement.text}，更新 {announcement.sequence}</span></div>;
 }

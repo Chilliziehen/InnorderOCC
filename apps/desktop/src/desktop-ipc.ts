@@ -231,6 +231,7 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
         state: "unavailable",
         reason: "UNAVAILABLE_CONTRACT",
         resourceGroups: ["/workspaces"],
+        message: "Workspace API contract is unavailable",
       }),
     },
     commands: {
@@ -238,6 +239,7 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
         state: "unavailable",
         reason: "UNAVAILABLE_CONTRACT",
         resourceGroups: ["/commands"],
+        message: "Command API contract is unavailable",
       }),
     },
     uploads: {

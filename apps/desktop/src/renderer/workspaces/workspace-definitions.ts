@@ -167,7 +167,7 @@ const definitions: Record<WorkspaceId, WorkspaceDefinition> = {
   },
   system: {
     id: "system",
-    apiGroups: ["/api/v1/system/status", "/audit", "/events"],
+    apiGroups: ["/system", "/audit", "/events"],
     tabs: [{ id: "services", label: "服务" }, { id: "dependencies", label: "依赖" }, { id: "delivery", label: "事件投递" }],
     filters: [filter("state", "运行状态", [option("READY", "就绪"), option("DEGRADED", "降级"), option("UNREACHABLE", "不可达")])],
     sortOptions: [option("service-asc", "服务名称"), option("state-asc", "运行状态")],
@@ -177,7 +177,7 @@ const definitions: Record<WorkspaceId, WorkspaceDefinition> = {
   },
   settings: {
     id: "settings",
-    apiGroups: ["local://profiles", "/api/v1/auth", "/api/v1/me"],
+    apiGroups: ["/auth", "/me"],
     tabs: [{ id: "profile", label: "服务器配置" }, { id: "trust", label: "TLS 信任" }, { id: "preferences", label: "偏好" }, { id: "session", label: "会话" }],
     filters: [],
     sortOptions: [option("name-asc", "配置名称")],

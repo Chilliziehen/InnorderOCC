@@ -77,6 +77,7 @@ function createOcc(overrides: Partial<{
         state: "unavailable",
         reason: "UNAVAILABLE_CONTRACT",
         resourceGroups: ["/unknown"],
+        message: "Workspace API contract is unavailable",
       }),
       ...overrides.workspaces,
     },

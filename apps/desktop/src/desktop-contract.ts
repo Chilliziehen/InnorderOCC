@@ -153,6 +153,7 @@ export const problemReceiptSchema = z
   .object({
     title: z.string().min(1),
     detail: z.string().optional(),
+    code: z.string().trim().min(1).max(128).optional(),
     status: z.number().int().min(400).max(599),
     correlationId: z.uuid().optional(),
   })
@@ -160,30 +161,49 @@ export const problemReceiptSchema = z
 export type ProblemReceipt = z.infer<typeof problemReceiptSchema>;
 
 const workspaceItemSchema = z.record(z.string(), z.unknown());
+const workspaceDataSchema = {
+  items: z.array(workspaceItemSchema).min(1),
+  count: z.number().int().min(1),
+  nextCursor: z.string().min(1).max(2048).optional(),
+  fetchedAt: z.iso.datetime({ offset: true }),
+} as const;
 export const workspaceResultSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("loading"), label: z.string().trim().min(1).max(256) }).strict(),
   z
     .object({
       state: z.literal("ready"),
-      items: z.array(workspaceItemSchema).min(1),
-      nextCursor: z.string().optional(),
-      fetchedAt: z.iso.datetime({ offset: true }),
-      stale: z.boolean().optional(),
+      ...workspaceDataSchema,
     })
     .strict(),
   z
     .object({
       state: z.literal("empty"),
       fetchedAt: z.iso.datetime({ offset: true }),
+      nextCommand: z.object({
+        label: z.string().trim().min(1).max(256),
+        permitted: z.boolean(),
+      }).strict().optional(),
     })
     .strict(),
+  z.object({
+    state: z.literal("error"),
+    problem: problemReceiptSchema.extend({ code: z.string().trim().min(1).max(128) }).strict(),
+  }).strict(),
+  z.object({ state: z.literal("stale"), ...workspaceDataSchema }).strict(),
+  z.object({ state: z.literal("offline"), ...workspaceDataSchema }).strict(),
+  z.object({
+    state: z.literal("conflict"),
+    currentVersion: z.number().int().min(0),
+    correlationId: z.uuid().optional(),
+  }).strict(),
   z
     .object({
       state: z.literal("unavailable"),
       reason: z.literal("UNAVAILABLE_CONTRACT"),
       resourceGroups: z.array(z.string().min(1)).min(1),
+      message: z.string().trim().min(1).max(1024),
     })
     .strict(),
-  z.object({ state: z.literal("problem"), problem: problemReceiptSchema }).strict(),
 ]);
 export type WorkspaceResult = z.infer<typeof workspaceResultSchema>;
 
@@ -193,7 +213,7 @@ export const workspaceCommandSchema = z
     operation: z.string().trim().min(1).max(128),
     targetId: z.string().min(1).max(256).optional(),
     payload: z.record(z.string(), z.unknown()).default({}),
-    idempotencyKey: z.uuid(),
+    intentHandle: z.uuid(),
   })
   .strict();
 export type WorkspaceCommand = z.input<typeof workspaceCommandSchema>;
@@ -218,6 +238,7 @@ export const commandReceiptSchema = z.discriminatedUnion("state", [
     .object({
       state: z.literal("conflict"),
       correlationId: z.uuid(),
+      currentVersion: z.number().int().min(0),
       detail: z.string().optional(),
     })
     .strict(),
@@ -226,6 +247,7 @@ export const commandReceiptSchema = z.discriminatedUnion("state", [
       state: z.literal("unavailable"),
       reason: z.literal("UNAVAILABLE_CONTRACT"),
       resourceGroups: z.array(z.string().min(1)).min(1),
+      message: z.string().trim().min(1).max(1024),
     })
     .strict(),
   z.object({ state: z.literal("problem"), problem: problemReceiptSchema }).strict(),

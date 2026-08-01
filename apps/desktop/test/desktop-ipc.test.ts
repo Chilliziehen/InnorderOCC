@@ -53,6 +53,7 @@ function dependencies() {
         state: "unavailable",
         reason: "UNAVAILABLE_CONTRACT",
         resourceGroups: ["/tasks"],
+        message: "Task API contract is unavailable",
       }),
     },
     commands: {
@@ -60,6 +61,7 @@ function dependencies() {
         state: "unavailable",
         reason: "UNAVAILABLE_CONTRACT",
         resourceGroups: ["/tasks"],
+        message: "Task command contract is unavailable",
       }),
     },
     uploads: {
@@ -143,6 +145,21 @@ describe("desktop IPC", () => {
     }).catch((error: unknown) => error);
     expect(failure).toEqual(new Error("IPC request failed"));
     expect(String(failure)).not.toContain("refresh-token-secret");
+  });
+
+  it("validates command intent handles and conflict current versions across IPC", async () => {
+    const deps = dependencies();
+    deps.commands.execute.mockResolvedValue({ state: "conflict", currentVersion: 12, correlationId: profileId });
+    registerDesktopIpc(rendererUrl, deps);
+    const handler = registeredHandler(DESKTOP_CHANNELS.commands.execute);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    const command = { workspace: "risks", operation: "resolve", payload: {}, intentHandle: profileId };
+
+    await expect(handler(event, command)).resolves.toEqual({ state: "conflict", currentVersion: 12, correlationId: profileId });
+    expect(deps.commands.execute).toHaveBeenCalledWith(command);
+    await expect(handler(event, { ...command, intentHandle: undefined, idempotencyKey: profileId })).rejects.toThrow("IPC request rejected");
+    deps.commands.execute.mockResolvedValueOnce({ state: "conflict", correlationId: profileId });
+    await expect(handler(event, command)).rejects.toThrow("IPC request failed");
   });
 
   it("sizes all received arguments and rejects arity other than one", async () => {
