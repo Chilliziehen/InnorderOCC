@@ -1,22 +1,24 @@
 package com.innorder.occ
 
 import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIf
 import org.postgresql.util.PSQLException
 import org.springframework.dao.DataAccessException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.testcontainers.containers.PostgreSQLContainer
+import org.testcontainers.DockerClientFactory
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import java.util.UUID
 import javax.sql.DataSource
 
-@Testcontainers(disabledWithoutDocker = true)
+@EnabledIf("dockerAvailableOrRequired")
+@Testcontainers
 class EvidenceRiskResourcePostgreSqlIntegrationTest {
     @Test
     fun `Flyway applies V014 and keeps trigger functions outside the runtime API`() {
@@ -44,11 +46,22 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
             runtimeJdbc.update("UPDATE occ.evidence_version SET mime_type = 'text/plain' WHERE id = ?", fixture.version)
         }
         assertDatabaseRejects {
+            runtimeJdbc.update("DELETE FROM occ.evidence_version WHERE id = ?", fixture.version)
+        }
+        assertDatabaseRejects {
             runtimeJdbc.update(
                 """INSERT INTO occ.evidence_review
                    (id, evidence_version_id, reviewer_id, decision, gate_satisfied)
                    VALUES (?, ?, ?, 'ACCEPTED', true)""",
                 UUID.randomUUID(), fixture.version, fixture.submitter,
+            )
+        }
+        assertDatabaseRejects {
+            runtimeJdbc.update(
+                """INSERT INTO occ.evidence_review
+                   (id, evidence_version_id, reviewer_id, decision, gate_satisfied)
+                   VALUES (?, ?, ?, 'ACCEPTED', true)""",
+                UUID.randomUUID(), fixture.version, fixture.creator,
             )
         }
 
@@ -61,6 +74,9 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         )
         assertDatabaseRejects {
             runtimeJdbc.update("UPDATE occ.evidence_review SET reason = 'changed' WHERE id = ?", review)
+        }
+        assertDatabaseRejects {
+            runtimeJdbc.update("DELETE FROM occ.evidence_review WHERE id = ?", review)
         }
 
         runtimeJdbc.update(
@@ -116,7 +132,9 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         )
 
         assertDatabaseRejects { runtimeJdbc.update("UPDATE occ.risk_occurrence SET calendar_version = 'v2' WHERE id = ?", occurrence) }
+        assertDatabaseRejects { runtimeJdbc.update("DELETE FROM occ.risk_occurrence WHERE id = ?", occurrence) }
         assertDatabaseRejects { runtimeJdbc.update("UPDATE occ.risk_action SET reason = 'changed' WHERE id = ?", action) }
+        assertDatabaseRejects { runtimeJdbc.update("DELETE FROM occ.risk_action WHERE id = ?", action) }
         runtimeJdbc.update("UPDATE occ.risk SET state = 'ACKNOWLEDGED' WHERE id = ?", risk)
         assertDatabaseRejects { runtimeJdbc.update("UPDATE occ.risk SET state = 'OPEN' WHERE id = ?", risk) }
     }
@@ -129,7 +147,7 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         val capacityResource = fixture.resource("capacity-resource", 10)
 
         reserve(exclusiveResource, requester, "[2035-01-01 09:00:00+00,2035-01-01 10:00:00+00)", 2, false)
-        assertDatabaseRejects {
+        assertSqlState("23P01") {
             reserve(exclusiveResource, requester, "[2035-01-01 09:30:00+00,2035-01-01 09:45:00+00)", 1, true)
         }
         assertDatabaseRejects {
@@ -139,7 +157,7 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         reserve(capacityResource, requester, "[2035-01-01 09:00:00+00,2035-01-01 10:00:00+00)", 6, false)
         reserve(capacityResource, requester, "[2035-01-01 09:30:00+00,2035-01-01 10:30:00+00)", 4, false)
         reserve(capacityResource, requester, "[2035-01-01 10:00:00+00,2035-01-01 11:00:00+00)", 6, false)
-        assertDatabaseRejects {
+        assertSqlState("23P01") {
             reserve(capacityResource, requester, "[2035-01-01 09:45:00+00,2035-01-01 10:15:00+00)", 1, false)
         }
         val reservation = reserve(
@@ -220,7 +238,7 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
             version, evidence, objectKey, "a".repeat(64), submitter, upload,
         )
         runtimeJdbc.update("UPDATE occ.evidence SET state = 'SUBMITTED', current_version = 1 WHERE id = ?", evidence)
-        return EvidenceFixture(evidence, version, upload, objectKey, submitter, reviewer)
+        return EvidenceFixture(evidence, version, upload, objectKey, creator, submitter, reviewer)
     }
 
     private fun newFixture(): Fixture {
@@ -306,9 +324,25 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
     }
 
     private fun assertDatabaseRejects(action: () -> Unit) {
-        assertThatThrownBy(action)
-            .isInstanceOf(DataAccessException::class.java)
-            .hasRootCauseInstanceOf(PSQLException::class.java)
+        val thrown = runCatching(action).exceptionOrNull()
+        assertThat(thrown).isInstanceOf(DataAccessException::class.java)
+        assertThat(postgresException(thrown)?.sqlState).describedAs("nested PostgreSQL exception SQLSTATE").isNotNull()
+    }
+
+    private fun assertSqlState(expected: String, action: () -> Unit) {
+        val thrown = runCatching(action).exceptionOrNull()
+        assertThat(thrown).isInstanceOf(DataAccessException::class.java)
+        assertThat(postgresException(thrown)?.sqlState).describedAs("nested PostgreSQL exception SQLSTATE").isEqualTo(expected)
+    }
+
+    private fun postgresException(error: Throwable?): PSQLException? {
+        val visited = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        var current = error
+        while (current != null && visited.add(current)) {
+            if (current is PSQLException) return current
+            current = current.cause
+        }
+        return null
     }
 
     private data class Fixture(
@@ -323,12 +357,18 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         val version: UUID,
         val upload: UUID,
         val objectKey: String,
+        val creator: UUID,
         val submitter: UUID,
         val reviewer: UUID,
     )
 
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
+        private const val REQUIRED_PROPERTY = "innorder.evidence-risk-resource-postgresql.required"
+
+        @JvmStatic
+        fun dockerAvailableOrRequired(): Boolean =
+            System.getProperty(REQUIRED_PROPERTY) == "true" || DockerClientFactory.instance().isDockerAvailable
 
         @Container
         @JvmStatic
