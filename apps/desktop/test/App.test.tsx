@@ -1,10 +1,24 @@
-import type { SystemStatus } from "@innorder/contracts";
+import type { CurrentUser, SystemStatus } from "@innorder/contracts";
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "../src/renderer/App";
+import type { OccApi, ServerProfile } from "../src/desktop-contract";
 
 const checkedAt = "2026-07-28T08:00:00.000Z";
+const profile: ServerProfile = {
+  id: "00000000-0000-4000-8000-000000000001",
+  name: "Pilot",
+  origin: "https://pilot.example.test",
+  environment: "pilot",
+};
+const user: CurrentUser = {
+  id: "00000000-0000-4000-8000-000000000002",
+  username: "operator",
+  displayName: "值班操作员",
+  status: "ACTIVE",
+  capabilities: ["occ.read", "occ.admin"],
+};
 
 function status(
   service: string,
@@ -18,10 +32,36 @@ function status(
 }
 
 function mockStatuses(statuses: SystemStatus[]): void {
+  const api: OccApi = {
+    profiles: {
+      list: vi.fn().mockResolvedValue([profile]),
+      save: vi.fn().mockResolvedValue(profile),
+      select: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn().mockResolvedValue(undefined),
+    },
+    session: {
+      restore: vi.fn().mockResolvedValue({
+        state: "authenticated",
+        user,
+        expiresAt: "2099-08-01T13:00:00.000Z",
+      }),
+      login: vi.fn(),
+      logout: vi.fn().mockResolvedValue(undefined),
+    },
+    runtime: { statuses: vi.fn().mockResolvedValue(statuses) },
+    workspaces: { query: vi.fn() },
+    commands: { execute: vi.fn() },
+    uploads: { start: vi.fn(), cancel: vi.fn() },
+    notifications: {
+      list: vi.fn().mockResolvedValue({ items: [] }),
+      subscribe: vi.fn(() => vi.fn()),
+    },
+  };
   Object.defineProperty(window, "occ", {
     configurable: true,
-    value: { runtime: { statuses: vi.fn().mockResolvedValue(statuses) } },
+    value: api,
   });
+  window.location.hash = "#/overview";
 }
 
 afterEach(() => {
@@ -29,20 +69,23 @@ afterEach(() => {
 });
 
 describe("OCC operations workspace", () => {
-  it("renders fixed navigation, metrics, and service rows", () => {
+  it("renders capability navigation, metrics, and service rows", async () => {
     mockStatuses([]);
     render(<App />);
 
     for (const item of [
       "总览",
-      "今日任务",
+      "我的工作",
       "流程",
-      "审核队列",
+      "介入中心",
       "风险",
-      "领域包",
+      "资源",
+      "领域设计",
+      "管理",
       "系统",
+      "设置",
     ]) {
-      expect(screen.getByRole("navigation")).toHaveTextContent(item);
+      expect(await screen.findByRole("navigation")).toHaveTextContent(item);
     }
 
     for (const metric of ["进行中流程", "今日待办", "待审核", "高风险"]) {
@@ -78,7 +121,7 @@ describe("OCC operations workspace", () => {
     ]);
     render(<App />);
 
-    expect(await within(screen.getByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
+    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
     expect(within(screen.getByRole("row", { name: /PostgreSQL/ })).getByText("降级")).toBeInTheDocument();
     expect(within(screen.getByRole("row", { name: /AI Service/ })).getByText("不可达")).toBeInTheDocument();
   });
@@ -93,7 +136,7 @@ describe("OCC operations workspace", () => {
     ]);
     render(<App />);
 
-    expect(await within(screen.getByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
+    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
     expect(within(screen.getByRole("row", { name: /OPA/ })).getByText("不可达")).toBeInTheDocument();
   });
 
@@ -106,7 +149,7 @@ describe("OCC operations workspace", () => {
     ]);
     render(<App />);
 
-    expect(await within(screen.getByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
+    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
     expect(within(screen.getByRole("row", { name: /OPA/ })).getByText("检查中")).toBeInTheDocument();
   });
 
@@ -117,7 +160,7 @@ describe("OCC operations workspace", () => {
     ]);
     render(<App />);
 
-    await within(screen.getByRole("row", { name: /OCC Core/ })).findByText("不可达");
+    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("不可达")).toBeInTheDocument();
     for (const dependency of ["PostgreSQL", "Flowable", "OPA", "Kafka", "Redis", "MinIO"]) {
       expect(
         within(screen.getByRole("row", { name: new RegExp(dependency) })).getByText(
@@ -134,7 +177,7 @@ describe("OCC operations workspace", () => {
     ]);
     render(<App />);
 
-    await within(screen.getByRole("row", { name: /OCC Core/ })).findByText("就绪");
+    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
     for (const dependency of ["PostgreSQL", "Flowable", "OPA", "Kafka", "Redis", "MinIO"]) {
       expect(
         within(screen.getByRole("row", { name: new RegExp(dependency) })).getByText(
@@ -144,10 +187,11 @@ describe("OCC operations workspace", () => {
     }
   });
 
-  it("presents unavailable business telemetry as unknown", () => {
+  it("presents unavailable business telemetry as unknown", async () => {
     mockStatuses([]);
     render(<App />);
 
+    await screen.findByText("进行中流程");
     for (const label of ["进行中流程", "今日待办", "待审核", "高风险"]) {
       const metric = screen.getByText(label).closest("article");
       expect(metric).not.toBeNull();
