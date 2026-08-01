@@ -639,11 +639,24 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF NEW.row_version > OLD.row_version THEN
+        WITH active_providers AS MATERIALIZED (
+            SELECT task.id AS task_id, provider.provider_key
+            FROM occ.task_projection task
+            JOIN occ.task_gate_provider_state provider ON provider.task_id = task.id
+            WHERE provider.source_entity_id = NEW.id
+              AND provider.source_row_version IS DISTINCT FROM NEW.row_version
+              AND provider.status = 'READY'
+              AND task.state IN ('AVAILABLE', 'CLAIMED')
+            FOR UPDATE OF task
+        )
         UPDATE occ.task_gate_provider_state provider
         SET status = 'STALE',
             safe_failure_code = NULL,
             refreshed_at = greatest(provider.refreshed_at, transaction_timestamp())
-        WHERE provider.source_entity_id = NEW.id
+        FROM active_providers active
+        WHERE provider.task_id = active.task_id
+          AND provider.provider_key = active.provider_key
+          AND provider.source_entity_id = NEW.id
           AND provider.source_row_version IS DISTINCT FROM NEW.row_version
           AND provider.status = 'READY';
     END IF;

@@ -391,6 +391,23 @@ SELECT pg_temp.assert_raises(
   '55000', 'task blockers cannot be deleted');
 UPDATE occ.task_projection SET state = 'COMPLETED', completed_at = transaction_timestamp()
 WHERE id = '59000000-0000-7000-8000-000000000001';
+UPDATE occ.evidence SET state = 'ACCEPTED'
+WHERE id = '5a000000-0000-7000-8000-000000000010';
+UPDATE occ.managed_resource SET data = '{"changed":"after-completion"}'
+WHERE id = '5a000000-0000-7000-8000-000000000011';
+UPDATE occ.process_instance SET state = 'SUSPENDED'
+WHERE id = '58000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+  (SELECT count(*) = 3
+      AND bool_and(status = 'READY')
+      AND bool_and(source_row_version = CASE provider_key
+        WHEN 'evidence.required' THEN 2
+        WHEN 'resource.capacity' THEN 2
+        WHEN 'process.lifecycle' THEN 3
+      END)
+   FROM occ.task_gate_provider_state
+   WHERE task_id = '59000000-0000-7000-8000-000000000001'),
+  'terminal task sources evolve without rewriting provider projections');
 SELECT pg_temp.assert_true(
   (SELECT row_version = 3 FROM occ.task_projection WHERE id = '59000000-0000-7000-8000-000000000001'),
   'task claims and completion increment row version');

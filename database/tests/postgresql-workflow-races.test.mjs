@@ -73,7 +73,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('69000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:archive-race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:blocker-race', 'ACTIVE'),
-        ('6a000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:requirement-race', 'ACTIVE');
+        ('6a000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:requirement-race', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000004', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:source-first-race', 'ACTIVE');
       INSERT INTO iam.principal (id, principal_kind, display_name, status) VALUES
         ('67000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', 'USER', 'Participant', 'ACTIVE');
@@ -137,6 +138,9 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     await pool.query(`INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
       VALUES ('6a000000-0000-7000-8000-000000000003', $1, 'gated-work', 'Gated work', 'requirement-race-task', 'requirement-race-execution', 'AVAILABLE')`, [processId]);
+    await pool.query(`INSERT INTO occ.task_projection
+      (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
+      VALUES ('6a000000-0000-7000-8000-000000000004', $1, 'source-first-work', 'Source first work', 'source-first-race-task', 'source-first-race-execution', 'AVAILABLE')`, [processId]);
     const claims = await Promise.all([
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000001', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
@@ -146,6 +150,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       WHERE id='6a000000-0000-7000-8000-000000000002'`);
     await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
       WHERE id='6a000000-0000-7000-8000-000000000003'`);
+    await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
+      WHERE id='6a000000-0000-7000-8000-000000000004'`);
     await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
       VALUES ('6a000000-0000-7000-8000-000000000001', 'process.lifecycle')`);
     await pool.query(`INSERT INTO occ.task_gate_provider_state
@@ -163,8 +169,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       const sourceChange = changeSource.query(`UPDATE occ.process_instance SET state='SUSPENDED' WHERE id=$1`, [processId]);
       await waitForBlockedApplications(pool, ['workflow-source-change']);
       await completeSource.query('COMMIT');
-      await assert.rejects(sourceChange, /terminal|provider|task/i);
-      await changeSource.query('ROLLBACK');
+      await sourceChange;
+      await changeSource.query('COMMIT');
     } finally {
       await completeSource.query('ROLLBACK').catch(() => {});
       await changeSource.query('ROLLBACK').catch(() => {});
@@ -176,8 +182,42 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       JOIN occ.process_instance process ON process.id=task.process_instance_id
       JOIN occ.task_gate_provider_state provider ON provider.task_id=task.id
       WHERE task.id='6a000000-0000-7000-8000-000000000001'`);
-    assert.deepEqual(sourceRaceState.rows, [{ task_state: 'COMPLETED', process_state: 'RUNNING', provider_status: 'READY' }],
-      'completion and source change cannot commit COMPLETED plus STALE');
+    assert.deepEqual(sourceRaceState.rows, [{ task_state: 'COMPLETED', process_state: 'SUSPENDED', provider_status: 'READY' }],
+      'completion first allows source evolution without changing the terminal provider projection');
+
+    await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
+      VALUES ('6a000000-0000-7000-8000-000000000004', 'process.lifecycle')`);
+    await pool.query(`INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+      SELECT '6a000000-0000-7000-8000-000000000004', 'process.lifecycle', 'READY', id, row_version
+      FROM occ.process_instance WHERE id=$1`, [processId]);
+    const changeSourceFirst = await pool.connect();
+    const completeAfterSource = await pool.connect();
+    try {
+      await changeSourceFirst.query('BEGIN');
+      await changeSourceFirst.query(`UPDATE occ.process_instance SET state='RUNNING' WHERE id=$1`, [processId]);
+      await completeAfterSource.query('BEGIN');
+      await completeAfterSource.query(`SET LOCAL application_name='workflow-completion-after-source'`);
+      const completion = completeAfterSource.query(`UPDATE occ.task_projection SET state='COMPLETED', completed_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000004'`);
+      const completionRejection = assert.rejects(completion, /gate|provider|stale/i);
+      await waitForBlockedApplications(pool, ['workflow-completion-after-source']);
+      await changeSourceFirst.query('COMMIT');
+      await completionRejection;
+      await completeAfterSource.query('ROLLBACK');
+    } finally {
+      await changeSourceFirst.query('ROLLBACK').catch(() => {});
+      await completeAfterSource.query('ROLLBACK').catch(() => {});
+      changeSourceFirst.release();
+      completeAfterSource.release();
+    }
+    const sourceFirstState = await pool.query(`SELECT task.state AS task_state, process.state AS process_state, provider.status AS provider_status
+      FROM occ.task_projection task
+      JOIN occ.process_instance process ON process.id=task.process_instance_id
+      JOIN occ.task_gate_provider_state provider ON provider.task_id=task.id
+      WHERE task.id='6a000000-0000-7000-8000-000000000004'`);
+    assert.deepEqual(sourceFirstState.rows, [{ task_state: 'CLAIMED', process_state: 'RUNNING', provider_status: 'STALE' }],
+      'source first marks the active provider stale and rejects completion');
 
     const completeBlocked = await pool.connect();
     const addBlocker = await pool.connect();
@@ -191,9 +231,10 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         (id, task_id, source_entity_id, source_row_version, blocker_code, severity)
         VALUES ('6d000000-0000-7000-8000-000000000001', '6a000000-0000-7000-8000-000000000002',
           '6a000000-0000-7000-8000-000000000002', 1, 'POLICY_DENIED', 'HARD')`);
+      const blockerInsertRejection = assert.rejects(blockerInsert, /terminal|blocker|task/i);
       await waitForBlockedApplications(pool, ['workflow-hard-blocker']);
       await completeBlocked.query('COMMIT');
-      await assert.rejects(blockerInsert, /terminal|blocker|task/i);
+      await blockerInsertRejection;
       await addBlocker.query('ROLLBACK');
     } finally {
       await completeBlocked.query('ROLLBACK').catch(() => {});
@@ -218,9 +259,10 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       await addRequirement.query(`SET LOCAL application_name='workflow-gate-requirement'`);
       const requirementInsert = addRequirement.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
         VALUES ('6a000000-0000-7000-8000-000000000003', 'process.late')`);
+      const requirementInsertRejection = assert.rejects(requirementInsert, /terminal|requirement|task/i);
       await waitForBlockedApplications(pool, ['workflow-gate-requirement']);
       await completeRequirement.query('COMMIT');
-      await assert.rejects(requirementInsert, /terminal|requirement|task/i);
+      await requirementInsertRejection;
       await addRequirement.query('ROLLBACK');
     } finally {
       await completeRequirement.query('ROLLBACK').catch(() => {});
