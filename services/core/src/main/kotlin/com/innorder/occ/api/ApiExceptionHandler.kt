@@ -12,6 +12,7 @@ import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.IdempotencyExpiredException
 import com.innorder.occ.command.CommandIntegrityException
 import com.innorder.occ.resource.ReservationConflictException
+import com.innorder.occ.resource.ReservationStateConflictException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -150,7 +151,14 @@ class ApiExceptionHandler(
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.reservationConflict(
         request, exception.resourceId.toString(), exception.start.toString(), exception.end.toString(),
+        exception.reservationId?.toString(), exception.requesterEntityId?.toString(),
     )
+
+    @ExceptionHandler(ReservationStateConflictException::class)
+    fun reservationStateConflict(
+        exception: ReservationStateConflictException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.reservationStateConflict(request)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(

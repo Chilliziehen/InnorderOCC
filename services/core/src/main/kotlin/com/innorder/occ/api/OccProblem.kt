@@ -20,6 +20,11 @@ data class OccProblem(
     val correlationId: String,
     val detail: String? = null,
     val currentVersion: Long? = null,
+    val resourceId: String? = null,
+    val intervalStart: String? = null,
+    val intervalEnd: String? = null,
+    val reservationId: String? = null,
+    val requesterEntityId: String? = null,
 ) {
     init {
         require(type.isAbsolute && PROBLEM_TYPE_PATTERN.matches(type.toString()))
@@ -29,6 +34,10 @@ data class OccProblem(
         require(detail == null || ApiContractValidation.hasCodePointLengthWithin(detail, 0, MAX_DETAIL_LENGTH))
         require(ApiContractValidation.isStandardUuid(correlationId))
         require(currentVersion == null || currentVersion in 0..com.innorder.occ.command.CommandExecutor.MAX_SAFE_INTEGER)
+        listOf(resourceId, reservationId, requesterEntityId).filterNotNull().forEach {
+            require(ApiContractValidation.isStandardUuid(it))
+        }
+        require((intervalStart == null) == (intervalEnd == null))
     }
 
     companion object {
@@ -89,10 +98,17 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
         resourceId: String,
         start: String,
         end: String,
+        reservationId: String?,
+        requesterEntityId: String?,
     ): ResponseEntity<OccProblem> = response(
         request, 409, "reservation-conflict", "Reservation conflict", "OCC-RESERVATION-CONFLICT",
         "Resource $resourceId is unavailable for interval [$start,$end).",
+        resourceId = resourceId, intervalStart = start, intervalEnd = end,
+        reservationId = reservationId, requesterEntityId = requesterEntityId,
     )
+
+    fun reservationStateConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "reservation-state-conflict", "Reservation state conflict", "OCC-RESERVATION-STATE-CONFLICT")
 
     fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
@@ -125,6 +141,11 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
         code: String,
         detail: String? = null,
         currentVersion: Long? = null,
+        resourceId: String? = null,
+        intervalStart: String? = null,
+        intervalEnd: String? = null,
+        reservationId: String? = null,
+        requesterEntityId: String? = null,
     ): ResponseEntity<OccProblem> {
         val problem = OccProblem(
             URI.create("${OccProblem.PROBLEM_TYPE_ROOT}$slug"),
@@ -134,6 +155,11 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
             correlationId(request),
             detail,
             currentVersion,
+            resourceId,
+            intervalStart,
+            intervalEnd,
+            reservationId,
+            requesterEntityId,
         )
         return ResponseEntity.status(status).contentType(MediaType.APPLICATION_PROBLEM_JSON).body(problem)
     }
