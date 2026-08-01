@@ -42,7 +42,10 @@ VALUES
    'ONE_TO_MANY', false, false, false),
   ('55000000-0000-7000-8000-000000000004', '51000000-0000-7000-8000-000000000001',
    'temporal_acyclic', '52000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000001',
-   'MANY_TO_MANY', true, true, false);
+   'MANY_TO_MANY', true, true, false),
+  ('55000000-0000-7000-8000-000000000005', '51000000-0000-7000-8000-000000000002',
+   'draft_history', '52000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000002',
+   'MANY_TO_MANY', false, false, false);
 INSERT INTO catalog.evidence_requirement
   (id, package_version_id, requirement_key, allowed_types, min_count, validation_schema)
 VALUES ('55000000-0000-7000-8000-000000000010', '51000000-0000-7000-8000-000000000001',
@@ -202,6 +205,54 @@ SELECT pg_temp.assert_raises(
       transaction_timestamp() - interval '150 minutes', transaction_timestamp() - interval '90 minutes',
       'SYSTEM', 'one-to-many-overlap')$$,
   '23514', 'ONE_TO_MANY rejects overlapping subjects for the same object');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+       revoked_at, revoked_by, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000020', '55000000-0000-7000-8000-000000000005',
+      '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000001',
+      transaction_timestamp() - interval '4 hours', transaction_timestamp() - interval '2 hours',
+      transaction_timestamp() - interval '3 hours', '56000000-0000-7000-8000-000000000001',
+      'SYSTEM', 'invalid-draft-history')$$,
+  '23514', 'revoked history requires a published relationship definition');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+       revoked_at, revoked_by, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000021', '55000000-0000-7000-8000-000000000002',
+      '57000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000002',
+      transaction_timestamp() - interval '4 hours', transaction_timestamp() - interval '2 hours',
+      transaction_timestamp() - interval '3 hours', '56000000-0000-7000-8000-000000000001',
+      'SYSTEM', 'invalid-endpoint-history')$$,
+  '23514', 'revoked history enforces relationship endpoint types');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+       revoked_at, revoked_by, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000022', '55000000-0000-7000-8000-000000000002',
+      '56000000-0000-7000-8000-000000000003', '57000000-0000-7000-8000-000000000001',
+      transaction_timestamp() - interval '150 minutes', transaction_timestamp() - interval '90 minutes',
+      transaction_timestamp() - interval '135 minutes', '56000000-0000-7000-8000-000000000001',
+      'SYSTEM', 'invalid-cardinality-history')$$,
+  '23514', 'revoked history enforces effective interval cardinality');
+INSERT INTO authz.relationship
+  (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+   revoked_at, revoked_by, source_kind, source_ref)
+VALUES ('5f100000-0000-7000-8000-000000000023', '55000000-0000-7000-8000-000000000002',
+  '56000000-0000-7000-8000-000000000003', '57000000-0000-7000-8000-000000000001',
+  transaction_timestamp() - interval '90 minutes', transaction_timestamp() - interval '30 minutes',
+  transaction_timestamp() - interval '60 minutes', '56000000-0000-7000-8000-000000000001',
+  'SYSTEM', 'valid-non-overlap-history');
+SELECT pg_temp.assert_true(
+  EXISTS (SELECT 1 FROM authz.relationship WHERE id = '5f100000-0000-7000-8000-000000000023'),
+  'non-overlapping revoked relationship history is accepted');
+UPDATE authz.relationship
+SET revoked_at = transaction_timestamp(), revoked_by = '56000000-0000-7000-8000-000000000001'
+WHERE id = '5f100000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+  (SELECT revoked_at = transaction_timestamp() FROM authz.relationship
+   WHERE id = '5f100000-0000-7000-8000-000000000001'),
+  'ordinary relationship revocation update remains valid');
 INSERT INTO authz.relationship
   (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
    revoked_at, revoked_by, source_kind, source_ref)
@@ -242,6 +293,16 @@ VALUES
    '56000000-0000-7000-8000-000000000002', '56000000-0000-7000-8000-000000000003',
    transaction_timestamp() - interval '10 hours', transaction_timestamp() - interval '5 hours',
    transaction_timestamp() - interval '7 hours', '56000000-0000-7000-8000-000000000001', 'SYSTEM', 'cycle-revoked-two');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+       revoked_at, revoked_by, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000024', '55000000-0000-7000-8000-000000000004',
+      '56000000-0000-7000-8000-000000000003', '56000000-0000-7000-8000-000000000001',
+      transaction_timestamp() - interval '9 hours', transaction_timestamp() - interval '8 hours',
+      transaction_timestamp() - interval '8 hours 30 minutes', '56000000-0000-7000-8000-000000000001',
+      'SYSTEM', 'invalid-cycle-history')$$,
+  '23514', 'revoked history enforces acyclic effective intervals');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO authz.relationship
       (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)

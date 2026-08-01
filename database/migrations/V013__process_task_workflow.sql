@@ -381,6 +381,12 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER trg_validate_relationship ON authz.relationship;
+CREATE TRIGGER trg_validate_relationship
+BEFORE INSERT OR UPDATE OF relation_definition_id, subject_entity_id, object_entity_id, revoked_at
+ON authz.relationship
+FOR EACH ROW EXECUTE FUNCTION authz.validate_relationship();
+
 CREATE FUNCTION authz.align_relationship_revocation_time()
 RETURNS trigger
 LANGUAGE plpgsql
