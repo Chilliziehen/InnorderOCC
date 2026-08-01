@@ -21,6 +21,7 @@ interface IntentBinding {
   acceptedAt?: number;
   terminalAt?: number;
   terminalReceipt?: CommandReceipt;
+  commandId?: string;
   correlationId?: string;
   inFlight?: Promise<CommandReceipt>;
 }
@@ -142,6 +143,7 @@ export function createCommandIntentRegistry(
           if (receipt.state === "accepted") {
             binding.state = "accepted";
             binding.acceptedAt = now();
+            binding.commandId = receipt.commandId;
             binding.correlationId = receipt.correlationId;
             delete binding.retryableAt;
           } else if (receipt.state === "problem" && receipt.problem.retryable === true) {
@@ -155,6 +157,7 @@ export function createCommandIntentRegistry(
             delete binding.retryableAt;
             delete binding.acceptedAt;
             delete binding.correlationId;
+            delete binding.commandId;
           }
           clearInFlight();
           resolveFlight(receipt);
@@ -183,7 +186,18 @@ export function createCommandIntentRegistry(
         return false;
       }
       if (correlationId !== undefined && binding.correlationId !== correlationId) return false;
-      return bindings.delete(parsed);
+      if (!binding.commandId || !binding.correlationId) return false;
+      binding.state = "terminal";
+      binding.terminalAt = now();
+      binding.terminalReceipt = commandReceiptSchema.parse({
+        state: "completed",
+        commandId: binding.commandId,
+        correlationId: binding.correlationId,
+      });
+      delete binding.acceptedAt;
+      delete binding.commandId;
+      delete binding.correlationId;
+      return true;
     },
   };
 }

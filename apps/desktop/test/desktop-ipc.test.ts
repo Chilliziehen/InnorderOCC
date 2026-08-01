@@ -578,6 +578,43 @@ describe("desktop main composition", () => {
     expect(order).toEqual(["abort-scope", "select", "abort-all", "logout"]);
   });
 
+  it("clears logout credentials and cache even when spool abort fails", async () => {
+    const deps = dependencies();
+    const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    let hasMemoryCredential = true;
+    deps.session.login.mockResolvedValue({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    deps.session.logout.mockImplementation(async () => { hasMemoryCredential = false; });
+    const readCache = { query: vi.fn(), purgeAccount: vi.fn().mockRejectedValue(new Error("cache purge failed")) };
+    const uploadLifecycle = { setScope: vi.fn(), abortScope: vi.fn(), abortAll: vi.fn().mockRejectedValue(new Error("spool abort failed")) };
+    const api = createDesktopApi({ profiles: deps.profiles as never, session: { ...deps.session, profileSwitched: vi.fn() }, statuses: deps.runtime.statuses, clearProfile: vi.fn(), readCache, getCacheScope: () => cacheScope, uploadLifecycle });
+    await api.session.login({ username: "user", password: "long-password" });
+
+    await expect(api.session.logout()).rejects.toThrow("Desktop session transition cleanup failed");
+    expect(uploadLifecycle.abortAll).toHaveBeenCalledOnce();
+    expect(deps.session.logout).toHaveBeenCalledOnce();
+    expect(readCache.purgeAccount).toHaveBeenCalledWith(cacheScope);
+    expect(hasMemoryCredential).toBe(false);
+  });
+
+  it("switches profile and clears old credentials even when scoped spool abort fails", async () => {
+    const deps = dependencies();
+    const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    let hasMemoryCredential = true;
+    deps.session.login.mockResolvedValue({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    const profileSwitched = vi.fn(async () => { hasMemoryCredential = false; });
+    const clearProfile = vi.fn().mockRejectedValue(new Error("cache clear failed"));
+    const uploadLifecycle = { setScope: vi.fn(), abortScope: vi.fn().mockRejectedValue(new Error("spool abort failed")), abortAll: vi.fn() };
+    const api = createDesktopApi({ profiles: { ...deps.profiles, selected: () => profile } as never, session: { ...deps.session, profileSwitched }, statuses: deps.runtime.statuses, clearProfile, getCacheScope: () => cacheScope, uploadLifecycle });
+    await api.session.login({ username: "user", password: "long-password" });
+
+    await expect(api.profiles.select("22222222-2222-4222-8222-222222222222")).rejects.toThrow("Desktop session transition cleanup failed");
+    expect(uploadLifecycle.abortScope).toHaveBeenCalledWith(cacheScope);
+    expect(deps.profiles.select).toHaveBeenCalledWith("22222222-2222-4222-8222-222222222222");
+    expect(profileSwitched).toHaveBeenCalledWith(profileId);
+    expect(clearProfile).toHaveBeenCalledWith(profileId);
+    expect(hasMemoryCredential).toBe(false);
+  });
+
   it("invalidates a session installed by an earlier queued login before logout executes", async () => {
     let resolveLogin!: (snapshot: any) => void;
     const loginPending = new Promise<any>((resolve) => void (resolveLogin = resolve));

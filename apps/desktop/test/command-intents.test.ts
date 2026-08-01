@@ -184,13 +184,27 @@ describe("main command intent registry", () => {
     expect(retry.mock.calls[0]![0].idempotencyKey).toBe(keyA);
   });
 
-  it("settles accepted bindings through a validated main-only method", async () => {
+  it("settles accepted bindings into terminal tombstones without allocating a new key", async () => {
     const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
     const intents = registry();
     await intents.execute(command(), execute);
     expect(intents.settle(handle)).toBe(true);
     expect(intents.settle(handle)).toBe(false);
     expect(() => intents.settle("not-a-uuid")).toThrow();
+    await expect(intents.execute(command(), execute)).resolves.toEqual({ state: "completed", commandId: keyA, correlationId });
+    await expect(intents.execute(command({ payload: { version: 3 } }), execute)).rejects.toThrow("Command intent mismatch");
+    await expect(intents.execute(command({ targetId: "different-target" }), execute)).rejects.toThrow("Command intent mismatch");
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA]);
+  });
+
+  it("expires notification-settled terminal tombstones after TTL", async () => {
+    let now = 1_000;
+    const keys = [keyA, keyB];
+    const intents = createCommandIntentRegistry({ now: () => now, createIdempotencyKey: () => keys.shift()! });
+    const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
+    await intents.execute(command(), execute);
+    expect(intents.settle(handle, correlationId)).toBe(true);
+    now += COMMAND_INTENT_ACCEPTED_TTL_MS + 1;
     await intents.execute(command(), execute);
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
   });

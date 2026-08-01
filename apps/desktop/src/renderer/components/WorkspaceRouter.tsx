@@ -328,19 +328,26 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     const begin = window.occ?.uploads?.begin;
     const append = window.occ?.uploads?.append;
     const finish = window.occ?.uploads?.finish;
-    if (!callable(preflight) || !callable(begin) || !callable(append) || !callable(finish)) throw new Error("archive-upload-unavailable");
+    const cancel = window.occ?.uploads?.cancel;
+    if (!callable(preflight) || !callable(begin) || !callable(append) || !callable(finish) || !callable(cancel)) throw new Error("archive-upload-unavailable");
     const metadata = { workspace: "domain-design", taskId: "package-import", fileName: file.name, mediaType: file.type, size: file.size, intentHandle: crypto.randomUUID() };
     const availability = await preflight(metadata);
     if (availability.state === "unavailable") throw new Error("archive-upload-unavailable");
     const started = await begin(metadata);
     if (started.state !== "started") throw new Error("archive-upload-unavailable");
-    for (let offset = 0, sequence = 0; offset < file.size; offset += 1024 * 1024, sequence += 1) {
-      const data = new Uint8Array(await file.slice(offset, offset + 1024 * 1024).arrayBuffer());
-      await append({ uploadId: started.uploadId, sequence, data });
+    let completed = false;
+    try {
+      for (let offset = 0, sequence = 0; offset < file.size; offset += 1024 * 1024, sequence += 1) {
+        const data = new Uint8Array(await file.slice(offset, offset + 1024 * 1024).arrayBuffer());
+        await append({ uploadId: started.uploadId, sequence, data });
+      }
+      const receipt = await finish(started.uploadId);
+      if (receipt.state !== "completed" || receipt.kind !== "archive") throw new Error("archive-upload-incomplete");
+      completed = true;
+      return { uploadId: receipt.uploadId, sha256: receipt.sha256 };
+    } finally {
+      if (!completed) await cancel(started.uploadId).catch(() => undefined);
     }
-    const receipt = await finish(started.uploadId);
-    if (receipt.state !== "completed" || receipt.kind !== "archive") throw new Error("archive-upload-incomplete");
-    return { uploadId: receipt.uploadId, sha256: receipt.sha256 };
   };
   const taskRows = hasWorkspaceItems(result) ? result.items.map((item) => taskRowSchema.safeParse(item)) : [];
   const processRows = hasWorkspaceItems(result) ? result.items.map((item) => processRowSchema.safeParse(item)) : [];

@@ -1,5 +1,4 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, unlink, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
@@ -60,6 +59,7 @@ interface UploadSession {
   readonly binding: IntentBinding;
   readonly filePath: string;
   readonly file: FileHandle;
+  readonly fileIdentity: { readonly dev: number; readonly ino: number };
   readonly hash: Hash;
   readonly controller: AbortController;
   readonly scope: ReadCacheScope | null;
@@ -157,6 +157,8 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
       }
       for (let attempt = 0; attempt < 10; attempt += 1) {
         try {
+          const current = await lstat(session.filePath);
+          if (current.dev !== session.fileIdentity.dev || current.ino !== session.fileIdentity.ino) return;
           await unlink(session.filePath);
           return;
         } catch (error) {
@@ -202,9 +204,10 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
     await mkdir(options.spoolDirectory, { recursive: true, mode: 0o700 });
     await chmod(options.spoolDirectory, 0o700);
     const filePath = path.join(options.spoolDirectory, `${uploadId}.occ-upload`);
-    const file = await open(filePath, "wx", 0o600);
+    const file = await open(filePath, "wx+", 0o600);
+    const fileStats = await file.stat();
     const session: UploadSession = {
-      uploadId, metadata, binding, filePath, file, hash: createHash("sha256"), controller: new AbortController(),
+      uploadId, metadata, binding, filePath, file, fileIdentity: { dev: fileStats.dev, ino: fileStats.ino }, hash: createHash("sha256"), controller: new AbortController(),
       scope: sessionScope, appendTail: Promise.resolve(), nextSequence: 0, receivedBytes: 0, finishing: false, closed: false,
     };
     sessions.set(uploadId, session);
@@ -248,9 +251,19 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
       await session.appendTail;
       if (session.controller.signal.aborted) throw new Error("Evidence upload cancelled");
       if (session.receivedBytes !== session.metadata.size) throw new Error("Evidence upload size mismatch");
-      session.closed = true;
-      await session.file.close();
+      const finalStats = await session.file.stat();
+      if (finalStats.size !== session.metadata.size) throw new Error("Evidence upload final size mismatch");
       contentHash = session.hash.digest("hex");
+      const verifyHash = createHash("sha256");
+      let verifiedBytes = 0;
+      while (verifiedBytes < session.metadata.size) {
+        const buffer = Buffer.allocUnsafe(Math.min(256 * 1024, session.metadata.size - verifiedBytes));
+        const { bytesRead } = await session.file.read(buffer, 0, buffer.byteLength, verifiedBytes);
+        if (bytesRead <= 0) throw new Error("Evidence upload verification read incomplete");
+        verifyHash.update(buffer.subarray(0, bytesRead));
+        verifiedBytes += bytesRead;
+      }
+      if (verifiedBytes !== session.metadata.size || verifyHash.digest("hex") !== contentHash) throw new Error("Evidence upload final hash mismatch");
       if (session.binding.terminal) {
         if (session.binding.terminal.contentHash !== contentHash) throw new Error("Evidence upload content mismatch");
         session.binding.touchedAt = now();
@@ -264,15 +277,15 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
       const token = options.getAccessToken?.();
       if (!token) throw new Error("Evidence upload requires an authenticated session");
       const { intentHandle: _intentHandle, ...transportMetadata } = session.metadata;
+      let transportedBytes = 0;
       const chunks = async function* () {
-        const stream = createReadStream(session.filePath, { highWaterMark: 256 * 1024 });
-        try {
-          for await (const chunk of stream) {
-            if (session.controller.signal.aborted) throw new Error("Evidence upload cancelled");
-            yield new Uint8Array(chunk as Buffer);
-          }
-        } finally {
-          stream.destroy();
+        while (transportedBytes < session.metadata.size) {
+          if (session.controller.signal.aborted) throw new Error("Evidence upload cancelled");
+          const buffer = Buffer.allocUnsafe(Math.min(256 * 1024, session.metadata.size - transportedBytes));
+          const { bytesRead } = await session.file.read(buffer, 0, buffer.byteLength, transportedBytes);
+          if (bytesRead <= 0) throw new Error("Evidence upload transport read incomplete");
+          transportedBytes += bytesRead;
+          yield new Uint8Array(buffer.subarray(0, bytesRead));
         }
       };
       const raw = await options.transport({
@@ -282,6 +295,7 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
         chunks: chunks(),
         signal: session.controller.signal,
       });
+      if (transportedBytes !== session.metadata.size) throw new Error("Evidence upload transport did not consume spool");
       const response = uploadTransportResponseSchema.parse(raw);
       if (response.kind === "archive" && response.sha256 !== contentHash) throw new Error("Archive content hash mismatch");
       const receipt = uploadReceiptSchema.parse({ state: "completed", uploadId: session.uploadId, ...response });
@@ -291,10 +305,7 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
     } catch (error) {
       if (session.controller.signal.aborted) {
         const receipt = uploadReceiptSchema.parse({ state: "problem", problem: { title: "Upload cancelled", code: "UPLOAD_CANCELLED", status: 499, retryable: true } });
-        if (contentHash) {
-          session.binding.terminal = { contentHash, receipt };
-          session.binding.touchedAt = now();
-        }
+        session.binding.touchedAt = now();
         return receipt;
       }
       throw error;

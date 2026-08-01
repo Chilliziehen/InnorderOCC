@@ -6,10 +6,20 @@ const metadataMode = vi.hoisted(() => ({ available: false }));
 
 vi.mock("../src/renderer/workspaces/workspace-definitions", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/renderer/workspaces/workspace-definitions")>();
+  const domain = actual.WORKSPACE_DEFINITIONS["domain-design"];
   return {
     ...actual,
+    WORKSPACE_DEFINITIONS: {
+      ...actual.WORKSPACE_DEFINITIONS,
+      "domain-design": {
+        ...domain,
+        commands: domain.commands.map((command) => command.operation === "import"
+          ? { ...command, availability: { state: "available" as const } }
+          : command),
+      },
+    },
     commandFor: (workspace: Parameters<typeof actual.commandFor>[0], operationName: string) => {
-      const operation = actual.commandFor(workspace, operationName);
+      const operation = actual.commandFor(typeof workspace === "string" ? workspace : workspace.id, operationName);
       return operation && metadataMode.available
         ? { ...operation, availability: { state: "available" as const } }
         : operation;
@@ -375,6 +385,40 @@ describe("authenticated workspace integration", () => {
     expect(api.uploads.preflight).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-17", fileName: "record.pdf" }));
     expect(read).not.toHaveBeenCalled();
     expect(api.uploads.begin).not.toHaveBeenCalled();
+  });
+
+  it.each(["read", "append", "finish"] as const)("cancels a begun domain archive session after %s failure", async (failure) => {
+    metadataMode.available = true;
+    const api = installOcc();
+    const uploadId = "00000000-0000-4000-8000-000000000077";
+    vi.mocked(api.uploads.begin).mockResolvedValue({ state: "started", uploadId });
+    vi.mocked(api.uploads.append).mockResolvedValue({ acceptedBytes: 1024 * 1024, receivedBytes: 1024 * 1024 });
+    vi.mocked(api.uploads.finish).mockResolvedValue({ state: "completed", kind: "archive", uploadId, uploadReference: uploadId, sha256: "a".repeat(64) });
+    if (failure === "append") vi.mocked(api.uploads.append).mockRejectedValue(new Error("append failed"));
+    if (failure === "finish") vi.mocked(api.uploads.finish).mockRejectedValue(new Error("finish failed"));
+    const bytes = new Uint8Array(1024 * 1024 + 4);
+    bytes.set([0x50, 0x4b, 0x03, 0x04]);
+    const file = new File([bytes], "domain.zip", { type: "application/zip" });
+    const signature = file.slice(0, 4);
+    const chunkRead = vi.fn(() => failure === "read"
+      ? Promise.reject(new Error("read failed"))
+      : Promise.resolve(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer));
+    const slice = vi.fn()
+      .mockImplementationOnce(() => signature)
+      .mockImplementation(() => ({ arrayBuffer: chunkRead }));
+    Object.defineProperty(file, "slice", { value: slice });
+    render(<AppShell state={state("/domain-design")} statuses={[]} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText("签名领域包归档"), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "上传归档" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "上传归档" }));
+
+    await screen.findByRole("status", { name: "归档校验错误" });
+    expect(api.uploads.begin).toHaveBeenCalledWith(expect.objectContaining({ workspace: "domain-design", taskId: "package-import", size: 1024 * 1024 + 4 }));
+    expect(api.uploads.cancel).toHaveBeenCalledOnce();
+    expect(api.uploads.cancel).toHaveBeenCalledWith(uploadId);
+    for (const [start, end] of slice.mock.calls.slice(1)) expect((end as number) - (start as number)).toBeLessThanOrEqual(1024 * 1024);
+    if (failure === "finish") expect(slice.mock.calls.slice(1)).toEqual([[0, 1024 * 1024], [1024 * 1024, 2 * 1024 * 1024]]);
   });
 
   it("ignores upload completion after the selected task changes", async () => {

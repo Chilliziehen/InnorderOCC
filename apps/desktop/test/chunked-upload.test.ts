@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -50,6 +50,54 @@ describe("chunked evidence upload sessions", () => {
     expect(await readdir(spoolDirectory)).toEqual([]);
   });
 
+  it("streams from the original validated handle when its pathname is replaced", async () => {
+    const spoolDirectory = await root();
+    let streamed = Buffer.alloc(0);
+    const transport: EvidenceTransport = vi.fn(async (request) => {
+      const spoolPath = path.join(spoolDirectory, `${uploadId}.occ-upload`);
+      await rename(spoolPath, `${spoolPath}.moved`);
+      await writeFile(spoolPath, new Uint8Array([9, 9, 9, 9]));
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of request.chunks) chunks.push(chunk);
+      streamed = Buffer.concat(chunks);
+      return { kind: "evidence", evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" };
+    });
+    const service = createEvidenceUploadService({ spoolDirectory, getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", transport, createUploadId: () => uploadId });
+    await service.begin(metadata());
+    await service.append({ uploadId, sequence: 0, data: new Uint8Array([1, 2, 3, 4]) });
+
+    await expect(service.finish(uploadId)).resolves.toMatchObject({ state: "completed" });
+    expect(streamed).toEqual(Buffer.from([1, 2, 3, 4]));
+  });
+
+  it("verifies final fd size and hash before transport and rejects append after finish starts", async () => {
+    const spoolDirectory = await root();
+    let releaseTransport!: () => void;
+    let transportCalls = 0;
+    const transport: EvidenceTransport = vi.fn(async (request) => {
+      transportCalls += 1;
+      if (transportCalls === 1) await new Promise<void>((resolve) => { releaseTransport = resolve; });
+      for await (const _chunk of request.chunks) { /* consume */ }
+      return { kind: "evidence", evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" };
+    });
+    const ids = [uploadId, "77777777-7777-4777-8777-777777777777"];
+    const service = createEvidenceUploadService({ spoolDirectory, getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", transport, createUploadId: () => ids.shift()! });
+    await service.begin(metadata());
+    await service.append({ uploadId, sequence: 0, data: new Uint8Array([1, 2, 3, 4]) });
+    const finishing = service.finish(uploadId);
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+    await expect(service.append({ uploadId, sequence: 1, data: new Uint8Array([5]) })).rejects.toThrow("session unavailable");
+    releaseTransport();
+    await finishing;
+
+    const mutatedId = "77777777-7777-4777-8777-777777777777";
+    await service.begin(metadata({ intentHandle: "88888888-8888-4888-8888-888888888888" }));
+    await service.append({ uploadId: mutatedId, sequence: 0, data: new Uint8Array([1, 2, 3, 4]) });
+    await writeFile(path.join(spoolDirectory, `${mutatedId}.occ-upload`), new Uint8Array([4, 3, 2, 1]));
+    await expect(service.finish(mutatedId)).rejects.toThrow("hash mismatch");
+    expect(transport).toHaveBeenCalledOnce();
+  });
+
   it("enforces sequence, chunk, declared total, session, and total buffered bounds", async () => {
     const service = createEvidenceUploadService({ spoolDirectory: await root(), getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", transport: vi.fn(), createUploadId: () => uploadId, maxSessions: 1, maxBufferedBytes: 1024 * 1024 });
     await service.begin(metadata());
@@ -57,11 +105,15 @@ describe("chunked evidence upload sessions", () => {
     await expect(service.append({ uploadId, sequence: 1, data: new Uint8Array(1) })).rejects.toThrow("sequence");
     await expect(service.append({ uploadId, sequence: 0, data: new Uint8Array(1024 * 1024 + 1) })).rejects.toThrow("chunk");
     await expect(service.append({ uploadId, sequence: 0, data: new Uint8Array(5) })).rejects.toThrow("declared size");
+    await service.cancel(uploadId);
   });
 
   it("replays exact terminal content without a second transport", async () => {
     const response = { kind: "evidence" as const, evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released" as const, processingStatus: "ready" as const, reviewStatus: "pending" as const };
-    const transport: EvidenceTransport = vi.fn().mockResolvedValue(response);
+    const transport: EvidenceTransport = vi.fn(async (request) => {
+      for await (const _chunk of request.chunks) { /* consume */ }
+      return response;
+    });
     const ids = [uploadId, "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888"];
     const service = createEvidenceUploadService({ spoolDirectory: await root(), getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", transport, createUploadId: () => ids.shift()! });
     const complete = async (id: string, data: Uint8Array) => { await service.append({ uploadId: id, sequence: 0, data: new Uint8Array(data) }); return service.finish(id); };
@@ -78,7 +130,10 @@ describe("chunked evidence upload sessions", () => {
 
   it("binds retained terminal receipts to the authenticated scope", async () => {
     let activeScope = scope;
-    const transport: EvidenceTransport = vi.fn().mockResolvedValue({ kind: "evidence", evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
+    const transport: EvidenceTransport = vi.fn(async (request) => {
+      for await (const _chunk of request.chunks) { /* consume */ }
+      return { kind: "evidence", evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" };
+    });
     const ids = [uploadId, "77777777-7777-4777-8777-777777777777"];
     const service = createEvidenceUploadService({ spoolDirectory: await root(), getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", getScope: () => activeScope, transport, createUploadId: () => ids.shift()! });
     await service.begin(metadata());
@@ -89,14 +144,21 @@ describe("chunked evidence upload sessions", () => {
     expect(transport).toHaveBeenCalledOnce();
   });
 
-  it("replays a fully received terminal cancellation without another transport", async () => {
+  it("retries cancellation immediately with a fresh spool and the same canonical key", async () => {
     let transportRequest!: Parameters<EvidenceTransport>[0];
-    const transport: EvidenceTransport = vi.fn((request) => {
+    const keys: string[] = [];
+    let calls = 0;
+    const transport: EvidenceTransport = vi.fn(async (request) => {
+      calls += 1;
+      keys.push(request.headers["idempotency-key"]!);
       transportRequest = request;
-      return new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("aborted"))));
+      if (calls === 1) return new Promise<never>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("aborted"))));
+      for await (const _chunk of request.chunks) { /* consume */ }
+      return { kind: "evidence", evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" };
     });
+    const spoolDirectory = await root();
     const ids = [uploadId, "77777777-7777-4777-8777-777777777777"];
-    const service = createEvidenceUploadService({ spoolDirectory: await root(), getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", transport, createUploadId: () => ids.shift()! });
+    const service = createEvidenceUploadService({ spoolDirectory, getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token", transport, createUploadId: () => ids.shift()!, createIdempotencyKey: () => "99999999-9999-4999-8999-999999999999" });
     await service.begin(metadata());
     await service.append({ uploadId, sequence: 0, data: new Uint8Array([1, 2, 3, 4]) });
     const finishing = service.finish(uploadId);
@@ -104,11 +166,15 @@ describe("chunked evidence upload sessions", () => {
     await service.cancel(uploadId);
     const cancelled = await finishing;
     expect(cancelled).toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED" } });
+    expect(await readdir(spoolDirectory)).toEqual([]);
     const replayId = "77777777-7777-4777-8777-777777777777";
+    await expect(service.begin(metadata({ fileName: "changed.pdf" }))).rejects.toThrow("intent mismatch");
     await service.begin(metadata());
     await service.append({ uploadId: replayId, sequence: 0, data: new Uint8Array([1, 2, 3, 4]) });
-    await expect(service.finish(replayId)).resolves.toEqual(cancelled);
-    expect(transport).toHaveBeenCalledOnce();
+    await expect(service.finish(replayId)).resolves.toMatchObject({ state: "completed", uploadId: replayId });
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(keys).toEqual(["99999999-9999-4999-8999-999999999999", "99999999-9999-4999-8999-999999999999"]);
+    expect(await readdir(spoolDirectory)).toEqual([]);
   });
 
   it("cancels and aborts scope before deleting every active spool", async () => {

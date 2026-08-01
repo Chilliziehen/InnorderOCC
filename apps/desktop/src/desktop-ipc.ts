@@ -303,12 +303,17 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     dependencies.onSessionScopeChanged?.(null, sessionGeneration);
     return previous;
   };
-  const cleanup = async (profileId: string) => {
-    await Promise.all([
-      dependencies.session.profileSwitched(profileId),
-      dependencies.clearProfile(profileId),
-    ]);
+  const settle = async (operations: ReadonlyArray<() => Promise<unknown>>): Promise<unknown[]> => {
+    const results = await Promise.allSettled(operations.map((operation) => Promise.resolve().then(operation)));
+    return results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
   };
+  const throwTransitionFailures = (failures: unknown[]) => {
+    if (failures.length > 0) throw new AggregateError(failures, "Desktop session transition cleanup failed");
+  };
+  const cleanup = (profileId: string) => settle([
+    () => dependencies.session.profileSwitched(profileId),
+    () => dependencies.clearProfile(profileId),
+  ]);
   const acceptSession = (snapshot: Awaited<ReturnType<SessionManager["login"]>>) => {
     const candidate = snapshot.state === "authenticated" ? dependencies.getCacheScope?.(snapshot.user.id) : null;
     authenticatedCacheScope = candidate && snapshot.state === "authenticated" && candidate.principalId === snapshot.user.id
@@ -331,9 +336,15 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
           ? undefined
           : (await dependencies.profiles.list()).find(({ id }) => id === input.id);
         if (previous && candidate && previous.origin !== candidate.origin) {
+          const failures: unknown[] = [];
           const invalidated = dependencies.profiles.selected()?.id === previous.id ? invalidateSessionScope() : null;
-          if (invalidated) await dependencies.uploadLifecycle?.abortScope(invalidated);
-          await cleanup(previous.id);
+          if (invalidated && dependencies.uploadLifecycle) failures.push(...await settle([() => dependencies.uploadLifecycle!.abortScope(invalidated)]));
+          failures.push(...await cleanup(previous.id));
+          let saved: Awaited<ReturnType<ProfileStore["save"]>> | undefined;
+          const saveFailures = await settle([async () => { saved = await dependencies.profiles.save(input); }]);
+          failures.push(...saveFailures);
+          throwTransitionFailures(failures);
+          return saved!;
         }
         return dependencies.profiles.save(input);
       }),
@@ -346,9 +357,12 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
             const lateScope = invalidateSessionScope();
             if (lateScope) scopes.push(lateScope);
           }
-          for (const scope of scopes) await dependencies.uploadLifecycle?.abortScope(scope);
-          await dependencies.profiles.select(id);
-          if (changing) await cleanup(previous.id);
+          const failures = dependencies.uploadLifecycle
+            ? await settle(scopes.map((scope) => () => dependencies.uploadLifecycle!.abortScope(scope)))
+            : [];
+          failures.push(...await settle([() => dependencies.profiles.select(id)]));
+          if (changing) failures.push(...await cleanup(previous.id));
+          throwTransitionFailures(failures);
         });
       },
       remove: (id) => {
@@ -359,9 +373,12 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
             const lateScope = invalidateSessionScope();
             if (lateScope) scopes.push(lateScope);
           }
-          for (const scope of scopes) await dependencies.uploadLifecycle?.abortScope(scope);
-          await cleanup(id);
-          await dependencies.profiles.remove(id);
+          const failures = dependencies.uploadLifecycle
+            ? await settle(scopes.map((scope) => () => dependencies.uploadLifecycle!.abortScope(scope)))
+            : [];
+          failures.push(...await cleanup(id));
+          failures.push(...await settle([() => dependencies.profiles.remove(id)]));
+          throwTransitionFailures(failures);
         });
       },
     },
@@ -376,12 +393,13 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
             invalidateSessionScope();
             if (!scopes.some((scope) => scope.profileId === lateScope.profileId && scope.customerInstanceId === lateScope.customerInstanceId && scope.principalId === lateScope.principalId)) scopes.push(lateScope);
           }
-          try {
-            await dependencies.uploadLifecycle?.abortAll();
-            await dependencies.session.logout();
-          } finally {
-            for (const scope of scopes) await dependencies.readCache?.purgeAccount(scope);
-          }
+          const failures = dependencies.uploadLifecycle
+            ? await settle([() => dependencies.uploadLifecycle!.abortAll()])
+            : [];
+          const cleanupOperations: Array<() => Promise<unknown>> = [() => dependencies.session.logout()];
+          if (dependencies.readCache) cleanupOperations.push(...scopes.map((scope) => () => dependencies.readCache!.purgeAccount(scope)));
+          failures.push(...await settle(cleanupOperations));
+          throwTransitionFailures(failures);
         });
       },
     },
