@@ -3,6 +3,7 @@ package com.innorder.occ.evidence
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
@@ -11,40 +12,104 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
-data class ProcessParserSandboxConfiguration(
+class ProcessParserSandboxConfiguration(
     val executable: Path,
-    val arguments: List<String>,
-    val startupTimeout: Duration,
+    arguments: List<String>,
     val maximumRuntime: Duration,
     val maximumRequestBytes: Int,
     val maximumOutputBytes: Int,
-    val maximumWorkerMemoryBytes: Long,
+    val maximumContainerMemoryBytes: Long,
+    val maximumContainerPids: Int,
+    val maximumTmpfsBytes: Long,
 ) {
+    val arguments: List<String> = java.util.List.copyOf(arguments)
+
     init {
         require(executable.isAbsolute && Files.isRegularFile(executable) && Files.isExecutable(executable))
-        require(arguments.size <= 32 && arguments.all { it.length in 1..32_767 && '\u0000' !in it })
-        require(arguments.sumOf { it.length + 1 } <= 32_767)
-        require(startupTimeout in Duration.ofMillis(100)..Duration.ofSeconds(30))
+        require(executable.fileName.toString().lowercase() in setOf("docker", "docker.exe"))
         require(maximumRuntime in Duration.ofMillis(100)..Duration.ofMinutes(5))
         require(maximumRequestBytes in 64..1024 * 1024)
         require(maximumOutputBytes in 64..64 * 1024)
-        require(maximumWorkerMemoryBytes in 16L * 1024 * 1024..2L * 1024 * 1024 * 1024)
+        require(maximumContainerMemoryBytes in MINIMUM_MEMORY_BYTES..2L * 1024 * 1024 * 1024)
+        require(maximumContainerPids in 1..1024)
+        require(maximumTmpfsBytes in 1..1024L * 1024 * 1024)
+        validateArguments()
+    }
+
+    fun command(input: Path, operation: String): List<String> {
+        require(operation == "--inspect")
+        val normalized = input.toAbsolutePath().normalize()
+        require(Files.isRegularFile(normalized, LinkOption.NOFOLLOW_LINKS))
+        require(normalized.toString().none { it == ',' || it == '\n' || it == '\r' || it == '\u0000' })
+        val mount = "--mount=type=bind,src=$normalized,dst=$CONTAINER_INPUT_PATH,readonly"
+        return listOf(executable.toString()) + arguments.map { if (it == INPUT_MOUNT_PLACEHOLDER) mount else it } + operation
+    }
+
+    private fun validateArguments() {
+        require(arguments.size == EXPECTED_ARGUMENT_COUNT)
+        require(arguments.firstOrNull() == "run")
+        require(IMAGE_REFERENCE.matches(arguments.last()))
+        val options = arguments.subList(1, arguments.lastIndex)
+        require(options.size == options.toSet().size)
+        require(options.containsAll(REQUIRED_FIXED_OPTIONS))
+        require(options.singleOrNull { it.startsWith("--network=") } == "--network=none")
+        require(options.singleOrNull { it.startsWith("--security-opt=") } == "--security-opt=no-new-privileges")
+        require(options.singleOrNull { it.startsWith("--cap-drop=") } == "--cap-drop=ALL")
+        require(options.singleOrNull { it.startsWith("--mount=") } == INPUT_MOUNT_PLACEHOLDER)
+
+        val memory = parsePositiveLong(options, "--memory=")
+        require(memory in MINIMUM_MEMORY_BYTES..maximumContainerMemoryBytes)
+        val pids = parsePositiveLong(options, "--pids-limit=")
+        require(pids in 1..maximumContainerPids.toLong())
+        val tmpfs = options.singleOrNull { it.startsWith("--tmpfs=") } ?: error("bounded tmpfs required")
+        val prefix = "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size="
+        require(tmpfs.startsWith(prefix))
+        require(tmpfs.removePrefix(prefix).toLongOrNull()?.let { it in 1..maximumTmpfsBytes } == true)
+
+        val recognized = REQUIRED_FIXED_OPTIONS + setOf(
+            "--network=none",
+            "--security-opt=no-new-privileges",
+            "--cap-drop=ALL",
+            INPUT_MOUNT_PLACEHOLDER,
+            "--memory=$memory",
+            "--pids-limit=$pids",
+            tmpfs,
+        )
+        require(options.toSet() == recognized)
+    }
+
+    private fun parsePositiveLong(options: List<String>, prefix: String): Long {
+        val option = options.singleOrNull { it.startsWith(prefix) } ?: error("required Docker option missing")
+        return option.removePrefix(prefix).toLongOrNull()?.takeIf { it > 0 } ?: error("invalid Docker limit")
+    }
+
+    companion object {
+        const val INPUT_MOUNT_PLACEHOLDER = "--mount=type=bind,src={EVIDENCE_INPUT},dst=/input/evidence,readonly"
+        const val CONTAINER_INPUT_PATH = "/input/evidence"
+        private const val EXPECTED_ARGUMENT_COUNT = 11
+        private const val MINIMUM_MEMORY_BYTES = 16L * 1024 * 1024
+        private val REQUIRED_FIXED_OPTIONS = setOf("--rm", "--read-only")
+        private val IMAGE_REFERENCE = Regex("^[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$")
     }
 }
 
-class ProcessParserSandbox(
+internal fun interface ProcessStarter {
+    fun start(command: List<String>): Process
+}
+
+class ProcessParserSandbox internal constructor(
     private val configuration: ProcessParserSandboxConfiguration,
-    private val clock: Clock = Clock.systemUTC(),
+    private val clock: Clock,
+    private val processStarter: ProcessStarter,
 ) : ParserSandbox {
-    init {
-        val capabilities = launch("--capabilities", null, configuration.startupTimeout)
-        require(capabilities.exitCode == 0 && !capabilities.timedOut && !capabilities.oversized)
-        val parsed = WorkerCapabilities.parse(capabilities.output)
-        require(parsed.protocol == PROTOCOL_VERSION)
-        require(parsed.processIsolation)
-        require(parsed.networkIsolation)
-        require(parsed.memoryLimitBytes in 1..configuration.maximumWorkerMemoryBytes)
-    }
+    constructor(
+        configuration: ProcessParserSandboxConfiguration,
+        clock: Clock = Clock.systemUTC(),
+    ) : this(
+        configuration,
+        clock,
+        ProcessStarter { command -> ProcessBuilder(command).redirectErrorStream(true).start() },
+    )
 
     override fun inspect(request: ParserSandboxRequest): ParserSandboxResult {
         val requestRemaining = Duration.between(clock.instant(), request.deadline)
@@ -53,9 +118,12 @@ class ProcessParserSandbox(
         }
         val timeout = minOf(requestRemaining, configuration.maximumRuntime)
         return try {
-            val input = ByteArrayOutputStream().also { ParserSandboxProtocol.writeRequest(it, request) }.toByteArray()
+            if (Files.size(request.path) > request.policy.maximumBytes) return sandboxError()
+            val workerRequest = request.copy(path = Path.of(ProcessParserSandboxConfiguration.CONTAINER_INPUT_PATH))
+            val input = ByteArrayOutputStream().also { ParserSandboxProtocol.writeRequest(it, workerRequest) }.toByteArray()
             if (input.size > configuration.maximumRequestBytes) return sandboxError()
-            val outcome = launch("--inspect", input, timeout)
+            val command = configuration.command(request.path, "--inspect")
+            val outcome = launch(command, input, timeout)
             if (outcome.exitCode != 0 || outcome.timedOut || outcome.oversized) sandboxError()
             else ParserSandboxProtocol.readResult(outcome.output)
         } catch (_: Exception) {
@@ -63,27 +131,20 @@ class ProcessParserSandbox(
         }
     }
 
-    private fun launch(operation: String, input: ByteArray?, timeout: Duration): ProcessOutcome {
-        val process = ProcessBuilder(
-            configuration.executable.toString(),
-            *configuration.arguments.toTypedArray(),
-            operation,
-        ).redirectErrorStream(true).start()
+    private fun launch(command: List<String>, input: ByteArray, timeout: Duration): ProcessOutcome {
+        val process = processStarter.start(command)
         val readerExecutor = Executors.newSingleThreadExecutor { work ->
             Thread(work, "evidence-parser-output").apply { isDaemon = true }
         }
-        val outputFuture = readerExecutor.submit<BoundedOutput> {
-            readBounded(process, configuration.maximumOutputBytes)
-        }
+        val outputFuture = readerExecutor.submit<BoundedOutput> { readBounded(process) }
         return try {
             try {
-                process.outputStream.use { output -> input?.let(output::write) }
+                process.outputStream.use { it.write(input) }
             } catch (_: IOException) {
                 terminate(process)
                 return ProcessOutcome(-1, ByteArray(0), timedOut = false, oversized = false)
             }
-            val completed = process.waitFor(maxOf(1, timeout.toMillis()), TimeUnit.MILLISECONDS)
-            if (!completed) {
+            if (!process.waitFor(maxOf(1, timeout.toMillis()), TimeUnit.MILLISECONDS)) {
                 terminate(process)
                 return ProcessOutcome(-1, ByteArray(0), timedOut = true, oversized = false)
             }
@@ -103,14 +164,14 @@ class ProcessParserSandbox(
         }
     }
 
-    private fun readBounded(process: Process, maximumBytes: Int): BoundedOutput {
-        val output = ByteArrayOutputStream(minOf(maximumBytes, 8192))
+    private fun readBounded(process: Process): BoundedOutput {
+        val output = ByteArrayOutputStream(minOf(configuration.maximumOutputBytes, 8192))
         process.inputStream.use { input ->
             val buffer = ByteArray(512)
             while (true) {
                 val count = input.read(buffer)
                 if (count < 0) break
-                if (output.size() + count > maximumBytes) {
+                if (output.size() + count > configuration.maximumOutputBytes) {
                     terminate(process)
                     return BoundedOutput(ByteArray(0), oversized = true)
                 }
@@ -129,44 +190,10 @@ class ProcessParserSandbox(
     }
 
     private fun sandboxError() = ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR)
-
-    private data class ProcessOutcome(
-        val exitCode: Int,
-        val output: ByteArray,
-        val timedOut: Boolean,
-        val oversized: Boolean,
-    )
-
+    private data class ProcessOutcome(val exitCode: Int, val output: ByteArray, val timedOut: Boolean, val oversized: Boolean)
     private data class BoundedOutput(val bytes: ByteArray, val oversized: Boolean)
 
-    private data class WorkerCapabilities(
-        val protocol: Int,
-        val processIsolation: Boolean,
-        val networkIsolation: Boolean,
-        val memoryLimitBytes: Long,
-    ) {
-        companion object {
-            fun parse(bytes: ByteArray): WorkerCapabilities {
-                require(bytes.size <= 4096)
-                val values = linkedMapOf<String, String>()
-                String(bytes, Charsets.US_ASCII).lineSequence().filter(String::isNotBlank).forEach { line ->
-                    val separator = line.indexOf('=')
-                    require(separator > 0 && separator < line.lastIndex)
-                    val key = line.substring(0, separator)
-                    require(values.put(key, line.substring(separator + 1)) == null)
-                }
-                require(values.keys == setOf("protocol", "processIsolation", "networkIsolation", "memoryLimitBytes"))
-                return WorkerCapabilities(
-                    values.getValue("protocol").toInt(),
-                    values.getValue("processIsolation").toBooleanStrict(),
-                    values.getValue("networkIsolation").toBooleanStrict(),
-                    values.getValue("memoryLimitBytes").toLong(),
-                )
-            }
-        }
-    }
-
     companion object {
-        private const val PROTOCOL_VERSION = 1
+        const val INPUT_MOUNT_PLACEHOLDER = ProcessParserSandboxConfiguration.INPUT_MOUNT_PLACEHOLDER
     }
 }

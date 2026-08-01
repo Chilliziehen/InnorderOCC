@@ -45,7 +45,10 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                     val captureXml = entry.name == CONTENT_TYPES || entry.name.endsWith(".rels") || entry.name in OOXML_MAIN_PART_BY_ROOT.values
                     val captured = if (captureXml) ByteArrayOutputStream() else null
                     var entryBytes = 0L
-                    var prefix = ByteArray(0)
+                    if (entry.name.substringAfterLast('.', "").lowercase() in ARCHIVE_EXTENSIONS) {
+                        reject(EvidenceRejectionCode.NESTED_ARCHIVE)
+                    }
+                    val nestedArchiveDetector = NestedArchiveDetector()
                     archive.getInputStream(entry).buffered().use { input ->
                         val buffer = ByteArray(BUFFER_SIZE)
                         while (true) {
@@ -58,17 +61,13 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                             if (ratio(entryBytes, compressed) > request.policy.archiveLimits.maximumCompressionRatio ||
                                 ratio(expandedBytes, compressedBytes) > request.policy.archiveLimits.maximumCompressionRatio
                             ) reject(EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
-                            if (prefix.size < ARCHIVE_PREFIX_BYTES) {
-                                val needed = minOf(ARCHIVE_PREFIX_BYTES - prefix.size, count)
-                                prefix += buffer.copyOfRange(0, needed)
-                            }
+                            if (nestedArchiveDetector.accept(buffer, count)) reject(EvidenceRejectionCode.NESTED_ARCHIVE)
                             captured?.let {
                                 if (it.size() + count > MAXIMUM_XML_BYTES) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
                                 it.write(buffer, 0, count)
                             }
                         }
                     }
-                    if (isNestedArchive(entry.name, prefix)) reject(EvidenceRejectionCode.NESTED_ARCHIVE)
                     inspectPartName(entry.name)
                     captured?.toByteArray()?.let { xmlParts[entry.name] = it }
                 }
@@ -300,10 +299,6 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         }
     }
 
-    private fun isNestedArchive(name: String, prefix: ByteArray): Boolean =
-        name.substringAfterLast('.', "").lowercase() in ARCHIVE_EXTENSIONS ||
-            ARCHIVE_MAGICS.any { prefix.containsBytes(it) } || prefix.indexOfBytes(USTAR_MAGIC) >= 257
-
     private fun validateEntryName(name: String) {
         val normalized = name.replace('\\', '/')
         val withoutSuffix = normalized.removeSuffix("/")
@@ -347,19 +342,38 @@ internal class ArchiveContentValidator(private val clock: Clock) {
     private fun unsignedShort(bytes: ByteArray, offset: Int) = (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
     private fun unsignedInt(bytes: ByteArray, offset: Int) = (bytes[offset].toLong() and 0xff) or ((bytes[offset + 1].toLong() and 0xff) shl 8) or ((bytes[offset + 2].toLong() and 0xff) shl 16) or ((bytes[offset + 3].toLong() and 0xff) shl 24)
     private fun ByteArray.matchesAt(offset: Int, expected: ByteArray) = offset >= 0 && size - offset >= expected.size && expected.indices.all { this[offset + it] == expected[it] }
-    private fun ByteArray.containsBytes(expected: ByteArray) = indexOfBytes(expected) >= 0
-    private fun ByteArray.indexOfBytes(expected: ByteArray): Int {
-        if (expected.isEmpty() || expected.size > size) return -1
-        for (offset in 0..size - expected.size) if (expected.indices.all { this[offset + it] == expected[it] }) return offset
-        return -1
-    }
     private fun reject(code: EvidenceRejectionCode): Nothing = throw EvidenceRejectedException(code)
 
     private data class PackageRelationship(val type: String, val target: String)
 
+    private class NestedArchiveDetector {
+        private var processedBytes = 0L
+        private var overlap = ByteArray(0)
+
+        fun accept(buffer: ByteArray, count: Int): Boolean {
+            val window = overlap + buffer.copyOfRange(0, count)
+            val absoluteWindowStart = processedBytes - overlap.size
+            if (ARCHIVE_MAGICS.any { window.indexOfBytes(it) >= 0 }) return true
+            val tarMarker = window.indexOfBytes(USTAR_MAGIC)
+            if (tarMarker >= 0 && absoluteWindowStart + tarMarker >= TAR_MAGIC_OFFSET) return true
+            processedBytes += count
+            overlap = window.copyOfRange(maxOf(0, window.size - MAXIMUM_SIGNATURE_OVERLAP), window.size)
+            return false
+        }
+
+        private fun ByteArray.indexOfBytes(expected: ByteArray): Int {
+            if (expected.size > size) return -1
+            for (offset in 0..size - expected.size) {
+                if (expected.indices.all { this[offset + it] == expected[it] }) return offset
+            }
+            return -1
+        }
+    }
+
     companion object {
         private const val BUFFER_SIZE = 8192
-        private const val ARCHIVE_PREFIX_BYTES = 512
+        private const val TAR_MAGIC_OFFSET = 257L
+        private const val MAXIMUM_SIGNATURE_OVERLAP = 7
         private const val MAXIMUM_XML_BYTES = 1024 * 1024
         private const val MAXIMUM_XML_EVENTS = 20_000
         private const val MAXIMUM_XML_DEPTH = 64
@@ -377,7 +391,7 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private val ZIP_CENTRAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x01, 0x02)
         private val OLE_MAGIC = byteArrayOf(0xd0.toByte(), 0xcf.toByte(), 0x11, 0xe0.toByte(), 0xa1.toByte(), 0xb1.toByte(), 0x1a, 0xe1.toByte())
         private val ARCHIVE_MAGICS = listOf(
-            ZIP_LOCAL_MAGIC, OLE_MAGIC, byteArrayOf(0x1f, 0x8b.toByte()),
+            ZIP_LOCAL_MAGIC, ZIP_END_MAGIC, OLE_MAGIC, byteArrayOf(0x1f, 0x8b.toByte()),
             byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c),
             "Rar!\u001a\u0007".toByteArray(StandardCharsets.ISO_8859_1),
             byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00),

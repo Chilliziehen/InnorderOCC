@@ -5,30 +5,74 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.Arguments
+import org.junit.jupiter.params.provider.MethodSource
 import org.junit.jupiter.params.provider.ValueSource
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.util.stream.Stream
 
 class ProcessParserSandboxTest {
     @TempDir
     lateinit var tempDirectory: Path
 
     @Test
-    fun `production process sandbox accepts only attested isolated worker`() {
-        val sandbox = sandbox("clean")
+    fun `ordinary process executable is rejected`() {
+        val javaExecutable = Path.of(
+            System.getProperty("java.home"),
+            "bin",
+            if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java",
+        )
+
+        assertThatThrownBy { configuration(executable = javaExecutable) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @ParameterizedTest(name = "rejects unsafe Docker arguments {0}")
+    @MethodSource("unsafeDockerArguments")
+    fun `weakened overridden duplicated or additional Docker controls are rejected`(
+        description: String,
+        arguments: List<String>,
+    ) {
+        assertThatThrownBy { configuration(arguments = arguments) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun `fully constrained Docker invocation is accepted and mounts only requested file read-only`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox("clean", commands = commands)
         val path = Files.writeString(tempDirectory.resolve("claim.pdf"), "fixture")
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Accepted("application/pdf"))
+        assertThat(commands).hasSize(1)
+        assertThat(commands.single()).contains(
+            "--network=none",
+            "--memory=67108864",
+            "--pids-limit=32",
+            "--read-only",
+            "--security-opt=no-new-privileges",
+            "--cap-drop=ALL",
+            "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16777216",
+            "--mount=type=bind,src=${path.toAbsolutePath().normalize()},dst=/input/evidence,readonly",
+        )
+        assertThat(commands.single()).doesNotContain(ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER)
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = ["missing-process-isolation", "missing-network-isolation", "excessive-memory"])
-    fun `missing worker isolation capability fails adapter startup`(mode: String) {
-        assertThatThrownBy { sandbox(mode) }
-            .isInstanceOf(IllegalArgumentException::class.java)
+    @Test
+    fun `validated Docker flags cannot be weakened through caller mutation`() {
+        val arguments = secureDockerArguments().toMutableList()
+        val configuration = configuration(arguments = arguments)
+        arguments[2] = "--network=host"
+        val input = Files.writeString(tempDirectory.resolve("claim.pdf"), "fixture")
+
+        assertThat(configuration.command(input, "--inspect"))
+            .contains("--network=none")
+            .doesNotContain("--network=host")
     }
 
     @ParameterizedTest
@@ -42,9 +86,9 @@ class ProcessParserSandboxTest {
     }
 
     @Test
-    fun `worker timeout forcibly terminates process`() {
+    fun `worker timeout forcibly terminates launched container process`() {
         val pidFile = tempDirectory.resolve("worker.pid")
-        val sandbox = sandbox("timeout", pidFile, maximumRuntime = Duration.ofSeconds(2))
+        val sandbox = sandbox("timeout", pidFile, maximumRuntime = Duration.ofSeconds(5))
         val path = Files.writeString(tempDirectory.resolve("claim.pdf"), "fixture")
 
         assertThat(sandbox.inspect(parserRequest(path)))
@@ -62,11 +106,23 @@ class ProcessParserSandboxTest {
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
     }
 
+    @Test
+    fun `input larger than evidence policy is rejected before Docker launch`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox("clean", commands = commands)
+        val path = Files.write(tempDirectory.resolve("oversized.pdf"), ByteArray(2048))
+
+        assertThat(sandbox.inspect(parserRequest(path)))
+            .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+        assertThat(commands).isEmpty()
+    }
+
     private fun sandbox(
         mode: String,
         pidFile: Path = tempDirectory.resolve("unused.pid"),
-        maximumRuntime: Duration = Duration.ofSeconds(3),
+        maximumRuntime: Duration = Duration.ofSeconds(8),
         maximumRequestBytes: Int = 4096,
+        commands: MutableList<List<String>> = mutableListOf(),
     ): ProcessParserSandbox {
         val javaExecutable = Path.of(
             System.getProperty("java.home"),
@@ -79,16 +135,40 @@ class ProcessParserSandboxTest {
             "-cp\n${System.getProperty("java.class.path")}\n${ParserWorkerFixture::class.java.name}\n$mode\n$pidFile\n",
         )
         return ProcessParserSandbox(
-            ProcessParserSandboxConfiguration(
-                executable = javaExecutable,
-                arguments = listOf("@$argumentFile"),
-                startupTimeout = Duration.ofSeconds(3),
-                maximumRuntime = maximumRuntime,
-                maximumRequestBytes = maximumRequestBytes,
-                maximumOutputBytes = 1024,
-                maximumWorkerMemoryBytes = 128L * 1024 * 1024,
-            ),
+            configuration(maximumRuntime = maximumRuntime, maximumRequestBytes = maximumRequestBytes),
+            Clock.systemUTC(),
+            ProcessStarter { command ->
+                commands += command
+                ProcessBuilder(javaExecutable.toString(), "@$argumentFile", command.last())
+                    .redirectErrorStream(true)
+                    .start()
+            },
         )
+    }
+
+    private fun configuration(
+        executable: Path = fakeDockerExecutable(),
+        arguments: List<String> = secureDockerArguments(),
+        maximumRuntime: Duration = Duration.ofSeconds(8),
+        maximumRequestBytes: Int = 4096,
+    ) = ProcessParserSandboxConfiguration(
+        executable = executable,
+        arguments = arguments,
+        maximumRuntime = maximumRuntime,
+        maximumRequestBytes = maximumRequestBytes,
+        maximumOutputBytes = 1024,
+        maximumContainerMemoryBytes = 128L * 1024 * 1024,
+        maximumContainerPids = 64,
+        maximumTmpfsBytes = 32L * 1024 * 1024,
+    )
+
+    private fun fakeDockerExecutable(): Path {
+        val path = tempDirectory.resolve(if (System.getProperty("os.name").startsWith("Windows")) "docker.exe" else "docker")
+        if (!Files.exists(path)) {
+            Files.write(path, byteArrayOf(0))
+            path.toFile().setExecutable(true)
+        }
+        return path.toAbsolutePath()
     }
 
     private fun parserRequest(path: Path) = ParserSandboxRequest(
@@ -101,8 +181,49 @@ class ProcessParserSandboxTest {
             1024,
             ArchiveLimits(10, 2048, 20.0),
         ),
-        deadline = Instant.now().plusSeconds(10),
+        deadline = Instant.now().plusSeconds(30),
     )
+
+    companion object {
+        private val IMAGE = "registry.example/occ-evidence-parser@sha256:${"a".repeat(64)}"
+
+        private fun secureDockerArguments() = listOf(
+            "run",
+            "--rm",
+            "--network=none",
+            "--memory=67108864",
+            "--pids-limit=32",
+            "--read-only",
+            "--security-opt=no-new-privileges",
+            "--cap-drop=ALL",
+            "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16777216",
+            ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER,
+            IMAGE,
+        )
+
+        @JvmStatic
+        fun unsafeDockerArguments(): Stream<Arguments> {
+            val secure = secureDockerArguments()
+            fun without(value: String) = secure - value
+            fun replacing(old: String, new: String) = secure.map { if (it == old) new else it }
+            return Stream.of(
+                Arguments.of("missing network", without("--network=none")),
+                Arguments.of("host network override", replacing("--network=none", "--network=host")),
+                Arguments.of("duplicate network override", secure.toMutableList().apply { add(2, "--network=host") }),
+                Arguments.of("missing memory", without("--memory=67108864")),
+                Arguments.of("memory above configured limit", replacing("--memory=67108864", "--memory=268435456")),
+                Arguments.of("missing pids limit", without("--pids-limit=32")),
+                Arguments.of("writable root", without("--read-only")),
+                Arguments.of("missing no-new-privileges", without("--security-opt=no-new-privileges")),
+                Arguments.of("partial capability drop", replacing("--cap-drop=ALL", "--cap-drop=NET_ADMIN")),
+                Arguments.of("writable input", replacing(ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER, "--mount=type=bind,src={EVIDENCE_INPUT},dst=/input/evidence")),
+                Arguments.of("unbounded tmpfs", replacing("--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16777216", "--tmpfs=/tmp")),
+                Arguments.of("additional volume", secure.toMutableList().apply { add(size - 1, "--volume=/host:/host") }),
+                Arguments.of("privileged", secure.toMutableList().apply { add(size - 1, "--privileged") }),
+                Arguments.of("unpinned image", secure.dropLast(1) + "registry.example/occ-evidence-parser:latest"),
+            )
+        }
+    }
 }
 
 object ParserWorkerFixture {
@@ -110,26 +231,6 @@ object ParserWorkerFixture {
     fun main(args: Array<String>) {
         val mode = args[0]
         val pidFile = Path.of(args[1])
-        when (args[2]) {
-            "--capabilities" -> capabilities(mode)
-            "--inspect" -> inspect(mode, pidFile)
-            else -> error("unknown operation")
-        }
-    }
-
-    private fun capabilities(mode: String) {
-        val processIsolated = mode != "missing-process-isolation"
-        val networkIsolated = mode != "missing-network-isolation"
-        val memory = if (mode == "excessive-memory") 256L * 1024 * 1024 else 64L * 1024 * 1024
-        print(
-            "protocol=1\n" +
-                "processIsolation=$processIsolated\n" +
-                "networkIsolation=$networkIsolated\n" +
-                "memoryLimitBytes=$memory\n",
-        )
-    }
-
-    private fun inspect(mode: String, pidFile: Path) {
         ParserSandboxProtocol.readRequest(System.`in`)
         when (mode) {
             "timeout" -> {
@@ -138,10 +239,7 @@ object ParserWorkerFixture {
             }
             "malformed-output" -> print("not-the-parser-protocol")
             "oversized-output" -> print("x".repeat(4096))
-            else -> ParserSandboxProtocol.writeResult(
-                System.out,
-                ParserSandboxResult.Accepted("application/pdf"),
-            )
+            else -> ParserSandboxProtocol.writeResult(System.out, ParserSandboxResult.Accepted("application/pdf"))
         }
     }
 }
