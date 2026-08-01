@@ -97,6 +97,16 @@ function expectAiFailure(sql, pattern) {
   assert.match(result.stderr, pattern);
 }
 
+function expectSqlFailure(sql, pattern) {
+  const result = dockerSync([
+    'exec', '-i', '-e', 'PGPASSWORD', container,
+    'psql', '--no-psqlrc', '--set', 'ON_ERROR_STOP=1',
+    '--username', 'postgres', '--dbname', 'innorder_test',
+  ], { input: sql, env: adminConnectionEnvironment });
+  assert.notEqual(result.status, 0, `${sql} unexpectedly succeeded`);
+  assert.match(result.stderr, pattern);
+}
+
 function fixtureSql(prefix) {
   const id = (suffix) => `${prefix}-0000-7000-8000-${suffix}`;
   const cases = (datasetVersion, start, count, emptyIndex = -1) => Array.from({ length: count }, (_, index) => {
@@ -172,17 +182,25 @@ function fixtureSql(prefix) {
     INSERT INTO ai.evaluation_dataset (id, dataset_key, name) VALUES
       ('${id('000000000060')}', 'test.one.${prefix}', 'One-case dataset'),
       ('${id('000000000061')}', 'test.nineteen.${prefix}', 'Nineteen-case dataset'),
-      ('${id('000000000062')}', 'test.empty.${prefix}', 'Empty-case dataset');
+      ('${id('000000000062')}', 'test.empty.${prefix}', 'Empty-case dataset'),
+      ('${id('000000000074')}', 'test.draft.${prefix}', 'Draft dataset'),
+      ('${id('000000000075')}', 'test.retired.${prefix}', 'Retired dataset');
     INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status) VALUES
       ('${id('000000000063')}', '${id('000000000060')}', 1, repeat('3', 64), 'DRAFT'),
       ('${id('000000000064')}', '${id('000000000061')}', 1, repeat('4', 64), 'DRAFT'),
-      ('${id('000000000065')}', '${id('000000000062')}', 1, repeat('5', 64), 'DRAFT');
+      ('${id('000000000065')}', '${id('000000000062')}', 1, repeat('5', 64), 'DRAFT'),
+      ('${id('000000000076')}', '${id('000000000074')}', 1, repeat('6', 64), 'DRAFT'),
+      ('${id('000000000077')}', '${id('000000000075')}', 1, repeat('7', 64), 'DRAFT');
     INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties) VALUES
-      ${cases('000000000013', 100, 20)},
-      ${cases('00000000003b', 120, 20)},
+      ${cases('000000000013', 100, 30)},
+      ${cases('00000000003b', 130, 20)},
       ${cases('000000000063', 200, 1)},
       ${cases('000000000064', 300, 19)},
       ${cases('000000000065', 400, 20, 19)};
+    UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
+    WHERE id IN ('${id('000000000013')}', '${id('00000000003b')}', '${id('000000000063')}',
+                 '${id('000000000064')}', '${id('000000000065')}', '${id('000000000077')}');
+    UPDATE ai.evaluation_dataset_version SET status = 'RETIRED' WHERE id = '${id('000000000077')}';
 
     INSERT INTO ai.knowledge_source
       (id, source_type, sync_config, state, sync_cursor)
@@ -293,6 +311,16 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   const fixture = randomUUID().replaceAll('-', '').slice(0, 8);
   const id = (suffix) => `${fixture}-0000-7000-8000-${suffix}`;
   execSql(fixtureSql(fixture));
+
+  expectSqlFailure(`UPDATE ai.evaluation_dataset_version SET content_hash = repeat('f',64)
+    WHERE id = '${id('000000000013')}';`, /published evaluation dataset version is immutable/iu);
+  expectSqlFailure(`INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties)
+    VALUES ('${id('000000000078')}', '${id('000000000013')}', 'late', '{"x":1}', '{"y":1}');`,
+  /evaluation cases for published or retired datasets are immutable/iu);
+  expectSqlFailure(`UPDATE ai.evaluation_case SET input = '{"changed":true}'
+    WHERE id = '${id('000000000100')}';`, /evaluation cases for published or retired datasets are immutable/iu);
+  expectSqlFailure(`DELETE FROM ai.evaluation_case WHERE id = '${id('000000000100')}';`,
+  /evaluation cases for published or retired datasets are immutable/iu);
 
   for (const sql of [
     'SELECT * FROM iam.principal;', 'SELECT * FROM authz.relationship;',
@@ -446,19 +474,35 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     Array.from({ length: count }, (_, index) => `SELECT ai.record_embedding_gate_case('${evaluationId}',
       '${id(String(start + index).padStart(12, '0'))}', ${numerator}, ${denominator}, ${recall}, repeat('b',64));`).join('\n');
 
+  expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('000000000069')}', '${id('000000000076')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('5',64));`,
+  /dataset version is not PUBLISHED/iu);
+  expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('00000000006a')}', '${id('000000000077')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('6',64));`,
+  /dataset version is not PUBLISHED/iu);
+
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000046')}', '${id('000000000013')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('a',64));`);
-  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`, /at least 20/iu);
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`,
+  /partial evidence cannot finalize a complete evaluation dataset/iu);
 
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000066')}', '${id('000000000063')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('1',64));`);
   execAiSql(gateEvidence(id('000000000066'), 200, 1, 1, 1, 1));
   expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000066')}');`, /at least 20/iu);
+  execSql(`UPDATE ai.evaluation_dataset_version SET status = 'RETIRED' WHERE id = '${id('000000000063')}';`);
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000066')}');`, /dataset version is not PUBLISHED/iu);
+  expectSqlFailure(`UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
+    WHERE id = '${id('000000000063')}';`, /retired evaluation dataset version is immutable/iu);
 
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000067')}', '${id('000000000064')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('2',64));`);
   execAiSql(gateEvidence(id('000000000067'), 300, 19, 1, 1, 1));
   expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000067')}');`, /at least 20/iu);
+  execSql(`ALTER TABLE ai.evaluation_dataset_version DISABLE TRIGGER trg_evaluation_dataset_version_lifecycle;
+    UPDATE ai.evaluation_dataset_version SET content_hash = repeat('8',64) WHERE id = '${id('000000000064')}';
+    ALTER TABLE ai.evaluation_dataset_version ENABLE TRIGGER trg_evaluation_dataset_version_lifecycle;`);
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000067')}');`, /dataset version content hash changed/iu);
 
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000068')}', '${id('000000000065')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('3',64));`);
@@ -469,12 +513,18 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     VALUES ('${id('000000000068')}', '${id('000000000419')}', 1, 1, 1, repeat('4',64));`);
   expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000068')}');`, /evaluation dataset contains empty cases/iu);
 
-  execAiSql(gateEvidence(id('000000000046'), 100, 20, 19, 20, 0.85));
-  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`), 'PASS');
+  execAiSql(gateEvidence(id('000000000046'), 100, 20, 1, 1, 1));
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`,
+  /partial evidence cannot finalize a complete evaluation dataset/iu);
+  execAiSql(gateEvidence(id('000000000046'), 120, 10, 0, 1, 0));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`), 'FAIL');
+  assert.equal(execAiSql(`SELECT dataset_content_hash || '|' || citation_numerator || '|' || citation_denominator ||
+    '|' || recall_sum || '|' || recall_count FROM ai.embedding_space_gate_result
+    WHERE id = '${id('000000000046')}';`), `${'1'.repeat(64)}|20|30|20|30`);
 
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000047')}', '${id('00000000003b')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('c',64));`);
-  execAiSql(gateEvidence(id('000000000047'), 120, 20, 18, 20, 0.84));
+  execAiSql(gateEvidence(id('000000000047'), 130, 20, 18, 20, 0.84));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000047')}');`), 'FAIL');
   expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('000000000048')}', '${id('000000000013')}',
     '${id('000000000029')}', repeat('8',64), '${id('000000000009')}', repeat('e',64));`, /stale corpus manifest/iu);

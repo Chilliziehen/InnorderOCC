@@ -246,6 +246,7 @@ CREATE TABLE ai.retrieval_hit (
 CREATE TABLE ai.embedding_space_gate_evaluation (
     id uuid PRIMARY KEY,
     dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
+    dataset_content_hash text NOT NULL CHECK (dataset_content_hash ~ '^[0-9a-f]{64}$'),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
     candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
@@ -257,7 +258,8 @@ CREATE TABLE ai.embedding_space_gate_evaluation (
     retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
     legal_hold_id uuid,
     CHECK (retention_until >= created_at + interval '1 year'),
-    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id)
+    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id),
+    UNIQUE (id, dataset_version_id, dataset_content_hash)
 );
 
 CREATE TABLE ai.embedding_space_gate_case_evidence (
@@ -277,6 +279,7 @@ CREATE TABLE ai.embedding_space_gate_case_evidence (
 CREATE TABLE ai.embedding_space_gate_result (
     id uuid PRIMARY KEY REFERENCES ai.embedding_space_gate_evaluation(id),
     dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
+    dataset_content_hash text NOT NULL CHECK (dataset_content_hash ~ '^[0-9a-f]{64}$'),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
     candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
@@ -305,7 +308,9 @@ CREATE TABLE ai.embedding_space_gate_result (
         AND citation_numerator::numeric / citation_denominator >= minimum_citation_precision
         AND recall_sum / recall_count >= minimum_recall_at_10
     )),
-    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id)
+    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id),
+    FOREIGN KEY (id, dataset_version_id, dataset_content_hash)
+        REFERENCES ai.embedding_space_gate_evaluation(id, dataset_version_id, dataset_content_hash)
 );
 
 CREATE TABLE ai.legal_hold (
@@ -349,6 +354,75 @@ ALTER TABLE ai.ai_run_artifact
     ADD COLUMN legal_hold_id uuid REFERENCES ai.legal_hold(id),
     ADD CONSTRAINT ck_ai_run_artifact_one_year_retention
         CHECK (retention_until >= created_at + interval '1 year');
+
+CREATE FUNCTION ai.enforce_evaluation_dataset_version_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'DRAFT' THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation dataset versions must be inserted in DRAFT state';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.status IN ('PUBLISHED', 'RETIRED') THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'published evaluation dataset version is immutable';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF OLD.status = 'RETIRED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retired evaluation dataset version is immutable';
+    END IF;
+    IF OLD.status = 'PUBLISHED' THEN
+        IF NEW.status = 'RETIRED' AND (to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status') THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'published evaluation dataset version is immutable';
+    END IF;
+    IF NEW.status = 'RETIRED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version must be published before retirement';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_evaluation_dataset_version_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON ai.evaluation_dataset_version
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_evaluation_dataset_version_lifecycle();
+
+CREATE FUNCTION ai.enforce_evaluation_case_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    old_dataset_status text;
+    new_dataset_status text;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        SELECT status INTO STRICT old_dataset_status
+        FROM ai.evaluation_dataset_version WHERE id = OLD.dataset_version_id FOR SHARE;
+        IF old_dataset_status IN ('PUBLISHED', 'RETIRED') THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation cases for published or retired datasets are immutable';
+        END IF;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        SELECT status INTO STRICT new_dataset_status
+        FROM ai.evaluation_dataset_version WHERE id = NEW.dataset_version_id FOR SHARE;
+        IF new_dataset_status <> 'DRAFT' THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation cases for published or retired datasets are immutable';
+        END IF;
+    END IF;
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE TRIGGER trg_evaluation_case_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON ai.evaluation_case
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_evaluation_case_lifecycle();
 
 CREATE FUNCTION ai.enforce_ingestion_job_lifecycle()
 RETURNS trigger
@@ -1153,10 +1227,17 @@ DECLARE
     candidate_manifest text;
     candidate_status text;
     active_status text;
+    dataset_content_hash text;
+    dataset_status text;
     eligible bigint;
     embedded bigint;
     leakage bigint;
 BEGIN
+    SELECT content_hash, status INTO STRICT dataset_content_hash, dataset_status
+    FROM ai.evaluation_dataset_version WHERE id = p_dataset_version_id FOR SHARE;
+    IF dataset_status <> 'PUBLISHED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version is not PUBLISHED';
+    END IF;
     SELECT corpus_version, status INTO STRICT candidate_manifest, candidate_status
     FROM ai.embedding_space WHERE id = p_candidate_embedding_space_id;
     SELECT status INTO STRICT active_status FROM ai.embedding_space WHERE id = p_expected_active_space_id;
@@ -1182,9 +1263,9 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: eligible corpus is empty';
     END IF;
     INSERT INTO ai.embedding_space_gate_evaluation
-        (id, dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id,
+        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, candidate_embedding_space_id,
          expected_active_space_id, eligible_count, embedded_count, leakage_count, evidence_hash)
-    VALUES (p_id, p_dataset_version_id, p_corpus_manifest_digest, p_candidate_embedding_space_id,
+    VALUES (p_id, p_dataset_version_id, dataset_content_hash, p_corpus_manifest_digest, p_candidate_embedding_space_id,
             p_expected_active_space_id, eligible, embedded, leakage, p_evidence_hash);
     RETURN p_id;
 END;
@@ -1234,16 +1315,28 @@ DECLARE
     evaluation ai.embedding_space_gate_evaluation%ROWTYPE;
     current_manifest text;
     active_status text;
+    dataset_content_hash text;
+    dataset_status text;
     citation_num bigint;
     citation_den bigint;
     recall_total numeric;
     cases bigint;
     dataset_cases bigint;
+    evidence_cases bigint;
+    foreign_cases bigint;
     empty_cases bigint;
     gate_decision text;
 BEGIN
     SELECT * INTO STRICT evaluation FROM ai.embedding_space_gate_evaluation
     WHERE id = p_evaluation_id FOR SHARE;
+    SELECT content_hash, status INTO STRICT dataset_content_hash, dataset_status
+    FROM ai.evaluation_dataset_version WHERE id = evaluation.dataset_version_id FOR SHARE;
+    IF dataset_status <> 'PUBLISHED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version is not PUBLISHED';
+    END IF;
+    IF dataset_content_hash <> evaluation.dataset_content_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version content hash changed';
+    END IF;
     SELECT corpus_version INTO STRICT current_manifest FROM ai.embedding_space
     WHERE id = evaluation.candidate_embedding_space_id;
     SELECT status INTO STRICT active_status FROM ai.embedding_space
@@ -1257,15 +1350,27 @@ BEGIN
     IF empty_cases > 0 THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation dataset contains empty cases';
     END IF;
+    SELECT count(*) INTO evidence_cases
+    FROM ai.embedding_space_gate_case_evidence
+    WHERE evaluation_id = p_evaluation_id;
+    SELECT count(*) INTO foreign_cases
+    FROM ai.embedding_space_gate_case_evidence evidence
+    LEFT JOIN ai.evaluation_case evaluation_case
+      ON evaluation_case.id = evidence.case_id
+     AND evaluation_case.dataset_version_id = evaluation.dataset_version_id
+    WHERE evidence.evaluation_id = p_evaluation_id AND evaluation_case.id IS NULL;
+    IF dataset_cases < 20 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'at least 20 meaningful evaluation cases are required';
+    END IF;
+    IF evidence_cases <> dataset_cases OR foreign_cases <> 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'partial evidence cannot finalize a complete evaluation dataset';
+    END IF;
     SELECT coalesce(sum(evidence.citation_numerator), 0), coalesce(sum(evidence.citation_denominator), 0),
            coalesce(sum(evidence.recall_at_10), 0), count(*)
     INTO citation_num, citation_den, recall_total, cases
     FROM ai.embedding_space_gate_case_evidence evidence
     JOIN ai.evaluation_case evaluation_case ON evaluation_case.id = evidence.case_id
     WHERE evidence.evaluation_id = p_evaluation_id;
-    IF dataset_cases < 20 OR cases < 20 THEN
-        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'at least 20 meaningful evaluation cases are required';
-    END IF;
     IF citation_den = 0 THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: citation evidence is required';
     END IF;
@@ -1274,11 +1379,11 @@ BEGIN
         AND citation_num::numeric / citation_den >= 0.95
         AND recall_total / cases >= 0.85 THEN 'PASS' ELSE 'FAIL' END;
     INSERT INTO ai.embedding_space_gate_result
-        (id, dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id,
+        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, candidate_embedding_space_id,
          expected_active_space_id, eligible_count, embedded_count, leakage_count,
          citation_numerator, citation_denominator, recall_sum, recall_count,
          decision, evidence_hash)
-    VALUES (evaluation.id, evaluation.dataset_version_id, evaluation.corpus_manifest_digest,
+    VALUES (evaluation.id, evaluation.dataset_version_id, evaluation.dataset_content_hash, evaluation.corpus_manifest_digest,
             evaluation.candidate_embedding_space_id, evaluation.expected_active_space_id,
             evaluation.eligible_count, evaluation.embedded_count, evaluation.leakage_count,
             citation_num, citation_den, recall_total, cases, gate_decision, evaluation.evidence_hash);

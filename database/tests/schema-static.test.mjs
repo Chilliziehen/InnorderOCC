@@ -558,3 +558,30 @@ test('keeps first-release tool metadata inaccessible to AI', () => {
   assert.match(live, /SELECT \* FROM ai\.tool_definition/iu);
   assert.match(live, /SELECT \* FROM ai\.agent_tool_grant/iu);
 });
+
+test('binds gate metrics to every case in an immutable published dataset version', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.match(sql, /CREATE TABLE ai\.embedding_space_gate_evaluation[\s\S]*dataset_content_hash text NOT NULL/iu);
+  assert.match(sql, /CREATE TABLE ai\.embedding_space_gate_result[\s\S]*dataset_content_hash text NOT NULL/iu);
+  const begin = sql.match(/CREATE FUNCTION ai\.begin_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(begin, /SELECT content_hash, status[\s\S]*FOR SHARE/iu);
+  assert.match(begin, /dataset_status <> 'PUBLISHED'/iu);
+  assert.match(begin, /dataset_content_hash/iu);
+  const finalize = sql.match(/CREATE FUNCTION ai\.finalize_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(finalize, /SELECT content_hash, status[\s\S]*FOR SHARE/iu);
+  assert.match(finalize, /dataset_content_hash <> evaluation\.dataset_content_hash/iu);
+  assert.match(finalize, /evidence_cases <> dataset_cases/iu);
+  assert.match(finalize, /foreign_cases <> 0/iu);
+  assert.match(finalize, /dataset_content_hash, corpus_manifest_digest/iu);
+
+  assert.match(sql, /CREATE FUNCTION ai\.enforce_evaluation_dataset_version_lifecycle\(\)/iu);
+  assert.match(sql, /OLD\.status = 'PUBLISHED'[\s\S]*NEW\.status = 'RETIRED'/iu);
+  assert.match(sql, /CREATE FUNCTION ai\.enforce_evaluation_case_lifecycle\(\)/iu);
+  assert.match(sql, /evaluation cases for published or retired datasets are immutable/iu);
+
+  const live = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(live, /cases\('000000000013', 100, 30\)/iu);
+  assert.match(live, /partial evidence cannot finalize a complete evaluation dataset/iu);
+  assert.match(live, /dataset version is not PUBLISHED/iu);
+  assert.match(live, /dataset version content hash changed/iu);
+});
