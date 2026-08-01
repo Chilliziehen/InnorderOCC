@@ -134,13 +134,34 @@ class PostgreSqlFlowableIntegrationTest(
     }
 
     @Test
+    fun `psql full schema entrypoint applies to a fresh PostgreSQL database`() {
+        val databaseDirectory = databaseDirectory()
+        postgres.copyFileToContainer(MountableFile.forHostPath(databaseDirectory), "/tmp/full-schema")
+        val adminJdbc = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_admin", "admin-test-only"))
+        adminJdbc.execute("DROP DATABASE IF EXISTS innorder_full_schema_test WITH (FORCE)")
+        adminJdbc.execute("CREATE DATABASE innorder_full_schema_test")
+        try {
+            val result = postgres.execInContainer(
+                "sh",
+                "-c",
+                "PGPASSWORD=admin-test-only psql -h 127.0.0.1 -U innorder_admin -d innorder_full_schema_test -f /tmp/full-schema/innorder_occ_full_schema.sql",
+            )
+            assertThat(result.exitCode).withFailMessage(result.stderr + result.stdout).isZero()
+            assertThat(result.stdout).contains("COMMIT")
+        } finally {
+            adminJdbc.execute("DROP DATABASE IF EXISTS innorder_full_schema_test WITH (FORCE)")
+        }
+    }
+
+    @Test
     fun `migrations runtime privileges Flowable and pgvector match production boundaries`() {
         val flywayJdbc = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
         assertThat(jdbcTemplate.queryForObject("SELECT current_user", String::class.java)).isEqualTo("innorder_runtime")
         assertThat(flywayJdbc.queryForList("SELECT DISTINCT installed_by FROM flyway_schema_history", String::class.java))
             .containsExactly("innorder_flyway")
+        // Agent 06 must reconcile this exact list to V001-V015 after merging reserved V013 and V015.
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14)
         assertThat(flywayJdbc.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'user_account' ORDER BY ordinal_position",
             String::class.java,
@@ -393,5 +414,11 @@ class PostgreSqlFlowableIntegrationTest(
             Path.of("..", "..", "database", "tests"),
         ).firstOrNull(Files::isDirectory)
             ?: error("database/tests directory is unavailable")
+
+        private fun databaseDirectory(): Path = listOf(
+            Path.of("database"),
+            Path.of("..", "..", "database"),
+        ).firstOrNull(Files::isDirectory)
+            ?: error("database directory is unavailable")
     }
 }

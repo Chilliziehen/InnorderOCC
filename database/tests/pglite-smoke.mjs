@@ -437,6 +437,9 @@ await expectSqlState(`
 `, '23505', 'duplicate promoted orphan disposition');
 
 await db.exec(`
+  UPDATE occ.evidence_object_disposition
+  SET disposition_state = 'DELETING'
+  WHERE id = '92000000-0000-7000-8000-000000000055';
   UPDATE occ.evidence
   SET legal_hold_at = transaction_timestamp(), legal_hold_by = '92000000-0000-7000-8000-000000000005',
       legal_hold_reason = 'portable hold'
@@ -446,6 +449,11 @@ await db.exec(`
   VALUES ('92000000-0000-7000-8000-000000000050', '92000000-0000-7000-8000-000000000030',
           'evidence/main', 'RETAINED');
 `);
+await expectSqlState(`
+  UPDATE occ.evidence_object_disposition
+  SET disposition_state = 'DELETED', deleted_at = transaction_timestamp()
+  WHERE id = '92000000-0000-7000-8000-000000000055'
+`, '55000', 'deleted disposition under a newly placed legal hold');
 await expectSqlState(`
   UPDATE occ.evidence_object_disposition SET disposition_state = 'CLEANUP_PENDING'
   WHERE id = '92000000-0000-7000-8000-000000000050'

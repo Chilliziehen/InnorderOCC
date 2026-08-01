@@ -551,7 +551,7 @@ BEGIN
     FROM occ.evidence e
     WHERE id = disposition_evidence_id
     FOR UPDATE;
-    IF NEW.disposition_state IN ('CLEANUP_PENDING', 'DELETING', 'DELETE_FAILED') AND (
+    IF NEW.disposition_state IN ('CLEANUP_PENDING', 'DELETING', 'DELETE_FAILED', 'DELETED') AND (
         NEW.legal_hold_at IS NOT NULL OR NEW.backup_snapshot_id IS NOT NULL
         OR evidence_legal_hold_at IS NOT NULL
     ) THEN

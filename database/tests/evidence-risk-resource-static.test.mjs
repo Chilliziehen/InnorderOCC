@@ -7,6 +7,10 @@ const sql = readFileSync(
   fileURLToPath(new URL('../migrations/V014__evidence_risk_resource.sql', import.meta.url)),
   'utf8',
 );
+const fullSchema = readFileSync(
+  fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)),
+  'utf8',
+);
 
 test('extends evidence storage without invalidating legacy rows', () => {
   for (const column of [
@@ -68,6 +72,15 @@ test('resolves and locks legal holds for version and upload dispositions', () =>
   assert.match(sql, /NEW\.object_key IS DISTINCT FROM upload_quarantine_object_key[\s\S]*NEW\.object_key IS DISTINCT FROM upload_immutable_object_key/i);
   assert.match(sql, /FROM occ\.upload_session[\s\S]*WHERE id = NEW\.upload_session_id/i);
   assert.match(sql, /FROM occ\.evidence[\s\S]*WHERE id = disposition_evidence_id[\s\S]*FOR UPDATE/i);
+  assert.match(sql, /NEW\.disposition_state IN \('CLEANUP_PENDING', 'DELETING', 'DELETE_FAILED', 'DELETED'\)/i);
+});
+
+test('runs V014 under an explicit psql transaction without changing Flyway transaction control', () => {
+  assert.match(
+    fullSchema,
+    /BEGIN;\s*\\ir migrations\/V014__evidence_risk_resource\.sql\s*COMMIT;/i,
+  );
+  assert.doesNotMatch(sql, /^\s*(?:BEGIN|COMMIT)\s*;/im);
 });
 
 test('enforces review segregation, follow-up facts, and one future review', () => {
