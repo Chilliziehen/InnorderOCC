@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
-import { blockerCodeSchema } from "./task.js";
-import { activityKeySchema, safeVersionSchema, uuidSchema } from "./workflow-common.js";
+import { blockerCodeSchema, providerKeySchema } from "./task.js";
+import { safeVersionSchema, uuidSchema } from "./workflow-common.js";
 
 export const PROBLEM_TITLE_MIN_LENGTH = 1;
 export const PROBLEM_TITLE_MAX_LENGTH = 256;
@@ -106,7 +106,7 @@ export const taskGateUnavailableProblemDetailsSchema = problemDetailsSchema
   .extend({
     status: z.literal(503),
     code: z.literal("OCC_TASK_GATE_UNAVAILABLE"),
-    providerKeys: z.array(activityKeySchema).min(1).max(100),
+    providerKeys: z.array(providerKeySchema).min(1).max(100),
   })
   .strict();
 

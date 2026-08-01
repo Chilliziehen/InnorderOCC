@@ -61,6 +61,7 @@ import {
   processCommandConflictProblemDetailsSchema,
   processTransferConflictProblemDetailsSchema,
   processWaitReleaseConflictProblemDetailsSchema,
+  providerKeySchema,
   taskClaimConflictProblemDetailsSchema,
   taskCommandConflictProblemDetailsSchema,
   versionedCommandConflictProblemDetailsSchema,
@@ -356,7 +357,12 @@ describe("workflow Problem Details", () => {
   });
 
   it("allows provider and blocker details only in their authorized strict errors", () => {
-    expect(taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["evidence"] })).toBeDefined();
+    for (const providerKey of ["evidence", "evidence.record", "resource_reservation"]) {
+      expect(providerKeySchema.parse(providerKey)).toBe(providerKey);
+      expect(taskGateUnavailableProblemDetailsSchema.parse({
+        ...problem, providerKeys: [providerKey],
+      })).toBeDefined();
+    }
     expect(taskBlockedProblemDetailsSchema.parse({
       ...problem,
       status: 409,
@@ -364,7 +370,12 @@ describe("workflow Problem Details", () => {
       blockerCodes: ["EVIDENCE_REQUIRED"],
     })).toBeDefined();
     expect(() => taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["evidence"], blockerCodes: [] })).toThrow();
-    expect(() => taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["Invalid Provider"] })).toThrow();
+    for (const providerKey of ["", ".evidence", "Evidence", "Invalid Provider", "x".repeat(65)]) {
+      expect(() => providerKeySchema.parse(providerKey)).toThrow();
+      expect(() => taskGateUnavailableProblemDetailsSchema.parse({
+        ...problem, providerKeys: [providerKey],
+      })).toThrow();
+    }
   });
 
   it("binds reusable workflow problems to their HTTP status and code set", () => {

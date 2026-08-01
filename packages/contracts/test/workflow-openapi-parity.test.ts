@@ -28,6 +28,10 @@ import {
   processTimelineTypeSchema,
   STABLE_CODE_PATTERN,
   processStateSchema,
+  PROVIDER_KEY_MAX_LENGTH,
+  PROVIDER_KEY_MIN_LENGTH,
+  PROVIDER_KEY_PATTERN,
+  providerKeySchema,
   REVIEW_SEQUENCE_MIN,
   reviewSequenceSchema,
   SAFE_INTEGER_MAX,
@@ -324,6 +328,7 @@ describe("workflow OpenAPI schema parity", () => {
     expect(persistenceDdl).toContain("review_sequence bigint NOT NULL CHECK (review_sequence > 0)");
     expect(persistenceDdl).toContain("conditional_rule_version text");
     expect(persistenceDdl).toContain("row_version bigint NOT NULL DEFAULT 0 CHECK (row_version >= 0)");
+    expect(persistenceDdl).toContain(`provider_key text NOT NULL CHECK (provider_key = lower(btrim(provider_key)) AND provider_key ~ '${PROVIDER_KEY_PATTERN}')`);
 
     expect(document.components.schemas.NotificationType).toEqual({
       type: "string",
@@ -350,6 +355,7 @@ describe("workflow OpenAPI schema parity", () => {
       ["BlockerSeverity", blockerSeveritySchema],
       ["ConditionalRuleVersion", conditionalRuleVersionSchema],
       ["ReviewSequence", reviewSequenceSchema],
+      ["ProviderKey", providerKeySchema],
     ] as const) {
       expectConstraintParity(
         z.toJSONSchema(zodSchema, { unrepresentable: "any" }) as Schema,
@@ -529,7 +535,19 @@ describe("workflow OpenAPI schema parity", () => {
     expect(gateProblem.required).toEqual(["type", "title", "status", "code", "correlationId", "providerKeys"]);
     expect(gateProblem.properties?.status).toEqual({ type: "integer", const: 503 });
     expect(gateProblem.properties?.code).toEqual({ type: "string", const: "OCC_TASK_GATE_UNAVAILABLE" });
-    expect(gateProblem.properties?.providerKeys).toEqual({ type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 128, pattern: ACTIVITY_KEY_PATTERN } });
+    expect(document.components.schemas.ProviderKey).toEqual({
+      type: "string",
+      minLength: PROVIDER_KEY_MIN_LENGTH,
+      maxLength: PROVIDER_KEY_MAX_LENGTH,
+      pattern: PROVIDER_KEY_PATTERN,
+    });
+    expect(gateProblem.properties?.providerKeys).toEqual({
+      type: "array", minItems: 1, maxItems: 100,
+      items: { $ref: "#/components/schemas/ProviderKey" },
+    });
+    expect(document.components.schemas.TaskBlocker.properties?.providerKey).toEqual({
+      $ref: "#/components/schemas/ProviderKey",
+    });
     expect(document.components.schemas.CompleteTaskRequest.properties).toEqual({
       expectedVersion: { $ref: "#/components/schemas/SafeVersion" },
     });
@@ -569,13 +587,11 @@ describe("workflow OpenAPI schema parity", () => {
       ["wait activityKey", parametersFor(document.paths["/api/v1/processes/{processId}/waits/{activityKey}/release"].post).find((parameter) => parameter.name === "activityKey")?.schema],
       ["ProcessProgress.activeActivities", document.components.schemas.ProcessProgress.properties?.activeActivities?.items],
       ["ProcessTask.activityKey", document.components.schemas.ProcessTask.properties?.activityKey],
-      ["TaskBlocker.providerKey", document.components.schemas.TaskBlocker.properties?.providerKey],
       ["TaskSummary.activityKey", document.components.schemas.TaskSummary.properties?.activityKey],
       ["TaskSummary.formKey", document.components.schemas.TaskSummary.properties?.formKey],
       ["TaskDetail.activityKey", document.components.schemas.TaskDetail.properties?.activityKey],
       ["TaskDetail.formKey", document.components.schemas.TaskDetail.properties?.formKey],
       ["TaskAvailablePayload.activityKey", document.components.schemas.TaskAvailablePayload.properties?.activityKey],
-      ["TaskGateUnavailableProblem.providerKeys", document.components.schemas.TaskGateUnavailableProblem.properties?.providerKeys?.items],
     ];
     for (const [field, schema] of expectedActivityFields) {
       expect(schema?.pattern, field).toBe(ACTIVITY_KEY_PATTERN);

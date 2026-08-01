@@ -927,6 +927,11 @@ components:
     BlockerCode:
       type: string
       enum: [PREREQUISITE_UNSATISFIED, EVIDENCE_REQUIRED, EVIDENCE_REVIEW_PENDING, EVIDENCE_RETURNED, RESOURCE_REQUIRED, RESOURCE_CONFLICT, PROCESS_SUSPENDED, PROCESS_CANCELLED, POLICY_DENIED, GATE_PROVIDER_UNAVAILABLE]
+    ProviderKey:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
     GateProviderStatus:
       type: string
       enum: [READY, UNAVAILABLE, STALE]
@@ -1197,7 +1202,7 @@ components:
         severity: { $ref: "#/components/schemas/BlockerSeverity" }
         sourceType: { type: string, enum: [TASK, EVIDENCE, RESOURCE, PROCESS, POLICY, PROVIDER] }
         sourceId: { type: string, format: uuid }
-        providerKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        providerKey: { $ref: "#/components/schemas/ProviderKey" }
         createdAt: { type: string, format: date-time }
         resolvedAt: { type: string, format: date-time }
     TaskSummary: &taskSummary
@@ -1392,7 +1397,7 @@ components:
         correlationId: { type: string, format: uuid }
         detail: { type: string, minLength: 0, maxLength: 4096 }
         currentVersion: { $ref: "#/components/schemas/SafeVersion" }
-        providerKeys: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" } }
+        providerKeys: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/ProviderKey" } }
     TaskBlockedProblem:
       type: object
       additionalProperties: false
