@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   parseServerProfile,
@@ -16,6 +16,16 @@ function memoryPersistence(initial?: unknown) {
     },
     current: () => value,
   };
+}
+
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("server profile validation", () => {
@@ -294,6 +304,131 @@ describe("profile store", () => {
     await expect(store.remove(profile.id)).rejects.toThrow("disk full");
     await expect(store.list()).resolves.toEqual([profile]);
     expect(store.selected()).toEqual(profile);
+  });
+
+  it("serializes concurrent saves against the latest committed state", async () => {
+    const writes: unknown[] = [];
+    const firstWrite = deferred();
+    const secondWrite = deferred();
+    const gates = [firstWrite, secondWrite];
+    const store = await createProfileStore({
+      read: async () => undefined,
+      write: async (value) => {
+        writes.push(structuredClone(value));
+        return gates[writes.length - 1]!.promise;
+      },
+      packaged: true,
+    });
+
+    const firstSave = store.save({ name: "First", origin: "https://first.test" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const secondSave = store.save({
+      name: "Second",
+      origin: "https://second.test",
+    });
+    await Promise.resolve();
+    expect(writes).toHaveLength(1);
+
+    firstWrite.resolve();
+    await firstSave;
+    await vi.waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({
+      profiles: [
+        expect.objectContaining({ name: "First" }),
+        expect.objectContaining({ name: "Second" }),
+      ],
+      selectedId: null,
+    });
+    secondWrite.resolve();
+    await secondSave;
+  });
+
+  it("serializes select and remove without losing the selected profile", async () => {
+    const first = parseServerProfile(
+      { name: "First", origin: "https://first.test" },
+      true,
+    );
+    const second = parseServerProfile(
+      { name: "Second", origin: "https://second.test" },
+      true,
+    );
+    const firstWrite = deferred();
+    const secondWrite = deferred();
+    const writes: unknown[] = [];
+    const gates = [firstWrite, secondWrite];
+    const store = await createProfileStore({
+      read: async () => ({ profiles: [first, second], selectedId: first.id }),
+      write: async (value) => {
+        writes.push(structuredClone(value));
+        return gates[writes.length - 1]!.promise;
+      },
+      packaged: true,
+    });
+
+    const selecting = store.select(second.id);
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const removing = store.remove(first.id);
+    await Promise.resolve();
+    expect(writes).toHaveLength(1);
+
+    firstWrite.resolve();
+    await selecting;
+    await vi.waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({ profiles: [second], selectedId: second.id });
+    secondWrite.resolve();
+    await removing;
+    expect(store.selected()).toEqual(second);
+  });
+
+  it("continues queued mutations after a persistence failure", async () => {
+    const failedWrite = deferred();
+    const successfulWrite = deferred();
+    const writes: unknown[] = [];
+    const gates = [failedWrite, successfulWrite];
+    const store = await createProfileStore({
+      read: async () => undefined,
+      write: async (value) => {
+        writes.push(structuredClone(value));
+        return gates[writes.length - 1]!.promise;
+      },
+      packaged: true,
+    });
+
+    const failedSave = store.save({ name: "Failed", origin: "https://failed.test" });
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    const successfulSave = store.save({
+      name: "Successful",
+      origin: "https://successful.test",
+    });
+    await Promise.resolve();
+    expect(writes).toHaveLength(1);
+
+    failedWrite.reject(new Error("disk full"));
+    await expect(failedSave).rejects.toThrow("disk full");
+    await vi.waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({
+      profiles: [expect.objectContaining({ name: "Successful" })],
+      selectedId: null,
+    });
+    successfulWrite.resolve();
+    await successfulSave;
+    await expect(store.list()).resolves.toEqual([
+      expect.objectContaining({ name: "Successful" }),
+    ]);
+  });
+
+  it("fails safe when persisted profiles contain duplicate ids", async () => {
+    const profile = parseServerProfile(
+      { name: "Pilot", origin: "https://occ.test" },
+      true,
+    );
+    const persistence = memoryPersistence({
+      profiles: [profile, { ...profile, name: "Duplicate" }],
+      selectedId: null,
+    });
+    const store = await createProfileStore({ ...persistence, packaged: true });
+
+    await expect(store.list()).resolves.toEqual([]);
   });
 
   it.each([

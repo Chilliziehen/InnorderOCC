@@ -13,6 +13,11 @@ const persistedProfilesSchema = z
   })
   .strict()
   .refine(
+    ({ profiles }) =>
+      new Set(profiles.map(({ id }) => id)).size === profiles.length,
+    { message: "Profile ids must be unique" },
+  )
+  .refine(
     ({ profiles, selectedId }) =>
       selectedId === null || profiles.some(({ id }) => id === selectedId),
     { message: "Selected profile does not exist" },
@@ -46,6 +51,7 @@ export async function createProfileStore({
   const loaded = persistedProfilesSchema.safeParse(await read());
   let profiles: ServerProfile[] = [];
   let selectedId: string | null = null;
+  let mutationQueue = Promise.resolve();
 
   if (loaded.success) {
     try {
@@ -67,6 +73,15 @@ export async function createProfileStore({
       selectedId: candidateSelectedId,
     });
 
+  const enqueueMutation = <T>(mutation: () => Promise<T>): Promise<T> => {
+    const result = mutationQueue.then(mutation);
+    mutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
   return {
     async list() {
       return profiles.map(copyProfile);
@@ -74,38 +89,45 @@ export async function createProfileStore({
 
     async save(input) {
       const profile = parseServerProfile(input, packaged, allowDevelopmentHttp);
-      const existingIndex = input.id
-        ? profiles.findIndex(({ id }) => id === input.id)
-        : -1;
+      const isUpdate = input.id !== undefined;
+      return enqueueMutation(async () => {
+        const existingIndex = isUpdate
+          ? profiles.findIndex(({ id }) => id === profile.id)
+          : -1;
 
-      if (input.id && existingIndex === -1) {
-        throw new Error(`Unknown profile: ${input.id}`);
-      }
-      const candidateProfiles = [...profiles];
-      if (existingIndex === -1) {
-        candidateProfiles.push(profile);
-      } else {
-        candidateProfiles[existingIndex] = profile;
-      }
-      await persist(candidateProfiles, selectedId);
-      profiles = candidateProfiles;
-      return copyProfile(profile);
+        if (isUpdate && existingIndex === -1) {
+          throw new Error(`Unknown profile: ${profile.id}`);
+        }
+        const candidateProfiles = [...profiles];
+        if (existingIndex === -1) {
+          candidateProfiles.push(profile);
+        } else {
+          candidateProfiles[existingIndex] = profile;
+        }
+        await persist(candidateProfiles, selectedId);
+        profiles = candidateProfiles;
+        return copyProfile(profile);
+      });
     },
 
     async select(id) {
-      if (!profiles.some((profile) => profile.id === id)) {
-        throw new Error(`Unknown profile: ${id}`);
-      }
-      await persist(profiles, id);
-      selectedId = id;
+      return enqueueMutation(async () => {
+        if (!profiles.some((profile) => profile.id === id)) {
+          throw new Error(`Unknown profile: ${id}`);
+        }
+        await persist(profiles, id);
+        selectedId = id;
+      });
     },
 
     async remove(id) {
-      const candidateProfiles = profiles.filter((profile) => profile.id !== id);
-      const candidateSelectedId = selectedId === id ? null : selectedId;
-      await persist(candidateProfiles, candidateSelectedId);
-      profiles = candidateProfiles;
-      selectedId = candidateSelectedId;
+      return enqueueMutation(async () => {
+        const candidateProfiles = profiles.filter((profile) => profile.id !== id);
+        const candidateSelectedId = selectedId === id ? null : selectedId;
+        await persist(candidateProfiles, candidateSelectedId);
+        profiles = candidateProfiles;
+        selectedId = candidateSelectedId;
+      });
     },
 
     selected() {
