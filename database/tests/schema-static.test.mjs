@@ -769,3 +769,14 @@ test('releases append-only legal holds through ordered bounded locking', () => {
   assert.match(live, /released hold was concurrently reactivated/iu);
   assert.match(live, /release-cleanup/iu);
 });
+
+test('retrofits optimistic versioning onto AI model profiles in V015', () => {
+  const v007 = readMigration('V007__ai_rag.sql');
+  const v015 = readMigration('V015__governed_ai_runtime.sql');
+  const originalProfile = v007.match(/CREATE TABLE ai\.model_profile\s*\([\s\S]*?\n\);/iu)?.[0] ?? '';
+  assert.doesNotMatch(originalProfile, /\brow_version\b|\bupdated_at\b/iu);
+  assert.match(v015, /ALTER TABLE ai\.model_profile[\s\S]*ADD COLUMN row_version bigint NOT NULL DEFAULT 0 CHECK \(row_version >= 0\)[\s\S]*ADD COLUMN updated_at timestamptz NOT NULL DEFAULT statement_timestamp\(\)/iu);
+  assert.match(v015, /CREATE TRIGGER trg_model_profile_touch[\s\S]*BEFORE UPDATE ON ai\.model_profile[\s\S]*EXECUTE FUNCTION platform\.touch_updated_at\(\)/iu);
+  assert.equal((v015.match(/CREATE TRIGGER trg_model_profile_touch/giu) ?? []).length, 1,
+    'model profiles must have exactly one row-version increment trigger');
+});

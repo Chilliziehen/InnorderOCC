@@ -425,6 +425,14 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     'CREATE TABLE ai.forbidden (id integer);',
   ]) expectAiFailure(sql, /permission denied/iu);
   assert.match(execAiSql(`SELECT provider_type FROM ai.model_provider WHERE id = '${id('000000000006')}';`), /TEST/iu);
+  assert.equal(execSql(`UPDATE ai.model_profile SET timeout_ms = 1500
+    WHERE id = '${id('000000000080')}' AND row_version = 0
+    RETURNING row_version || '|' || (updated_at > created_at);`, { role: 'innorder_runtime' }), '1|true\nUPDATE 1');
+  assert.equal(execSql(`UPDATE ai.model_profile SET timeout_ms = 2000
+    WHERE id = '${id('000000000080')}' AND row_version = 0 RETURNING id;`,
+  { role: 'innorder_runtime' }), 'UPDATE 0');
+  assert.equal(execSql(`SELECT timeout_ms || '|' || row_version FROM ai.model_profile
+    WHERE id = '${id('000000000080')}';`, { role: 'innorder_runtime' }), '1500|1');
 
   const revision = Number(execSql('SELECT current_revision FROM authz.authorization_state WHERE singleton;'));
   const sqlText = (value) => value === null ? 'NULL' : `'${value}'`;

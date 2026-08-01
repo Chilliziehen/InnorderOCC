@@ -203,6 +203,47 @@ console.log('passed V011 legacy account failure-window backfill');
 await applyMigration('V012__outbox_publisher_lifecycle.sql');
 await applyMigration('V015__governed_ai_runtime.sql');
 
+await db.exec(`
+  INSERT INTO ai.model_provider
+    (id, provider_type, base_url, secret_ref, capabilities, data_policy, state)
+  VALUES ('90000000-0000-7000-8000-000000000005', 'TEST', 'https://invalid.test',
+          'test-secret', '{}'::jsonb, '{}'::jsonb, 'ACTIVE');
+  INSERT INTO ai.model_profile
+    (id, provider_id, model_key, purpose, parameters, capability_snapshot, timeout_ms,
+     rate_limit, cost_rule, state)
+  VALUES ('90000000-0000-7000-8000-000000000040', '90000000-0000-7000-8000-000000000005',
+          'versioned-model', 'CHAT', '{}'::jsonb, '{}'::jsonb, 1000, '{}'::jsonb, '{}'::jsonb, 'ACTIVE');
+`);
+const profileUpdate = await db.query(`
+  UPDATE ai.model_profile
+  SET timeout_ms = 2000
+  WHERE id = '90000000-0000-7000-8000-000000000040' AND row_version = 0
+  RETURNING row_version::text, updated_at > created_at AS timestamp_advanced
+`);
+if (profileUpdate.rows.length !== 1
+    || profileUpdate.rows[0].row_version !== '1'
+    || !profileUpdate.rows[0].timestamp_advanced) {
+  throw new Error('model profile expected-version update did not advance exactly once');
+}
+const staleProfileUpdate = await db.query(`
+  UPDATE ai.model_profile
+  SET timeout_ms = 3000
+  WHERE id = '90000000-0000-7000-8000-000000000040' AND row_version = 0
+  RETURNING id
+`);
+const persistedProfile = await db.query(`
+  SELECT timeout_ms, row_version::text
+  FROM ai.model_profile
+  WHERE id = '90000000-0000-7000-8000-000000000040'
+`);
+if (staleProfileUpdate.rows.length !== 0
+    || persistedProfile.rows.length !== 1
+    || persistedProfile.rows[0].timeout_ms !== 2000
+    || persistedProfile.rows[0].row_version !== '1') {
+  throw new Error('stale model profile expected version did not conflict');
+}
+console.log('passed model profile optimistic version coverage');
+
 for (const relation of [
   'authz.ai_authorization_grant',
   'authz.ai_authorized_document',

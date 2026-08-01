@@ -1,3 +1,11 @@
+ALTER TABLE ai.model_profile
+    ADD COLUMN row_version bigint NOT NULL DEFAULT 0 CHECK (row_version >= 0),
+    ADD COLUMN updated_at timestamptz NOT NULL DEFAULT statement_timestamp();
+
+CREATE TRIGGER trg_model_profile_touch
+BEFORE UPDATE ON ai.model_profile
+FOR EACH ROW EXECUTE FUNCTION platform.touch_updated_at();
+
 CREATE TABLE authz.ai_authorization_grant (
     id uuid PRIMARY KEY,
     token_hash text NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
