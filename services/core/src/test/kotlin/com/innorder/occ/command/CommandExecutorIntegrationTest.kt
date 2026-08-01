@@ -42,6 +42,7 @@ import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.sql.SQLException
 
 @Testcontainers(disabledWithoutDocker = true)
 class CommandExecutorIntegrationTest {
@@ -55,7 +56,12 @@ class CommandExecutorIntegrationTest {
     @BeforeEach
     fun reset() {
         jdbc = JdbcTemplate(runtimeDataSource())
-        jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", AGGREGATE_ID)
+        jdbc.update(
+            "DELETE FROM audit.outbox_event WHERE aggregate_id IN (?, ?, ?)",
+            AGGREGATE_ID,
+            SECOND_AGGREGATE_ID,
+            CREATED_AGGREGATE_ID,
+        )
         JdbcTemplate(adminDataSource()).execute("TRUNCATE audit.audit_record")
         jdbc.update("DELETE FROM audit.idempotency_record WHERE principal_id = ?", PRINCIPAL_ID)
         jdbc.update("DELETE FROM occ.command_kernel_test")
@@ -280,6 +286,12 @@ class CommandExecutorIntegrationTest {
             @Suppress("UNCHECKED_CAST")
             (capturedCreated as MutableSet<AggregateReference>).clear()
         }.isInstanceOf(UnsupportedOperationException::class.java)
+    }
+
+    @Test
+    fun `created aggregate advisory key uses stable sha256 signed64 mapping`() {
+        assertThat(AggregateLockRegistry.advisoryLockKey(AggregateReference("kernel-created", CREATED_AGGREGATE_ID)))
+            .isEqualTo(532_315_003_273_509_880L)
     }
 
     @Test
@@ -757,6 +769,7 @@ class CommandExecutorIntegrationTest {
             override val lockPlan = AggregateLockPlan(existing = listOf(primary), created = listOf(created))
 
             override fun execute(context: CommandContext): CommandMutation {
+                assertThat(advisoryLockAvailable(AggregateLockRegistry.advisoryLockKey(created))).isFalse()
                 context.jdbc.update(
                     "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
                     AGGREGATE_ID,
@@ -810,6 +823,85 @@ class CommandExecutorIntegrationTest {
             Long::class.java,
             CREATED_AGGREGATE_ID,
         )).isEqualTo(1)
+    }
+
+    @Test
+    fun `opposite created plans reserve before handlers and resolve as success plus unique conflict without deadlock`() {
+        val firstRef = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
+        val secondRef = AggregateReference("kernel-created", SECOND_AGGREGATE_ID)
+        val handlerEntries = AtomicInteger()
+        val firstHandlerEntered = CountDownLatch(1)
+        val secondHandlerEntered = CountDownLatch(1)
+        val releaseFirstHandler = CountDownLatch(1)
+        fun createCommand(created: List<AggregateReference>) = object : AuthorizedCommand {
+            override val action = "test.create"
+            override val entityId = ENTITY_ID
+            override val resourceId = RESOURCE_ID
+            override val aggregateType = firstRef.type
+            override val aggregateId = firstRef.id
+            override val expectedVersionRequired = false
+            override val changesAuthorizationFacts = false
+            override val lockPlan = AggregateLockPlan(created = created)
+
+            override fun execute(context: CommandContext): CommandMutation {
+                when (handlerEntries.incrementAndGet()) {
+                    1 -> {
+                        firstHandlerEntered.countDown()
+                        check(releaseFirstHandler.await(10, TimeUnit.SECONDS))
+                    }
+                    2 -> secondHandlerEntered.countDown()
+                }
+                created.forEach { reference ->
+                    context.jdbc.update(
+                        "INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'created-race', 1)",
+                        reference.id,
+                    )
+                }
+                return CommandMutation(
+                    200,
+                    json("""{"result":"created"}"""),
+                    RESOURCE_ID,
+                    created.map { AggregateChange(it, 0, 1) },
+                    "created race",
+                    json("{}"),
+                    created.map { PendingEventSpec("kernel-created.race-created", 1, json("{}"), it, 1) },
+                )
+            }
+        }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val first = pool.submit<Any> {
+                runCatching {
+                    executor.execute(
+                        metadata("created-race-a").copy(expectedVersion = null),
+                        "{}".toByteArray(),
+                        createCommand(listOf(firstRef, secondRef)),
+                    )
+                }.getOrElse { it }
+            }
+            assertThat(firstHandlerEntered.await(10, TimeUnit.SECONDS)).isTrue()
+            val second = pool.submit<Any> {
+                runCatching {
+                    executor.execute(
+                        metadata("created-race-b").copy(expectedVersion = null),
+                        "{}".toByteArray(),
+                        createCommand(listOf(secondRef, firstRef)),
+                    )
+                }.getOrElse { it }
+            }
+
+            assertThat(secondHandlerEntered.await(750, TimeUnit.MILLISECONDS)).isFalse()
+            releaseFirstHandler.countDown()
+            val outcomes = listOf(first.get(15, TimeUnit.SECONDS), second.get(15, TimeUnit.SECONDS))
+            assertThat(outcomes.count { it is CommandResult }).isEqualTo(1)
+            val failure = outcomes.filterIsInstance<Throwable>().single()
+            assertThat(generateSequence(failure) { it.cause }.filterIsInstance<SQLException>().first().sqlState)
+                .isEqualTo("23505")
+        } finally {
+            releaseFirstHandler.countDown()
+            pool.shutdownNow()
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
+        }
     }
 
     @Test
@@ -1080,6 +1172,12 @@ class CommandExecutorIntegrationTest {
     )
 
     private fun primaryRef() = AggregateReference("kernel-test", AGGREGATE_ID)
+
+    private fun advisoryLockAvailable(key: Long): Boolean = JdbcTemplate(runtimeDataSource()).queryForObject(
+        "SELECT pg_try_advisory_lock(?)",
+        Boolean::class.java,
+        key,
+    )!!
 
     private fun insertIdempotencyFixture(
         key: String,

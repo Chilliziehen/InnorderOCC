@@ -2,6 +2,9 @@ package com.innorder.occ.command
 
 import org.springframework.jdbc.core.JdbcOperations
 import org.springframework.stereotype.Component
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.Collections
 import java.util.UUID
 
@@ -47,15 +50,24 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
     }
 
     internal fun acquire(jdbc: JdbcOperations, plan: AggregateLockPlan): AcquiredAggregateLocks {
-        val ordered = plan.existing.sortedWith(
+        val existing = plan.existing.toSet()
+        val ordered = (plan.existing + plan.created).sortedWith(
             compareBy<AggregateReference>({ resolversByType.getValue(it.type).order }, { it.id.toString() }, { it.type }),
         )
         val versions = linkedMapOf<AggregateReference, Long>()
         ordered.forEach { reference ->
-            val version = resolversByType.getValue(reference.type).lock(jdbc, reference.id)
-                ?: throw InvalidCommandRequestException()
-            if (version !in 0..CommandExecutor.MAX_SAFE_INTEGER) throw InvalidCommandRequestException()
-            versions[reference] = version
+            if (reference in existing) {
+                val version = resolversByType.getValue(reference.type).lock(jdbc, reference.id)
+                    ?: throw InvalidCommandRequestException()
+                if (version !in 0..CommandExecutor.MAX_SAFE_INTEGER) throw InvalidCommandRequestException()
+                versions[reference] = version
+            } else {
+                jdbc.queryForObject(
+                    "SELECT pg_advisory_xact_lock(?)",
+                    { _, _ -> Unit },
+                    advisoryLockKey(reference),
+                )
+            }
         }
         return AcquiredAggregateLocks(
             Collections.unmodifiableMap(versions),
@@ -80,4 +92,11 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
     private fun valid(reference: AggregateReference): Boolean =
         CommandExecutor.ACTION.matches(reference.type) && reference.id != UUID(0, 0) &&
             reference.id.version() in 1..8 && reference.id.variant() == 2
+
+    companion object {
+        internal fun advisoryLockKey(reference: AggregateReference): Long {
+            val identity = "${reference.type}\u0000${reference.id}".toByteArray(StandardCharsets.UTF_8)
+            return ByteBuffer.wrap(MessageDigest.getInstance("SHA-256").digest(identity)).long
+        }
+    }
 }
