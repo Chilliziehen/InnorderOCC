@@ -24,11 +24,11 @@ export function StatusBanner({ mode, lastFreshAt, retryAvailable = false, onRetr
   return (
     <div
       className={`status-banner connectivity-${mode}`}
-      role="status"
       aria-label="连接状态"
-      aria-live="polite"
     >
-      <strong>{state}</strong>
+      <span role="status" aria-label="连接状态更新" aria-live="polite">
+        <strong>{state}</strong>
+      </span>
       <span>数据距上次更新 {age}</span>
       {mode !== "authenticated" ? (
         <span className="mutation-lock">{mode === "offline" ? "只读模式，更改操作已锁定" : "更改操作已锁定"}</span>

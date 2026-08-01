@@ -390,6 +390,39 @@ describe("application state", () => {
     expect(freshnessAgeMs(online, 20_000)).toBe(19_000);
   });
 
+  it("refreshes authenticated telemetry freshness on repeated scoped healthy polls", () => {
+    const online = onlineState();
+    const first = reduceAppState(online, {
+      type: "STATUS_REACHABLE",
+      profileId: profileA.id,
+      generation: online.sessionGeneration,
+      at: 2_000,
+    });
+    const second = reduceAppState(first, {
+      type: "STATUS_REACHABLE",
+      profileId: profileA.id,
+      generation: online.sessionGeneration,
+      at: 5_000,
+    });
+
+    expect(first).toMatchObject({ mode: "authenticated", lastFreshAt: 2_000 });
+    expect(second).toMatchObject({ mode: "authenticated", lastFreshAt: 5_000 });
+  });
+
+  it("keeps a healthy telemetry poll locked until reconnect session validation", () => {
+    const reconnecting = reconnectingState();
+    const healthy = reduceAppState(reconnecting, {
+      type: "STATUS_REACHABLE",
+      profileId: profileA.id,
+      generation: reconnecting.sessionGeneration,
+      at: 10_000,
+    });
+
+    expect(healthy).toBe(reconnecting);
+    expect(healthy).toMatchObject({ mode: "reconnecting", lastFreshAt: 1_000 });
+    expect(canMutate(healthy, "processes.start")).toBe(false);
+  });
+
   it("clears session and cached identity when the profile changes or is removed", () => {
     const selected = reduceAppState(onlineState(), {
       type: "PROFILE_SELECTED",

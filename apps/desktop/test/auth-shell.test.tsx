@@ -302,15 +302,26 @@ describe("authenticated shell", () => {
 
   it("shows exact stale connectivity states and mutation lockout", () => {
     const { rerender } = render(<StatusBanner mode="authenticated" lastFreshAt={Date.now() - 4_000} />);
-    expect(screen.getByRole("status")).toHaveTextContent(/在线.*4 秒/);
+    expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/在线.*4 秒/);
 
     rerender(<StatusBanner mode="reconnecting" lastFreshAt={Date.now() - 65_000} />);
-    expect(screen.getByRole("status")).toHaveTextContent(/正在重新连接.*1 分钟/);
-    expect(screen.getByRole("status")).toHaveTextContent("更改操作已锁定");
+    expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/正在重新连接.*1 分钟/);
+    expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent("更改操作已锁定");
 
     rerender(<StatusBanner mode="offline" lastFreshAt={Date.now() - 125_000} />);
-    expect(screen.getByRole("status")).toHaveTextContent(/离线.*2 分钟/);
-    expect(screen.getByRole("status")).toHaveTextContent("只读");
+    expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/离线.*2 分钟/);
+    expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent("只读");
+  });
+
+  it("keeps changing freshness age outside the connectivity live region", () => {
+    const { rerender } = render(<StatusBanner mode="authenticated" lastFreshAt={Date.now() - 4_000} />);
+    const announcement = screen.getByRole("status", { name: "连接状态更新" });
+    expect(announcement).toHaveTextContent("在线");
+    expect(announcement).not.toHaveTextContent(/数据距上次更新|秒/);
+    expect(screen.getByText(/数据距上次更新/)).not.toHaveAttribute("aria-live");
+
+    rerender(<StatusBanner mode="authenticated" lastFreshAt={Date.now() - 8_000} />);
+    expect(screen.getByRole("status", { name: "连接状态更新" })).toHaveTextContent(/^在线$/);
   });
 });
 
@@ -392,7 +403,7 @@ describe("application controller", () => {
     await screen.findByRole("heading", { name: "运行总览" });
 
     fireEvent(window, new Event("offline"));
-    await waitFor(() => expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent(/离线.*只读/));
+    await waitFor(() => expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/离线.*只读/));
   });
 
   it("moves stale when polling reports Core unreachable", async () => {
@@ -414,7 +425,7 @@ describe("application controller", () => {
     render(<App />);
 
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent(/离线.*只读/);
+      expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/离线.*只读/);
     });
     expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("不可达");
   });
@@ -485,12 +496,12 @@ describe("application controller", () => {
     fireEvent(window, new Event("offline"));
     fireEvent(window, new Event("online"));
     const retry = await screen.findByRole("button", { name: /重试连接/ });
-    expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent(/重新连接.*锁定/);
+    expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/重新连接.*锁定/);
     await new Promise((resolve) => window.setTimeout(resolve, 25));
     expect(restore).toHaveBeenCalledTimes(2);
 
     fireEvent.click(retry);
-    await waitFor(() => expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent("在线"));
+    await waitFor(() => expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent("在线"));
     expect(restore).toHaveBeenCalledTimes(3);
     expect(document.body).not.toHaveTextContent("offline secret");
   });

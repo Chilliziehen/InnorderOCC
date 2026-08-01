@@ -298,9 +298,11 @@ export function reduceAppState(state: AppState, event: AppEvent): AppState {
         ? reduceAppState(state, { type: "OFFLINE", at: event.at })
         : state;
     case "STATUS_REACHABLE":
-      return matchesCurrentSession(state, event)
-        ? reduceAppState(state, { type: "ONLINE", at: event.at })
-        : state;
+      if (!matchesCurrentSession(state, event)) return state;
+      if (state.mode === "authenticated") {
+        return { ...state, lastFreshAt: event.at };
+      }
+      return reduceAppState(state, { type: "ONLINE", at: event.at });
     case "ROUTE_CHANGED":
       return { ...state, route: event.route };
     default:
