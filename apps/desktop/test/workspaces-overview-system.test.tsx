@@ -144,8 +144,11 @@ describe("Overview", () => {
     expect(tabs[0]).toHaveAttribute("aria-selected", "true");
     expect(tabs[0]).toHaveAttribute("tabindex", "0");
     expect(tabs[1]).toHaveAttribute("tabindex", "-1");
-    expect(tabs[0]).toHaveAttribute("aria-controls", "overview-panel-attention");
+    expect(tabs[0]).toHaveAttribute("aria-controls", "overview-panel");
     expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "overview-tab-attention");
+    for (const tab of tabs) {
+      expect(document.getElementById(tab.getAttribute("aria-controls")!)).toBeInTheDocument();
+    }
 
     tabs[0]!.focus();
     fireEvent.keyDown(tabs[0]!, { key: "ArrowRight" });
@@ -213,7 +216,10 @@ describe("SystemOperations", () => {
     expect(tabs[2]).toHaveFocus();
     expect(onTabChange).toHaveBeenCalledWith("delivery");
     expect(tabs[0]).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tabpanel")).toHaveAttribute("id", "system-panel-services");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("id", "system-panel");
+    for (const tab of tabs) {
+      expect(document.getElementById(tab.getAttribute("aria-controls")!)).toBeInTheDocument();
+    }
   });
 
   it("renders only validated ISO configuration freshness", () => {

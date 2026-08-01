@@ -47,6 +47,76 @@ describe("Administration", () => {
     {...overrides}
   />);
 
+  const expectTabControlsToResolve = () => {
+    for (const tab of screen.getAllByRole("tab")) {
+      const panelId = tab.getAttribute("aria-controls");
+      expect(panelId).toBeTruthy();
+      expect(document.getElementById(panelId!)).toBeInTheDocument();
+    }
+  };
+
+  it("resolves every tab control to the active panel", () => {
+    renderAdministration();
+    expectTabControlsToResolve();
+    fireEvent.click(screen.getByRole("tab", { name: "智能服务" }));
+    expectTabControlsToResolve();
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("智能服务");
+  });
+
+  it("renders labelled, tab-specific administration fields", () => {
+    renderAdministration();
+    expect(screen.getByLabelText("人员姓名")).toBeInTheDocument();
+    expect(screen.getByLabelText("人员邮箱")).toBeInTheDocument();
+    expect(screen.getByLabelText("停用人员 ID")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "关系" }));
+    expect(screen.getByLabelText("关系主体 ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("关系对象 ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("关系类型")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "角色" }));
+    expect(screen.getByLabelText("人员 ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("角色 ID")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "策略发布" }));
+    expect(screen.getByLabelText("策略发布 ID")).toBeInTheDocument();
+    expect(screen.getByLabelText("策略版本")).toBeInTheDocument();
+    expect(screen.getByLabelText("已批准发布")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "智能服务" }));
+    expect(screen.getByLabelText("服务地址")).toHaveAttribute("type", "url");
+    expect(screen.getByLabelText("服务密钥")).toHaveAttribute("type", "password");
+
+    fireEvent.click(screen.getByRole("tab", { name: "知识" }));
+    expect(screen.getByLabelText("上传引用")).toBeInTheDocument();
+    expect(screen.getByLabelText("知识目标")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "保留策略" }));
+    expect(screen.getByLabelText("保留天数")).toBeInTheDocument();
+    expect(screen.getByLabelText("法律保留")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "审计" }));
+    expect(screen.getByLabelText("审计目标")).toBeInTheDocument();
+  });
+
+  it("rejects non-HTTPS provider configuration and clears secrets when leaving the tab", () => {
+    const onExecute = vi.fn(execute);
+    renderAdministration({ capabilities: ["providers.manage"], onExecute });
+    fireEvent.click(screen.getByRole("tab", { name: "智能服务" }));
+    fireEvent.change(screen.getByLabelText("服务配置 ID"), { target: { value: "provider-1" } });
+    fireEvent.change(screen.getByLabelText("服务地址"), { target: { value: "http://provider.example.com" } });
+    fireEvent.change(screen.getByLabelText("服务模型"), { target: { value: "model-1" } });
+    fireEvent.change(screen.getByLabelText("服务密钥"), { target: { value: "raw-provider-secret" } });
+    fireEvent.submit(within(screen.getByRole("region", { name: "测试智能服务操作" })).getByRole("button", { name: "测试智能服务" }).closest("form")!);
+    expect(onExecute).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("HTTPS");
+    expect(document.body).not.toHaveTextContent("raw-provider-secret");
+
+    fireEvent.click(screen.getByRole("tab", { name: "审计" }));
+    fireEvent.click(screen.getByRole("tab", { name: "智能服务" }));
+    expect(screen.getByLabelText("服务密钥")).toHaveValue("");
+  });
+
   it("exposes the approved administration tabs and their named controls", () => {
     renderAdministration();
     const tabs = screen.getByRole("tablist", { name: "管理分类" });
@@ -116,6 +186,31 @@ describe("Settings", () => {
     onRemove: vi.fn(async (_id: string): Promise<void> => undefined),
     onPreferencesChange: vi.fn(async (_preferences: { theme: string; reducedMotion: boolean }): Promise<void> => undefined),
     onLogout: vi.fn(async (): Promise<void> => undefined),
+  });
+
+  it("resolves every settings tab control to the active panel", () => {
+    const handlers = callbacks();
+    render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
+    for (const tab of screen.getAllByRole("tab")) {
+      expect(document.getElementById(tab.getAttribute("aria-controls")!)).toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByRole("tab", { name: "会话" }));
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("会话");
+  });
+
+  it("strictly blocks invalid forced profile submissions and sends normalized valid input", () => {
+    const handlers = callbacks();
+    render(<Settings profiles={[]} current={null} connectivity="online" {...handlers} />);
+    fireEvent.submit(screen.getByRole("form", { name: "编辑服务器配置" }));
+    expect(handlers.onSave).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "  Pilot  " } });
+    fireEvent.change(screen.getByLabelText("服务器源地址"), { target: { value: "https://pilot.example.com/" } });
+    fireEvent.submit(screen.getByRole("form", { name: "编辑服务器配置" }));
+    expect(handlers.onSave).toHaveBeenCalledWith(expect.objectContaining({
+      name: "Pilot",
+      origin: "https://pilot.example.com/",
+    }));
   });
 
   it("selects and edits profiles through explicit callbacks", async () => {

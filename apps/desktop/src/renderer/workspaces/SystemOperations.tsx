@@ -69,7 +69,7 @@ function WorkspaceTabs({ definition, activeTab, label, onTabChange, children }: 
             type="button"
             role="tab"
             id={`${definition.id}-tab-${tab.id}`}
-            aria-controls={`${definition.id}-panel-${tab.id}`}
+            aria-controls={`${definition.id}-panel`}
             aria-selected={selected}
             tabIndex={selected ? 0 : -1}
             ref={(element) => { tabs.current[index] = element; }}
@@ -79,7 +79,7 @@ function WorkspaceTabs({ definition, activeTab, label, onTabChange, children }: 
           >{tab.label}</button>;
         })}
       </div>
-      {selectedTab ? <div role="tabpanel" id={`${definition.id}-panel-${selectedTab}`} aria-labelledby={`${definition.id}-tab-${selectedTab}`} tabIndex={0}>{children}</div> : null}
+      {selectedTab ? <div role="tabpanel" id={`${definition.id}-panel`} aria-labelledby={`${definition.id}-tab-${selectedTab}`} tabIndex={0}>{children}</div> : null}
     </>
   );
 }

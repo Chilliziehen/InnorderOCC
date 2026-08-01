@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
-import type { ProfileInput, ServerProfile } from "../../desktop-contract";
+import { profileInputSchema, type ProfileInput, type ServerProfile } from "../../desktop-contract";
 import { WORKSPACE_DEFINITIONS } from "./workspace-definitions";
 import type { WorkspaceConnectivity } from "./Administration";
 
@@ -51,6 +51,7 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
   const [reducedMotion, setReducedMotion] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [actionError, setActionError] = useState<ActionError>();
+  const [profileError, setProfileError] = useState("");
   const pendingActionRef = useRef<PendingAction | undefined>(undefined);
   const removalTriggerRef = useRef<HTMLButtonElement | undefined>(undefined);
   const confirmRemovalRef = useRef<HTMLButtonElement>(null);
@@ -93,14 +94,19 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
   const save = (event: FormEvent) => {
     event.preventDefault();
     if (!mutable || pendingActionRef.current) return;
-    const input: ProfileInput = {
+    const parsed = profileInputSchema.safeParse({
       ...(current ? { id: current.id } : {}),
       name,
       origin,
       environment,
       ...(fingerprint.trim() ? { caFingerprint: fingerprint } : {}),
-    };
-    void runAction("save", "无法保存服务器配置，请重试。", () => onSave(input));
+    });
+    if (!parsed.success) {
+      setProfileError("请填写有效的服务器配置");
+      return;
+    }
+    setProfileError("");
+    void runAction("save", "无法保存服务器配置，请重试。", () => onSave(parsed.data));
   };
   const changePreferences = (next: SettingsPreferences) => {
     if (!mutable || !preferencesAvailable) return;
@@ -142,7 +148,7 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
             type="button"
             role="tab"
             id={`settings-tab-${tab.id}`}
-            aria-controls={`settings-panel-${tab.id}`}
+            aria-controls="settings-panel"
             aria-selected={active.id === tab.id}
             tabIndex={active.id === tab.id ? 0 : -1}
             key={tab.id}
@@ -153,7 +159,7 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
           </button>
         ))}
         </div>
-        <div role="tabpanel" id={`settings-panel-${active.id}`} aria-labelledby={`settings-tab-${active.id}`}>
+        <div role="tabpanel" id="settings-panel" aria-labelledby={`settings-tab-${active.id}`}>
         {active.id === "profile" ? (
           <>
             <div aria-label="已保存的服务器配置">
@@ -173,6 +179,7 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
               <label>CA SHA-256 指纹<input disabled={!mutable} spellCheck={false} value={fingerprint} onChange={({ currentTarget }) => setFingerprint(currentTarget.value)} /></label>
               <button type="submit" disabled={!mutable || Boolean(pendingAction)}>{pendingAction === "save" ? "正在保存" : "保存配置"}</button>
             </form>
+            {profileError ? <p role="alert">{profileError}</p> : null}
             {actionError && actionError.action !== "remove" ? <p role="alert">{actionError.message}</p> : null}
           </>
         ) : null}
