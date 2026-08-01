@@ -57,10 +57,12 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
   const [profileError, setProfileError] = useState("");
   const pendingActionRef = useRef<PendingAction | undefined>(undefined);
   const removalTriggerRef = useRef<HTMLButtonElement | undefined>(undefined);
+  const removalDialogRef = useRef<HTMLDivElement>(null);
   const confirmRemovalRef = useRef<HTMLButtonElement>(null);
   const cancelRemovalRef = useRef<HTMLButtonElement>(null);
   const mutable = connectivity === "online";
   const preferencesAvailable = preferencesOperation.availability.state === "available";
+  const removing = pendingAction === "remove";
 
   useEffect(() => {
     setName(current?.name ?? "");
@@ -78,7 +80,7 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
 
   useEffect(() => {
     if (pendingRemoval) {
-      confirmRemovalRef.current?.focus();
+      (removing ? removalDialogRef.current : confirmRemovalRef.current)?.focus();
       return;
     }
     const trigger = removalTriggerRef.current;
@@ -89,7 +91,7 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
       if (document.activeElement === trigger) removalTriggerRef.current = undefined;
     });
     return () => cancelAnimationFrame(frame);
-  }, [modalIsolationActive, pendingRemoval]);
+  }, [modalIsolationActive, pendingRemoval, removing]);
 
   const runAction = async (action: PendingAction, message: string, callback: () => void | Promise<void>, onSuccess?: () => void) => {
     if (pendingActionRef.current) return;
@@ -141,6 +143,11 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
       return;
     }
     if (event.key !== "Tab") return;
+    if (pendingActionRef.current === "remove") {
+      event.preventDefault();
+      removalDialogRef.current?.focus();
+      return;
+    }
     if (event.shiftKey && document.activeElement === cancelRemovalRef.current) {
       event.preventDefault();
       confirmRemovalRef.current?.focus();
@@ -218,12 +225,12 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
       </div>
       {pendingRemoval ? createPortal(
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
-          <div role="dialog" aria-modal="true" aria-labelledby="remove-profile-title" onKeyDown={handleDialogKey}>
+          <div ref={removalDialogRef} role="dialog" aria-modal="true" aria-labelledby="remove-profile-title" tabIndex={-1} onKeyDown={handleDialogKey}>
           <h2 id="remove-profile-title">确认移除配置</h2>
           <p>{pendingRemoval.id === current?.id ? "这是当前选中的配置。移除后需要选择其他服务器。" : `将移除 ${pendingRemoval.name}。`}</p>
           {actionError?.action === "remove" ? <p role="alert">{actionError.message}</p> : null}
-          <button ref={cancelRemovalRef} type="button" disabled={pendingAction === "remove"} onClick={closeRemoval}>取消</button>
-          <button ref={confirmRemovalRef} type="button" disabled={!mutable || pendingAction === "remove"} onClick={() => { if (!mutable || pendingActionRef.current) return; void runAction("remove", "无法移除服务器配置，请重试。", () => onRemove(pendingRemoval.id), () => setPendingRemoval(undefined)); }}>{pendingAction === "remove" ? "正在移除" : "确认移除"}</button>
+          <button ref={cancelRemovalRef} type="button" disabled={removing} onClick={closeRemoval}>取消</button>
+          <button ref={confirmRemovalRef} type="button" disabled={!mutable || removing} onClick={() => { if (!mutable || pendingActionRef.current) return; void runAction("remove", "无法移除服务器配置，请重试。", () => onRemove(pendingRemoval.id), () => setPendingRemoval(undefined)); }}>{removing ? "正在移除" : "确认移除"}</button>
           </div>
         </div>
       , document.body) : null}

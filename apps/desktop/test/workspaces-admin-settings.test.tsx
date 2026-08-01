@@ -342,6 +342,33 @@ describe("Settings", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("keeps focus trapped while profile removal is pending", async () => {
+    const handlers = callbacks();
+    const removal = deferred<void>();
+    handlers.onRemove.mockReturnValue(removal.promise);
+    render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
+    fireEvent.click(screen.getByRole("button", { name: "移除 Pilot" }));
+    const confirm = screen.getByRole("button", { name: "确认移除" });
+    fireEvent.click(confirm);
+
+    const dialog = screen.getByRole("dialog", { name: "确认移除配置" });
+    expect(dialog).toHaveFocus();
+    expect(confirm).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(dialog).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(dialog).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(dialog).toBeInTheDocument();
+    fireEvent.click(confirm);
+    expect(handlers.onRemove).toHaveBeenCalledOnce();
+
+    removal.reject(new Error("remove failed"));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(confirm).toHaveFocus();
+  });
+
   it("manages modal focus, traps Tab, restores the trigger, and makes background inert", async () => {
     const handlers = callbacks();
     render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);
