@@ -42,16 +42,24 @@ class OutboxPublisher(
             }
             for (event in claimed) {
                 if (!beginSend(event)) break
-                val renewed = repository.renew(event)
-                if (renewed == null) {
-                    casLost++
-                    completeSend(event)
-                    continue
-                }
-                updateClaimToken(renewed)
-                var deliverySucceeded = false
-                val finalization = try {
-                    try {
+                try {
+                    val renewed = try {
+                        repository.renew(event)
+                    } catch (error: Exception) {
+                        try {
+                            repository.release(event)
+                        } catch (releaseError: Exception) {
+                            error.addSuppressed(releaseError)
+                        }
+                        throw error
+                    }
+                    if (renewed == null) {
+                        casLost++
+                        continue
+                    }
+                    updateClaimToken(renewed)
+                    var deliverySucceeded = false
+                    val finalization = try {
                         sender.publish(renewed.envelope())
                         deliverySucceeded = true
                         repository.succeed(renewed)
@@ -66,12 +74,12 @@ class OutboxPublisher(
                         failed++
                         repository.fail(renewed, FailureCategory.DELIVERY_FAILED)
                     }
+                    if (finalization == FinalizeResult.CAS_LOST) casLost++
+                    else if (deliverySucceeded) published++
+                    if (interrupted) break
                 } finally {
                     completeSend(event)
                 }
-                if (finalization == FinalizeResult.CAS_LOST) casLost++
-                else if (deliverySucceeded) published++
-                if (interrupted) break
             }
         } finally {
             try {

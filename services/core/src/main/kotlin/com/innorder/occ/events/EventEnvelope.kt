@@ -29,14 +29,15 @@ class EventEnvelope(
 
     init {
         if (!STABLE_TYPE.matches(type) || !STABLE_TYPE.matches(aggregateType)) invalid()
-        if (schemaVersion !in 1..MAX_SAFE_INTEGER || aggregateVersion !in 0..MAX_SAFE_INTEGER) invalid()
-        try {
+        if (schemaVersion !in 1..EventPayloadPolicy.MAX_SAFE_INTEGER ||
+            aggregateVersion !in 0..EventPayloadPolicy.MAX_SAFE_INTEGER
+        ) invalid()
+        val validatedPayload = try {
             EventPayloadPolicy.validate(payload)
         } catch (_: InvalidEventPayloadException) {
             invalid()
         }
-        if (payload !is ObjectNode || !validNumbers(payload)) invalid()
-        this.payload = sortObject(payload)
+        this.payload = sortObject(validatedPayload)
         bytes = serialize()
         if (bytes.size > MAX_MESSAGE_BYTES) invalid()
     }
@@ -60,7 +61,6 @@ class EventEnvelope(
     })
 
     companion object {
-        const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
         const val MAX_MESSAGE_BYTES = 256 * 1024
         private val STABLE_TYPE = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}${'$'}")
         private val MAPPER = ObjectMapper().findAndRegisterModules().apply {
@@ -82,16 +82,6 @@ class EventEnvelope(
             is ObjectNode -> sortObject(node)
             is ArrayNode -> MAPPER.createArrayNode().also { array -> node.forEach { array.add(sort(it)) } }
             else -> node.deepCopy<JsonNode>()
-        }
-
-        private fun validNumbers(node: JsonNode): Boolean {
-            return when {
-                node.isObject -> node.fields().asSequence().all { (_, value) -> validNumbers(value) }
-                node.isArray -> node.all(::validNumbers)
-                node.isIntegralNumber -> runCatching { node.longValue() in -MAX_SAFE_INTEGER..MAX_SAFE_INTEGER }.getOrDefault(false)
-                node.isFloatingPointNumber -> node.doubleValue().isFinite() && kotlin.math.abs(node.doubleValue()) <= MAX_SAFE_INTEGER
-                else -> true
-            }
         }
 
         private fun invalid(): Nothing = throw InvalidEventEnvelopeException()

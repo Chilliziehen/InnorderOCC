@@ -8,17 +8,20 @@ import java.text.Normalizer
 object EventPayloadPolicy {
     const val MAX_DEPTH = 32
     const val MAX_BYTES = 64 * 1024
+    const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
 
     private val mapper = ObjectMapper().findAndRegisterModules()
+    private val maxSafeInteger = MAX_SAFE_INTEGER.toBigInteger()
     private val sensitiveNames = setOf(
-        "password", "passphrase", "secret", "token", "authorization",
+        "password", "passwd", "passphrase", "secret", "token", "authorization",
         "cookie", "apikey", "credential", "privatekey",
     )
 
-    fun validate(payload: JsonNode, maxBytes: Int = MAX_BYTES) {
+    fun validate(payload: JsonNode, maxBytes: Int = MAX_BYTES): ObjectNode {
         if (payload !is ObjectNode || mapper.writeValueAsBytes(payload).size > maxBytes || !valid(payload, 0)) {
             throw InvalidEventPayloadException()
         }
+        return payload
     }
 
     fun sensitiveName(value: String): Boolean {
@@ -34,7 +37,9 @@ object EventPayloadPolicy {
             }
             node.isArray -> node.all { valid(it, depth + 1) }
             node.isTextual -> validText(node.textValue())
-            node.isNumber || node.isBoolean || node.isNull -> true
+            node.isIntegralNumber -> node.bigIntegerValue().abs() <= maxSafeInteger
+            node.isFloatingPointNumber -> node.doubleValue().let { it.isFinite() && kotlin.math.abs(it) <= MAX_SAFE_INTEGER }
+            node.isBoolean || node.isNull -> true
             else -> false
         }
     }

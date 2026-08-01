@@ -35,11 +35,11 @@ class EventEnvelopeTest {
     fun `rejects unstable types unsafe versions and messages over 256 KiB`() {
         assertThatThrownBy { envelope("{}", type = "bad type") }
             .isInstanceOf(InvalidEventEnvelopeException::class.java)
-        assertThatThrownBy { envelope("{}", aggregateVersion = EventEnvelope.MAX_SAFE_INTEGER + 1) }
+        assertThatThrownBy { envelope("{}", aggregateVersion = EventPayloadPolicy.MAX_SAFE_INTEGER + 1) }
             .isInstanceOf(InvalidEventEnvelopeException::class.java)
         assertThatThrownBy {
             EventEnvelope(
-                UUID.randomUUID(), UUID.randomUUID(), "order.updated", EventEnvelope.MAX_SAFE_INTEGER + 1,
+                UUID.randomUUID(), UUID.randomUUID(), "order.updated", EventPayloadPolicy.MAX_SAFE_INTEGER + 1,
                 "order", UUID.randomUUID(), 1, Instant.EPOCH, null, UUID.randomUUID(), null, JSON.readTree("{}"),
             )
         }.isInstanceOf(InvalidEventEnvelopeException::class.java)

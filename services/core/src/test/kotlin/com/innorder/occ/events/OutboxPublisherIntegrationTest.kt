@@ -1,15 +1,23 @@
 package com.innorder.occ.events
 
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.awaitility.Awaitility.await
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.MethodSource
+import org.junit.jupiter.params.provider.ValueSource
+import org.mockito.Mockito
+import org.mockito.Mockito.doThrow
+import org.mockito.Mockito.spy
 import org.postgresql.ds.PGSimpleDataSource
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
+import org.springframework.test.util.ReflectionTestUtils
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
@@ -141,6 +149,67 @@ class OutboxPublisherIntegrationTest {
         assertThat(deliveries[second]?.get()).isEqualTo(1)
         assertThat(status(first)).isEqualTo("PUBLISHED")
         assertThat(status(second)).isEqualTo("PUBLISHED")
+    }
+
+    @Test
+    fun `renew exception releases original claim and clears lifecycle before shutdown and new poll`() {
+        val id = insert(nextAttemptAt = Instant.now().minusSeconds(1))
+        val faultyRepository = spy(repository)
+        doThrow(IllegalStateException("renew unavailable"))
+            .`when`(faultyRepository).renew(anyValue())
+        val sends = AtomicInteger()
+        val publisher = OutboxPublisher(faultyRepository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties())
+
+        assertThatThrownBy(publisher::publishBatch).isInstanceOf(IllegalStateException::class.java)
+
+        assertThat(sends).hasValue(0)
+        assertThat(ReflectionTestUtils.getField(publisher, "activeEventId")).isNull()
+        assertThat(ReflectionTestUtils.getField(publisher, "outstanding") as Map<*, *>).isEmpty()
+        assertThat(admin.queryForMap("SELECT status, attempts FROM audit.outbox_event WHERE id = ?", id))
+            .containsEntry("status", "PENDING")
+            .containsEntry("attempts", 0)
+        publisher.shutdown()
+
+        val result = OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch()
+        assertThat(result.published).isEqualTo(1)
+        assertThat(sends).hasValue(1)
+        assertThat(status(id)).isEqualTo("PUBLISHED")
+    }
+
+    @Test
+    fun `renew and release exceptions clear lifecycle and leave claim for stale recovery only`() {
+        val id = insert(
+            nextAttemptAt = Instant.now().minusSeconds(1),
+            createdAt = Instant.now().minusSeconds(700),
+        )
+        val faultyRepository = spy(repository)
+        doThrow(IllegalStateException("renew unavailable"))
+            .`when`(faultyRepository).renew(anyValue())
+        doThrow(IllegalStateException("release unavailable"))
+            .`when`(faultyRepository).release(anyValue())
+        val sends = AtomicInteger()
+        val publisher = OutboxPublisher(faultyRepository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties())
+
+        assertThatThrownBy(publisher::publishBatch).isInstanceOf(IllegalStateException::class.java)
+
+        assertThat(sends).hasValue(0)
+        assertThat(ReflectionTestUtils.getField(publisher, "activeEventId")).isNull()
+        assertThat(ReflectionTestUtils.getField(publisher, "outstanding") as Map<*, *>).isEmpty()
+        assertThat(admin.queryForMap("SELECT status, attempts FROM audit.outbox_event WHERE id = ?", id))
+            .containsEntry("status", "PUBLISHING")
+            .containsEntry("attempts", 1)
+        publisher.shutdown()
+        assertThat(OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch().claimed)
+            .isZero()
+
+        admin.update(
+            "UPDATE audit.outbox_event SET claimed_at = statement_timestamp() - interval '6 minutes' WHERE id = ?",
+            id,
+        )
+        val recovered = OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch()
+        assertThat(recovered.published).isEqualTo(1)
+        assertThat(sends).hasValue(1)
+        assertThat(status(id)).isEqualTo("PUBLISHED")
     }
 
     @Test
@@ -487,22 +556,35 @@ class OutboxPublisherIntegrationTest {
             .containsEntry("last_error", "INVALID_EVENT")
     }
 
-    @Test
-    fun `corrupt legacy sensitive field union never sends`() {
-        val fields = listOf(
-            "password", "pass-phrase", "SECRET", "to_ken", "authori-zation",
-            "cookie", "api_Key", "credential", "private.key",
-        )
-        val ids = fields.map { field ->
-            insert(payload = """{"$field":"legacy-value"}""", nextAttemptAt = Instant.now().minusSeconds(1))
-        }
+    @ParameterizedTest(name = "corrupt normalized sensitive field {0} never sends")
+    @MethodSource("com.innorder.occ.events.EventPayloadPolicyTestCases#normalizedSensitiveFields")
+    fun `corrupt row with every normalized sensitive field never sends`(term: String, field: String) {
+        val id = insert(payload = """{"$field":"legacy-value"}""", nextAttemptAt = Instant.now().minusSeconds(1))
         val sends = AtomicInteger()
 
         OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch()
 
         assertThat(sends).hasValue(0)
-        assertThat(ids.map { admin.queryForMap("SELECT status, last_error FROM audit.outbox_event WHERE id = ?", it) })
-            .allSatisfy { assertThat(it).containsEntry("status", "PENDING").containsEntry("last_error", "INVALID_EVENT") }
+        assertThat(admin.queryForMap("SELECT status, last_error FROM audit.outbox_event WHERE id = ?", id))
+            .containsEntry("status", "PENDING")
+            .containsEntry("last_error", "INVALID_EVENT")
+    }
+
+    @ParameterizedTest(name = "corrupt unsafe number {0} never sends")
+    @ValueSource(strings = [
+        "9007199254740992", "-9007199254740992",
+        "9007199254740992.0", "-9007199254740992.0", "1e309", "-1e309",
+    ])
+    fun `corrupt row with unsafe number never sends`(number: String) {
+        val id = insert(payload = """{"value":$number}""", nextAttemptAt = Instant.now().minusSeconds(1))
+        val sends = AtomicInteger()
+
+        OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch()
+
+        assertThat(sends).hasValue(0)
+        assertThat(admin.queryForMap("SELECT status, last_error FROM audit.outbox_event WHERE id = ?", id))
+            .containsEntry("status", "PENDING")
+            .containsEntry("last_error", "INVALID_EVENT")
     }
 
     @Test
@@ -554,6 +636,12 @@ class OutboxPublisherIntegrationTest {
     private fun status(id: UUID) = admin.queryForObject("SELECT status FROM audit.outbox_event WHERE id = ?", String::class.java, id)
     private fun publishedAt(id: UUID) = admin.queryForMap("SELECT published_at FROM audit.outbox_event WHERE id = ?", id)["published_at"]
     private fun claimedAt(id: UUID) = admin.queryForMap("SELECT claimed_at FROM audit.outbox_event WHERE id = ?", id)["claimed_at"]
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> anyValue(): T {
+        Mockito.any<T>()
+        return null as T
+    }
 
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"

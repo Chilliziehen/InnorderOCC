@@ -21,6 +21,9 @@ import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.MethodSource
+import org.junit.jupiter.params.provider.ValueSource
 import org.postgresql.ds.PGSimpleDataSource
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
@@ -405,25 +408,37 @@ class CommandExecutorIntegrationTest {
         assertRolledBack()
     }
 
-    @Test
-    fun `event payload policy rejects complete normalized sensitive field union`() {
-        val fields = listOf(
-            "password", "pass-phrase", "SECRET", "to_ken", "authori-zation",
-            "cookie", "api_Key", "credential", "private.key",
-        )
-        fields.forEachIndexed { index, field ->
-            val command = object : AuthorizedCommand by command() {
-                override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
-                    events = listOf(PendingEventSpec(
-                        "kernel-test.updated", 1, json("""{"$field":"legacy-value"}"""), 4,
-                    )),
-                )
-            }
-
-            assertThatThrownBy { executor.execute(metadata("event-sensitive-$index"), "{}".toByteArray(), command) }
-                .isInstanceOf(InvalidCommandRequestException::class.java)
-            assertRolledBack()
+    @ParameterizedTest(name = "rejects normalized sensitive event field {0}")
+    @MethodSource("com.innorder.occ.events.EventPayloadPolicyTestCases#normalizedSensitiveFields")
+    fun `event payload policy rejects every normalized sensitive field`(term: String, field: String) {
+        val command = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
+                events = listOf(PendingEventSpec(
+                    "kernel-test.updated", 1, json("""{"$field":"legacy-value"}"""), 4,
+                )),
+            )
         }
+
+        assertThatThrownBy { executor.execute(metadata("event-sensitive-$term"), "{}".toByteArray(), command) }
+            .isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
+    }
+
+    @ParameterizedTest(name = "rejects unsafe event number {0}")
+    @ValueSource(strings = [
+        "9007199254740992", "-9007199254740992",
+        "9007199254740992.0", "-9007199254740992.0", "1e309", "-1e309",
+    ])
+    fun `event payload policy rejects unsafe numbers before command commit`(number: String) {
+        val command = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
+                events = listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":$number}"""), 4)),
+            )
+        }
+
+        assertThatThrownBy { executor.execute(metadata("event-number-${number.hashCode()}"), "{}".toByteArray(), command) }
+            .isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
     }
 
     @Test
