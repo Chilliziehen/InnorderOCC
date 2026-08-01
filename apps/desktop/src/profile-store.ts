@@ -32,6 +32,7 @@ interface ProfileStoreDependencies {
 
 export interface ProfileStore {
   list(): Promise<ServerProfile[]>;
+  validate(input: ProfileInput): ServerProfile;
   save(input: ProfileInput): Promise<ServerProfile>;
   select(id: string): Promise<void>;
   remove(id: string): Promise<void>;
@@ -85,6 +86,10 @@ export async function createProfileStore({
   return {
     async list() {
       return profiles.map(copyProfile);
+    },
+
+    validate(input) {
+      return parseServerProfile(input, packaged, allowDevelopmentHttp);
     },
 
     async save(input) {

@@ -17,7 +17,8 @@ import type { ProfileStore } from "./profile-store";
 import type { CredentialVault, SessionManager, VaultCredential } from "./session-manager";
 import { serializedSize } from "./serialized-size";
 
-const MAX_REQUEST_BYTES = 1024 * 1024;
+export const MAX_REQUEST_BYTES = 1024 * 1024;
+export const MAX_UPLOAD_REQUEST_BYTES = 100 * 1024 * 1024 + 64 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const profileListSchema = serverProfileSchema.array();
 type InvokeApi = Omit<OccApi, "notifications"> & {
@@ -29,6 +30,7 @@ interface HandlerDefinition<I, O> {
   input: z.ZodType<I>;
   output: z.ZodType<O>;
   invoke(input: I): Promise<O>;
+  maxRequestBytes?: number;
 }
 
 let activeRegistration: (() => void) | undefined;
@@ -66,6 +68,7 @@ interface JsonFileSystem {
     options: { encoding: "utf8"; mode: number },
   ): Promise<unknown>;
   rename(from: string, to: string): Promise<unknown>;
+  unlink(file: string): Promise<unknown>;
 }
 
 export function createAtomicJsonPersistence(
@@ -85,11 +88,16 @@ export function createAtomicJsonPersistence(
       const directory = path.dirname(file);
       const temporary = `${file}.${crypto.randomUUID()}.tmp`;
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-      await fs.writeFile(temporary, JSON.stringify(value), {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      await fs.rename(temporary, file);
+      try {
+        await fs.writeFile(temporary, JSON.stringify(value), {
+          encoding: "utf8",
+          mode: 0o600,
+        });
+        await fs.rename(temporary, file);
+      } catch (error) {
+        await fs.unlink(temporary).catch(() => undefined);
+        throw error;
+      }
     },
   };
 }
@@ -190,10 +198,13 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     profiles: {
       list: () => dependencies.profiles.list(),
       save: (input) => transition(async () => {
+        const candidate = input.id === undefined
+          ? undefined
+          : dependencies.profiles.validate(input);
         const previous = input.id === undefined
           ? undefined
           : (await dependencies.profiles.list()).find(({ id }) => id === input.id);
-        if (previous && previous.origin !== new URL(input.origin).origin) {
+        if (previous && candidate && previous.origin !== candidate.origin) {
           await cleanup(previous.id);
         }
         return dependencies.profiles.save(input);
@@ -239,10 +250,14 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
   };
 }
 
-function createHandler<I, O>(rendererUrl: string, definition: HandlerDefinition<I, O>) {
+function createHandler<I, O>(
+  rendererUrl: string,
+  definition: HandlerDefinition<I, O>,
+  sizeOf: (value: unknown) => number,
+) {
   return async (
     event: IpcMainInvokeEvent,
-    rawInput?: unknown,
+    ...rawArguments: unknown[]
   ): Promise<O> => {
     const frame = event.senderFrame;
     if (!frame || frame.parent !== null || frame.url !== rendererUrl) {
@@ -250,8 +265,10 @@ function createHandler<I, O>(rendererUrl: string, definition: HandlerDefinition<
     }
     let input: I;
     try {
-      if (serializedSize(rawInput) > MAX_REQUEST_BYTES) throw new Error();
-      input = definition.input.parse(rawInput);
+      const maxRequestBytes = definition.maxRequestBytes ?? MAX_REQUEST_BYTES;
+      if (sizeOf(rawArguments) > maxRequestBytes) throw new Error();
+      if (rawArguments.length !== 1) throw new Error();
+      input = definition.input.parse(rawArguments[0]);
     } catch {
       throw new Error("IPC request rejected");
     }
@@ -265,7 +282,15 @@ function createHandler<I, O>(rendererUrl: string, definition: HandlerDefinition<
   };
 }
 
-export function registerDesktopIpc(rendererUrl: string, api: InvokeApi): () => void {
+interface DesktopIpcOptions {
+  sizeOf?: (value: unknown) => number;
+}
+
+export function registerDesktopIpc(
+  rendererUrl: string,
+  api: InvokeApi,
+  options: DesktopIpcOptions = {},
+): () => void {
   activeRegistration?.();
   const definitions: HandlerDefinition<any, any>[] = [
     { channel: DESKTOP_CHANNELS.profiles.list, input: noInputSchema, output: profileListSchema, invoke: () => api.profiles.list() },
@@ -278,12 +303,15 @@ export function registerDesktopIpc(rendererUrl: string, api: InvokeApi): () => v
     { channel: DESKTOP_CHANNELS.runtime.statuses, input: noInputSchema, output: systemStatusesSchema, invoke: () => api.runtime.statuses() },
     { channel: DESKTOP_CHANNELS.workspaces.query, input: workspaceQuerySchema, output: workspaceResultSchema, invoke: (input) => api.workspaces.query(input) },
     { channel: DESKTOP_CHANNELS.commands.execute, input: workspaceCommandSchema, output: commandReceiptSchema, invoke: (input) => api.commands.execute(input) },
-    { channel: DESKTOP_CHANNELS.uploads.start, input: evidenceUploadInputSchema, output: uploadReceiptSchema, invoke: (input) => api.uploads.start(input) },
+    { channel: DESKTOP_CHANNELS.uploads.start, input: evidenceUploadInputSchema, output: uploadReceiptSchema, invoke: (input) => api.uploads.start(input), maxRequestBytes: MAX_UPLOAD_REQUEST_BYTES },
     { channel: DESKTOP_CHANNELS.uploads.cancel, input: idInputSchema, output: voidOutputSchema, invoke: (id) => api.uploads.cancel(id) },
     { channel: DESKTOP_CHANNELS.notifications.list, input: optionalCursorSchema, output: notificationPageSchema, invoke: (cursor) => api.notifications.list(cursor) },
   ];
   for (const definition of definitions) {
-    ipcMain.handle(definition.channel, createHandler(rendererUrl, definition));
+    ipcMain.handle(
+      definition.channel,
+      createHandler(rendererUrl, definition, options.sizeOf ?? serializedSize),
+    );
   }
   let current = true;
   const dispose = () => {

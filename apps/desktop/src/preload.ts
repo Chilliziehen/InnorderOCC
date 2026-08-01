@@ -11,18 +11,18 @@ function freezeApi<T extends object>(value: T): Readonly<T> {
 
 const api: OccApi = freezeApi({
   profiles: {
-    list: () => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.list),
+    list: () => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.list, undefined),
     save: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.save, input),
     select: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.select, id),
     remove: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.remove, id),
   },
   session: {
-    restore: () => ipcRenderer.invoke(DESKTOP_CHANNELS.session.restore),
+    restore: () => ipcRenderer.invoke(DESKTOP_CHANNELS.session.restore, undefined),
     login: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.session.login, input),
-    logout: () => ipcRenderer.invoke(DESKTOP_CHANNELS.session.logout),
+    logout: () => ipcRenderer.invoke(DESKTOP_CHANNELS.session.logout, undefined),
   },
   runtime: {
-    statuses: () => ipcRenderer.invoke(DESKTOP_CHANNELS.runtime.statuses),
+    statuses: () => ipcRenderer.invoke(DESKTOP_CHANNELS.runtime.statuses, undefined),
   },
   workspaces: { query: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.workspaces.query, input) },
   commands: { execute: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.commands.execute, input) },

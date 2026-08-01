@@ -73,14 +73,14 @@ describe("preload bridge", () => {
     await api.notifications.list("cursor");
 
     expect(electronMocks.invoke.mock.calls).toEqual([
-      [DESKTOP_CHANNELS.profiles.list],
+      [DESKTOP_CHANNELS.profiles.list, undefined],
       [DESKTOP_CHANNELS.profiles.save, input],
       [DESKTOP_CHANNELS.profiles.select, "profile-id"],
       [DESKTOP_CHANNELS.profiles.remove, "profile-id"],
-      [DESKTOP_CHANNELS.session.restore],
+      [DESKTOP_CHANNELS.session.restore, undefined],
       [DESKTOP_CHANNELS.session.login, input],
-      [DESKTOP_CHANNELS.session.logout],
-      [DESKTOP_CHANNELS.runtime.statuses],
+      [DESKTOP_CHANNELS.session.logout, undefined],
+      [DESKTOP_CHANNELS.runtime.statuses, undefined],
       [DESKTOP_CHANNELS.workspaces.query, input],
       [DESKTOP_CHANNELS.commands.execute, input],
       [DESKTOP_CHANNELS.uploads.start, input],

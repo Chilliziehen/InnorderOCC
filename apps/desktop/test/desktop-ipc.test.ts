@@ -22,6 +22,7 @@ import {
   sendDesktopNotification,
 } from "../src/desktop-ipc";
 import { DESKTOP_CHANNELS } from "../src/ipc-contract";
+import { createProfileStore } from "../src/profile-store";
 
 const rendererUrl = "file:///D:/OCC/index.html";
 const profileId = "11111111-1111-4111-8111-111111111111";
@@ -109,7 +110,7 @@ describe("desktop IPC", () => {
       handler({ senderFrame: { url: "file:///D:/OCC/other.html", parent: null } }),
     ).rejects.toThrow("IPC request rejected");
     await expect(
-      handler({ senderFrame: { url: rendererUrl, parent: null } }),
+      handler({ senderFrame: { url: rendererUrl, parent: null } }, undefined),
     ).resolves.toEqual([profile]);
   });
 
@@ -131,6 +132,39 @@ describe("desktop IPC", () => {
     expect(String(failure)).not.toContain("refresh-token-secret");
   });
 
+  it("sizes all received arguments and rejects arity other than one", async () => {
+    const sizeOf = vi.fn(() => 2 * 1024 * 1024);
+    registerDesktopIpc(rendererUrl, dependencies(), { sizeOf });
+    const handler = registeredHandler(DESKTOP_CHANNELS.profiles.list);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    const extra = { value: "x".repeat(2 * 1024 * 1024) };
+    expect(serialize(extra).byteLength).toBeGreaterThan(2 * 1024 * 1024);
+
+    await expect(handler(event, undefined, extra)).rejects.toThrow("IPC request rejected");
+    expect(sizeOf).toHaveBeenCalledWith([undefined, extra]);
+  });
+
+  it("uses a bounded upload-only request allowance", async () => {
+    let measuredSize = 100 * 1024 * 1024 + 64 * 1024;
+    const deps = dependencies();
+    registerDesktopIpc(rendererUrl, deps, { sizeOf: () => measuredSize });
+    const handler = registeredHandler(DESKTOP_CHANNELS.uploads.start);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    const input = {
+      workspace: "evidence",
+      targetId: "task-1",
+      fileName: "evidence.txt",
+      contentType: "text/plain",
+      size: 1,
+      data: new Uint8Array([1]),
+    };
+
+    await expect(handler(event, input)).resolves.toMatchObject({ state: "started" });
+    measuredSize += 1;
+    await expect(handler(event, input)).rejects.toThrow("IPC request rejected");
+    expect(deps.uploads.start).toHaveBeenCalledOnce();
+  });
+
   it("rejects requests above 1 MiB and invalid or oversized output", async () => {
     const deps = dependencies();
     registerDesktopIpc(rendererUrl, deps);
@@ -142,11 +176,11 @@ describe("desktop IPC", () => {
 
     await expect(save(event, oversizedInput)).rejects.toThrow("IPC request rejected");
     deps.profiles.list.mockResolvedValueOnce([{ ...profile, leaked: true }]);
-    await expect(list(event)).rejects.toThrow("IPC request failed");
+    await expect(list(event, undefined)).rejects.toThrow("IPC request failed");
     deps.profiles.list.mockResolvedValueOnce([
       { ...profile, name: "x".repeat(2 * 1024 * 1024) },
     ]);
-    await expect(list(event)).rejects.toThrow("IPC request failed");
+    await expect(list(event, undefined)).rejects.toThrow("IPC request failed");
   });
 
   it("replaces duplicate registrations and disposes every owned handler", () => {
@@ -214,6 +248,7 @@ describe("desktop main composition", () => {
         files.set(to, files.get(from)!);
         files.delete(from);
       }),
+      unlink: vi.fn(async (file: string) => void files.delete(file)),
     };
     const persistence = createAtomicJsonPersistence("D:\\user-data\\profiles.json", fs);
 
@@ -231,6 +266,30 @@ describe("desktop main composition", () => {
     );
     await expect(persistence.read()).resolves.toEqual({ profiles: [], selectedId: null });
   });
+
+  it.each(["write", "rename"] as const)(
+    "removes the temporary JSON file after %s failure",
+    async (stage) => {
+      const failure = new Error(`${stage} failed`);
+      const fs = {
+        mkdir: vi.fn().mockResolvedValue(undefined),
+        readFile: vi.fn(),
+        writeFile: stage === "write"
+          ? vi.fn().mockRejectedValue(failure)
+          : vi.fn().mockResolvedValue(undefined),
+        rename: stage === "rename"
+          ? vi.fn().mockRejectedValue(failure)
+          : vi.fn().mockResolvedValue(undefined),
+        unlink: vi.fn().mockResolvedValue(undefined),
+      };
+      const persistence = createAtomicJsonPersistence("D:\\user-data\\profiles.json", fs);
+
+      await expect(persistence.write({ profiles: [] })).rejects.toBe(failure);
+      expect(fs.unlink).toHaveBeenCalledWith(
+        expect.stringMatching(/profiles\.json\..+\.tmp$/),
+      );
+    },
+  );
 
   it("encrypts versioned credentials and never persists a plaintext refresh token", async () => {
     let persisted: unknown;
@@ -274,6 +333,7 @@ describe("desktop main composition", () => {
     let selected = profile;
     const profiles = {
       list: vi.fn().mockResolvedValue([profile]),
+      validate: vi.fn(() => profile),
       save: vi.fn().mockResolvedValue(profile),
       select: vi.fn(async () => undefined),
       remove: vi.fn(async () => void (selected = undefined as never)),
@@ -306,6 +366,7 @@ describe("desktop main composition", () => {
     const updatedProfile = { ...otherProfile, origin: "https://new.example.com" };
     const profiles = {
       list: vi.fn().mockResolvedValue([profile, otherProfile]),
+      validate: vi.fn(() => updatedProfile),
       save: vi.fn().mockResolvedValue(updatedProfile),
       select: vi.fn(),
       remove: vi.fn(),
@@ -335,6 +396,28 @@ describe("desktop main composition", () => {
     );
   });
 
+  it("validates packaged profile changes before destructive cleanup", async () => {
+    const store = await createProfileStore({
+      read: async () => ({ profiles: [profile], selectedId: profileId }),
+      write: vi.fn(),
+      packaged: true,
+    });
+    const session = {
+      restore: vi.fn(), login: vi.fn(), logout: vi.fn(),
+      profileSwitched: vi.fn().mockResolvedValue(undefined),
+    };
+    const clearProfile = vi.fn().mockResolvedValue(undefined);
+    const api = createDesktopApi({ profiles: store, session, statuses: vi.fn(), clearProfile });
+
+    await expect(api.profiles.save({
+      id: profileId,
+      name: profile.name,
+      origin: "http://127.0.0.1:8080",
+    })).rejects.toThrow("HTTPS is required");
+    expect(session.profileSwitched).not.toHaveBeenCalled();
+    expect(clearProfile).not.toHaveBeenCalled();
+  });
+
   it("waits for a concurrent login then removes its old-origin credential before saving", async () => {
     let releaseLogin!: () => void;
     const loginGate = new Promise<void>((resolve) => void (releaseLogin = resolve));
@@ -342,6 +425,7 @@ describe("desktop main composition", () => {
     const updatedProfile = { ...profile, origin: "https://new.example.com" };
     const profiles = {
       list: vi.fn().mockResolvedValue([profile]),
+      validate: vi.fn(() => updatedProfile),
       save: vi.fn().mockResolvedValue(updatedProfile),
       select: vi.fn(), remove: vi.fn(), selected: vi.fn(() => profile),
     };
@@ -390,6 +474,7 @@ describe("desktop main composition", () => {
     const updatedProfile = { ...profile, origin: "https://new.example.com" };
     const profiles = {
       list: vi.fn().mockResolvedValue([profile]),
+      validate: vi.fn(() => updatedProfile),
       save: vi.fn().mockResolvedValue(updatedProfile),
       select: vi.fn(), remove: vi.fn(), selected: vi.fn(() => profile),
     };
