@@ -67,6 +67,9 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
                     { _, _ -> Unit },
                     advisoryLockKey(reference),
                 )
+                if (resolversByType.getValue(reference.type).lock(jdbc, reference.id) != null) {
+                    throw InvalidCommandRequestException()
+                }
             }
         }
         return AcquiredAggregateLocks(

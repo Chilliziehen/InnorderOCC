@@ -42,7 +42,6 @@ import org.springframework.transaction.support.TransactionTemplate
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
-import java.sql.SQLException
 
 @Testcontainers(disabledWithoutDocker = true)
 class CommandExecutorIntegrationTest {
@@ -292,6 +291,40 @@ class CommandExecutorIntegrationTest {
     fun `created aggregate advisory key uses stable sha256 signed64 mapping`() {
         assertThat(AggregateLockRegistry.advisoryLockKey(AggregateReference("kernel-created", CREATED_AGGREGATE_ID)))
             .isEqualTo(532_315_003_273_509_880L)
+    }
+
+    @Test
+    fun `created aggregate must be absent after reservation before handler execution`() {
+        jdbc.update(
+            "INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'already-created', 1)",
+            CREATED_AGGREGATE_ID,
+        )
+        val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
+        val duplicateCreate = object : AuthorizedCommand by command() {
+            override val lockPlan = AggregateLockPlan(existing = listOf(primaryRef()), created = listOf(created))
+
+            override fun execute(context: CommandContext): CommandMutation {
+                executions.incrementAndGet()
+                return successMutation()
+            }
+        }
+
+        assertThatThrownBy {
+            executor.execute(metadata("created-already-exists"), "{}".toByteArray(), duplicateCreate)
+        }.isInstanceOf(InvalidCommandRequestException::class.java)
+        assertThat(executions).hasValue(0)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record", Long::class.java)).isZero()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.outbox_event WHERE aggregate_id IN (?, ?)",
+            Long::class.java,
+            AGGREGATE_ID,
+            CREATED_AGGREGATE_ID,
+        )).isZero()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ?",
+            Long::class.java,
+            PRINCIPAL_ID,
+        )).isZero()
     }
 
     @Test
@@ -826,7 +859,7 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
-    fun `opposite created plans reserve before handlers and resolve as success plus unique conflict without deadlock`() {
+    fun `opposite created plans resolve as one success plus one pre-handler existence conflict without deadlock`() {
         val firstRef = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
         val secondRef = AggregateReference("kernel-created", SECOND_AGGREGATE_ID)
         val handlerEntries = AtomicInteger()
@@ -894,9 +927,9 @@ class CommandExecutorIntegrationTest {
             releaseFirstHandler.countDown()
             val outcomes = listOf(first.get(15, TimeUnit.SECONDS), second.get(15, TimeUnit.SECONDS))
             assertThat(outcomes.count { it is CommandResult }).isEqualTo(1)
-            val failure = outcomes.filterIsInstance<Throwable>().single()
-            assertThat(generateSequence(failure) { it.cause }.filterIsInstance<SQLException>().first().sqlState)
-                .isEqualTo("23505")
+            assertThat(outcomes.filterIsInstance<Throwable>().single())
+                .isExactlyInstanceOf(InvalidCommandRequestException::class.java)
+            assertThat(handlerEntries).hasValue(1)
         } finally {
             releaseFirstHandler.countDown()
             pool.shutdownNow()
