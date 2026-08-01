@@ -447,7 +447,7 @@ class CommandExecutorIntegrationTest {
                     )
                     return successMutation().copy(
                         auditDetail = json(attempt.detail),
-                        events = listOf(PendingEventSpec("kernel-test.updated", 1, json(attempt.payload), 4)),
+                        events = listOf(PendingEventSpec("kernel-test.updated", 1, json(attempt.payload), primaryRef(), 4)),
                     )
                 }
             }
@@ -463,7 +463,7 @@ class CommandExecutorIntegrationTest {
         val nested = "{" + "\"level\":{".repeat(33) + "}" + "}".repeat(33)
         val tooDeep = object : AuthorizedCommand by command() {
             override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
-                events = listOf(PendingEventSpec("kernel-test.updated", 1, json(nested), 4)),
+                events = listOf(PendingEventSpec("kernel-test.updated", 1, json(nested), primaryRef(), 4)),
             )
         }
 
@@ -478,7 +478,7 @@ class CommandExecutorIntegrationTest {
         val command = object : AuthorizedCommand by command() {
             override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
                 events = listOf(PendingEventSpec(
-                    "kernel-test.updated", 1, json("""{"$field":"legacy-value"}"""), 4,
+                    "kernel-test.updated", 1, json("""{"$field":"legacy-value"}"""), primaryRef(), 4,
                 )),
             )
         }
@@ -496,7 +496,7 @@ class CommandExecutorIntegrationTest {
     fun `event payload policy rejects unsafe numbers before command commit`(number: String) {
         val command = object : AuthorizedCommand by command() {
             override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
-                events = listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":$number}"""), 4)),
+                events = listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":$number}"""), primaryRef(), 4)),
             )
         }
 
@@ -517,7 +517,7 @@ class CommandExecutorIntegrationTest {
                     body = json("""{"displayName":"Alice"}"""),
                     auditDetail = json("""{"displayName":"Alice"}"""),
                     events = listOf(PendingEventSpec(
-                        "kernel-test.updated", 1, json("""{"displayName":"Alice"}"""), 4,
+                        "kernel-test.updated", 1, json("""{"displayName":"Alice"}"""), primaryRef(), 4,
                     )),
                 )
             }
@@ -554,7 +554,7 @@ class CommandExecutorIntegrationTest {
                 mutation.copy(auditReason = secret)
             }),
             Attempt("event-type", "event-sensitive", command = mutationCommand { mutation, secret ->
-                mutation.copy(events = listOf(PendingEventSpec(secret, 1, json("{}"), 4)))
+                mutation.copy(events = listOf(PendingEventSpec(secret, 1, json("{}"), primaryRef(), 4)))
             }),
             Attempt("aggregate-type", "secret.aggregate", command = { secret ->
                 object : AuthorizedCommand by command() { override val aggregateType = secret }
@@ -599,7 +599,7 @@ class CommandExecutorIntegrationTest {
             },
             Attempt("event-suffix") { mutation, value ->
                 mutation.copy(events = listOf(PendingEventSpec(
-                    "kernel-test.updated", 1, json("""{"before-$value":"unsafe"}"""), 4,
+                    "kernel-test.updated", 1, json("""{"before-$value":"unsafe"}"""), primaryRef(), 4,
                 )))
             },
             Attempt("response-embedded") { mutation, value ->
@@ -640,7 +640,7 @@ class CommandExecutorIntegrationTest {
                 return successMutation(json("""{"$nearMatch":"safe"}""")).copy(
                     auditDetail = json("""{"$nearMatch":"safe"}"""),
                     events = listOf(PendingEventSpec(
-                        "kernel-test.updated", 1, json("""{"$nearMatch":"safe"}"""), 4,
+                        "kernel-test.updated", 1, json("""{"$nearMatch":"safe"}"""), primaryRef(), 4,
                     )),
                 )
             }
@@ -728,9 +728,9 @@ class CommandExecutorIntegrationTest {
     fun `mutation identity and version mismatches roll back before audit and outbox`() {
         val cases = listOf(
             successMutation().copy(resourceId = ENTITY_ID),
-            successMutation().copy(aggregateId = UUID.randomUUID()),
-            successMutation().copy(beforeVersion = 2),
-            successMutation().copy(afterVersion = 5),
+            successMutation().copy(changes = listOf(AggregateChange(AggregateReference("kernel-test", UUID.randomUUID()), 3, 4))),
+            successMutation().copy(changes = listOf(AggregateChange(primaryRef(), 2, 4))),
+            successMutation().copy(changes = listOf(AggregateChange(primaryRef(), 3, 5))),
         )
         cases.forEachIndexed { index, mutation ->
             val invalid = object : AuthorizedCommand by command() {
@@ -749,9 +749,104 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
+    fun `multi aggregate mutation persists event identities and sorted affected aggregate audit detail`() {
+        val primary = AggregateReference("kernel-test", AGGREGATE_ID)
+        val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
+        val multi = object : AuthorizedCommand by command() {
+            override val lockPlan = AggregateLockPlan(existing = listOf(primary), created = listOf(created))
+
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
+                    AGGREGATE_ID,
+                )
+                context.jdbc.update(
+                    "INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'created', 1)",
+                    CREATED_AGGREGATE_ID,
+                )
+                return CommandMutation(
+                    status = 200,
+                    body = json("""{"result":"multi"}"""),
+                    resourceId = RESOURCE_ID,
+                    changes = listOf(
+                        AggregateChange(primary, 3, 4),
+                        AggregateChange(created, 0, 1),
+                    ),
+                    auditReason = "multi",
+                    auditDetail = json("""{"changed":true}"""),
+                    events = listOf(
+                        PendingEventSpec("kernel-test.updated", 1, json("{}"), primary, 4),
+                        PendingEventSpec("kernel-created.created", 1, json("{}"), created, 1),
+                    ),
+                )
+            }
+        }
+
+        val result = executor.execute(metadata("multi-aggregate"), "{}".toByteArray(), multi)
+
+        assertThat(result.status).isEqualTo(200)
+        assertThat(jdbc.queryForList(
+            """SELECT aggregate_type, aggregate_id, aggregate_version FROM audit.outbox_event
+               WHERE aggregate_id IN (?, ?) ORDER BY aggregate_type, aggregate_id""",
+            AGGREGATE_ID,
+            CREATED_AGGREGATE_ID,
+        )).containsExactly(
+            mapOf("aggregate_type" to "kernel-created", "aggregate_id" to CREATED_AGGREGATE_ID, "aggregate_version" to 1L),
+            mapOf("aggregate_type" to "kernel-test", "aggregate_id" to AGGREGATE_ID, "aggregate_version" to 4L),
+        )
+        val detail = JSON.readTree(jdbc.queryForObject(
+            "SELECT detail::text FROM audit.audit_record WHERE target_entity_id = ?",
+            String::class.java,
+            RESOURCE_ID,
+        ))
+        assertThat(detail.path("affectedAggregates")).isEqualTo(JSON.readTree("""[
+            {"type":"kernel-created","id":"$CREATED_AGGREGATE_ID","beforeVersion":0,"afterVersion":1},
+            {"type":"kernel-test","id":"$AGGREGATE_ID","beforeVersion":3,"afterVersion":4}
+        ]"""))
+        assertThat(detail.path("changed").booleanValue()).isTrue()
+        assertThat(jdbc.queryForObject(
+            "SELECT row_version FROM occ.command_kernel_test WHERE id = ?",
+            Long::class.java,
+            CREATED_AGGREGATE_ID,
+        )).isEqualTo(1)
+    }
+
+    @Test
+    fun `multi aggregate changes and events must match declared lock plan and exact after versions`() {
+        val primary = AggregateReference("kernel-test", AGGREGATE_ID)
+        val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
+        val undeclared = AggregateReference("kernel-test", SECOND_AGGREGATE_ID)
+        val validChanges = listOf(AggregateChange(primary, 3, 4), AggregateChange(created, 0, 1))
+        val validEvents = listOf(
+            PendingEventSpec("kernel-test.updated", 1, json("{}"), primary, 4),
+            PendingEventSpec("kernel-created.created", 1, json("{}"), created, 1),
+        )
+        val attempts = listOf(
+            validChanges + AggregateChange(undeclared, 0, 1) to validEvents,
+            listOf(AggregateChange(primary, 2, 4), AggregateChange(created, 0, 1)) to validEvents,
+            listOf(AggregateChange(primary, 3, 4), AggregateChange(created, 1, 2)) to validEvents,
+            validChanges to listOf(PendingEventSpec("kernel-test.updated", 1, json("{}"), primary, 3)),
+            validChanges to (validEvents + PendingEventSpec("kernel-test.duplicate", 1, json("{}"), primary, 4)),
+        )
+
+        attempts.forEachIndexed { index, (changes, events) ->
+            val invalid = object : AuthorizedCommand by command() {
+                override val lockPlan = AggregateLockPlan(existing = listOf(primary), created = listOf(created))
+                override fun execute(context: CommandContext): CommandMutation = CommandMutation(
+                    200, json("{}"), RESOURCE_ID, changes, "invalid", json("{}"), events,
+                )
+            }
+            assertThatThrownBy { executor.execute(metadata("invalid-multi-$index"), "{}".toByteArray(), invalid) }
+                .describedAs("multi mutation $index")
+                .isInstanceOf(InvalidCommandRequestException::class.java)
+        }
+        assertThat(executions).hasValue(0)
+    }
+
+    @Test
     fun `mutation snapshots caller event list before executor validation and persistence`() {
         val callerEvents = mutableListOf(
-            PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), 4),
+            PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), primaryRef(), 4),
         )
         lateinit var mutation: CommandMutation
         val mutableEventsCommand = object : AuthorizedCommand by command() {
@@ -761,8 +856,8 @@ class CommandExecutorIntegrationTest {
                     AGGREGATE_ID,
                 )
                 mutation = CommandMutation(
-                    200, json("""{"result":"after"}"""), RESOURCE_ID, AGGREGATE_ID,
-                    "kernel-test", 3, 4, "test", json("""{"changed":true}"""), callerEvents,
+                    200, json("""{"result":"after"}"""), RESOURCE_ID,
+                    listOf(AggregateChange(primaryRef(), 3, 4)), "test", json("""{"changed":true}"""), callerEvents,
                 )
                 callerEvents.clear()
                 return mutation
@@ -844,10 +939,12 @@ class CommandExecutorIntegrationTest {
     }
 
     private fun successMutation(body: CanonicalJsonObject = json("""{"result":"after"}""")) = CommandMutation(
-        200, body, RESOURCE_ID, AGGREGATE_ID, "kernel-test", 3, 4, "test",
+        200, body, RESOURCE_ID, listOf(AggregateChange(primaryRef(), 3, 4)), "test",
         json("""{"changed":"value"}"""),
-        listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), 4)),
+        listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), primaryRef(), 4)),
     )
+
+    private fun primaryRef() = AggregateReference("kernel-test", AGGREGATE_ID)
 
     private fun json(value: String): CanonicalJsonObject = CanonicalJsonObject.from(JSON.readTree(value))
 
@@ -877,7 +974,13 @@ class CommandExecutorIntegrationTest {
                 id,
             ).singleOrNull()
         },
-        AggregateLockResolver("kernel-created", 30) { _, _ -> error("created aggregates are not locked") },
+        AggregateLockResolver("kernel-created", 30) { operations, id ->
+            operations.query(
+                "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
+                { result, _ -> result.getLong(1) },
+                id,
+            ).singleOrNull()
+        },
         AggregateLockResolver("kernel-invalid-0", 40) { _, _ -> -1 },
         AggregateLockResolver("kernel-invalid-1", 40) { _, _ -> CommandExecutor.MAX_SAFE_INTEGER + 1 },
     ))
@@ -902,13 +1005,10 @@ class CommandExecutorIntegrationTest {
                 status = 200,
                 body = json("""{"result":"after"}"""),
                 resourceId = RESOURCE_ID,
-                aggregateId = AGGREGATE_ID,
-                aggregateType = "kernel-test",
-                beforeVersion = 3,
-                afterVersion = 4,
+                changes = listOf(AggregateChange(primaryRef(), 3, 4)),
                 auditReason = "test",
                 auditDetail = json("""{"changed":"value"}"""),
-                events = listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), 4)),
+                events = listOf(PendingEventSpec("kernel-test.updated", 1, json("""{"value":"after"}"""), primaryRef(), 4)),
             )
         }
     }

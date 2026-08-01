@@ -9,6 +9,7 @@ import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.AggregateLockPlan
 import com.innorder.occ.command.AggregateLockResolver
 import com.innorder.occ.command.AggregateReference
+import com.innorder.occ.command.AggregateChange
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
 import com.innorder.occ.command.CommandExecutor
@@ -319,9 +320,13 @@ class PlatformSecurityKernelIntegrationTest(
             context.jdbc.update("UPDATE occ.platform_kernel_test SET value = ?, row_version = ? WHERE id = ?", value, after, aggregateId)
             fun json(text: String) = CanonicalJsonObject.from(mapper.readTree(text))
             return CommandMutation(
-                200, json("""{"result":"$value","version":$after}"""), aggregateId, aggregateId,
-                aggregateType, before, after, "platform kernel acceptance", json("""{"value":"$value"}"""),
-                listOf(PendingEventSpec("platform-kernel.updated", 1, json("""{"value":"$value","version":$after}"""), after)),
+                200, json("""{"result":"$value","version":$after}"""), aggregateId,
+                listOf(AggregateChange(AggregateReference(aggregateType, aggregateId), before, after)),
+                "platform kernel acceptance", json("""{"value":"$value"}"""),
+                listOf(PendingEventSpec(
+                    "platform-kernel.updated", 1, json("""{"value":"$value","version":$after}"""),
+                    AggregateReference(aggregateType, aggregateId), after,
+                )),
             )
         }
     }

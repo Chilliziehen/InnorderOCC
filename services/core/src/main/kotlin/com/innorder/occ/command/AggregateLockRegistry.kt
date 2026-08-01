@@ -63,6 +63,20 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
         )
     }
 
+    internal fun verifyCreatedVersions(
+        jdbc: JdbcOperations,
+        changes: List<AggregateChange>,
+        created: Set<AggregateReference>,
+    ) {
+        changes.filter { it.ref in created }.sortedWith(
+            compareBy<AggregateChange>({ resolversByType.getValue(it.ref.type).order }, { it.ref.id.toString() }, { it.ref.type }),
+        ).forEach { change ->
+            if (resolversByType.getValue(change.ref.type).lock(jdbc, change.ref.id) != change.afterVersion) {
+                throw InvalidCommandRequestException()
+            }
+        }
+    }
+
     private fun valid(reference: AggregateReference): Boolean =
         CommandExecutor.ACTION.matches(reference.type) && reference.id != UUID(0, 0) &&
             reference.id.version() in 1..8 && reference.id.variant() == 2

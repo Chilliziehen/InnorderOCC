@@ -81,9 +81,11 @@ class CommandExecutor(
             throw OptimisticConflictException(currentVersion ?: 0)
         }
         val mutation = command.execute(context)
-        validateMutation(descriptor, mutation, currentVersion)
-        validateDataMinimization(mutation, sensitiveValues)
-        audit.insert(transactionId, metadata.correlationId, descriptor, mutation)
+        validateMutation(descriptor, mutation, acquired)
+        aggregateLocks.verifyCreatedVersions(jdbc, mutation.changes, acquired.created)
+        val auditDetail = audit.detail(mutation)
+        validateDataMinimization(mutation, auditDetail, sensitiveValues)
+        audit.insert(transactionId, metadata.correlationId, descriptor, mutation, auditDetail)
         outbox.insert(descriptor, metadata.correlationId, transactionId, mutation)
         val result = CommandResult(mutation.status, mutation.body, mutation.resourceId, replayed = false)
         idempotency.complete(idempotencyRecordId, result)
@@ -119,20 +121,33 @@ class CommandExecutor(
         return descriptor
     }
 
-    private fun validateMutation(descriptor: CommandDescriptor, mutation: CommandMutation, currentVersion: Long?) {
-        if (mutation.status !in 100..599 || mutation.aggregateType.length !in 1..128 ||
-            mutation.aggregateType != descriptor.aggregateType || mutation.resourceId != descriptor.resourceId ||
-            mutation.aggregateId != descriptor.aggregateId || mutation.afterVersion !in 0..MAX_SAFE_INTEGER ||
-            mutation.beforeVersion != currentVersion || mutation.afterVersion <= (mutation.beforeVersion ?: -1) ||
-            (descriptor.requiresExpectedVersion && mutation.afterVersion != requireNotNull(currentVersion) + 1) ||
+    private fun validateMutation(
+        descriptor: CommandDescriptor,
+        mutation: CommandMutation,
+        acquired: AcquiredAggregateLocks,
+    ) {
+        val primary = AggregateReference(descriptor.aggregateType, descriptor.aggregateId)
+        val primaryChange = mutation.changes.singleOrNull { it.ref == primary }
+        val changesByRef = mutation.changes.associateBy { it.ref }
+        if (mutation.status !in 100..599 || mutation.resourceId != descriptor.resourceId || primaryChange == null ||
+            mutation.changes.isEmpty() || mutation.changes.size > 128 || changesByRef.size != mutation.changes.size ||
+            mutation.changes.any { change ->
+                change.beforeVersion !in 0..MAX_SAFE_INTEGER || change.afterVersion !in 1..MAX_SAFE_INTEGER ||
+                    when (val lockedVersion = acquired.versions[change.ref]) {
+                        null -> change.ref !in acquired.created || change.beforeVersion != 0L || change.afterVersion != 1L
+                        else -> change.beforeVersion != lockedVersion || change.afterVersion != lockedVersion + 1
+                    }
+            } ||
             mutation.auditReason?.let { it.length !in 1..1024 || it.any(Char::isISOControl) } == true ||
-            mutation.body.size() > MAX_RESPONSE_BYTES || mutation.auditDetail.size() > MAX_AUDIT_BYTES ||
+            mutation.body.size() > MAX_RESPONSE_BYTES ||
             mutation.events.isEmpty() || mutation.events.size > 128 ||
-            mutation.events.map { it.aggregateVersion }.distinct().size != mutation.events.size ||
-            mutation.events.map { it.aggregateVersion } != mutation.events.map { it.aggregateVersion }.sorted() ||
+            mutation.events.groupBy { it.aggregate }.any { (_, events) ->
+                events.map { it.aggregateVersion }.let { versions -> versions.distinct().size != versions.size || versions != versions.sorted() }
+            } ||
             mutation.events.any {
-                it.payload.size() > MAX_EVENT_BYTES || it.aggregateVersion <= (mutation.beforeVersion ?: -1) ||
-                    it.aggregateVersion > mutation.afterVersion || it.schemaVersion < 1 || !ACTION.matches(it.eventType) ||
+                val change = changesByRef[it.aggregate]
+                it.payload.size() > MAX_EVENT_BYTES || change == null || it.aggregateVersion != change.afterVersion ||
+                    it.schemaVersion < 1 || !ACTION.matches(it.eventType) ||
                     (!descriptor.changesAuthorizationFacts && authorizationNamespace(it.eventType))
             }
         ) throw InvalidCommandRequestException()
@@ -161,11 +176,15 @@ class CommandExecutor(
         return CanonicalJsonObject.from(envelope, MAX_REQUEST_BYTES + 4096).digest
     }
 
-    private fun validateDataMinimization(mutation: CommandMutation, requestSensitiveValues: Set<String>) {
+    private fun validateDataMinimization(
+        mutation: CommandMutation,
+        auditDetail: CanonicalJsonObject,
+        requestSensitiveValues: Set<String>,
+    ) {
         mutation.auditReason?.let { validatePersistedString(it, requestSensitiveValues) }
-        validatePersistedString(mutation.aggregateType, requestSensitiveValues)
+        mutation.changes.forEach { validatePersistedString(it.ref.type, requestSensitiveValues) }
         validateSafePersistenceJson(mutation.body.toJsonNode(), requestSensitiveValues, MAX_RESPONSE_BYTES)
-        validateSafePersistenceJson(mutation.auditDetail.toJsonNode(), requestSensitiveValues, MAX_AUDIT_BYTES)
+        validateSafePersistenceJson(auditDetail.toJsonNode(), requestSensitiveValues, MAX_AUDIT_BYTES)
         mutation.events.forEach {
             validatePersistedString(it.eventType, requestSensitiveValues)
             validateSafePersistenceJson(it.payload.toJsonNode(), requestSensitiveValues, MAX_EVENT_BYTES)
@@ -181,6 +200,9 @@ class CommandExecutor(
         validatePersistedString(descriptor.commandKey, requestSensitiveValues)
         validatePersistedString(descriptor.action, requestSensitiveValues)
         validatePersistedString(descriptor.aggregateType, requestSensitiveValues)
+        descriptor.lockPlan?.let { plan ->
+            (plan.existing + plan.created).forEach { validatePersistedString(it.type, requestSensitiveValues) }
+        }
     }
 
     private fun sensitiveValues(request: CanonicalJsonObject): Set<String> {

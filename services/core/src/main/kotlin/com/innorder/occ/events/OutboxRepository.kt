@@ -26,7 +26,7 @@ class OutboxRepository(
                     event_type, schema_version, payload, actor_entity_id, correlation_id, causation_id,
                     available_at, next_attempt_at, status)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, statement_timestamp(), statement_timestamp(), 'PENDING')""",
-                UUID.randomUUID(), DEFAULT_CUSTOMER_INSTANCE_ID, mutation.aggregateType, mutation.aggregateId,
+                UUID.randomUUID(), DEFAULT_CUSTOMER_INSTANCE_ID, event.aggregate.type, event.aggregate.id,
                 event.aggregateVersion, event.eventType, event.schemaVersion, event.payload.canonicalText(),
                 descriptor.principalId, correlationId, transactionId,
             )

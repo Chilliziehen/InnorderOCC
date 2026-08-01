@@ -67,37 +67,38 @@ data class PendingEventSpec(
     val eventType: String,
     val schemaVersion: Int,
     val payload: CanonicalJsonObject,
+    val aggregate: AggregateReference,
     val aggregateVersion: Long,
+)
+
+data class AggregateChange(
+    val ref: AggregateReference,
+    val beforeVersion: Long,
+    val afterVersion: Long,
 )
 
 class CommandMutation(
     val status: Int,
     val body: CanonicalJsonObject,
     val resourceId: UUID,
-    val aggregateId: UUID,
-    val aggregateType: String,
-    val beforeVersion: Long?,
-    val afterVersion: Long,
+    changes: List<AggregateChange>,
     val auditReason: String?,
     val auditDetail: CanonicalJsonObject,
     events: List<PendingEventSpec>,
 ) {
+    val changes: List<AggregateChange> = Collections.unmodifiableList(changes.toList())
     val events: List<PendingEventSpec> = Collections.unmodifiableList(events.toList())
 
     fun copy(
         status: Int = this.status,
         body: CanonicalJsonObject = this.body,
         resourceId: UUID = this.resourceId,
-        aggregateId: UUID = this.aggregateId,
-        aggregateType: String = this.aggregateType,
-        beforeVersion: Long? = this.beforeVersion,
-        afterVersion: Long = this.afterVersion,
+        changes: List<AggregateChange> = this.changes,
         auditReason: String? = this.auditReason,
         auditDetail: CanonicalJsonObject = this.auditDetail,
         events: List<PendingEventSpec> = this.events,
     ): CommandMutation = CommandMutation(
-        status, body, resourceId, aggregateId, aggregateType, beforeVersion, afterVersion,
-        auditReason, auditDetail, events,
+        status, body, resourceId, changes, auditReason, auditDetail, events,
     )
 }
 

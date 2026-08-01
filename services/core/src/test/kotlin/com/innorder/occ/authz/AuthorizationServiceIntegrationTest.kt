@@ -48,6 +48,7 @@ import com.innorder.occ.command.AggregateLockPlan
 import com.innorder.occ.command.AggregateLockRegistry
 import com.innorder.occ.command.AggregateLockResolver
 import com.innorder.occ.command.AggregateReference
+import com.innorder.occ.command.AggregateChange
 import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
@@ -1239,15 +1240,13 @@ class AuthorizationServiceIntegrationTest {
                 200,
                 CanonicalJsonObject.from(ObjectMapper().readTree("""{"result":"after"}""")),
                 resourceId,
-                aggregateId,
-                "kernel-authz-test",
-                3,
-                4,
+                listOf(AggregateChange(AggregateReference(aggregateType, aggregateId), 3, 4)),
                 "authorized test",
                 CanonicalJsonObject.from(ObjectMapper().readTree("""{"changed":true}""")),
                 listOf(PendingEventSpec(
                     "kernel-authz-test.updated", 1,
-                    CanonicalJsonObject.from(ObjectMapper().readTree("""{"value":"after"}""")), 4,
+                    CanonicalJsonObject.from(ObjectMapper().readTree("""{"value":"after"}""")),
+                    AggregateReference(aggregateType, aggregateId), 4,
                 )),
             )
         }
@@ -1276,9 +1275,13 @@ class AuthorizationServiceIntegrationTest {
             )
             fun canonical(value: String) = CanonicalJsonObject.from(ObjectMapper().readTree(value))
             return CommandMutation(
-                200, canonical("""{"result":"changed"}"""), resourceId, aggregateId, aggregateType,
-                3, 4, "fact change", canonical("""{"changed":true}"""),
-                listOf(PendingEventSpec("authz.entity.updated", 1, canonical("""{"changed":true}"""), 4)),
+                200, canonical("""{"result":"changed"}"""), resourceId,
+                listOf(AggregateChange(AggregateReference(aggregateType, aggregateId), 3, 4)),
+                "fact change", canonical("""{"changed":true}"""),
+                listOf(PendingEventSpec(
+                    "authz.entity.updated", 1, canonical("""{"changed":true}"""),
+                    AggregateReference(aggregateType, aggregateId), 4,
+                )),
             )
         }
     }
