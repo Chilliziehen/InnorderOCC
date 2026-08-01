@@ -4,12 +4,14 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 import {
+  ACTIVITY_KEY_PATTERN,
   blockerCodeSchema,
   COHORT_DATE_ORDER_CONSTRAINT,
   cohortStatusSchema,
   gateProviderStatusSchema,
   problemCodeSchema,
   processTimelineTypeSchema,
+  STABLE_CODE_PATTERN,
   processStateSchema,
   taskTimelineTypeSchema,
   taskPresentationStateSchema,
@@ -31,6 +33,7 @@ type Schema = {
   maximum?: number;
   minLength?: number;
   minimum?: number;
+  pattern?: string;
   properties?: Record<string, Schema>;
   required?: string[];
   type?: string;
@@ -152,12 +155,20 @@ describe("workflow OpenAPI surface", () => {
           const response = operation.responses?.[status];
           const component = response?.$ref?.replace("#/components/responses/", "");
           const resolved = component ? document.components.responses[component] : response;
-          const expectedSchema = path === "/api/v1/tasks/{taskId}/complete" && status === "409"
-            ? "TaskBlockedProblem"
-            : path === "/api/v1/tasks/{taskId}/complete" && status === "503"
-              ? "TaskGateUnavailableProblem"
-              : "ProblemDetails";
-          expect(resolved?.content?.["application/problem+json"]?.schema?.$ref).toBe(`#/components/schemas/${expectedSchema}`);
+          const schema = resolved?.content?.["application/problem+json"]?.schema;
+          if (path === "/api/v1/tasks/{taskId}/complete" && status === "409") {
+            expect(schema?.oneOf).toEqual([
+              { $ref: "#/components/schemas/TaskBlockedProblem" },
+              { $ref: "#/components/schemas/ProblemDetails" },
+            ]);
+          } else if (path === "/api/v1/tasks/{taskId}/complete" && status === "503") {
+            expect(schema?.oneOf).toEqual([
+              { $ref: "#/components/schemas/TaskGateUnavailableProblem" },
+              { $ref: "#/components/schemas/ProblemDetails" },
+            ]);
+          } else {
+            expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+          }
         }
       }
     }
@@ -238,7 +249,7 @@ describe("workflow OpenAPI schema parity", () => {
     expect(gateProblem.required).toEqual(["type", "title", "status", "code", "correlationId", "providerKeys"]);
     expect(gateProblem.properties?.status).toEqual({ type: "integer", const: 503 });
     expect(gateProblem.properties?.code).toEqual({ type: "string", const: "OCC_TASK_GATE_UNAVAILABLE" });
-    expect(gateProblem.properties?.providerKeys).toEqual({ type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 128 } });
+    expect(gateProblem.properties?.providerKeys).toEqual({ type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 128, pattern: ACTIVITY_KEY_PATTERN } });
     expect(document.components.schemas.CompleteTaskRequest.properties?.variables).toEqual({
       type: "object",
       propertyNames: { minLength: 1, maxLength: 128 },
@@ -251,6 +262,30 @@ describe("workflow OpenAPI schema parity", () => {
         ],
       },
     });
+  });
+
+  it("matches every stable activity, provider, form, and failure-code pattern", () => {
+    const expectedActivityFields: Array<[string, Schema | undefined]> = [
+      ["wait activityKey", parametersFor(document.paths["/api/v1/processes/{processId}/waits/{activityKey}/release"].post).find((parameter) => parameter.name === "activityKey")?.schema],
+      ["ProcessProgress.activeActivities", document.components.schemas.ProcessProgress.properties?.activeActivities?.items],
+      ["ProcessTask.activityKey", document.components.schemas.ProcessTask.properties?.activityKey],
+      ["TaskBlocker.providerKey", document.components.schemas.TaskBlocker.properties?.providerKey],
+      ["TaskSummary.activityKey", document.components.schemas.TaskSummary.properties?.activityKey],
+      ["TaskSummary.formKey", document.components.schemas.TaskSummary.properties?.formKey],
+      ["TaskDetail.activityKey", document.components.schemas.TaskDetail.properties?.activityKey],
+      ["TaskDetail.formKey", document.components.schemas.TaskDetail.properties?.formKey],
+      ["TaskAvailablePayload.activityKey", document.components.schemas.TaskAvailablePayload.properties?.activityKey],
+      ["TaskGateUnavailableProblem.providerKeys", document.components.schemas.TaskGateUnavailableProblem.properties?.providerKeys?.items],
+    ];
+    for (const [field, schema] of expectedActivityFields) {
+      expect(schema?.pattern, field).toBe(ACTIVITY_KEY_PATTERN);
+    }
+    for (const [field, schema] of [
+      ["TaskSummary.failureCode", document.components.schemas.TaskSummary.properties?.failureCode],
+      ["TaskDetail.failureCode", document.components.schemas.TaskDetail.properties?.failureCode],
+    ] as Array<[string, Schema | undefined]>) {
+      expect(schema?.pattern, field).toBe(STABLE_CODE_PATTERN);
+    }
   });
 
   it("uses separate strict process and task history entry enums", () => {

@@ -443,7 +443,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/invalid-credentials",
       title: "Invalid credentials",
       status: 401,
-      code: "AUTH_INVALID_CREDENTIALS",
+      code: "OCC-AUTH-INVALID-CREDENTIALS",
       correlationId: id,
       detail: "The supplied username or password was not accepted.",
     };
@@ -456,7 +456,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/boundary",
       title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH),
       status: PROBLEM_STATUS_MAX,
-      code: "AUTH_INVALID_CREDENTIALS",
+      code: "OCC-AUTH-INVALID-CREDENTIALS",
       correlationId: id,
       detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
       currentVersion: 0,
@@ -483,7 +483,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/unicode",
       title: "😀".repeat(PROBLEM_TITLE_MAX_LENGTH),
       status: PROBLEM_STATUS_MIN,
-      code: "UNICODE_DETAIL",
+      code: "OCC-API-VALIDATION",
       correlationId: id,
       detail: "😀".repeat(PROBLEM_DETAIL_MAX_LENGTH),
     };

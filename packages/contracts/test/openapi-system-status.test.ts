@@ -70,6 +70,7 @@ interface OpenApiSchemaProperty {
   maximum?: number;
   minLength?: number;
   minimum?: number;
+  oneOf?: OpenApiSchemaProperty[];
   pattern?: string;
   type?: string;
 }
@@ -98,7 +99,7 @@ interface OpenApiOperation {
 }
 
 interface OpenApiResponse {
-  content?: Record<string, { schema?: { $ref?: string } }>;
+  content?: Record<string, { schema?: OpenApiSchemaProperty }>;
   $ref?: string;
 }
 
@@ -203,14 +204,13 @@ describe("OCC Core OpenAPI system status", () => {
     });
 
     for (const [name, response] of Object.entries(document.components.responses ?? {})) {
-      const expectedSchema = name === "TaskBlocked"
-        ? "TaskBlockedProblem"
-        : name === "TaskGateUnavailable"
-          ? "TaskGateUnavailableProblem"
-          : "ProblemDetails";
-      expect(response.content?.["application/problem+json"]?.schema?.$ref).toBe(
-        `#/components/schemas/${expectedSchema}`,
-      );
+      const schema = response.content?.["application/problem+json"]?.schema;
+      if (name === "TaskBlocked" || name === "TaskGateUnavailable") {
+        expect(schema?.oneOf).toHaveLength(2);
+        expect(schema?.oneOf?.[1]?.$ref).toBe("#/components/schemas/ProblemDetails");
+      } else {
+        expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+      }
     }
   });
 
@@ -248,14 +248,13 @@ describe("OCC Core OpenAPI system status", () => {
           const resolvedResponse = componentName
             ? document.components.responses?.[componentName]
             : response;
-          const expectedSchema = path === "/api/v1/tasks/{taskId}/complete" && status === "409"
-            ? "TaskBlockedProblem"
-            : path === "/api/v1/tasks/{taskId}/complete" && status === "503"
-              ? "TaskGateUnavailableProblem"
-              : "ProblemDetails";
-          expect(
-            resolvedResponse?.content?.["application/problem+json"]?.schema?.$ref,
-          ).toBe(`#/components/schemas/${expectedSchema}`);
+          const schema = resolvedResponse?.content?.["application/problem+json"]?.schema;
+          if (path === "/api/v1/tasks/{taskId}/complete" && ["409", "503"].includes(status)) {
+            expect(schema?.oneOf).toHaveLength(2);
+            expect(schema?.oneOf?.[1]?.$ref).toBe("#/components/schemas/ProblemDetails");
+          } else {
+            expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+          }
         }
       }
     }

@@ -378,13 +378,17 @@ components:
       content:
         application/problem+json:
           schema:
-            $ref: "#/components/schemas/TaskBlockedProblem"
+            oneOf:
+              - $ref: "#/components/schemas/TaskBlockedProblem"
+              - $ref: "#/components/schemas/ProblemDetails"
     TaskGateUnavailable:
       description: Authorized provider details are unavailable or stale
       content:
         application/problem+json:
           schema:
-            $ref: "#/components/schemas/TaskGateUnavailableProblem"
+            oneOf:
+              - $ref: "#/components/schemas/TaskGateUnavailableProblem"
+              - $ref: "#/components/schemas/ProblemDetails"
     BadRequest:
       description: Invalid request
       content:
@@ -428,8 +432,6 @@ components:
         - OCC-AUTHZ-UNAVAILABLE
         - OCC-API-INTERNAL
         - OCC-API-REQUEST
-        - AUTH_INVALID_CREDENTIALS
-        - UNICODE_DETAIL
         - OCC_INVALID_REQUEST
         - OCC_INVALID_CURSOR
         - OCC_UNAUTHENTICATED
@@ -1161,7 +1163,7 @@ components:
         severity: { type: string, enum: [INFO, WARNING, HARD] }
         sourceType: { type: string, enum: [TASK, EVIDENCE, RESOURCE, PROCESS, POLICY, PROVIDER] }
         sourceId: { type: string, format: uuid }
-        providerKey: { type: string, minLength: 1, maxLength: 128 }
+        providerKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
         createdAt: { type: string, format: date-time }
         resolvedAt: { type: string, format: date-time }
     TaskSummary: &taskSummary
@@ -1172,18 +1174,18 @@ components:
         id: { type: string, format: uuid }
         processId: { type: string, format: uuid }
         cohortId: { type: string, format: uuid }
-        activityKey: { type: string, minLength: 1, maxLength: 128 }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
         activityName: { type: string, minLength: 1, maxLength: 256 }
         state: { $ref: "#/components/schemas/TaskEngineState" }
         presentationState: { $ref: "#/components/schemas/TaskPresentationState" }
         version: { $ref: "#/components/schemas/SafeVersion" }
         assigneeId: { type: string, format: uuid }
-        formKey: { type: string, minLength: 1, maxLength: 128 }
+        formKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
         dueAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         completedAt: { type: string, format: date-time }
-        failureCode: { type: string, minLength: 1, maxLength: 128 }
+        failureCode: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
         followUpDueAt: { type: string, format: date-time }
         conditionalRuleVersion: { $ref: "#/components/schemas/SafeVersion" }
     TaskDetail:
@@ -1193,18 +1195,18 @@ components:
         id: { type: string, format: uuid }
         processId: { type: string, format: uuid }
         cohortId: { type: string, format: uuid }
-        activityKey: { type: string, minLength: 1, maxLength: 128 }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
         activityName: { type: string, minLength: 1, maxLength: 256 }
         state: { $ref: "#/components/schemas/TaskEngineState" }
         presentationState: { $ref: "#/components/schemas/TaskPresentationState" }
         version: { $ref: "#/components/schemas/SafeVersion" }
         assigneeId: { type: string, format: uuid }
-        formKey: { type: string, minLength: 1, maxLength: 128 }
+        formKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
         dueAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         completedAt: { type: string, format: date-time }
-        failureCode: { type: string, minLength: 1, maxLength: 128 }
+        failureCode: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
         followUpDueAt: { type: string, format: date-time }
         conditionalRuleVersion: { $ref: "#/components/schemas/SafeVersion" }
         blockers: { type: array, items: { $ref: "#/components/schemas/TaskBlocker" } }
@@ -1307,7 +1309,7 @@ components:
         correlationId: { type: string, format: uuid }
         detail: { type: string, minLength: 0, maxLength: 4096 }
         currentVersion: { $ref: "#/components/schemas/SafeVersion" }
-        providerKeys: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128 } }
+        providerKeys: { type: array, minItems: 1, maxItems: 100, items: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" } }
     TaskBlockedProblem:
       type: object
       additionalProperties: false

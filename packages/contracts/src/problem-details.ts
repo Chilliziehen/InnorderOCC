@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
 import { blockerCodeSchema } from "./task.js";
+import { activityKeySchema } from "./workflow-common.js";
 
 export const PROBLEM_TITLE_MIN_LENGTH = 1;
 export const PROBLEM_TITLE_MAX_LENGTH = 256;
@@ -28,8 +29,6 @@ export const PLATFORM_PROBLEM_CODES = [
   "OCC-AUTHZ-UNAVAILABLE",
   "OCC-API-INTERNAL",
   "OCC-API-REQUEST",
-  "AUTH_INVALID_CREDENTIALS",
-  "UNICODE_DETAIL",
 ] as const;
 
 export const WORKFLOW_ERROR_CODES = [
@@ -103,7 +102,7 @@ export const taskGateUnavailableProblemDetailsSchema = problemDetailsSchema
   .extend({
     status: z.literal(503),
     code: z.literal("OCC_TASK_GATE_UNAVAILABLE"),
-    providerKeys: z.array(z.string().min(1).max(128)).min(1).max(100),
+    providerKeys: z.array(activityKeySchema).min(1).max(100),
   })
   .strict();
 

@@ -22,9 +22,11 @@ import {
   notificationListQuerySchema,
   notificationPageSchema,
   processDetailSchema,
+  processProgressSchema,
   processListQuerySchema,
   processPageSchema,
   processParticipantListQuerySchema,
+  problemDetailsSchema,
   processStateSchema,
   reconcileProcessRequestSchema,
   releaseProcessWaitRequestSchema,
@@ -35,6 +37,7 @@ import {
   suspendProcessRequestSchema,
   taskBlockerPageSchema,
   taskBlockerListQuerySchema,
+  taskBlockerSchema,
   taskDetailSchema,
   taskHistoryPageSchema,
   taskHistoryQuerySchema,
@@ -49,6 +52,7 @@ import {
   workflowEventPageSchema,
   workflowErrorCodeSchema,
   problemCodeSchema,
+  PLATFORM_PROBLEM_CODES,
 } from "../src/index.js";
 
 const id = "550e8400-e29b-41d4-a716-446655440000";
@@ -207,6 +211,20 @@ describe("task contracts", () => {
     expect(taskBlockerListQuerySchema.parse({ pageSize: 100 })).toEqual({ pageSize: 100 });
     expect(() => taskPageSchema.parse({ items: [], page: {}, total: 0 })).toThrow();
   });
+
+  it("applies stable key and failure-code patterns to every task field", () => {
+    expect(() => processProgressSchema.parse({
+      processId: id, state: "RUNNING", completedActivities: 0,
+      activeActivities: ["Invalid Activity"], version: 1, updatedAt: at,
+    })).toThrow();
+    expect(() => taskBlockerSchema.parse({
+      id, code: "GATE_PROVIDER_UNAVAILABLE", severity: "HARD", sourceType: "PROVIDER",
+      providerKey: "Invalid Provider", createdAt: at,
+    })).toThrow();
+    expect(() => taskDetailSchema.parse({ ...task, activityKey: "Invalid Activity", blockers: [] })).toThrow();
+    expect(() => taskDetailSchema.parse({ ...task, formKey: "Invalid Form", blockers: [] })).toThrow();
+    expect(() => taskDetailSchema.parse({ ...task, failureCode: "invalid-code", blockers: [] })).toThrow();
+  });
 });
 
 describe("notification and event catch-up contracts", () => {
@@ -250,10 +268,10 @@ describe("workflow Problem Details", () => {
       "OCC-API-VALIDATION",
       "OCC-AUTH-INVALID-CREDENTIALS",
       "OCC-COMMAND-OPTIMISTIC-CONFLICT",
-      "AUTH_INVALID_CREDENTIALS",
-      "UNICODE_DETAIL",
       "OCC_TASK_BLOCKED",
     ]) expect(problemCodeSchema.parse(code)).toBe(code);
+    expect(PLATFORM_PROBLEM_CODES).not.toContain("AUTH_INVALID_CREDENTIALS");
+    expect(PLATFORM_PROBLEM_CODES).not.toContain("UNICODE_DETAIL");
     expect(() => problemCodeSchema.parse("ARBITRARY_ERROR")).toThrow();
   });
 
@@ -266,5 +284,24 @@ describe("workflow Problem Details", () => {
       blockerCodes: ["EVIDENCE_REQUIRED"],
     })).toBeDefined();
     expect(() => taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["evidence"], blockerCodes: [] })).toThrow();
+    expect(() => taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["Invalid Provider"] })).toThrow();
+  });
+
+  it("keeps generic completion conflict and dependency codes valid", () => {
+    for (const [status, code] of [
+      [409, "OCC_STALE_VERSION"],
+      [409, "OCC_INVALID_TRANSITION"],
+      [409, "OCC_PROCESS_NOT_RUNNING"],
+      [503, "OCC_AUTHORIZATION_UNAVAILABLE"],
+      [503, "OCC_WORKFLOW_UNAVAILABLE"],
+    ] as const) {
+      expect(problemDetailsSchema.parse({
+        type: "https://innorder.example/problems/workflow",
+        title: "Workflow error",
+        status,
+        code,
+        correlationId: id,
+      })).toBeDefined();
+    }
   });
 });

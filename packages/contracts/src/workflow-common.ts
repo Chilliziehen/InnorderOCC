@@ -10,6 +10,8 @@ export const REASON_MAX_LENGTH = 1024;
 export const CODE_MAX_LENGTH = 128;
 export const DISPLAY_TEXT_MAX_LENGTH = 256;
 export const ACTIVITY_KEY_MAX_LENGTH = 128;
+export const ACTIVITY_KEY_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
+export const STABLE_CODE_PATTERN = "^[A-Z][A-Z0-9_]*$";
 
 export const safeIntegerSchema = z.number().int().min(0).max(SAFE_INTEGER_MAX);
 export const safeVersionSchema = safeIntegerSchema;
@@ -25,8 +27,8 @@ export const pageSizeSchema = z
   .default(PAGE_SIZE_DEFAULT);
 export const idempotencyKeySchema = z.string().min(1).max(IDEMPOTENCY_KEY_MAX_LENGTH);
 export const reasonSchema = z.string().min(1).max(REASON_MAX_LENGTH);
-export const stableCodeSchema = z.string().min(1).max(CODE_MAX_LENGTH).regex(/^[A-Z][A-Z0-9_]*$/);
-export const activityKeySchema = z.string().min(1).max(ACTIVITY_KEY_MAX_LENGTH).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+export const stableCodeSchema = z.string().min(1).max(CODE_MAX_LENGTH).regex(new RegExp(STABLE_CODE_PATTERN));
+export const activityKeySchema = z.string().min(1).max(ACTIVITY_KEY_MAX_LENGTH).regex(new RegExp(ACTIVITY_KEY_PATTERN));
 export const displayTextSchema = z.string().min(1).max(DISPLAY_TEXT_MAX_LENGTH);
 
 export const cursorQuerySchema = z
