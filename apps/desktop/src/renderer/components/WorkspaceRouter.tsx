@@ -139,6 +139,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
   const [upload, setUpload] = useState<EvidenceUploadState>({ state: "idle" });
   const [uploadReference, setUploadReference] = useState<string>();
   const uploadRetry = useRef<{ file: File; targetId: string; intentHandle: string } | undefined>(undefined);
+  const activeUploadId = useRef<string | undefined>(undefined);
   const uploadSequence = useRef(0);
   const uploadScopeKey = `${scopeKey}:${selectedTaskId ?? ""}`;
   const currentUploadScope = useRef(uploadScopeKey);
@@ -154,6 +155,9 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     ...("nextCursor" in result && result.nextCursor ? { nextCursor: result.nextCursor } : {}),
   };
   useEffect(() => {
+    const uploadId = activeUploadId.current;
+    if (uploadId) void window.occ?.uploads?.cancel?.(uploadId);
+    activeUploadId.current = undefined;
     uploadSequence.current += 1;
     setSelectedTaskId(undefined);
     setSelectedProcessId(undefined);
@@ -189,17 +193,16 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
       } });
       return () => { active = false; };
     }
-    if (!online) {
+    const retainedFallback = (): WorkspaceResult | undefined => {
       const retained = retainedResult.current;
       const retainedValue = retained?.key === scopeKey ? retained.value : undefined;
-      setResultState({ key: requestKey, value: retainedValue
-        ? hasWorkspaceItems(retainedValue) ? { ...retainedValue, state: "offline" } : retainedValue
-        : { state: "error", problem: { title: "离线且没有可用缓存。", code: "OFFLINE_NO_CACHE", status: 503 } } });
-      return () => { active = false; };
-    }
+      return retainedValue
+        ? hasWorkspaceItems(retainedValue) ? { ...retainedValue, state: "offline" as const } : retainedValue
+        : undefined;
+    };
     const queryApi = window.occ?.workspaces?.query;
     if (!callable(queryApi)) {
-      setResultState({ key: requestKey, value: unavailableWorkspaceResult(definition) });
+      setResultState({ key: requestKey, value: retainedFallback() ?? unavailableWorkspaceResult(definition) });
       return () => { active = false; };
     }
     void queryApi(workspaceQueryInput(definition, query, activeTab)).then(
@@ -210,7 +213,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
         }
       },
       () => {
-        if (active && requestSequence.current === sequence) setResultState({ key: requestKey, value: failedWorkspaceResult() });
+        if (active && requestSequence.current === sequence) setResultState({ key: requestKey, value: retainedFallback() ?? failedWorkspaceResult() });
       },
     );
     return () => { active = false; };
@@ -265,8 +268,11 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     uploadRetry.current = { file, targetId, intentHandle };
     const metadata = { workspace: "my-work", taskId: targetId, fileName: file.name, mediaType: file.type, size: file.size, intentHandle };
     const preflight = window.occ?.uploads?.preflight;
-    const start = window.occ?.uploads?.start;
-    if (!callable(preflight) || !callable(start)) {
+    const begin = window.occ?.uploads?.begin;
+    const append = window.occ?.uploads?.append;
+    const finish = window.occ?.uploads?.finish;
+    const cancel = window.occ?.uploads?.cancel;
+    if (!callable(preflight) || !callable(begin) || !callable(append) || !callable(finish) || !callable(cancel)) {
       setUpload({ state: "failed", fileName: file.name, message: "证据上传接口不可用。", retryable: false });
       return;
     }
@@ -277,9 +283,24 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
         setUpload({ state: "failed", fileName: file.name, message: availability.message, retryable: false });
         return;
       }
-      const data = new Uint8Array(await file.arrayBuffer());
-      if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
-      const receipt = await start({ ...metadata, data });
+      const started = await begin(metadata);
+      if (started.state !== "started") {
+        if (started.state === "unavailable") setUpload({ state: "failed", fileName: file.name, message: started.message, retryable: false });
+        else setUpload({ state: "failed", fileName: file.name, message: "证据上传响应无效。", retryable: false });
+        return;
+      }
+      activeUploadId.current = started.uploadId;
+      for (let offset = 0, chunkSequence = 0; offset < file.size; offset += 1024 * 1024, chunkSequence += 1) {
+        if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) {
+          await cancel(started.uploadId);
+          activeUploadId.current = undefined;
+          return;
+        }
+        const data = new Uint8Array(await file.slice(offset, offset + 1024 * 1024).arrayBuffer());
+        await append({ uploadId: started.uploadId, sequence: chunkSequence, data });
+      }
+      const receipt = await finish(started.uploadId);
+      activeUploadId.current = undefined;
       if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
       if (receipt.state === "completed" && receipt.kind === "evidence") {
         setUpload({ state: "accepted", fileName: file.name, evidenceId: receipt.evidenceId });
@@ -294,6 +315,9 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
         setUpload({ state: "failed", fileName: file.name, message: "证据上传响应无效。", retryable: false });
       }
     } catch {
+      const uploadId = activeUploadId.current;
+      if (uploadId) await window.occ?.uploads?.cancel?.(uploadId).catch(() => undefined);
+      activeUploadId.current = undefined;
       if (uploadSequence.current === sequence && currentUploadScope.current === initiationScope) {
         setUpload({ state: "failed", fileName: file.name, message: "证据上传失败，请重试。", retryable: true });
       }
@@ -301,12 +325,20 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
   };
   const archiveUpload = async (file: File): Promise<ArchiveUploadReference> => {
     const preflight = window.occ?.uploads?.preflight;
-    const start = window.occ?.uploads?.start;
-    if (!callable(preflight) || !callable(start)) throw new Error("archive-upload-unavailable");
+    const begin = window.occ?.uploads?.begin;
+    const append = window.occ?.uploads?.append;
+    const finish = window.occ?.uploads?.finish;
+    if (!callable(preflight) || !callable(begin) || !callable(append) || !callable(finish)) throw new Error("archive-upload-unavailable");
     const metadata = { workspace: "domain-design", taskId: "package-import", fileName: file.name, mediaType: file.type, size: file.size, intentHandle: crypto.randomUUID() };
     const availability = await preflight(metadata);
     if (availability.state === "unavailable") throw new Error("archive-upload-unavailable");
-    const receipt = await start({ ...metadata, data: new Uint8Array(await file.arrayBuffer()) });
+    const started = await begin(metadata);
+    if (started.state !== "started") throw new Error("archive-upload-unavailable");
+    for (let offset = 0, sequence = 0; offset < file.size; offset += 1024 * 1024, sequence += 1) {
+      const data = new Uint8Array(await file.slice(offset, offset + 1024 * 1024).arrayBuffer());
+      await append({ uploadId: started.uploadId, sequence, data });
+    }
+    const receipt = await finish(started.uploadId);
     if (receipt.state !== "completed" || receipt.kind !== "archive") throw new Error("archive-upload-incomplete");
     return { uploadId: receipt.uploadId, sha256: receipt.sha256 };
   };

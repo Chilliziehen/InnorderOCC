@@ -8,8 +8,8 @@ export const DESKTOP_CHANNELS = {
   runtime: { statuses: "system-statuses:get" },
   workspaces: { query: "workspaces:query" },
   commands: { execute: "commands:execute" },
-  uploads: { preflight: "uploads:preflight", start: "uploads:start", cancel: "uploads:cancel", progress: "uploads:progress" },
-  notifications: { list: "notifications:list", event: "notifications:event" },
+  uploads: { preflight: "uploads:preflight", begin: "uploads:begin", append: "uploads:append", finish: "uploads:finish", cancel: "uploads:cancel", progress: "uploads:progress" },
+  notifications: { list: "notifications:list", event: "notifications:event", state: "notifications:state" },
 } as const;
 
 export const SYSTEM_STATUSES_CHANNEL = DESKTOP_CHANNELS.runtime.statuses;

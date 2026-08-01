@@ -13,6 +13,7 @@ import {
   createSafeStorageVault,
   registerDesktopIpc,
   sendDesktopNotification,
+  sendDesktopNotificationState,
   sendDesktopUploadProgress,
 } from "./desktop-ipc";
 import { createEvidenceUploadService } from "./evidence-upload";
@@ -140,7 +141,11 @@ if (ownsInstance) void app.whenReady().then(async () => {
   const disposeNotificationForwarder = notificationStream.subscribe((event) => {
     if (mainWindow) sendDesktopNotification(mainWindow.webContents, event);
   });
+  const disposeNotificationStateForwarder = notificationStream.subscribeState((state) => {
+    if (mainWindow) sendDesktopNotificationState(mainWindow.webContents, state);
+  });
   const uploads = createEvidenceUploadService({
+    spoolDirectory: path.join(userData, "upload-spool"),
     getProfile: () => ({ origin: selectedProfile().origin, endpointAvailable: false }),
     getAccessToken: () => accessToken,
     isOnline: connectivity.isOnline,
@@ -149,10 +154,13 @@ if (ownsInstance) void app.whenReady().then(async () => {
       if (mainWindow) sendDesktopUploadProgress(mainWindow.webContents, progress);
     },
   });
+  void uploads.cleanupStaleSpools().catch(() => undefined);
   disposeSession = () => sessionManager.dispose();
   disposeReliability = () => {
     disposeNotificationForwarder();
+    disposeNotificationStateForwarder();
     notificationStream.dispose();
+    void uploads.dispose();
   };
   const api = createMainReliabilityApi({
     profiles,

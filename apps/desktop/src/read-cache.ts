@@ -39,6 +39,7 @@ interface CacheEntry extends ReadCacheScope {
   readonly workspace: string;
   readonly result: WorkspaceResult;
   readonly storedAt: number;
+  readonly accessedAt: number;
 }
 
 const boundedText = z.string().min(1).max(2_048);
@@ -105,6 +106,7 @@ const cacheEntrySchema = scopeSchema.extend({
   workspace: z.string().min(1).max(128),
   result: workspaceResultSchema,
   storedAt: z.number().int().nonnegative(),
+  accessedAt: z.number().int().nonnegative().optional(),
 }).strict();
 const cacheFileSchema = (maxEntries: number) => z.object({ version: z.literal(1), entries: z.array(cacheEntrySchema).max(maxEntries) }).strict();
 
@@ -173,7 +175,11 @@ export function createReadCache(options: ReadCacheOptions) {
       const actualBytes = Buffer.byteLength(raw.text, "utf8");
       if (actualBytes !== raw.byteLength || actualBytes > maxBytes) return [];
       const file = cacheFileSchema(maxEntries).parse(JSON.parse(raw.text));
-      return file.entries.map((entry) => ({ ...entry, result: cacheSafeResult(entry.workspace, entry.result) }));
+      return file.entries.map((entry) => ({
+        ...entry,
+        accessedAt: entry.accessedAt ?? entry.storedAt,
+        result: cacheSafeResult(entry.workspace, entry.result),
+      }));
     } catch {
       return [];
     }
@@ -184,8 +190,11 @@ export function createReadCache(options: ReadCacheOptions) {
     return result;
   };
   const persist = async (entries: CacheEntry[]) => {
-    const file = cacheFileSchema(maxEntries).parse({ version: 1, entries });
-    if (byteLength(file) > maxBytes) throw new Error("Read cache byte limit exceeded");
+    const bounded = [...entries];
+    while (bounded.length > maxEntries) bounded.shift();
+    while (bounded.length > 1 && byteLength({ version: 1, entries: bounded }) > maxBytes) bounded.shift();
+    const file = cacheFileSchema(maxEntries).parse({ version: 1, entries: bounded });
+    if (byteLength(file) > maxBytes) throw new Error("Read cache entry exceeds byte limit");
     await options.persistence.write(file);
   };
   const validateCacheable = (query: WorkspaceQuery, result: WorkspaceResult) => {
@@ -207,8 +216,8 @@ export function createReadCache(options: ReadCacheOptions) {
           workspace: validated.query.workspace,
           result: validated.result,
           storedAt: now(),
+          accessedAt: now(),
         }];
-        while (next.length > maxEntries) next.shift();
         await persist(next);
       });
     },
@@ -221,15 +230,23 @@ export function createReadCache(options: ReadCacheOptions) {
       if (authenticatedScope === null) return undefined;
       const parsedAuthenticated = scopeSchema.parse(authenticatedScope);
       if (!sameScope(parsedScope, parsedAuthenticated)) return undefined;
-      const entry = (await load()).find(({ key }) => key === queryKey(parsedScope, query));
-      if (!entry) return undefined;
-      const result = workspaceResultSchema.safeParse(entry.result);
-      if (!result.success) return undefined;
-      const age = Math.max(0, now() - Date.parse(
-        "fetchedAt" in result.data ? result.data.fetchedAt : new Date(entry.storedAt).toISOString(),
-      ));
-      if (age > maxStaleMs) return undefined;
-      return age > freshTtlMs ? staleResult(result.data) : result.data;
+      return mutate(async () => {
+        const entries = await load();
+        const key = queryKey(parsedScope, query);
+        const index = entries.findIndex((entry) => entry.key === key);
+        if (index < 0) return undefined;
+        const entry = entries[index]!;
+        const result = workspaceResultSchema.safeParse(entry.result);
+        if (!result.success) return undefined;
+        const age = Math.max(0, now() - Date.parse(
+          "fetchedAt" in result.data ? result.data.fetchedAt : new Date(entry.storedAt).toISOString(),
+        ));
+        if (age > maxStaleMs) return undefined;
+        entries.splice(index, 1);
+        entries.push({ ...entry, accessedAt: now() });
+        await persist(entries).catch(() => undefined);
+        return age > freshTtlMs ? staleResult(result.data) : result.data;
+      });
     },
     purgeProfile(profileId: string): Promise<void> {
       const parsed = z.uuid().parse(profileId);

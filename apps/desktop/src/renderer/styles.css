@@ -538,6 +538,18 @@ progress {
   font-size: 12px;
 }
 
+.notification-sync-state {
+  align-self: flex-end;
+  margin: 8px 24px 0;
+  color: var(--status-warning);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.notification-sync-state.unavailable {
+  color: var(--status-danger);
+}
+
 .mutation-lock {
   margin-left: auto;
   font-weight: 700;

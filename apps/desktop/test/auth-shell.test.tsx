@@ -82,13 +82,19 @@ function createOcc(overrides: Partial<{
       ...overrides.workspaces,
     },
     commands: { execute: vi.fn() },
-    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
+    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), begin: vi.fn(), append: vi.fn(), finish: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
     notifications: {
       list: vi.fn().mockResolvedValue({ items: [] }),
       subscribe: vi.fn(() => vi.fn()),
+      subscribeState: vi.fn(() => vi.fn()),
     },
   };
 }
+
+it("shows quiet notification freshness state without replacing connectivity status", () => {
+  render(<AppShell state={authenticatedState()} statuses={[]} notificationState={{ state: "reconnecting", changedAt: "2026-08-01T12:00:00.000Z", lastEventAt: "2026-08-01T11:59:00.000Z" }} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
+  expect(screen.getByRole("status", { name: "通知同步延迟" })).toBeInTheDocument();
+});
 
 function installOcc(api: OccApi): void {
   Object.defineProperty(window, "occ", { configurable: true, value: api });

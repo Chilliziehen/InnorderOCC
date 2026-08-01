@@ -277,7 +277,36 @@ describe("validated workspace read cache", () => {
 
     await expect(cache.get(scope(), query({ cursor: "a" }), scope())).resolves.toBeUndefined();
     await expect(cache.get(scope(), query({ cursor: "b" }), scope())).resolves.toEqual(ready("b"));
-    const tiny = createReadCache({ persistence: memoryPersistence(), now: () => Date.parse(fetchedAt), maxBytes: 300 });
-    await expect(tiny.put(scope(), query({ cursor: "large" }), ready("large"))).rejects.toThrow("byte limit");
+  });
+
+  it("touches reads and evicts the least recently used entry", async () => {
+    const persistence = memoryPersistence();
+    const cache = createReadCache({ persistence, now: () => Date.parse(fetchedAt), maxEntries: 2 });
+    await cache.put(scope(), query({ cursor: "a" }), ready("a"));
+    await cache.put(scope(), query({ cursor: "b" }), ready("b"));
+    await cache.get(scope(), query({ cursor: "a" }), scope());
+    await cache.put(scope(), query({ cursor: "c" }), ready("c"));
+
+    await expect(cache.get(scope(), query({ cursor: "a" }), scope())).resolves.toEqual(ready("a"));
+    await expect(cache.get(scope(), query({ cursor: "b" }), scope())).resolves.toBeUndefined();
+    await expect(cache.get(scope(), query({ cursor: "c" }), scope())).resolves.toEqual(ready("c"));
+  });
+
+  it("evicts by serialized UTF-8 bytes and recovers after rejecting one oversized entry", async () => {
+    const persistence = memoryPersistence();
+    const cache = createReadCache({ persistence, now: () => Date.parse(fetchedAt), maxEntries: 10, maxBytes: 1_700 });
+    await cache.put(scope(), query({ cursor: "a" }), ready("a"));
+    await cache.put(scope(), query({ cursor: "b" }), ready("b"));
+    const large = { ...ready("c"), items: [{ ...(ready("c") as Extract<WorkspaceResult, { state: "ready" }>).items[0]!, risk: "x".repeat(900) }] } as WorkspaceResult;
+    await cache.put(scope(), query({ cursor: "c" }), large);
+    expect(Buffer.byteLength(JSON.stringify(persistence.value), "utf8")).toBeLessThanOrEqual(1_700);
+    await expect(cache.get(scope(), query({ cursor: "a" }), scope())).resolves.toBeUndefined();
+    await expect(cache.get(scope(), query({ cursor: "c" }), scope())).resolves.toEqual(large);
+
+    const tinyPersistence = memoryPersistence();
+    const tiny = createReadCache({ persistence: tinyPersistence, now: () => Date.parse(fetchedAt), maxBytes: 800 });
+    await expect(tiny.put(scope(), query({ cursor: "large" }), large)).rejects.toThrow("entry exceeds");
+    await expect(tiny.put(scope(), query({ cursor: "small" }), ready("small"))).resolves.toBeUndefined();
+    await expect(tiny.get(scope(), query({ cursor: "small" }), scope())).resolves.toEqual(ready("small"));
   });
 });

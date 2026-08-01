@@ -16,9 +16,11 @@ interface IntentBinding {
   readonly identityHash: string;
   readonly payloadHash: string;
   readonly idempotencyKey: string;
-  state: "retryable" | "accepted";
+  state: "retryable" | "accepted" | "terminal";
   retryableAt?: number;
   acceptedAt?: number;
+  terminalAt?: number;
+  terminalReceipt?: CommandReceipt;
   correlationId?: string;
   inFlight?: Promise<CommandReceipt>;
 }
@@ -43,7 +45,9 @@ export interface CommandIntentRegistry {
 export const COMMAND_INTENT_ACCEPTED_TTL_MS = 15 * 60 * 1_000;
 /** Idle retryable bindings retain their key for 15 minutes before releasing capacity. */
 export const COMMAND_INTENT_RETRYABLE_TTL_MS = 15 * 60 * 1_000;
-/** The hard entry cap bounds accepted and retryable bindings during prolonged outages. */
+/** Terminal receipts use the accepted TTL to cover lost renderer responses without permanent growth. */
+export const COMMAND_INTENT_TERMINAL_TTL_MS = COMMAND_INTENT_ACCEPTED_TTL_MS;
+/** The hard entry cap bounds every retained intent state during prolonged outages. */
 export const COMMAND_INTENT_MAX_ENTRIES = 1_000;
 const intentHandleSchema = z.uuid();
 
@@ -77,7 +81,10 @@ export function createCommandIntentRegistry(
       const expiredRetryable = binding.state === "retryable" &&
         binding.retryableAt !== undefined &&
         currentTime - binding.retryableAt >= retryableTtlMs;
-      if (binding.inFlight === undefined && (expiredAccepted || expiredRetryable)) {
+      const expiredTerminal = binding.state === "terminal" &&
+        binding.terminalAt !== undefined &&
+        currentTime - binding.terminalAt >= COMMAND_INTENT_TERMINAL_TTL_MS;
+      if (binding.inFlight === undefined && (expiredAccepted || expiredRetryable || expiredTerminal)) {
         bindings.delete(handle);
       }
     }
@@ -107,6 +114,9 @@ export function createCommandIntentRegistry(
         bindings.set(command.intentHandle, binding);
       }
       if (binding.inFlight) return binding.inFlight;
+      if (binding.state === "terminal" && binding.terminalReceipt) {
+        return Promise.resolve(binding.terminalReceipt);
+      }
       const internal: InternalWorkspaceCommand = {
         workspace: command.workspace,
         operation: command.operation,
@@ -139,7 +149,12 @@ export function createCommandIntentRegistry(
             binding.retryableAt = now();
             delete binding.acceptedAt;
           } else {
-            bindings.delete(command.intentHandle);
+            binding.state = "terminal";
+            binding.terminalAt = now();
+            binding.terminalReceipt = receipt;
+            delete binding.retryableAt;
+            delete binding.acceptedAt;
+            delete binding.correlationId;
           }
           clearInFlight();
           resolveFlight(receipt);

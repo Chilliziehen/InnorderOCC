@@ -70,7 +70,9 @@ describe("preload bridge", () => {
     await api.workspaces.query(input);
     await api.commands.execute(input);
     await api.uploads.preflight(input);
-    await api.uploads.start(input);
+    await api.uploads.begin(input);
+    await api.uploads.append(input);
+    await api.uploads.finish("upload-id");
     await api.uploads.cancel("upload-id");
     await api.notifications.list("cursor");
 
@@ -87,7 +89,9 @@ describe("preload bridge", () => {
       [DESKTOP_CHANNELS.workspaces.query, input],
       [DESKTOP_CHANNELS.commands.execute, input],
       [DESKTOP_CHANNELS.uploads.preflight, input],
-      [DESKTOP_CHANNELS.uploads.start, input],
+      [DESKTOP_CHANNELS.uploads.begin, input],
+      [DESKTOP_CHANNELS.uploads.append, input],
+      [DESKTOP_CHANNELS.uploads.finish, "upload-id"],
       [DESKTOP_CHANNELS.uploads.cancel, "upload-id"],
       [DESKTOP_CHANNELS.notifications.list, "cursor"],
     ]);
@@ -134,6 +138,20 @@ describe("preload bridge", () => {
       DESKTOP_CHANNELS.notifications.event,
       wrapped,
     );
+  });
+
+  it("validates notification connection state and synchronously disposes the listener", () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    const listener = vi.fn();
+    const dispose = api.notifications.subscribeState(listener);
+    const wrapped = electronMocks.on.mock.calls.find(([channel]) => channel === DESKTOP_CHANNELS.notifications.state)?.[1];
+    wrapped({}, { state: "online", changedAt: "invalid" });
+    const state = { state: "reconnecting", changedAt: "2026-08-01T12:00:00.000Z", lastEventAt: "2026-08-01T11:59:00.000Z" };
+    wrapped({}, state);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(state);
+    dispose();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(DESKTOP_CHANNELS.notifications.state, wrapped);
   });
 
   it("imports no Node modules into the sandboxed preload graph", () => {

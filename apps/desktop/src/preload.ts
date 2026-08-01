@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-import { DESKTOP_CHANNELS, notificationEventSchema, uploadProgressSchema, type OccApi } from "./ipc-contract";
+import { DESKTOP_CHANNELS, notificationConnectionStateSchema, notificationEventSchema, uploadProgressSchema, type OccApi } from "./ipc-contract";
 
 function freezeApi<T extends object>(value: T): Readonly<T> {
   for (const child of Object.values(value)) {
@@ -29,7 +29,9 @@ const api: OccApi = freezeApi({
   commands: { execute: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.commands.execute, input) },
   uploads: {
     preflight: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.preflight, input),
-    start: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.start, input),
+    begin: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.begin, input),
+    append: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.append, input),
+    finish: (uploadId) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.finish, uploadId),
     cancel: (uploadId) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.cancel, uploadId),
     subscribeProgress(listener) {
       const wrapped = (_event: unknown, input: unknown) => {
@@ -49,6 +51,14 @@ const api: OccApi = freezeApi({
       };
       ipcRenderer.on(DESKTOP_CHANNELS.notifications.event, wrapped);
       return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.notifications.event, wrapped);
+    },
+    subscribeState(listener) {
+      const wrapped = (_event: unknown, input: unknown) => {
+        const parsed = notificationConnectionStateSchema.safeParse(input);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(DESKTOP_CHANNELS.notifications.state, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.notifications.state, wrapped);
     },
   },
 });

@@ -3,7 +3,7 @@ import { Tooltip } from "antd";
 import { LogOut, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import type { ProfileInput, ServerProfile } from "../../desktop-contract";
+import type { NotificationConnectionState, ProfileInput, ServerProfile } from "../../desktop-contract";
 import type { AuthenticatedState, OfflineState, ReconnectingState } from "../app-controller";
 import { resolveRoute, visibleRoutes } from "../routes";
 import type { WorkspaceId } from "../workspace-manifest";
@@ -16,6 +16,7 @@ export type ShellState = AuthenticatedState | OfflineState | ReconnectingState;
 interface AppShellProps {
   state: ShellState;
   statuses: SystemStatus[];
+  notificationState?: NotificationConnectionState;
   onLogout(): void | Promise<void>;
   onProfileSelect(profile: ServerProfile): void | Promise<void>;
   onProfileSave(input: ProfileInput): Promise<unknown>;
@@ -23,7 +24,7 @@ interface AppShellProps {
   onRetry?(): void;
 }
 
-export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfileSave, onProfileRemove, onRetry }: AppShellProps) {
+export function AppShell({ state, statuses, notificationState, onLogout, onProfileSelect, onProfileSave, onProfileRemove, onRetry }: AppShellProps) {
   const identity = state.mode === "authenticated" ? state.identity : state.cachedIdentity;
   const resolution = resolveRoute(state.route?.path ?? "", identity.capabilities);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -68,6 +69,11 @@ export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfile
 
       <main className="workspace">
         <StatusBanner mode={state.mode} lastFreshAt={state.lastFreshAt} retryAvailable={state.mode === "reconnecting" && state.retryAvailable} {...(onRetry ? { onRetry } : {})} />
+        {notificationState && (notificationState.state === "reconnecting" || notificationState.state === "unavailable") ? (
+          <span className={`notification-sync-state ${notificationState.state}`} role="status" aria-label={notificationState.state === "reconnecting" ? "通知同步延迟" : "通知服务不可用"} title={notificationState.lastEventAt ? `最近通知：${notificationState.lastEventAt}` : undefined}>
+            {notificationState.state === "reconnecting" ? "通知同步延迟" : "通知服务不可用"}
+          </span>
+        ) : null}
         <span className="sr-only" aria-live="polite" data-testid="page-announcement">{title}</span>
         <div className="workspace-content" ref={contentRef}>
           {resolution.kind === "access-denied" ? (

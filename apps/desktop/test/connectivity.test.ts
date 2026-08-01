@@ -23,6 +23,7 @@ describe("main-owned Core connectivity", () => {
       .mockResolvedValueOnce([status("UNREACHABLE")]);
     const transport = vi.fn();
     const uploads = createEvidenceUploadService({
+      spoolDirectory: "D:\\occ-connectivity-test-spool",
       getProfile: () => ({ origin: profile.origin, endpointAvailable: true }), getAccessToken: () => "token",
       isOnline: connectivity.isOnline, transport,
     });

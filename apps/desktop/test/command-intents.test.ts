@@ -134,11 +134,14 @@ describe("main command intent registry", () => {
     { state: "problem", problem: { title: "Rejected", code: "REJECTED", status: 422, retryable: false } },
     { state: "conflict", currentVersion: 3, correlationId },
     { state: "unavailable", reason: "UNAVAILABLE_CONTRACT", resourceGroups: ["/risks"], message: "Risk commands unavailable" },
-  ] as CommandReceipt[])("releases terminal $state intents", async (receipt) => {
+  ] as CommandReceipt[])("replays exact terminal $state receipts without invoking again", async (receipt) => {
     const execute = vi.fn().mockResolvedValueOnce(receipt).mockResolvedValueOnce(receipt);
     const intents = registry();
-    await intents.execute(command(), execute);
-    await intents.execute(command(), execute);
+    await expect(intents.execute(command(), execute)).resolves.toEqual(receipt);
+    await expect(intents.execute(command(), execute)).resolves.toEqual(receipt);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA]);
+    await expect(intents.execute(command({ payload: { version: 3 } }), execute)).rejects.toThrow("Command intent mismatch");
+    await intents.execute(command({ intentHandle: keyB }), execute);
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
   });
 
@@ -163,8 +166,8 @@ describe("main command intent registry", () => {
     resolve({ state: "completed", commandId: keyA, correlationId });
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
     const next = vi.fn().mockResolvedValue({ state: "completed", commandId: keyB, correlationId });
-    await intents.execute(command(), next);
-    expect(next.mock.calls[0]![0].idempotencyKey).toBe(keyB);
+    await expect(intents.execute(command(), next)).resolves.toEqual({ state: "completed", commandId: keyA, correlationId });
+    expect(next).not.toHaveBeenCalled();
   });
 
   it("shares a failed in-flight call then reuses its key on retry", async () => {
@@ -217,6 +220,22 @@ describe("main command intent registry", () => {
     await intents.execute(command(), execute);
     now += COMMAND_INTENT_ACCEPTED_TTL_MS + 1;
     await intents.execute(command(), execute);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
+  });
+
+  it("expires terminal replay receipts and recovers registry capacity", async () => {
+    let now = 1_000;
+    const keys = [keyA, keyB];
+    const intents = createCommandIntentRegistry({
+      now: () => now,
+      maxEntries: 1,
+      createIdempotencyKey: () => keys.shift()!,
+    });
+    const execute = vi.fn().mockResolvedValue({ state: "completed", commandId: keyA, correlationId });
+    await intents.execute(command(), execute);
+    await expect(intents.execute(command({ intentHandle: keyB }), execute)).rejects.toThrow("capacity exceeded");
+    now += COMMAND_INTENT_ACCEPTED_TTL_MS + 1;
+    await intents.execute(command({ intentHandle: keyB }), execute);
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
   });
 

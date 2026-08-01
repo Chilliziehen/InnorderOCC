@@ -10,7 +10,11 @@ interface MainReliabilityCompositionOptions extends Pick<
 > {
   readonly readCache: NonNullable<DesktopApiDependencies["readCache"]>;
   readonly notificationStream: { setSession(session: NotificationSession | null): Promise<void> };
-  readonly uploads: Pick<OccApi["uploads"], "preflight" | "start" | "cancel">;
+  readonly uploads: Pick<OccApi["uploads"], "preflight" | "begin" | "append" | "finish" | "cancel"> & {
+    setScope?(scope: NotificationSession["scope"] | null): void;
+    abortScope?(scope: NotificationSession["scope"]): Promise<void>;
+    abortAll?(): Promise<void>;
+  };
   readonly getCustomerInstanceId: () => string | null;
   readonly connectivity: ConnectivityTracker;
   readonly getNotificationSession?: (scope: NotificationSession["scope"]) => NotificationSession | null;
@@ -19,28 +23,32 @@ interface MainReliabilityCompositionOptions extends Pick<
 
 export function createMainReliabilityApi(options: MainReliabilityCompositionOptions) {
   let activeGeneration = 0;
-  let notificationActive = false;
   const reportBackgroundError = () => {
     try { options.onBackgroundError?.(new Error("Notification session update failed")); } catch { /* Background reporting is contained. */ }
   };
   const setNotificationSession = (session: NotificationSession | null) => {
-    if (session === null && !notificationActive) return;
+    let candidate = session;
     if (session) {
-      if (!session.endpointAvailable) return;
-      try {
-        const origin = new URL(session.origin);
-        if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) {
+      if (!session.endpointAvailable) {
+        candidate = null;
+      } else {
+        try {
+          const origin = new URL(session.origin);
+          if (origin.protocol !== "https:" || origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) {
+            reportBackgroundError();
+            candidate = null;
+          }
+        } catch {
           reportBackgroundError();
-          return;
+          candidate = null;
         }
-      } catch {
-        reportBackgroundError();
-        return;
       }
     }
-    notificationActive = session !== null;
+    const expectedGeneration = activeGeneration;
     try {
-      void options.notificationStream.setSession(session).catch(reportBackgroundError);
+      void options.notificationStream.setSession(null).then(async () => {
+        if (candidate && expectedGeneration === activeGeneration) await options.notificationStream.setSession(candidate);
+      }).catch(reportBackgroundError);
     } catch {
       reportBackgroundError();
     }
@@ -75,6 +83,9 @@ export function createMainReliabilityApi(options: MainReliabilityCompositionOpti
     executeCommand: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/commands"),
     isOnline: options.connectivity.isOnline,
     uploads: options.uploads,
+    ...(options.uploads.setScope && options.uploads.abortScope && options.uploads.abortAll ? {
+      uploadLifecycle: { setScope: options.uploads.setScope, abortScope: options.uploads.abortScope, abortAll: options.uploads.abortAll },
+    } : {}),
     notifications: { list: async () => mainUnavailableNotificationList() },
     onSessionScopeChanged: (scope, generation) => {
       activeGeneration = generation;

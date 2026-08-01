@@ -57,10 +57,11 @@ function mockStatuses(statuses: SystemStatus[]): void {
       message: "总览业务 API 合同尚未集成",
     }) },
     commands: { execute: vi.fn() },
-    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
+    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), begin: vi.fn(), append: vi.fn(), finish: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
     notifications: {
       list: vi.fn().mockResolvedValue({ items: [] }),
       subscribe: vi.fn(() => vi.fn()),
+      subscribeState: vi.fn(() => vi.fn()),
     },
   };
   Object.defineProperty(window, "occ", {
@@ -96,7 +97,7 @@ describe("OCC operations workspace", () => {
 
     expect(screen.getByRole("tablist", { name: "运行总览视图" })).toBeInTheDocument();
     expect(screen.getByRole("form", { name: "查询工具" })).toBeInTheDocument();
-    expect(await screen.findByText("离线且没有可用缓存。")).toBeInTheDocument();
+    expect(await screen.findByText("总览业务 API 合同尚未集成")).toBeInTheDocument();
   });
 
   it("passes profile-scoped statuses to the integrated overview", async () => {
@@ -130,6 +131,6 @@ describe("OCC operations workspace", () => {
       expect(within(metric as HTMLElement).getByText("--")).toBeInTheDocument();
       expect(within(metric as HTMLElement).getByText("不可用")).toBeInTheDocument();
     }
-    expect(await screen.findByText("离线且没有可用缓存。")).toBeInTheDocument();
+    expect(await screen.findByText("总览业务 API 合同尚未集成")).toBeInTheDocument();
   });
 });

@@ -102,8 +102,8 @@ function installOcc(query = vi.fn().mockResolvedValue(unavailable())): OccApi {
     runtime: { statuses: vi.fn().mockResolvedValue([]) },
     workspaces: { query },
     commands: { execute: vi.fn() },
-    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
-    notifications: { list: vi.fn().mockResolvedValue({ items: [] }), subscribe: vi.fn(() => vi.fn()) },
+    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), begin: vi.fn(), append: vi.fn().mockResolvedValue({ acceptedBytes: 3, receivedBytes: 3 }), finish: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
+    notifications: { list: vi.fn().mockResolvedValue({ items: [] }), subscribe: vi.fn(() => vi.fn()), subscribeState: vi.fn(() => vi.fn()) },
   };
   Object.defineProperty(window, "occ", { configurable: true, value: api });
   return api;
@@ -322,7 +322,8 @@ describe("authenticated workspace integration", () => {
     };
     const api = installOcc(vi.fn().mockResolvedValue(result));
     const uploadId = "00000000-0000-4000-8000-000000000077";
-    vi.mocked(api.uploads.start).mockResolvedValue({ state: "completed", kind: "evidence", uploadId, evidenceId: "evidence-17", uploadReference: uploadId, quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
+    vi.mocked(api.uploads.begin).mockResolvedValue({ state: "started", uploadId });
+    vi.mocked(api.uploads.finish).mockResolvedValue({ state: "completed", kind: "evidence", uploadId, evidenceId: "evidence-17", uploadReference: uploadId, quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
     vi.mocked(api.commands.execute).mockResolvedValue({
       state: "completed",
       commandId: "00000000-0000-4000-8000-000000000088",
@@ -332,12 +333,18 @@ describe("authenticated workspace integration", () => {
     fireEvent.click(await screen.findByRole("button", { name: "选择任务：校准电源" }));
     const input = await screen.findByLabelText("选择证据文件");
     const file = new File(["pdf"], "record.pdf", { type: "application/pdf" });
-    Object.defineProperty(file, "arrayBuffer", { value: vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer) });
+    const wholeRead = vi.fn();
+    const slice = vi.fn(() => ({ arrayBuffer: vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer) }));
+    Object.defineProperty(file, "arrayBuffer", { value: wholeRead });
+    Object.defineProperty(file, "slice", { value: slice });
     fireEvent.change(input, { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
 
     await screen.findByRole("status", { name: "证据上传完成" });
-    expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-17", fileName: "record.pdf", mediaType: "application/pdf", intentHandle: expect.stringMatching(/^[0-9a-f-]{36}$/i) }));
+    expect(api.uploads.begin).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-17", fileName: "record.pdf", mediaType: "application/pdf", intentHandle: expect.stringMatching(/^[0-9a-f-]{36}$/i) }));
+    expect(slice).toHaveBeenCalledWith(0, 1024 * 1024);
+    expect(wholeRead).not.toHaveBeenCalled();
+    expect(api.uploads.append).toHaveBeenCalledWith({ uploadId, sequence: 0, data: new Uint8Array([112, 100, 102]) });
     fireEvent.click(screen.getByRole("button", { name: "提交证据" }));
     await waitFor(() => expect(api.commands.execute).toHaveBeenCalledWith(expect.objectContaining({
       operation: "submitEvidence",
@@ -361,13 +368,13 @@ describe("authenticated workspace integration", () => {
     fireEvent.click(await screen.findByRole("button", { name: "选择任务：校准电源" }));
     const file = new File(["pdf"], "record.pdf", { type: "application/pdf" });
     const read = vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer);
-    Object.defineProperty(file, "arrayBuffer", { value: read });
+    Object.defineProperty(file, "slice", { value: vi.fn(() => ({ arrayBuffer: read })) });
     fireEvent.change(screen.getByLabelText("选择证据文件"), { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
     await screen.findByText("证据提交 API 合同尚未集成");
     expect(api.uploads.preflight).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-17", fileName: "record.pdf" }));
     expect(read).not.toHaveBeenCalled();
-    expect(api.uploads.start).not.toHaveBeenCalled();
+    expect(api.uploads.begin).not.toHaveBeenCalled();
   });
 
   it("ignores upload completion after the selected task changes", async () => {
@@ -387,17 +394,18 @@ describe("authenticated workspace integration", () => {
         },
       ],
     };
-    let completeUpload!: (receipt: Awaited<ReturnType<NonNullable<typeof window.occ>["uploads"]["start"]>>) => void;
+    let completeUpload!: (receipt: Awaited<ReturnType<NonNullable<typeof window.occ>["uploads"]["finish"]>>) => void;
     const api = installOcc(vi.fn().mockResolvedValue(result));
-    vi.mocked(api.uploads.start).mockImplementation(() => new Promise((resolve) => { completeUpload = resolve; }));
+    vi.mocked(api.uploads.begin).mockResolvedValue({ state: "started", uploadId: "00000000-0000-4000-8000-000000000077" });
+    vi.mocked(api.uploads.finish).mockImplementation(() => new Promise((resolve) => { completeUpload = resolve; }));
     render(<AppShell state={state("/my-work")} statuses={[]} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "选择任务：任务 A" }));
     const file = new File(["pdf"], "record.pdf", { type: "application/pdf" });
-    Object.defineProperty(file, "arrayBuffer", { value: vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer) });
+    Object.defineProperty(file, "slice", { value: vi.fn(() => ({ arrayBuffer: vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer) })) });
     fireEvent.change(screen.getByLabelText("选择证据文件"), { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
-    await waitFor(() => expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-a" })));
+    await waitFor(() => expect(api.uploads.finish).toHaveBeenCalledWith("00000000-0000-4000-8000-000000000077"));
     fireEvent.click(screen.getByRole("button", { name: "选择任务：任务 B" }));
 
     completeUpload({ state: "completed", kind: "evidence", uploadId: "00000000-0000-4000-8000-000000000077", evidenceId: "evidence-a", uploadReference: "upload-ref-a", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
@@ -550,7 +558,8 @@ describe("authenticated workspace integration", () => {
       count: 1,
       fetchedAt: "2026-08-01T12:00:00.000Z",
     };
-    const api = installOcc(vi.fn().mockResolvedValue(readyResult));
+    const query = vi.fn().mockResolvedValueOnce(readyResult).mockRejectedValueOnce(new Error("main unavailable"));
+    const api = installOcc(query);
     const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
     const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
     await waitFor(() => expect(api.workspaces.query).toHaveBeenCalledOnce());
@@ -560,7 +569,7 @@ describe("authenticated workspace integration", () => {
 
     expect(await screen.findByText("离线数据，只读")).toBeInTheDocument();
     expect(screen.getByText("GPU pool")).toBeInTheDocument();
-    expect(api.workspaces.query).toHaveBeenCalledOnce();
+    expect(api.workspaces.query).toHaveBeenCalledTimes(2);
     expect(screen.getByLabelText("资源名称")).toBeDisabled();
     expect(api.commands.execute).not.toHaveBeenCalled();
   });
@@ -589,9 +598,9 @@ describe("authenticated workspace integration", () => {
     expect(screen.getByText("Stale GPU pool")).toBeInTheDocument();
     rerender(<AppShell state={offlineState("/resources")} {...props} />);
 
-    expect(await screen.findByText("离线数据，只读")).toBeInTheDocument();
+    expect(await screen.findByText("过期数据，只读")).toBeInTheDocument();
     expect(screen.getByText("Stale GPU pool")).toBeInTheDocument();
-    expect(api.workspaces.query).toHaveBeenCalledOnce();
+    expect(api.workspaces.query).toHaveBeenCalledTimes(2);
   });
 
   it("preserves retained success across an online refresh error for later offline display", async () => {
@@ -608,7 +617,7 @@ describe("authenticated workspace integration", () => {
       state: "error",
       problem: { title: "online refresh failed", code: "REFRESH_FAILED", status: 503 },
     };
-    const query = vi.fn().mockResolvedValueOnce(readyResult).mockResolvedValueOnce(refreshError);
+    const query = vi.fn().mockResolvedValueOnce(readyResult).mockResolvedValueOnce(refreshError).mockRejectedValueOnce(new Error("main unavailable"));
     installOcc(query);
     const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
     const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
@@ -621,19 +630,32 @@ describe("authenticated workspace integration", () => {
     rerender(<AppShell state={offlineState("/resources")} {...props} />);
     expect(await screen.findByText("离线数据，只读")).toBeInTheDocument();
     expect(screen.getByText("GPU pool")).toBeInTheDocument();
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+
+  it("loads persisted main cache on an offline restart without renderer retention", async () => {
+    const cached: WorkspaceResult = {
+      state: "stale", items: [{ id: "restart-resource", name: "Restart GPU pool", type: "compute", state: "available", capacity: 4, availableCapacity: 2, reservations: [], conflicts: [] }],
+      count: 1, fetchedAt: "2026-08-01T09:00:00.000Z",
+    };
+    const api = installOcc(vi.fn().mockResolvedValue(cached));
+    render(<AppShell state={offlineState("/resources")} statuses={[]} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
+
+    expect(await screen.findByText("Restart GPU pool")).toBeInTheDocument();
+    expect(api.workspaces.query).toHaveBeenCalledOnce();
+    expect(screen.getByText("过期数据，只读")).toBeInTheDocument();
   });
 
   it("ignores an in-flight online result after connectivity goes offline", async () => {
-    let resolveOnline!: (value: WorkspaceResult) => void;
-    const query = vi.fn(() => new Promise<WorkspaceResult>((resolve) => { resolveOnline = resolve; }));
+    const resolvers: Array<(value: WorkspaceResult) => void> = [];
+    const query = vi.fn(() => new Promise<WorkspaceResult>((resolve) => { resolvers.push(resolve); }));
     installOcc(query);
     const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
     const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
     await waitFor(() => expect(query).toHaveBeenCalledOnce());
 
     rerender(<AppShell state={offlineState("/resources")} {...props} />);
-    resolveOnline({
+    resolvers[0]!({
       state: "ready",
       items: [{ id: "late", name: "late online secret", type: "compute", state: "available", capacity: 1, availableCapacity: 1, reservations: [], conflicts: [] }],
       count: 1,
@@ -641,7 +663,7 @@ describe("authenticated workspace integration", () => {
     });
     await new Promise((resolve) => window.setTimeout(resolve, 0));
 
-    expect(query).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledTimes(2);
     expect(document.body).not.toHaveTextContent("late online secret");
   });
 });

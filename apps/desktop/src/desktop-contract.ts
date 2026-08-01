@@ -275,17 +275,20 @@ export const evidenceUploadMetadataSchema = z
   .strict();
 export type EvidenceUploadMetadata = z.infer<typeof evidenceUploadMetadataSchema>;
 
-export const evidenceUploadInputSchema = evidenceUploadMetadataSchema
-  .extend({
-    data: z.union([z.instanceof(Uint8Array), z.instanceof(ArrayBuffer)]).transform((value) =>
-      value instanceof Uint8Array ? value : new Uint8Array(value),
-    ),
-  })
-  .strict()
-  .refine(({ data, size }) => data.byteLength === size, {
-    message: "Upload size does not match data length",
-  });
-export type EvidenceUploadInput = z.infer<typeof evidenceUploadInputSchema>;
+export const uploadAppendInputSchema = z.object({
+  uploadId: z.uuid(),
+  sequence: z.number().int().nonnegative(),
+  data: z.union([z.instanceof(Uint8Array), z.instanceof(ArrayBuffer)]).transform((value) =>
+    value instanceof Uint8Array ? value : new Uint8Array(value),
+  ).refine((value) => value.byteLength > 0 && value.byteLength <= 1024 * 1024, "Upload chunk exceeds byte limit"),
+}).strict();
+export type UploadAppendInput = z.infer<typeof uploadAppendInputSchema>;
+
+export const uploadAppendReceiptSchema = z.object({
+  acceptedBytes: z.number().int().positive().max(1024 * 1024),
+  receivedBytes: z.number().int().positive().max(100 * 1024 * 1024),
+}).strict();
+export type UploadAppendReceipt = z.infer<typeof uploadAppendReceiptSchema>;
 
 export const uploadProgressSchema = z.object({
   uploadId: z.uuid(),
@@ -347,10 +350,17 @@ export const notificationEventSchema = z
   .strict();
 export type NotificationEvent = z.infer<typeof notificationEventSchema>;
 
+export const notificationConnectionStateSchema = z.object({
+  state: z.enum(["connecting", "online", "reconnecting", "unavailable"]),
+  changedAt: z.iso.datetime({ offset: true }),
+  lastEventAt: z.iso.datetime({ offset: true }).optional(),
+}).strict();
+export type NotificationConnectionState = z.infer<typeof notificationConnectionStateSchema>;
+
 export const notificationPageSchema = z
   .object({
-    items: z.array(notificationEventSchema),
-    nextCursor: z.string().optional(),
+    items: z.array(notificationEventSchema).max(2_000),
+    nextCursor: z.string().min(1).max(2048).optional(),
   })
   .strict();
 export type NotificationPage = z.infer<typeof notificationPageSchema>;
@@ -384,13 +394,16 @@ export interface OccApi {
   commands: { execute(input: WorkspaceCommand): Promise<CommandReceipt> };
   uploads: {
     preflight(input: EvidenceUploadMetadata): Promise<UploadAvailability>;
-    start(input: EvidenceUploadInput): Promise<UploadReceipt>;
+    begin(input: EvidenceUploadMetadata): Promise<UploadReceipt>;
+    append(input: UploadAppendInput): Promise<UploadAppendReceipt>;
+    finish(uploadId: string): Promise<UploadReceipt>;
     cancel(uploadId: string): Promise<void>;
     subscribeProgress(listener: (progress: UploadProgress) => void): () => void;
   };
   notifications: {
     list(cursor?: string): Promise<NotificationListResult>;
     subscribe(listener: (event: NotificationEvent) => void): () => void;
+    subscribeState(listener: (state: NotificationConnectionState) => void): () => void;
   };
 }
 

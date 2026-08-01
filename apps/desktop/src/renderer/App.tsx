@@ -2,7 +2,7 @@ import { ConfigProvider } from "antd";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { SystemStatus } from "@innorder/contracts";
 
-import type { LoginInput, ProfileInput, ServerProfile, SessionSnapshot } from "../desktop-contract";
+import type { LoginInput, NotificationConnectionState, ProfileInput, ServerProfile, SessionSnapshot } from "../desktop-contract";
 import {
   initialAppState,
   reduceAppState,
@@ -24,6 +24,7 @@ export function App() {
   const stateRef = useRef(state);
   const [loading, setLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [notificationState, setNotificationState] = useState<NotificationConnectionState>();
   const [statuses, setStatuses] = useState<{
     profileId: string;
     generation: number;
@@ -108,6 +109,8 @@ export function App() {
       window.removeEventListener("online", online);
     };
   }, [dispatchEvent]);
+
+  useEffect(() => window.occ.notifications.subscribeState(setNotificationState), []);
 
   useEffect(() => {
     if (state.mode !== "reconnecting" || state.sessionOperation !== null || state.retryAvailable) return;
@@ -264,6 +267,7 @@ export function App() {
       <AppShell
         state={state}
         statuses={visibleStatuses}
+        {...(notificationState ? { notificationState } : {})}
         onLogout={logout}
         onProfileSelect={selectProfile}
         onProfileSave={saveProfile}

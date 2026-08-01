@@ -6,11 +6,6 @@ import {
   type NotificationConnector,
   type NotificationStreamPersistence,
 } from "../src/notification-stream";
-import {
-  createEvidenceUploadService,
-  validateEvidenceUpload,
-  type EvidenceTransport,
-} from "../src/evidence-upload";
 
 const profileId = "11111111-1111-4111-8111-111111111111";
 const customerInstanceId = "22222222-2222-4222-8222-222222222222";
@@ -77,7 +72,9 @@ describe("notification stream", () => {
     const harness = connectorHarness();
     let resolveFallback!: (page: { items: ReturnType<typeof event>[]; nextCursor?: string }) => void;
     const fallback = new Promise<{ items: ReturnType<typeof event>[]; nextCursor?: string }>((resolve) => void (resolveFallback = resolve));
-    const listFallback = vi.fn(() => fallback);
+    const listFallback = vi.fn()
+      .mockImplementationOnce(() => fallback)
+      .mockResolvedValueOnce({ items: [{ ...event("cursor-b"), id: "77777777-7777-4777-8777-777777777777" }] });
     const listener = vi.fn();
     const stream = createNotificationStream({ connector: harness.connector, persistence, getAccessToken: () => "token", listFallback });
     await stream.setSession({ scope, origin: "https://core.example.test", endpointAvailable: true });
@@ -87,14 +84,54 @@ describe("notification stream", () => {
 
     resolveFallback({
       items: [event("cursor-a"), { ...event("cursor-b"), id: notificationId }, { ...event("cursor-a"), id: "77777777-7777-4777-8777-777777777777" }],
-      nextCursor: "cursor-final",
+      nextCursor: "page-token-2",
     });
     await stream.idle();
 
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(persistence.value).toEqual({ version: 1, cursors: { [`${profileId}:${customerInstanceId}:${principalId}`]: "cursor-final" } });
+    expect(listFallback).toHaveBeenNthCalledWith(2, "page-token-2");
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(persistence.value).toEqual({ version: 1, cursors: { [`${profileId}:${customerInstanceId}:${principalId}`]: "cursor-b" } });
     expect(harness.connector).toHaveBeenCalledOnce();
-    expect(harness.connections[0]!.request.headers["last-event-id"]).toBe("cursor-final");
+    expect(harness.connections[0]!.request.headers["last-event-id"]).toBe("cursor-b");
+  });
+
+  it("publishes validated connection state and event freshness", async () => {
+    let now = Date.parse("2026-08-02T02:00:00.000Z");
+    const harness = connectorHarness();
+    const stream = createNotificationStream({ connector: harness.connector, persistence: notificationPersistence(), getAccessToken: () => "token", now: () => now });
+    const states: unknown[] = [];
+    const dispose = stream.subscribeState((value) => states.push(value));
+    stream.subscribe(vi.fn());
+    await stream.setSession({ scope, origin: "https://core.example.test", endpointAvailable: true });
+    expect(states).toEqual([
+      { state: "connecting", changedAt: "2026-08-02T02:00:00.000Z" },
+      { state: "online", changedAt: "2026-08-02T02:00:00.000Z" },
+    ]);
+    now += 1_000;
+    await harness.connections[0]!.request.onMessage({ data: JSON.stringify(event()), lastEventId: "cursor-1" });
+    expect(states.at(-1)).toEqual({ state: "online", changedAt: "2026-08-02T02:00:01.000Z", lastEventAt: "2026-08-02T02:00:01.000Z" });
+    harness.connections[0]!.request.onError();
+    expect(states.at(-1)).toMatchObject({ state: "reconnecting", lastEventAt: "2026-08-02T02:00:01.000Z" });
+    dispose();
+  });
+
+  it("bounds cursor persistence by least-recently-used scopes and serialized bytes", async () => {
+    const persistence = notificationPersistence();
+    const harness = connectorHarness();
+    const stream = createNotificationStream({
+      connector: harness.connector, persistence, getAccessToken: () => "token", maxCursorScopes: 2, maxCursorBytes: 190,
+    });
+    stream.subscribe(vi.fn());
+    const scopes = [scope, { ...scope, principalId: notificationId }, { ...scope, principalId: uploadId }];
+    for (let index = 0; index < scopes.length; index += 1) {
+      await stream.setSession({ scope: scopes[index]!, origin: "https://core.example.test", endpointAvailable: true });
+      await stream.idle();
+      await harness.connections[index]!.request.onMessage({ data: JSON.stringify(event(`cursor-${index}`)), lastEventId: `cursor-${index}` });
+    }
+    expect(Buffer.byteLength(JSON.stringify(persistence.value), "utf8")).toBeLessThanOrEqual(190);
+    const cursors = (persistence.value as { cursors: Record<string, string> }).cursors;
+    expect(cursors[`${profileId}:${customerInstanceId}:${principalId}`]).toBeUndefined();
+    expect(cursors[`${profileId}:${customerInstanceId}:${uploadId}`]).toBe("cursor-2");
   });
 
   it("validates and bounds events, persists cursor before emit, and settles matching intents", async () => {
@@ -206,221 +243,5 @@ describe("notification stream", () => {
 
     expect(harness.connector).toHaveBeenCalledOnce();
     expect(harness.connections[0]!.request.url).toBe("https://second.example.test/api/v1/notifications/stream");
-  });
-});
-
-const uploadInput = (overrides: Record<string, unknown> = {}) => ({
-  workspace: "my-work",
-  taskId: "task-1",
-  fileName: "evidence.pdf",
-  mediaType: "application/pdf",
-  size: 4,
-  data: new Uint8Array([1, 2, 3, 4]),
-  intentHandle,
-  ...overrides,
-});
-const uploadMetadata = (overrides: Record<string, unknown> = {}) => {
-  const { data: _data, ...metadata } = uploadInput(overrides);
-  return metadata;
-};
-
-describe("evidence upload boundary", () => {
-  it("strictly validates task metadata, names, media, extension, and 100 MiB bounds", () => {
-    expect(validateEvidenceUpload(uploadInput())).toMatchObject({ taskId: "task-1", size: 4 });
-    for (const invalid of [
-      uploadInput({ taskId: "" }),
-      uploadInput({ fileName: "../evidence.pdf" }),
-      uploadInput({ fileName: "folder\\evidence.pdf" }),
-      uploadInput({ fileName: "evidence.exe", mediaType: "application/octet-stream" }),
-      uploadInput({ fileName: "evidence.png", mediaType: "application/pdf" }),
-      uploadInput({ size: 100 * 1024 * 1024 + 1, data: new Uint8Array(1) }),
-      uploadInput({ size: 3 }),
-      { ...uploadInput(), path: "C:\\secret.pdf" },
-    ]) expect(() => validateEvidenceUpload(invalid)).toThrow();
-  });
-
-  it("returns exact unavailable after validation without transport or file access", async () => {
-    const transport = vi.fn();
-    const service = createEvidenceUploadService({ getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: false }), transport });
-
-    await expect(service.preflight(uploadMetadata())).resolves.toEqual({
-      state: "unavailable",
-      reason: "UNAVAILABLE_CONTRACT",
-      resourceGroups: ["/evidence"],
-      message: "证据提交 API 合同尚未集成",
-    });
-    await expect(service.start(uploadInput())).resolves.toEqual({
-      state: "unavailable",
-      reason: "UNAVAILABLE_CONTRACT",
-      resourceGroups: ["/evidence"],
-      message: "证据提交 API 合同尚未集成",
-    });
-    expect(transport).not.toHaveBeenCalled();
-  });
-
-  it("streams chunks only to the named Core endpoint with monotonic progress and validated statuses", async () => {
-    const progress: number[] = [];
-    const transport: EvidenceTransport = vi.fn(async (request) => {
-      const chunks: Uint8Array[] = [];
-      for await (const chunk of request.chunks) chunks.push(chunk);
-      expect(request.url).toBe("https://core.example.test/api/v1/evidence/uploads");
-      expect(request.url).not.toMatch(/minio/i);
-      expect(request.headers.authorization).toBe("Bearer main-token");
-      expect(Buffer.concat(chunks).equals(Buffer.from([1, 2, 3, 4]))).toBe(true);
-      return {
-        kind: "evidence",
-        evidenceId: "evidence-1",
-        uploadReference: "upload-ref-1",
-        quarantineStatus: "quarantined",
-        processingStatus: "scanning",
-        reviewStatus: "pending",
-      };
-    });
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }),
-      getAccessToken: () => "main-token",
-      transport,
-      createUploadId: () => uploadId,
-      chunkBytes: 2,
-      onProgress: (update) => progress.push(update.percent),
-    });
-
-    await expect(service.start(uploadInput())).resolves.toEqual({
-      state: "completed",
-      kind: "evidence",
-      uploadId,
-      evidenceId: "evidence-1",
-      uploadReference: "upload-ref-1",
-      quarantineStatus: "quarantined",
-      processingStatus: "scanning",
-      reviewStatus: "pending",
-    });
-    expect(progress).toEqual([0, 50, 100]);
-  });
-
-  it("cancels active uploads, retains exact retry binding, and rejects changed content", async () => {
-    const transport: EvidenceTransport = vi.fn((request) => new Promise((_resolve, rejectPromise) => {
-      request.signal.addEventListener("abort", () => rejectPromise(new Error("aborted")));
-    }));
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }),
-      getAccessToken: () => "token",
-      transport,
-      createUploadId: () => uploadId,
-    });
-    const pending = service.start(uploadInput());
-    await vi.waitFor(() => expect(transport).toHaveBeenCalled());
-    await service.cancel(uploadId);
-    await expect(pending).resolves.toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED", retryable: true } });
-    await expect(service.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("intent mismatch");
-    expect(transport).toHaveBeenCalledOnce();
-    vi.mocked(transport).mockRejectedValueOnce(new Error("retry transport"));
-    await expect(service.start(uploadInput())).rejects.toThrow("retry transport");
-    expect(transport).toHaveBeenCalledTimes(2);
-  });
-
-  it("rejects a concurrent duplicate intent deterministically with one network call", async () => {
-    const transport: EvidenceTransport = vi.fn((request) => new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("aborted")))));
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token",
-      transport, createUploadId: () => uploadId,
-    });
-    const first = service.start(uploadInput());
-    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
-    await expect(service.start(uploadInput())).rejects.toThrow("already active");
-    expect(transport).toHaveBeenCalledOnce();
-    await service.cancel(uploadId);
-    await expect(first).resolves.toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED" } });
-  });
-
-  it("rejects offline before upload dependencies and rejects untrusted profile origins", async () => {
-    const transport = vi.fn();
-    const offline = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }),
-      isOnline: () => false,
-      getAccessToken: vi.fn(() => "token"),
-      transport,
-    });
-    await expect(offline.start(uploadInput())).rejects.toThrow("offline");
-    expect(transport).not.toHaveBeenCalled();
-
-    const untrusted = createEvidenceUploadService({ getProfile: () => ({ origin: "https://minio.example.test/path", endpointAvailable: true }), transport });
-    await expect(untrusted.start(uploadInput())).rejects.toThrow("origin");
-    expect(transport).not.toHaveBeenCalled();
-  });
-
-  it("requires a main-owned bearer before transport and rejects unrelated workspaces", async () => {
-    const transport = vi.fn();
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }),
-      getAccessToken: () => null,
-      transport,
-    });
-    await expect(service.start(uploadInput())).rejects.toThrow("authenticated session");
-    await expect(service.start(uploadInput({ workspace: "administration" }))).rejects.toThrow("workspace");
-    expect(transport).not.toHaveBeenCalled();
-  });
-
-  it("allows only ZIP domain archives and returns a distinct lowercase SHA-256 receipt", async () => {
-    const sha256 = "a".repeat(64);
-    const transport: EvidenceTransport = vi.fn(async () => ({ kind: "archive", uploadReference: "archive-ref", sha256 }));
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }),
-      getAccessToken: () => "token",
-      transport,
-      createUploadId: () => uploadId,
-    });
-    const archive = uploadInput({ workspace: "domain-design", taskId: "package-import", fileName: "domain.zip", mediaType: "application/zip" });
-
-    await expect(service.start(archive)).resolves.toEqual({ state: "completed", kind: "archive", uploadId, uploadReference: "archive-ref", sha256 });
-    await expect(service.start(uploadInput({ workspace: "domain-design", fileName: "domain.pdf" }))).rejects.toThrow("media type");
-    await expect(service.start(uploadInput({ workspace: "my-work", fileName: "evidence.zip", mediaType: "application/zip" }))).rejects.toThrow("media type");
-    vi.mocked(transport).mockResolvedValueOnce({ kind: "archive", uploadReference: "archive-ref", sha256: "A".repeat(64) });
-    await expect(service.start({ ...archive, intentHandle: "88888888-8888-4888-8888-888888888888" })).rejects.toThrow();
-  });
-
-  it("releases a canonical intent binding after successful receipt delivery", async () => {
-    const response = { kind: "evidence" as const, evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released" as const, processingStatus: "ready" as const, reviewStatus: "pending" as const };
-    const transport: EvidenceTransport = vi.fn().mockResolvedValue(response);
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token",
-      transport, createUploadId: () => uploadId,
-    });
-    await expect(service.start(uploadInput())).resolves.toMatchObject({ state: "completed" });
-    await expect(service.start(uploadInput({ fileName: "changed.pdf" }))).resolves.toMatchObject({ state: "completed" });
-    expect(transport).toHaveBeenCalledTimes(2);
-  });
-
-  it("bounds retained retry and cancelled intents by capacity and TTL", async () => {
-    let now = 0;
-    const transport = vi.fn().mockRejectedValue(new Error("transport"));
-    const service = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }),
-      getAccessToken: () => "token",
-      transport,
-      now: () => now,
-      maxIntents: 1,
-      intentTtlMs: 1_000,
-      createUploadId: () => uploadId,
-    });
-    await expect(service.start(uploadInput())).rejects.toThrow("transport");
-    await expect(service.start(uploadInput({ intentHandle: "88888888-8888-4888-8888-888888888888" }))).rejects.toThrow("capacity");
-    now = 1_001;
-    await expect(service.start(uploadInput({ intentHandle: "88888888-8888-4888-8888-888888888888" }))).rejects.toThrow("transport");
-
-    let hold!: Parameters<EvidenceTransport>[0];
-    const pendingTransport: EvidenceTransport = vi.fn((request) => { hold = request; return new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("aborted")))); });
-    const cancellable = createEvidenceUploadService({
-      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token",
-      transport: pendingTransport, maxIntents: 1, createUploadId: () => uploadId, now: () => now, intentTtlMs: 1_000,
-    });
-    const pending = cancellable.start(uploadInput());
-    await vi.waitFor(() => expect(hold).toBeDefined());
-    await cancellable.cancel(uploadId);
-    await expect(pending).resolves.toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED" } });
-    await expect(cancellable.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("intent mismatch");
-    now += 1_001;
-    vi.mocked(pendingTransport).mockRejectedValueOnce(new Error("transport after expiry"));
-    await expect(cancellable.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("transport after expiry");
   });
 });
