@@ -1,9 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 import { DESKTOP_CHANNELS, notificationEventSchema, type OccApi } from "./ipc-contract";
+import { serializedSize } from "./serialized-size";
 
 const MAX_NOTIFICATION_BYTES = 2 * 1024 * 1024;
-const encoder = new TextEncoder();
 
 function freezeApi<T extends object>(value: T): Readonly<T> {
   for (const child of Object.values(value)) {
@@ -38,7 +38,7 @@ const api: OccApi = freezeApi({
     subscribe(listener) {
       const wrapped = (_event: unknown, input: unknown) => {
         try {
-          if (encoder.encode(JSON.stringify(input)).byteLength > MAX_NOTIFICATION_BYTES) return;
+          if (serializedSize(input) > MAX_NOTIFICATION_BYTES) return;
           const parsed = notificationEventSchema.safeParse(input);
           if (parsed.success) listener(parsed.data);
         } catch {

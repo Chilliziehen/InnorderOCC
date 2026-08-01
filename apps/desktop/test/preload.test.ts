@@ -118,19 +118,26 @@ describe("preload bridge", () => {
     );
   });
 
-  it("rejects notification events above the 2 MiB serialized output limit", () => {
+  it("counts structured-clone-visible undefined fields toward the notification limit", () => {
     const api = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
     const listener = vi.fn();
     api.notifications.subscribe(listener);
     const wrapped = electronMocks.on.mock.calls[0]?.[1];
+    const padding = Object.fromEntries(
+      Array.from({ length: 100_000 }, (_, index) => [
+        `padding-${index.toString().padStart(6, "0")}-abcdefghij`,
+        undefined,
+      ]),
+    );
     const event = {
       id: "33333333-3333-4333-8333-333333333333",
       type: "task.updated",
       occurredAt: "2026-08-01T12:00:00.000Z",
       title: "Task updated",
       read: false,
-      data: { value: "x".repeat(2 * 1024 * 1024) },
+      data: padding,
     };
+    expect(JSON.stringify(event).length).toBeLessThan(1024);
     expect(serialize(event).byteLength).toBeGreaterThan(2 * 1024 * 1024);
 
     wrapped({}, event);

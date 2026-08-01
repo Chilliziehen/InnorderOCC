@@ -1,4 +1,3 @@
-import { serialize } from "node:v8";
 import path from "node:path";
 
 import { ipcMain, type IpcMainInvokeEvent } from "electron";
@@ -15,6 +14,7 @@ import {
 } from "./ipc-contract";
 import type { ProfileStore } from "./profile-store";
 import type { CredentialVault, SessionManager, VaultCredential } from "./session-manager";
+import { serializedSize } from "./serialized-size";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -154,6 +154,12 @@ interface DesktopApiDependencies {
 }
 
 export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeApi {
+  let transitionTail = Promise.resolve();
+  const transition = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = transitionTail.then(operation);
+    transitionTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
   const cleanup = async (profileId: string) => {
     await Promise.all([
       dependencies.session.profileSwitched(profileId),
@@ -163,7 +169,7 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
   return {
     profiles: {
       list: () => dependencies.profiles.list(),
-      async save(input) {
+      save: (input) => transition(async () => {
         const previous = input.id === undefined
           ? undefined
           : (await dependencies.profiles.list()).find(({ id }) => id === input.id);
@@ -171,21 +177,21 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
           await cleanup(previous.id);
         }
         return dependencies.profiles.save(input);
-      },
-      async select(id) {
+      }),
+      select: (id) => transition(async () => {
         const previous = dependencies.profiles.selected();
         await dependencies.profiles.select(id);
         if (previous && previous.id !== id) await cleanup(previous.id);
-      },
-      async remove(id) {
+      }),
+      remove: (id) => transition(async () => {
         await cleanup(id);
         await dependencies.profiles.remove(id);
-      },
+      }),
     },
     session: {
-      restore: () => dependencies.session.restore(),
-      login: (input) => dependencies.session.login(input),
-      logout: () => dependencies.session.logout(),
+      restore: () => transition(() => dependencies.session.restore()),
+      login: (input) => transition(() => dependencies.session.login(input)),
+      logout: () => transition(() => dependencies.session.logout()),
     },
     runtime: { statuses: dependencies.statuses },
     workspaces: {
@@ -224,14 +230,14 @@ function createHandler<I, O>(rendererUrl: string, definition: HandlerDefinition<
     }
     let input: I;
     try {
-      if (serialize(rawInput).byteLength > MAX_REQUEST_BYTES) throw new Error();
+      if (serializedSize(rawInput) > MAX_REQUEST_BYTES) throw new Error();
       input = definition.input.parse(rawInput);
     } catch {
       throw new Error("IPC request rejected");
     }
     try {
       const output = definition.output.parse(await definition.invoke(input));
-      if (serialize(output).byteLength > MAX_OUTPUT_BYTES) throw new Error();
+      if (serializedSize(output) > MAX_OUTPUT_BYTES) throw new Error();
       return output;
     } catch {
       throw new Error("IPC request failed");

@@ -296,4 +296,87 @@ describe("desktop main composition", () => {
       profiles.save.mock.invocationCallOrder[0]!,
     );
   });
+
+  it("waits for a concurrent login then removes its old-origin credential before saving", async () => {
+    let releaseLogin!: () => void;
+    const loginGate = new Promise<void>((resolve) => void (releaseLogin = resolve));
+    let credentialStored = false;
+    const updatedProfile = { ...profile, origin: "https://new.example.com" };
+    const profiles = {
+      list: vi.fn().mockResolvedValue([profile]),
+      save: vi.fn().mockResolvedValue(updatedProfile),
+      select: vi.fn(), remove: vi.fn(), selected: vi.fn(() => profile),
+    };
+    const session = {
+      restore: vi.fn(),
+      login: vi.fn(async () => {
+        await loginGate;
+        credentialStored = true;
+        return { state: "anonymous" as const };
+      }),
+      logout: vi.fn(),
+      profileSwitched: vi.fn(async () => void (credentialStored = false)),
+    };
+    const api = createDesktopApi({
+      profiles,
+      session,
+      statuses: vi.fn(),
+      clearProfile: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const login = api.session.login({
+      username: "operator",
+      password: "correct horse battery staple",
+    });
+    await vi.waitFor(() => expect(session.login).toHaveBeenCalledOnce());
+    const save = api.profiles.save({
+      id: profileId,
+      name: profile.name,
+      origin: updatedProfile.origin,
+      environment: profile.environment,
+    });
+    await Promise.resolve();
+    expect(profiles.save).not.toHaveBeenCalled();
+
+    releaseLogin();
+    await Promise.all([login, save]);
+
+    expect(session.profileSwitched).toHaveBeenCalledWith(profileId);
+    expect(credentialStored).toBe(false);
+    expect(session.profileSwitched.mock.invocationCallOrder[0]).toBeLessThan(
+      profiles.save.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("continues queued profile transitions after a session operation fails", async () => {
+    const updatedProfile = { ...profile, origin: "https://new.example.com" };
+    const profiles = {
+      list: vi.fn().mockResolvedValue([profile]),
+      save: vi.fn().mockResolvedValue(updatedProfile),
+      select: vi.fn(), remove: vi.fn(), selected: vi.fn(() => profile),
+    };
+    const session = {
+      restore: vi.fn(),
+      login: vi.fn().mockRejectedValue(new Error("login failed")),
+      logout: vi.fn(),
+      profileSwitched: vi.fn().mockResolvedValue(undefined),
+    };
+    const api = createDesktopApi({
+      profiles,
+      session,
+      statuses: vi.fn(),
+      clearProfile: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(api.session.login({
+      username: "operator",
+      password: "correct horse battery staple",
+    })).rejects.toThrow("login failed");
+    await expect(api.profiles.save({
+      id: profileId,
+      name: profile.name,
+      origin: updatedProfile.origin,
+      environment: profile.environment,
+    })).resolves.toEqual(updatedProfile);
+  });
 });
