@@ -223,7 +223,7 @@ export function MyWork({
   const renderWorkSelection = (item: z.infer<typeof workItemSchema>) => <button type="button" aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>选择任务：{item.task}</button>;
 
   return (
-    <main aria-labelledby="my-work-title">
+    <section aria-labelledby="my-work-title">
       <header>
         <h1 id="my-work-title">我的工作</h1>
         <div role="tablist" aria-label="工作状态">
@@ -369,6 +369,6 @@ export function MyWork({
       {definition.tabs.filter(({ id }) => id !== activeTab).map(({ id }) => (
         <section role="tabpanel" id={`my-work-panel-${id}`} aria-labelledby={`my-work-tab-${id}`} hidden key={id} />
       ))}
-    </main>
+    </section>
   );
 }

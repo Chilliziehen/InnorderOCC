@@ -191,7 +191,7 @@ export function Processes({
   const renderProcessSelection = (item: z.infer<typeof processItemSchema>) => <button type="button" aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>选择流程：{item.process}</button>;
 
   return (
-    <main aria-labelledby="processes-title">
+    <section aria-labelledby="processes-title">
       <header>
         <h1 id="processes-title">流程</h1>
         <div role="tablist" aria-label="流程视图">
@@ -274,6 +274,6 @@ export function Processes({
       {definition.tabs.filter(({ id }) => id !== activeTab).map(({ id }) => (
         <section role="tabpanel" id={`processes-panel-${id}`} aria-labelledby={`processes-tab-${id}`} hidden key={id} />
       ))}
-    </main>
+    </section>
   );
 }

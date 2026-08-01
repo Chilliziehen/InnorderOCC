@@ -97,7 +97,7 @@ export function SystemOperations({ definition, result, statuses, query, activeTa
   const validConfigurationFreshness = parsedFreshness.success ? parsedFreshness.data : undefined;
 
   return (
-    <main className="workspace workspace-system" aria-labelledby="system-title">
+    <section className="workspace-system" aria-labelledby="system-title">
       <header>
         <h1 id="system-title">系统运行</h1>
         <dl>
@@ -138,6 +138,6 @@ export function SystemOperations({ definition, result, statuses, query, activeTa
           onRefresh={onConflictRefresh ?? onRefresh}
         />
       </WorkspaceTabs>
-    </main>
+    </section>
   );
 }

@@ -122,7 +122,7 @@ export function Overview({ definition, result, statuses, query, activeTab, envir
   const counts = metricCounts(result);
 
   return (
-    <main className="workspace workspace-overview" aria-labelledby="overview-title">
+    <section className="workspace-overview" aria-labelledby="overview-title">
       <header>
         <h1 id="overview-title">运行总览</h1>
         <p>环境：{environment}</p>
@@ -166,6 +166,6 @@ export function Overview({ definition, result, statuses, query, activeTab, envir
           onRefresh={onConflictRefresh ?? onRefresh}
         />
       </WorkspaceTabs>
-    </main>
+    </section>
   );
 }
