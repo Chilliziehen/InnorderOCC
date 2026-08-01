@@ -11,6 +11,15 @@ const runtimeRoleBootstrapPath = fileURLToPath(
 const postgresqlRaceTestPath = fileURLToPath(
   new URL('./postgresql-idempotency-race.test.mjs', import.meta.url),
 );
+const governedPostgresqlTestPath = fileURLToPath(
+  new URL('./postgresql-governed-ai.test.mjs', import.meta.url),
+);
+const composeRolePath = fileURLToPath(
+  new URL('../../infra/compose/postgres/010-create-roles.sh', import.meta.url),
+);
+const coreTestInitPath = fileURLToPath(
+  new URL('../../services/core/src/test/resources/postgres-test-init.sql', import.meta.url),
+);
 const migrations = [
   'V001__bootstrap.sql',
   'V002__catalog.sql',
@@ -24,6 +33,7 @@ const migrations = [
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V015__governed_ai_runtime.sql',
 ];
 
 function readMigration(name) {
@@ -306,4 +316,114 @@ test('isolates PostgreSQL race fixtures and keeps credentials out of process arg
   assert.match(source, /skip:\s*!strict\s*&&\s*localSkip/i);
   assert.match(source, /t\.after\(cleanup\)[\s\S]*await execPsql/i);
   assert.match(source, /finally\s*\{[\s\S]*await cleanup\(\)/i);
+});
+
+test('defines the governed AI persistence and retention contracts', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  for (const table of [
+    'authz.ai_authorization_grant',
+    'authz.ai_authorized_document',
+    'ai.ingestion_job',
+    'ai.ingestion_attempt',
+    'ai.event_consumption',
+    'ai.model_invocation',
+    'ai.retrieval_trace',
+    'ai.retrieval_hit',
+    'ai.embedding_space_gate_result',
+    'ai.legal_hold',
+    'ai.legal_hold_object',
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE ${table.replace('.', '\\.') }\\b`, 'iu'), table);
+  }
+  assert.match(sql, /token_hash text NOT NULL UNIQUE[\s\S]*?\^\[0-9a-f\]\{64\}\$/iu);
+  for (const column of [
+    'operation', 'jti', 'principal_id', 'target_entity_id', 'purpose',
+    'authorization_revision', 'policy_release_digest', 'authorized_set_digest',
+    'context_digest', 'bounded_context', 'classification_ceiling', 'issued_at',
+    'expires_at', 'consumed_at', 'event_id', 'run_id',
+  ]) assert.match(sql, new RegExp(`\\b${column}\\b`, 'iu'), column);
+  assert.match(sql, /expires_at <= issued_at \+ interval '5 minutes'/iu);
+  assert.match(sql, /authorized document limit of 500 exceeded/iu);
+  assert.doesNotMatch(sql, /LIMIT\s+500[\s\S]*INSERT INTO authz\.ai_authorized_document/iu);
+  assert.match(sql, /CREATE TRIGGER trg_ai_authorization_grant_lifecycle/iu);
+  assert.match(sql, /CREATE TRIGGER trg_ai_authorized_document_immutable/iu);
+  assert.match(sql, /retention_until[\s\S]*interval '1 year'/iu);
+  assert.match(sql, /legal_hold/iu);
+});
+
+test('defines deterministic workers, durable event consumption, traces, and gates', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  for (const term of [
+    'source_version', 'content_hash', 'checkpoint', 'stage', 'lease_owner',
+    'lease_expires_at', 'next_attempt_at', 'sanitized_error', 'corpus_manifest_digest',
+    'consumer_key', 'event_id', 'schema_version', 'aggregate_version', 'DEAD',
+    'provider_request_id', 'capability_hash', 'request_hash', 'response_hash',
+    'lexical_score', 'vector_score', 'fused_score', 'injection_detected',
+    'eligible_count', 'embedded_count', 'leakage_count', 'citation_numerator',
+    'citation_denominator', 'citation_precision', 'recall_sum', 'recall_count',
+    'recall_mean', 'decision', 'evidence_hash',
+  ]) assert.match(sql, new RegExp(`\\b${term}\\b`, 'iu'), term);
+  for (const index of [
+    'ix_ingestion_job_claim', 'ix_ingestion_job_stale_lease', 'ix_event_consumption_claim',
+    'ix_event_consumption_stale_lease', 'ix_model_invocation_run',
+    'ix_model_invocation_provider_request', 'ix_retrieval_trace_run',
+    'ix_retrieval_hit_document', 'ix_ai_authorized_document_version',
+  ]) assert.match(sql, new RegExp(`CREATE (?:UNIQUE )?INDEX ${index}\\b`, 'iu'), index);
+  assert.match(sql, /CREATE TRIGGER trg_ingestion_job_lifecycle/iu);
+  assert.match(sql, /ingestion job deterministic identity is immutable/iu);
+  assert.match(sql, /CREATE TRIGGER trg_event_consumption_lifecycle/iu);
+  assert.match(sql, /terminal event consumption is immutable/iu);
+  assert.match(sql, /CREATE TRIGGER trg_model_invocation_lifecycle/iu);
+  assert.match(sql, /model invocation request identity is immutable/iu);
+});
+
+test('exposes only hardened bounded AI capabilities', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  for (const name of [
+    'authz.consume_ai_authorization_grant',
+    'ai.claim_ingestion_jobs',
+    'ai.claim_event_consumptions',
+    'ai.authorized_hybrid_retrieval',
+  ]) {
+    const escaped = name.replace('.', '\\.');
+    const definition = sql.match(new RegExp(`CREATE FUNCTION ${escaped}\\([\\s\\S]*?\\$\\$;`, 'iu'))?.[0] ?? '';
+    assert.match(definition, /SECURITY DEFINER/iu, `${name} is SECURITY DEFINER`);
+    assert.match(definition, /SET search_path = pg_catalog, pg_temp/iu, `${name} fixes search_path`);
+    assert.match(sql, new RegExp(`REVOKE (?:ALL|EXECUTE) ON FUNCTION ${escaped}\\([\\s\\S]*?FROM PUBLIC`, 'iu'));
+    assert.match(sql, new RegExp(`GRANT EXECUTE ON FUNCTION ${escaped}\\([\\s\\S]*?TO innorder_ai_runtime`, 'iu'));
+  }
+  const retrieval = sql.match(/CREATE FUNCTION ai\.authorized_hybrid_retrieval\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(retrieval, /JOIN authz\.ai_authorized_document/iu);
+  assert.ok((retrieval.match(/JOIN authz\.ai_authorized_document/giu) ?? []).length >= 2,
+    'lexical and vector candidate branches each authorization-filter before ranking');
+  assert.match(retrieval, /ROW_NUMBER\(\)[\s\S]*fused/iu);
+  assert.match(sql, /REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai FROM PUBLIC/iu);
+  assert.match(sql, /GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai TO innorder_runtime/iu);
+});
+
+test('provisions a separate AI identity before Flyway without granting broad access', () => {
+  const bootstrap = readFileSync(runtimeRoleBootstrapPath, 'utf8');
+  assert.match(bootstrap, /CREATE ROLE\s+innorder_ai_runtime\s+NOLOGIN/iu);
+  assert.doesNotMatch(readMigration('V015__governed_ai_runtime.sql'), /CREATE ROLE/iu);
+
+  const compose = readFileSync(composeRolePath, 'utf8');
+  assert.match(compose, /AI_DATABASE_PASSWORD_FILE/iu);
+  assert.match(compose, /ALTER ROLE %I LOGIN PASSWORD %L/iu);
+  assert.match(compose, /innorder_ai_runtime/iu);
+
+  const testInit = readFileSync(coreTestInitPath, 'utf8');
+  assert.match(testInit, /CREATE ROLE innorder_ai_runtime NOLOGIN/iu);
+
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.match(sql, /GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime/iu);
+  assert.match(sql, /GRANT SELECT, INSERT ON ai\.knowledge_document_version, ai\.knowledge_chunk, ai\.chunk_embedding[\s\S]*TO innorder_ai_runtime/iu);
+  assert.doesNotMatch(sql, /GRANT\s+(?:ALL|CREATE)\s+ON SCHEMA/iu);
+  assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*ON[^;]*(?:iam\.|authz\.(?:entity|relationship|authorization_state|policy_release)\b|occ\.|flowable\.|audit\.|ai\.(?:model_provider|knowledge_source|knowledge_document|recommendation|conversation)\b)/iu);
+  for (const schema of ['iam', 'occ', 'flowable', 'audit']) {
+    assert.match(sql, new RegExp(`REVOKE ALL ON SCHEMA ${schema} FROM innorder_ai_runtime`, 'iu'));
+  }
+  assert.ok(existsSync(governedPostgresqlTestPath), 'real governed AI PostgreSQL suite exists');
+  const liveSuite = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(liveSuite, /docker/iu);
+  assert.doesNotMatch(liveSuite, /\bskip\s*:/iu);
 });

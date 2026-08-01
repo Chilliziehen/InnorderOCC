@@ -12,3 +12,4 @@
 \ir migrations/V010__platform_security_kernel.sql
 \ir migrations/V011__account_failed_attempt_window.sql
 \ir migrations/V012__outbox_publisher_lifecycle.sql
+\ir migrations/V015__governed_ai_runtime.sql

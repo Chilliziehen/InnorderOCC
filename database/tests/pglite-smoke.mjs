@@ -26,6 +26,12 @@ if (runtimeRole.rows.length !== 1 || runtimeRole.rows[0].rolcanlogin !== false) 
   throw new Error('runtime role bootstrap must be idempotent and create a NOLOGIN role');
 }
 console.log('passed idempotent NOLOGIN runtime role bootstrap');
+const aiRuntimeRole = await db.query(
+  "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'innorder_ai_runtime'",
+);
+if (aiRuntimeRole.rows.length !== 1 || aiRuntimeRole.rows[0].rolcanlogin !== false) {
+  throw new Error('AI runtime role bootstrap must be idempotent and create a NOLOGIN role');
+}
 
 const migrationDir = resolve('database/migrations');
 const migrations = [
@@ -41,6 +47,7 @@ const migrations = [
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V015__governed_ai_runtime.sql',
 ];
 
 async function applyMigration(migration) {
@@ -51,11 +58,17 @@ async function applyMigration(migration) {
       'CREATE DOMAIN vector AS double precision[];',
     );
   }
+  if (migration === 'V015__governed_ai_runtime.sql') {
+    sql = sql
+      .replace(/\(1 - \(embedding\.embedding OPERATOR\(public\.<=>\) p_query_embedding\)\)::double precision/g,
+        '1::double precision')
+      .replace(/embedding\.embedding OPERATOR\(public\.<=>\) p_query_embedding/g, 'chunk.id::text');
+  }
   await db.exec(sql);
   console.log(`applied ${migration}`);
 }
 
-for (const migration of migrations.slice(0, -3)) {
+for (const migration of migrations.slice(0, migrations.indexOf('V010__platform_security_kernel.sql'))) {
   await applyMigration(migration);
 }
 
@@ -188,6 +201,39 @@ if (legacyAccountWindow.rows.length !== 1
 console.log('passed V011 legacy account failure-window backfill');
 
 await applyMigration('V012__outbox_publisher_lifecycle.sql');
+await applyMigration('V015__governed_ai_runtime.sql');
+
+for (const relation of [
+  'authz.ai_authorization_grant',
+  'authz.ai_authorized_document',
+  'ai.ingestion_job',
+  'ai.ingestion_attempt',
+  'ai.event_consumption',
+  'ai.model_invocation',
+  'ai.retrieval_trace',
+  'ai.retrieval_hit',
+  'ai.embedding_space_gate_result',
+]) {
+  const result = await db.query('SELECT to_regclass($1) IS NOT NULL AS present', [relation]);
+  if (!result.rows[0]?.present) throw new Error(`${relation} is missing after V015`);
+}
+for (const routine of [
+  'authz.consume_ai_authorization_grant',
+  'ai.claim_ingestion_jobs',
+  'ai.claim_event_consumptions',
+  'ai.authorized_hybrid_retrieval',
+]) {
+  const result = await db.query(`
+    SELECT count(*)::integer AS count
+    FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname || '.' || p.proname = $1
+      AND p.prosecdef
+      AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
+  `, [routine]);
+  if (result.rows[0]?.count !== 1) throw new Error(`${routine} is not a hardened SECURITY DEFINER function`);
+}
+console.log('passed V015 governed AI contracts');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
