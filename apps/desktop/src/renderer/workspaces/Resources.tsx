@@ -8,14 +8,15 @@ import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
 
 const identifierSchema = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-const integerCapacitySchema = z.number().int().nonnegative();
+const positiveCapacitySchema = z.number().finite().positive();
+const availableCapacitySchema = z.number().finite().nonnegative();
 const integerInputSchema = z.string().regex(/^(?:0|[1-9]\d*)$/).transform(Number);
-const positiveIntegerInputSchema = z.string().regex(/^[1-9]\d*$/).transform(Number);
+const positiveCapacityInputSchema = z.string().trim().min(1).transform(Number).pipe(positiveCapacitySchema);
 const reservationSchema = z.object({
   id: identifierSchema,
   start: z.string().datetime({ offset: true }),
   end: z.string().datetime({ offset: true }),
-  capacity: z.number().int().positive(),
+  capacity: positiveCapacitySchema,
   state: z.string().trim().min(1).max(64),
 }).refine(({ start, end }) => Date.parse(start) < Date.parse(end));
 
@@ -23,7 +24,7 @@ const conflictSchema = z.object({
   kind: z.enum(["exclusive", "capacity"]),
   start: z.string().datetime({ offset: true }),
   end: z.string().datetime({ offset: true }),
-  capacity: integerCapacitySchema.optional(),
+  capacity: positiveCapacitySchema.optional(),
 }).refine(({ start, end }) => Date.parse(start) < Date.parse(end));
 
 const resourceSchema = z.object({
@@ -31,8 +32,8 @@ const resourceSchema = z.object({
   name: z.string().trim().min(1).max(128),
   type: identifierSchema,
   state: z.string().trim().min(1).max(64),
-  capacity: integerCapacitySchema,
-  availableCapacity: integerCapacitySchema,
+  capacity: positiveCapacitySchema,
+  availableCapacity: availableCapacitySchema,
   reservations: z.array(reservationSchema),
   conflicts: z.array(conflictSchema),
 }).refine(({ capacity, availableCapacity }) => availableCapacity <= capacity);
@@ -40,20 +41,18 @@ const resourceSchema = z.object({
 const createSchema = z.object({
   name: z.string().trim().min(1).max(128),
   type: identifierSchema,
-  capacity: integerInputSchema,
-  availableCapacity: integerInputSchema,
-}).refine(({ capacity, availableCapacity }) => availableCapacity <= capacity);
+  capacity: positiveCapacityInputSchema,
+});
 const changeSchema = z.object({
   resourceId: identifierSchema,
   expectedVersion: integerInputSchema,
-  capacity: integerInputSchema,
-  availableCapacity: integerInputSchema,
-}).refine(({ capacity, availableCapacity }) => availableCapacity <= capacity);
+  capacity: positiveCapacityInputSchema,
+});
 const reserveSchema = z.object({
   resourceId: identifierSchema,
   start: z.string().min(1),
   end: z.string().min(1),
-  capacity: positiveIntegerInputSchema,
+  capacity: positiveCapacityInputSchema,
   expectedVersion: integerInputSchema,
   exclusive: z.boolean(),
 }).refine(({ start, end }) => Number.isFinite(Date.parse(start)) && Date.parse(start) < Date.parse(end));
@@ -126,8 +125,8 @@ function ResourceDetails({ resource, view }: { resource: Resource; view: string 
 
 export function Resources({ result, query, capabilities, online, authenticated, onQueryChange, onRefresh, onExecute, onConflictRefresh }: ResourcesProps) {
   const [activeTab, setActiveTab] = useState(definition.tabs[0]!.id);
-  const [createPayload, setCreatePayload] = useState({ name: "", type: "", capacity: "", availableCapacity: "" });
-  const [changePayload, setChangePayload] = useState({ resourceId: "", expectedVersion: "", capacity: "", availableCapacity: "" });
+  const [createPayload, setCreatePayload] = useState({ name: "", type: "", capacity: "" });
+  const [changePayload, setChangePayload] = useState({ resourceId: "", expectedVersion: "", capacity: "" });
   const [reservePayload, setReservePayload] = useState({ resourceId: "", start: "", end: "", capacity: "", expectedVersion: "", exclusive: false });
   const [cancelPayload, setCancelPayload] = useState({ reservationId: "", expectedVersion: "" });
   const commandProps = { capabilities, online, authenticated, onExecute, onConflictRefresh };
@@ -179,24 +178,22 @@ export function Resources({ result, query, capabilities, online, authenticated, 
           <h3 id="resource-create-heading">创建资源</h3>
           <label>资源名称<input value={createPayload.name} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, name: event.currentTarget.value })} /></label>
           <label>新资源类型<input value={createPayload.type} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, type: event.currentTarget.value })} /></label>
-          <label>容量<input type="number" min="0" step="1" value={createPayload.capacity} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, capacity: event.currentTarget.value })} /></label>
-          <label>初始可用容量<input type="number" min="0" step="1" value={createPayload.availableCapacity} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, availableCapacity: event.currentTarget.value })} /></label>
-          {guardedCommand(create, createResult, "资源名称、类型与容量无效", createResult.success ? createResult.data : {})}
+          <label>容量<input type="number" min="0" step="any" value={createPayload.capacity} disabled={controlDisabled(create)} onChange={(event) => setCreatePayload({ ...createPayload, capacity: event.currentTarget.value })} /></label>
+          {guardedCommand(create, createResult, "资源名称、类型或总容量无效", createResult.success ? createResult.data : {})}
         </section>
         <section aria-labelledby="resource-change-heading">
           <h3 id="resource-change-heading">变更资源</h3>
           <label>变更资源编号<input value={changePayload.resourceId} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, resourceId: event.currentTarget.value })} /></label>
           <label>当前版本<input type="number" min="0" step="1" value={changePayload.expectedVersion} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, expectedVersion: event.currentTarget.value })} /></label>
-          <label>新容量<input type="number" min="0" step="1" value={changePayload.capacity} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, capacity: event.currentTarget.value })} /></label>
-          <label>新可用容量<input type="number" min="0" step="1" value={changePayload.availableCapacity} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, availableCapacity: event.currentTarget.value })} /></label>
-          {guardedCommand(change, changeResult, "资源编号、版本或容量无效", changeResult.success ? { expectedVersion: changeResult.data.expectedVersion, capacity: changeResult.data.capacity, availableCapacity: changeResult.data.availableCapacity } : {}, changeResult.success ? changeResult.data.resourceId : undefined)}
+          <label>新容量<input type="number" min="0" step="any" value={changePayload.capacity} disabled={controlDisabled(change)} onChange={(event) => setChangePayload({ ...changePayload, capacity: event.currentTarget.value })} /></label>
+          {guardedCommand(change, changeResult, "资源编号、版本或容量无效", changeResult.success ? { expectedVersion: changeResult.data.expectedVersion, capacity: changeResult.data.capacity } : {}, changeResult.success ? changeResult.data.resourceId : undefined)}
         </section>
         <section aria-labelledby="resource-reserve-heading">
           <h3 id="resource-reserve-heading">创建预留</h3>
           <label>预留资源编号<input value={reservePayload.resourceId} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, resourceId: event.currentTarget.value })} /></label>
           <label>开始时间<input type="datetime-local" value={reservePayload.start} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, start: event.currentTarget.value })} /></label>
           <label>结束时间<input type="datetime-local" value={reservePayload.end} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, end: event.currentTarget.value })} /></label>
-          <label>预留容量<input type="number" min="1" step="1" value={reservePayload.capacity} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, capacity: event.currentTarget.value })} /></label>
+          <label>预留容量<input type="number" min="0" step="any" value={reservePayload.capacity} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, capacity: event.currentTarget.value })} /></label>
           <label>资源预期版本<input type="number" min="0" step="1" value={reservePayload.expectedVersion} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, expectedVersion: event.currentTarget.value })} /></label>
           <label><input type="checkbox" checked={reservePayload.exclusive} disabled={controlDisabled(reserve)} onChange={(event) => setReservePayload({ ...reservePayload, exclusive: event.currentTarget.checked })} />独占预留</label>
           {guardedCommand(reserve, reserveResult, "预留资源、时间区间、容量或版本无效", reserveResult.success ? { start: new Date(reserveResult.data.start).toISOString(), end: new Date(reserveResult.data.end).toISOString(), capacity: reserveResult.data.capacity, expectedVersion: reserveResult.data.expectedVersion, exclusive: reserveResult.data.exclusive } : {}, reserveResult.success ? reserveResult.data.resourceId : undefined)}

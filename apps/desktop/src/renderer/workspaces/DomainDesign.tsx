@@ -113,9 +113,11 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
     publish: operation("publish"),
   };
   const commandProps = { capabilities, online, authenticated, onExecute, onConflictRefresh };
-  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || !capabilities.includes(command.capability);
+  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || command.availability.state !== "available" || !capabilities.includes(command.capability);
   const archiveBoundValid = Number.isSafeInteger(maxArchiveBytes) && maxArchiveBytes > 0;
+  const importEnabled = archiveBoundValid && online && authenticated && commands.import.availability.state === "available" && capabilities.includes(commands.import.capability);
   const selectArchive = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (!importEnabled) return;
     const file = event.currentTarget.files?.[0];
     setArchive(undefined);
     setArchiveReference(undefined);
@@ -148,7 +150,7 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
     }
   };
   const uploadArchive = async () => {
-    if (!archive || !archiveBoundValid || uploadPending || !online || !authenticated || !capabilities.includes(commands.import.capability)) return;
+    if (!archive || !importEnabled || uploadPending) return;
     setUploadPending(true);
     setArchiveError(undefined);
     setUploadProgress(0);
@@ -207,12 +209,12 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
         <label>包名称<input value={packageMetadata.packageName} disabled={controlDisabled(commands.import)} onChange={(event) => setPackageMetadata({ ...packageMetadata, packageName: event.currentTarget.value })} /></label>
         <label>包版本<input value={packageMetadata.packageVersion} disabled={controlDisabled(commands.import)} onChange={(event) => setPackageMetadata({ ...packageMetadata, packageVersion: event.currentTarget.value })} /></label>
         <label>包类型<input value={packageMetadata.packageType} disabled={controlDisabled(commands.import)} onChange={(event) => setPackageMetadata({ ...packageMetadata, packageType: event.currentTarget.value })} /></label>
-        <label>签名领域包归档<input type="file" accept=".zip,application/zip" disabled={!archiveBoundValid || !online || !authenticated || !capabilities.includes(commands.import.capability) || uploadPending} onChange={(event) => void selectArchive(event)} /></label>
+        <label>签名领域包归档<input type="file" accept=".zip,application/zip" disabled={!importEnabled || uploadPending} onChange={(event) => void selectArchive(event)} /></label>
         {archiveError ? <p role="status" aria-label="归档校验错误">{archiveError}</p> : null}
-        <button type="button" disabled={!archive || !archiveBoundValid || !online || !authenticated || !capabilities.includes(commands.import.capability) || uploadPending || Boolean(archiveError)} onClick={() => void uploadArchive()}>{uploadPending ? "正在上传" : "上传归档"}</button>
+        <button type="button" disabled={!archive || !importEnabled || uploadPending || Boolean(archiveError)} onClick={() => void uploadArchive()}>{uploadPending ? "正在上传" : "上传归档"}</button>
         <progress aria-label="归档上传进度" max="100" value={uploadProgress} />
-        {archiveReference ? <section aria-label="归档上传引用"><strong>归档上传完成</strong><code>{archiveReference.uploadId}</code><code>{archiveReference.sha256}</code></section> : null}
-        {guardedCommand(commands.import, importResult.success && archiveReference !== undefined, "包名称、版本、类型或上传引用无效", importResult.success && archiveReference ? { ...importResult.data, uploadId: archiveReference.uploadId, sha256: archiveReference.sha256 } : {})}
+        {importEnabled && archiveReference ? <section aria-label="归档上传引用"><strong>归档上传完成</strong><code>{archiveReference.uploadId}</code><code>{archiveReference.sha256}</code></section> : null}
+        {guardedCommand(commands.import, importEnabled && importResult.success && archiveReference !== undefined, "包名称、版本、类型或上传引用无效", importEnabled && importResult.success && archiveReference ? { ...importResult.data, uploadId: archiveReference.uploadId, sha256: archiveReference.sha256 } : {})}
       </section>
 
       <section aria-labelledby="validation-diff-heading">

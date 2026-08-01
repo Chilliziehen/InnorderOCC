@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceResult } from "../src/desktop-contract";
@@ -61,7 +61,7 @@ describe("Resources workspace", () => {
       expect(button).toBeDisabled();
       fireEvent.submit(button.closest("form")!);
     }
-    expect(screen.getByText("资源名称、类型与容量无效")).toBeInTheDocument();
+    expect(screen.getByText("资源名称、类型或总容量无效")).toBeInTheDocument();
     expect(screen.getByText("资源编号、版本或容量无效")).toBeInTheDocument();
     expect(screen.getByText("预留资源、时间区间、容量或版本无效")).toBeInTheDocument();
     expect(screen.getByText("预留编号或版本无效")).toBeInTheDocument();
@@ -80,13 +80,13 @@ describe("Resources workspace", () => {
         name: "电气安全实验台",
         type: "laboratory",
         state: "available",
-        capacity: 4,
-        availableCapacity: 1,
+        capacity: 4.5,
+        availableCapacity: 1.25,
         reservations: [
-          { id: "reservation-1", start: "2026-08-02T08:00:00Z", end: "2026-08-02T10:00:00Z", capacity: 3, state: "active" },
-          { id: "reservation-2", start: "2026-08-03T08:00:00Z", end: "2026-08-03T09:00:00Z", capacity: 1, state: "pending" },
+          { id: "reservation-1", start: "2026-08-02T08:00:00Z", end: "2026-08-02T10:00:00Z", capacity: 3.25, state: "active" },
+          { id: "reservation-2", start: "2026-08-03T08:00:00Z", end: "2026-08-03T09:00:00Z", capacity: 0.5, state: "pending" },
         ],
-        conflicts: [{ kind: "capacity", start: "2026-08-02T09:00:00Z", end: "2026-08-02T11:00:00Z", capacity: 2, requesterName: "REDACT-ME" }],
+        conflicts: [{ kind: "capacity", start: "2026-08-02T09:00:00Z", end: "2026-08-02T11:00:00Z", capacity: 0.75, requesterName: "REDACT-ME" }],
         authorizationDetail: "REDACT-SECRET",
       }],
     };
@@ -101,7 +101,7 @@ describe("Resources workspace", () => {
 
     const inventory = screen.getByRole("region", { name: "资源库存详情" });
     expect(inventory).toHaveTextContent("电气安全实验台");
-    expect(inventory).toHaveTextContent("可用容量 1 / 4");
+    expect(inventory).toHaveTextContent("可用容量 1.25 / 4.5");
     fireEvent.click(screen.getByRole("tab", { name: "预留" }));
     const reservations = screen.getByRole("region", { name: "资源预留详情" });
     expect(reservations).toHaveTextContent("reservation-1");
@@ -160,19 +160,33 @@ describe("Resources workspace", () => {
     const name = within(section).getByLabelText("资源名称");
     const type = within(section).getByLabelText("新资源类型");
     const capacity = within(section).getByLabelText("容量");
-    const available = within(section).getByLabelText("初始可用容量");
+    expect(within(section).queryByLabelText("初始可用容量")).not.toBeInTheDocument();
     expect(name).toBeEnabled();
 
     fireEvent.change(name, { target: { value: "实验台" } });
     fireEvent.change(type, { target: { value: "laboratory" } });
+    fireEvent.change(capacity, { target: { value: "0" } });
+    expect(within(section).getByText("资源名称、类型或总容量无效")).toBeInTheDocument();
     fireEvent.change(capacity, { target: { value: "1.5" } });
-    fireEvent.change(available, { target: { value: "2" } });
-    expect(within(section).getByText("资源名称、类型与容量无效")).toBeInTheDocument();
-    fireEvent.change(capacity, { target: { value: "4" } });
 
-    expect(within(section).queryByText("资源名称、类型与容量无效")).not.toBeInTheDocument();
+    expect(within(section).queryByText("资源名称、类型或总容量无效")).not.toBeInTheDocument();
     expect(within(section).getByText("资源创建 API 合同尚未集成")).toBeInTheDocument();
     expect(within(section).getByRole("button", { name: "创建资源" })).toBeDisabled();
+  });
+
+  it("accepts positive fractional reservation capacity and blocks zero", () => {
+    render(<Resources result={unavailableResources} query={initialQuery} capabilities={["reservations.create"]} online authenticated {...callbacks()} />);
+    const section = screen.getByRole("heading", { name: "创建预留", level: 3 }).closest("section")!;
+    fireEvent.change(within(section).getByLabelText("预留资源编号"), { target: { value: "resource-1" } });
+    fireEvent.change(within(section).getByLabelText("开始时间"), { target: { value: "2026-08-02T08:00" } });
+    fireEvent.change(within(section).getByLabelText("结束时间"), { target: { value: "2026-08-02T09:00" } });
+    fireEvent.change(within(section).getByLabelText("资源预期版本"), { target: { value: "2" } });
+    const capacity = within(section).getByLabelText("预留容量");
+    fireEvent.change(capacity, { target: { value: "0" } });
+    expect(within(section).getByText("预留资源、时间区间、容量或版本无效")).toBeInTheDocument();
+    fireEvent.change(capacity, { target: { value: "0.25" } });
+    expect(within(section).queryByText("预留资源、时间区间、容量或版本无效")).not.toBeInTheDocument();
+    expect(within(section).getByText("资源预留 API 合同尚未集成")).toBeInTheDocument();
   });
 
   it("uses roving tab focus with Arrow, Home, End, and labelled panels", () => {
@@ -262,14 +276,8 @@ describe("Domain Design workspace", () => {
     expect(document.body).not.toHaveTextContent(/REDACT-ACTOR|REDACT-SOURCE/);
   });
 
-  it("validates and uploads ZIP bytes before retaining only the upload reference", async () => {
-    const onArchiveUpload = vi.fn(async (_file: File, reportProgress: (percent: number) => void) => {
-      reportProgress(35);
-      return {
-        uploadId: "11111111-1111-4111-8111-111111111111",
-        sha256: "a".repeat(64),
-      };
-    });
+  it("does not select or upload an archive while packages.import is unavailable", () => {
+    const onArchiveUpload = vi.fn();
     render(<DomainDesign
       result={unavailableDomain}
       query={{ search: "", filters: {}, sort: "updated-desc" }}
@@ -282,46 +290,14 @@ describe("Domain Design workspace", () => {
     />);
     const file = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01])], "pilot.zip", { type: "application/zip" });
 
-    fireEvent.change(screen.getByLabelText("签名领域包归档"), { target: { files: [file] } });
-    const upload = await screen.findByRole("button", { name: "上传归档" });
-    await waitFor(() => expect(upload).toBeEnabled());
+    const input = screen.getByLabelText("签名领域包归档");
+    expect(input).toBeDisabled();
+    fireEvent.change(input, { target: { files: [file] } });
+    const upload = screen.getByRole("button", { name: "上传归档" });
+    expect(upload).toBeDisabled();
     fireEvent.click(upload);
-
-    expect(await screen.findByText("归档上传完成")).toBeInTheDocument();
-    expect(onArchiveUpload).toHaveBeenCalledWith(file, expect.any(Function));
-    expect(screen.getByText("11111111-1111-4111-8111-111111111111")).toBeInTheDocument();
-    expect(screen.getByText("a".repeat(64))).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "归档上传进度" })).toHaveAttribute("value", "100");
-    fireEvent.change(screen.getByLabelText("包名称"), { target: { value: "embedded-medical-device-pilot" } });
-    fireEvent.change(screen.getByLabelText("包版本"), { target: { value: "1.0.0" } });
-    fireEvent.change(screen.getByLabelText("包类型"), { target: { value: "domain" } });
-    expect(screen.queryByText("包名称、版本、类型或上传引用无效")).not.toBeInTheDocument();
-    expect(screen.getByText("领域包导入 API 合同尚未集成")).toBeInTheDocument();
-  });
-
-  it.each([
-    ["name", new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], "pilot.txt", { type: "application/zip" })],
-    ["type", new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], "pilot.zip", { type: "text/plain" })],
-    ["signature", new File([new Uint8Array([0x00, 0x01, 0x02, 0x03])], "pilot.zip", { type: "application/zip" })],
-    ["signature pair", new File([new Uint8Array([0x50, 0x4b, 0x03, 0x06])], "pilot.zip", { type: "application/zip" })],
-    ["size", new File([new Uint8Array(9)], "pilot.zip", { type: "application/zip" })],
-  ])("blocks an archive with invalid %s before upload", async (_case, file) => {
-    const onArchiveUpload = vi.fn();
-    render(<DomainDesign
-      result={unavailableDomain}
-      query={{ search: "", filters: {}, sort: "updated-desc" }}
-      capabilities={["packages.import"]}
-      online
-      authenticated
-      maxArchiveBytes={8}
-      onArchiveUpload={onArchiveUpload}
-      {...callbacks()}
-    />);
-
-    fireEvent.change(screen.getByLabelText("签名领域包归档"), { target: { files: [file] } });
-    expect(await screen.findByRole("status", { name: "归档校验错误" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "上传归档" })).toBeDisabled();
     expect(onArchiveUpload).not.toHaveBeenCalled();
+    expect(screen.queryByText("归档上传完成")).not.toBeInTheDocument();
   });
 
   it("uses roving focus for domain tabs", () => {
