@@ -119,7 +119,13 @@ class PostgreSqlFlowableIntegrationTest(
     @Test
     fun `real PostgreSQL executes all schema contract SQL`() {
         val testDirectory = databaseTestDirectory()
-        listOf("000_assert.sql", "001_schema_contract.sql", "002_constraints.sql", "run_all.sql").forEach { name ->
+        listOf(
+            "000_assert.sql",
+            "001_schema_contract.sql",
+            "002_constraints.sql",
+            "003_process_task_workflow.sql",
+            "run_all.sql",
+        ).forEach { name ->
             postgres.copyFileToContainer(MountableFile.forHostPath(testDirectory.resolve(name)), "/tmp/database-tests/$name")
         }
 
@@ -140,7 +146,7 @@ class PostgreSqlFlowableIntegrationTest(
         assertThat(flywayJdbc.queryForList("SELECT DISTINCT installed_by FROM flyway_schema_history", String::class.java))
             .containsExactly("innorder_flyway")
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+            .containsExactlyElementsOf((1..13).toList())
         assertThat(flywayJdbc.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'user_account' ORDER BY ordinal_position",
             String::class.java,
