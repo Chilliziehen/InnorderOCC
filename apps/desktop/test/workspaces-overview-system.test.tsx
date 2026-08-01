@@ -74,12 +74,13 @@ describe("Overview", () => {
           { item: "待审核证据", type: "attention", status: "open", dueAt: fetchedAt },
           { item: "今日截止", type: "deadline", status: "open", dueAt: fetchedAt },
           { item: "供应风险", type: "risk", status: "open", dueAt: fetchedAt },
-          { item: "入职流程", type: "process", status: "ACTIVE" },
           { item: "采购流程", type: "process", status: "RUNNING" },
-          { item: "暂停流程", type: "process", status: "PAUSED" },
-          { item: "大小写不匹配", type: "process", status: "active" },
+          { item: "暂停流程", type: "process", status: "SUSPENDED" },
+          { item: "完成流程", type: "process", status: "COMPLETED" },
+          { item: "取消流程", type: "process", status: "CANCELLED" },
+          { item: "失败流程", type: "process", status: "FAILED" },
         ],
-        count: 7,
+        count: 8,
         fetchedAt,
       }}
       statuses={statuses}
@@ -92,13 +93,36 @@ describe("Overview", () => {
     />);
 
     const metrics = screen.getByRole("region", { name: "运行指标" });
-    expect(within(metrics).getAllByText("1")).toHaveLength(3);
-    expect(within(metrics).getByRole("heading", { level: 2, name: "进行中流程" }).parentElement).toHaveTextContent("2");
+    expect(within(metrics).getAllByText("1")).toHaveLength(4);
+    expect(within(metrics).getByRole("heading", { level: 2, name: "进行中流程" }).parentElement).toHaveTextContent("1");
     expect(screen.getByRole("table", { name: "工作区数据" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "供应" } });
     expect(onQueryChange).toHaveBeenCalledWith(expect.objectContaining({ search: "供应" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("rejects invented process states from metrics and workspace data", () => {
+    render(<Overview
+      definition={WORKSPACE_DEFINITIONS.overview}
+      result={{
+        state: "ready",
+        items: [{ item: "错误流程", type: "process", status: "ACTIVE" }],
+        count: 1,
+        fetchedAt,
+      }}
+      statuses={statuses}
+      query={query}
+      activeTab="attention"
+      environment="试点环境"
+      onTabChange={vi.fn()}
+      onQueryChange={vi.fn()}
+      onRefresh={vi.fn()}
+    />);
+
+    expect(within(screen.getByRole("region", { name: "运行指标" })).getAllByText("--")).toHaveLength(4);
+    expect(screen.getByRole("region", { name: "数据校验错误" })).toHaveTextContent("数据格式无效");
+    expect(document.body).not.toHaveTextContent("错误流程");
   });
 
   it("renders controlled tabs and supports roving keyboard focus", () => {

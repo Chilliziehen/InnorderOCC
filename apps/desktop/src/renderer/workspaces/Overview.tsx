@@ -7,12 +7,20 @@ import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolb
 import { WorkspaceState } from "../components/WorkspaceState";
 import type { WorkspaceDefinition } from "./workspace-definitions";
 
-const overviewItemSchema = z.object({
+const overviewItemBase = {
   item: z.string(),
-  type: z.enum(["attention", "deadline", "risk", "process"]),
-  status: z.string(),
   dueAt: z.iso.datetime({ offset: true }).optional(),
-}).strict();
+};
+const overviewItemSchema = z.discriminatedUnion("type", [
+  z.object({ ...overviewItemBase, type: z.literal("attention"), status: z.string() }).strict(),
+  z.object({ ...overviewItemBase, type: z.literal("deadline"), status: z.string() }).strict(),
+  z.object({ ...overviewItemBase, type: z.literal("risk"), status: z.string() }).strict(),
+  z.object({
+    ...overviewItemBase,
+    type: z.literal("process"),
+    status: z.enum(["RUNNING", "SUSPENDED", "COMPLETED", "CANCELLED", "FAILED"]),
+  }).strict(),
+]);
 
 const STATE_LABELS: Record<ServiceState, string> = {
   READY: "就绪",
@@ -104,7 +112,7 @@ function metricCounts(result: WorkspaceResult): Readonly<Record<(typeof METRICS)
   return Object.fromEntries(METRICS.map(({ type }) => [
     type,
     parsed.filter((entry) => entry.success && entry.data.type === type && (
-      type !== "process" || entry.data.status === "ACTIVE" || entry.data.status === "RUNNING"
+      type !== "process" || entry.data.status === "RUNNING"
     )).length,
   ])) as Record<(typeof METRICS)[number]["type"], number>;
 }
