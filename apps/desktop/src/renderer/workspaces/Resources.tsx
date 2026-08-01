@@ -70,6 +70,8 @@ export interface ResourcesProps {
   readonly onRefresh: () => void;
   readonly onExecute: (intent: WorkspaceCommand) => Promise<CommandReceipt>;
   readonly onConflictRefresh: () => void;
+  readonly onTabChange?: (tabId: string) => void;
+  readonly activeTab?: string;
 }
 
 const definition = WORKSPACE_DEFINITIONS.resources;
@@ -123,8 +125,9 @@ function ResourceDetails({ resource, view }: { resource: Resource; view: string 
   );
 }
 
-export function Resources({ result, query, capabilities, online, authenticated, onQueryChange, onRefresh, onExecute, onConflictRefresh }: ResourcesProps) {
-  const [activeTab, setActiveTab] = useState(definition.tabs[0]!.id);
+export function Resources({ result, query, capabilities, online, authenticated, onQueryChange, onRefresh, onExecute, onConflictRefresh, onTabChange, activeTab: controlledActiveTab }: ResourcesProps) {
+  const [localActiveTab, setActiveTab] = useState(definition.tabs[0]!.id);
+  const activeTab = definition.tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const [createPayload, setCreatePayload] = useState({ name: "", type: "", capacity: "" });
   const [changePayload, setChangePayload] = useState({ resourceId: "", expectedVersion: "", capacity: "" });
   const [reservePayload, setReservePayload] = useState({ resourceId: "", start: "", end: "", capacity: "", expectedVersion: "", exclusive: false });
@@ -142,6 +145,7 @@ export function Resources({ result, query, capabilities, online, authenticated, 
   const selectTab = (index: number, target: HTMLButtonElement) => {
     const tab = definition.tabs[index]!;
     setActiveTab(tab.id);
+    onTabChange?.(tab.id);
     const buttons = target.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
     buttons?.[index]?.focus();
   };
@@ -168,7 +172,7 @@ export function Resources({ result, query, capabilities, online, authenticated, 
         {definition.tabs.map((tab, index) => <button key={tab.id} id={`resources-tab-${tab.id}`} type="button" role="tab" tabIndex={activeTab === tab.id ? 0 : -1} aria-selected={activeTab === tab.id} aria-controls="resources-panel" onKeyDown={(event) => handleTabKey(event, index)} onClick={(event) => selectTab(index, event.currentTarget)}>{tab.label}</button>)}
       </div>
       <section id="resources-panel" role="tabpanel" aria-labelledby={`resources-tab-${activeTab}`}>
-        <QueryToolbar definition={definition} value={query} disabled={!online || !authenticated || result.state === "unavailable"} onChange={onQueryChange} onRefresh={onRefresh} />
+        <QueryToolbar definition={definition} value={query} disabled={result.state === "loading"} onChange={onQueryChange} onRefresh={onRefresh} />
         <WorkspaceState result={result} itemSchema={resourceSchema} onRetry={onRefresh} onRefresh={onConflictRefresh} renderItem={(item) => <ResourceDetails resource={item} view={activeTab} />} />
       </section>
 

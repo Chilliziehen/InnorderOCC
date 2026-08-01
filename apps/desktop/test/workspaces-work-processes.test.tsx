@@ -113,6 +113,15 @@ function processProps(overrides: Partial<ProcessesProps> = {}): ProcessesProps {
 }
 
 describe("My Work workspace", () => {
+  it("states honestly when upload progress integration is unavailable", () => {
+    render(<MyWork {...myWorkProps({
+      uploadProgressAvailable: false,
+      upload: { state: "uploading", fileName: "evidence.pdf", progress: 0, uploadId: "00000000-0000-4000-8000-000000000077" },
+    })} />);
+
+    expect(screen.getByText("上传进度不可用")).toBeInTheDocument();
+  });
+
   it("renders every canonical state tab and reports controlled tab changes", () => {
     const onTabChange = vi.fn();
     render(<MyWork {...myWorkProps({ onTabChange })} />);

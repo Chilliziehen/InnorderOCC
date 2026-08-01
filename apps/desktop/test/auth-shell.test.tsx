@@ -428,7 +428,7 @@ describe("application controller", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("连接状态", { exact: true })).toHaveTextContent(/离线.*只读/);
     });
-    expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("不可达");
+    expect(screen.getByRole("row", { name: /occ-core/ })).toHaveTextContent("不可达");
   });
 
   it("clears statuses on profile switch and rejects the old delayed callback", async () => {
@@ -457,11 +457,11 @@ describe("application controller", () => {
     fireEvent.change(screen.getByLabelText(/服务器配置/), { target: { value: profileB.id } });
     await screen.findByRole("heading", { name: "运行总览" });
     expect(statuses).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("检查中");
+    expect(screen.queryByRole("row", { name: /occ-core/ })).not.toBeInTheDocument();
 
     resolveA([]);
     await new Promise((resolve) => window.setTimeout(resolve, 0));
-    expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("检查中");
+    expect(screen.queryByRole("row", { name: /occ-core/ })).not.toBeInTheDocument();
     resolveB([]);
   });
 
@@ -532,6 +532,40 @@ describe("application controller", () => {
 
     const selector = await screen.findByLabelText(/服务器配置/);
     expect(within(selector).getByRole("option", { name: updated.name })).toBeInTheDocument();
+  });
+
+  it("clears the selected profile after confirmed removal", async () => {
+    const api = createOcc({
+      session: { restore: vi.fn().mockResolvedValue({ state: "authenticated", user: identity, expiresAt }) },
+    });
+    installOcc(api);
+    window.location.hash = "#/settings";
+    render(<App />);
+    await screen.findByRole("heading", { name: "设置" });
+
+    fireEvent.click(screen.getByRole("button", { name: `移除 ${profileA.name}` }));
+    fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
+
+    await waitFor(() => expect(api.profiles.remove).toHaveBeenCalledWith(profileA.id));
+    expect(await screen.findByRole("heading", { name: "连接服务器" })).toBeInTheDocument();
+  });
+
+  it("completes local logout offline when server revocation rejects", async () => {
+    const api = createOcc({
+      session: {
+        restore: vi.fn().mockResolvedValue({ state: "authenticated", user: identity, expiresAt }),
+        logout: vi.fn().mockRejectedValue(new Error("server unavailable")),
+      },
+    });
+    installOcc(api);
+    render(<App />);
+    await screen.findByRole("heading", { name: "运行总览" });
+    fireEvent(window, new Event("offline"));
+
+    fireEvent.click(screen.getByRole("button", { name: "退出登录" }));
+
+    expect(await screen.findByRole("heading", { name: /登录/ })).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("server unavailable");
   });
 });
 

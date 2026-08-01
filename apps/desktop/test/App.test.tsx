@@ -50,7 +50,12 @@ function mockStatuses(statuses: SystemStatus[]): void {
       logout: vi.fn().mockResolvedValue(undefined),
     },
     runtime: { statuses: vi.fn().mockResolvedValue(statuses) },
-    workspaces: { query: vi.fn() },
+    workspaces: { query: vi.fn().mockResolvedValue({
+      state: "unavailable",
+      reason: "UNAVAILABLE_CONTRACT",
+      resourceGroups: ["/me", "/tasks", "/processes", "/risks"],
+      message: "总览业务 API 合同尚未集成",
+    }) },
     commands: { execute: vi.fn() },
     uploads: { start: vi.fn(), cancel: vi.fn() },
     notifications: {
@@ -70,7 +75,7 @@ afterEach(() => {
 });
 
 describe("OCC operations workspace", () => {
-  it("renders capability navigation, metrics, and service rows", async () => {
+  it("renders capability navigation and the integrated overview controls", async () => {
     mockStatuses([]);
     render(<App />);
 
@@ -89,25 +94,12 @@ describe("OCC operations workspace", () => {
       expect(await screen.findByRole("navigation")).toHaveTextContent(item);
     }
 
-    for (const metric of ["进行中流程", "今日待办", "待审核", "高风险"]) {
-      expect(screen.getByText(metric)).toBeInTheDocument();
-    }
-
-    for (const service of [
-      "OCC Core",
-      "AI Service",
-      "PostgreSQL",
-      "Flowable",
-      "OPA",
-      "Kafka",
-      "Redis",
-      "MinIO",
-    ]) {
-      expect(screen.getByRole("row", { name: new RegExp(service) })).toBeInTheDocument();
-    }
+    expect(screen.getByRole("tablist", { name: "运行总览视图" })).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: "查询工具" })).toBeInTheDocument();
+    expect(await screen.findByText("总览业务 API 合同尚未集成")).toBeInTheDocument();
   });
 
-  it("renders READY, DEGRADED, and UNREACHABLE as semantic text", async () => {
+  it("passes profile-scoped statuses to the integrated overview", async () => {
     mockStatuses([
       status("occ-core", "READY", [
         {
@@ -122,70 +114,9 @@ describe("OCC operations workspace", () => {
     ]);
     render(<App />);
 
-    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
-    expect(within(screen.getByRole("row", { name: /PostgreSQL/ })).getByText("降级")).toBeInTheDocument();
-    expect(within(screen.getByRole("row", { name: /AI Service/ })).getByText("不可达")).toBeInTheDocument();
-  });
-
-  it("uses canonical core-runtime telemetry instead of aggregate dependency state", async () => {
-    mockStatuses([
-      status("occ-core", "DEGRADED", [
-        { id: "core-runtime", label: "Core Runtime", state: "READY", checkedAt },
-        { id: "opa", label: "OPA", state: "UNREACHABLE", checkedAt },
-      ]),
-      status("occ-ai", "READY"),
-    ]);
-    render(<App />);
-
-    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
-    expect(within(screen.getByRole("row", { name: /OPA/ })).getByText("不可达")).toBeInTheDocument();
-  });
-
-  it("does not use AI components as Core dependency telemetry", async () => {
-    mockStatuses([
-      status("occ-core", "READY"),
-      status("occ-ai", "READY", [
-        { id: "opa", label: "OPA", state: "READY", checkedAt },
-      ]),
-    ]);
-    render(<App />);
-
-    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
-    expect(within(screen.getByRole("row", { name: /OPA/ })).getByText("检查中")).toBeInTheDocument();
-  });
-
-  it("marks Core dependencies unreachable when Core is unreachable", async () => {
-    mockStatuses([
-      status("occ-core", "UNREACHABLE"),
-      status("occ-ai", "READY"),
-    ]);
-    render(<App />);
-
-    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("不可达")).toBeInTheDocument();
-    for (const dependency of ["PostgreSQL", "Flowable", "OPA", "Kafka", "Redis", "MinIO"]) {
-      expect(
-        within(screen.getByRole("row", { name: new RegExp(dependency) })).getByText(
-          "不可达",
-        ),
-      ).toBeInTheDocument();
-    }
-  });
-
-  it("keeps omitted dependency telemetry checking while Core is reachable", async () => {
-    mockStatuses([
-      status("occ-core", "READY"),
-      status("occ-ai", "READY"),
-    ]);
-    render(<App />);
-
-    expect(await within(await screen.findByRole("row", { name: /OCC Core/ })).findByText("就绪")).toBeInTheDocument();
-    for (const dependency of ["PostgreSQL", "Flowable", "OPA", "Kafka", "Redis", "MinIO"]) {
-      expect(
-        within(screen.getByRole("row", { name: new RegExp(dependency) })).getByText(
-          "检查中",
-        ),
-      ).toBeInTheDocument();
-    }
+    expect(await within(await screen.findByRole("row", { name: /occ-core/ })).findByText("就绪")).toBeInTheDocument();
+    expect(within(screen.getByRole("row", { name: /occ-ai/ })).getByText("不可达")).toBeInTheDocument();
+    expect(screen.getByRole("row", { name: /occ-core/ })).toHaveTextContent("pilot");
   });
 
   it("presents unavailable business telemetry as unknown", async () => {
@@ -193,17 +124,12 @@ describe("OCC operations workspace", () => {
     render(<App />);
 
     await screen.findByText("进行中流程");
-    for (const label of ["进行中流程", "今日待办", "待审核", "高风险"]) {
-      const metric = screen.getByText(label).closest("article");
+    for (const label of ["关注事项", "时限", "风险", "进行中流程"]) {
+      const metric = screen.getByRole("heading", { level: 2, name: label }).closest("article");
       expect(metric).not.toBeNull();
       expect(within(metric as HTMLElement).getByText("--")).toBeInTheDocument();
-      expect(within(metric as HTMLElement).getByText("暂无遥测")).toBeInTheDocument();
+      expect(within(metric as HTMLElement).getByText("不可用")).toBeInTheDocument();
     }
-
-    expect(screen.getByText("等待流程遥测")).toBeInTheDocument();
-    expect(screen.getByText("等待介入队列遥测")).toBeInTheDocument();
-    expect(screen.queryByText("暂无运行中的流程")).not.toBeInTheDocument();
-    expect(screen.queryByText("暂无待人工介入事项")).not.toBeInTheDocument();
-    expect(screen.queryByText("0 项")).not.toBeInTheDocument();
+    expect(await screen.findByText("总览业务 API 合同尚未集成")).toBeInTheDocument();
   });
 });

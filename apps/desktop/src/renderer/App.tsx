@@ -191,6 +191,15 @@ export function App() {
     return profile;
   };
 
+  const removeProfile = async (profileId: string) => {
+    const current = stateRef.current;
+    if (current.mode === "offline" || current.mode === "reconnecting") {
+      throw new Error("Profile changes unavailable");
+    }
+    await window.occ.profiles.remove(profileId);
+    dispatchEvent({ type: "PROFILE_REMOVED", profileId });
+  };
+
   const login = async (input: LoginInput): Promise<SessionSnapshot> => {
     const current = stateRef.current;
     if (current.mode !== "login") throw new Error("Login unavailable");
@@ -258,6 +267,7 @@ export function App() {
         onLogout={logout}
         onProfileSelect={selectProfile}
         onProfileSave={saveProfile}
+        onProfileRemove={removeProfile}
         onRetry={retryRestore}
       />
     );

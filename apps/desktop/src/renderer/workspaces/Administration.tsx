@@ -18,6 +18,8 @@ export interface AdministrationProps {
   readonly onQueryChange: (query: WorkspaceQueryValue) => void;
   readonly onRefresh: () => void;
   readonly onExecute: (command: WorkspaceCommand) => Promise<CommandReceipt>;
+  readonly onTabChange?: (tabId: string) => void;
+  readonly activeTab?: string;
 }
 
 const definition = WORKSPACE_DEFINITIONS.administration;
@@ -65,8 +67,11 @@ export function Administration({
   onQueryChange,
   onRefresh,
   onExecute,
+  onTabChange,
+  activeTab: controlledActiveTab,
 }: AdministrationProps) {
-  const [activeTab, setActiveTab] = useState(initialTab.id);
+  const [localActiveTab, setActiveTab] = useState(initialTab.id);
+  const activeTab = tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const active = tabs.find(({ id }) => id === activeTab) ?? initialTab;
   const commands = (operationsByTab[active.id] ?? [])
     .map((operation) => definition.commands.find((command) => command.operation === operation))
@@ -87,14 +92,14 @@ export function Administration({
             aria-selected={active.id === tab.id}
             tabIndex={active.id === tab.id ? 0 : -1}
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            onKeyDown={(event) => moveTab(event, index, setActiveTab)}
+            onClick={() => { setActiveTab(tab.id); onTabChange?.(tab.id); }}
+            onKeyDown={(event) => moveTab(event, index, (tabId) => { setActiveTab(tabId); onTabChange?.(tabId); })}
           >
             {tab.label}
           </button>
         ))}
       </div>
-      <QueryToolbar definition={definition} value={query} disabled={!mutable} onChange={onQueryChange} onRefresh={onRefresh} />
+      <QueryToolbar definition={definition} value={query} disabled={result.state === "loading"} onChange={onQueryChange} onRefresh={onRefresh} />
       <div
         role="tabpanel"
         id={`administration-panel-${active.id}`}

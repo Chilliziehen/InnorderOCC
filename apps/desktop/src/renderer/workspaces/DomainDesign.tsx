@@ -48,6 +48,8 @@ export interface DomainDesignProps {
   readonly onConflictRefresh: () => void;
   readonly maxArchiveBytes: number;
   readonly onArchiveUpload: (file: File, reportProgress: (percent: number) => void) => Promise<ArchiveUploadReference>;
+  readonly onTabChange?: (tabId: string) => void;
+  readonly activeTab?: string;
 }
 
 const definition = WORKSPACE_DEFINITIONS["domain-design"];
@@ -93,8 +95,9 @@ function isZipSignature(bytes: Uint8Array): boolean {
     (bytes[2] === 0x07 && bytes[3] === 0x08);
 }
 
-export function DomainDesign({ result, query, capabilities, online, authenticated, onQueryChange, onRefresh, onExecute, onConflictRefresh, maxArchiveBytes, onArchiveUpload }: DomainDesignProps) {
-  const [activeTab, setActiveTab] = useState(definition.tabs[0]!.id);
+export function DomainDesign({ result, query, capabilities, online, authenticated, onQueryChange, onRefresh, onExecute, onConflictRefresh, maxArchiveBytes, onArchiveUpload, onTabChange, activeTab: controlledActiveTab }: DomainDesignProps) {
+  const [localActiveTab, setActiveTab] = useState(definition.tabs[0]!.id);
+  const activeTab = definition.tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const [archive, setArchive] = useState<File>();
   const [archiveReference, setArchiveReference] = useState<ArchiveUploadReference>();
   const [archiveError, setArchiveError] = useState<string>();
@@ -168,7 +171,9 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
     }
   };
   const selectTab = (index: number, target: HTMLButtonElement) => {
-    setActiveTab(definition.tabs[index]!.id);
+    const tabId = definition.tabs[index]!.id;
+    setActiveTab(tabId);
+    onTabChange?.(tabId);
     const buttons = target.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
     buttons?.[index]?.focus();
   };
@@ -199,7 +204,7 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
         {definition.tabs.map((tab, index) => <button key={tab.id} id={`domain-tab-${tab.id}`} type="button" role="tab" tabIndex={activeTab === tab.id ? 0 : -1} aria-selected={activeTab === tab.id} aria-controls="domain-design-panel" onKeyDown={(event) => handleTabKey(event, index)} onClick={(event) => selectTab(index, event.currentTarget)}>{tab.label}</button>)}
       </div>
       <section id="domain-design-panel" role="tabpanel" aria-labelledby={`domain-tab-${activeTab}`}>
-        <QueryToolbar definition={definition} value={query} disabled={!online || !authenticated || result.state === "unavailable"} onChange={onQueryChange} onRefresh={onRefresh} />
+        <QueryToolbar definition={definition} value={query} disabled={result.state === "loading"} onChange={onQueryChange} onRefresh={onRefresh} />
         <WorkspaceState result={result} itemSchema={packageSchema} onRetry={onRefresh} onRefresh={onConflictRefresh} renderItem={(item) => <PackageDetails item={item} />} />
       </section>
 

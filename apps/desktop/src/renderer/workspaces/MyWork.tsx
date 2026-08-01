@@ -55,6 +55,7 @@ export interface MyWorkProps {
   readonly authenticated: boolean;
   readonly selectedTask?: MyWorkTaskDetails;
   readonly upload?: EvidenceUploadState;
+  readonly uploadProgressAvailable?: boolean;
   readonly guidance?: GuidanceState;
   readonly uploadReference?: string;
   readonly onTabChange: (tab: MyWorkTab) => void;
@@ -168,6 +169,7 @@ export function MyWork({
   authenticated,
   selectedTask,
   upload = { state: "idle" },
+  uploadProgressAvailable = true,
   guidance,
   uploadReference,
   onTabChange,
@@ -283,8 +285,7 @@ export function MyWork({
         {!uploadShape.valid ? <p role="alert">{uploadShape.message}</p> : null}
         {upload.state === "uploading" ? (
           <div>
-            <progress aria-label={`${upload.fileName} 上传进度`} max={100} value={Math.min(100, Math.max(0, upload.progress))} />
-            <span>{upload.progress}%</span>
+            {uploadProgressAvailable ? <><progress aria-label={`${upload.fileName} 上传进度`} max={100} value={Math.min(100, Math.max(0, upload.progress))} /><span>{upload.progress}%</span></> : <p>上传进度不可用</p>}
             <form aria-label="取消证据上传" onSubmit={(event) => {
               event.preventDefault();
               if (!uploadBlocked && upload.uploadId.trim()) onCancelUpload(upload.uploadId);

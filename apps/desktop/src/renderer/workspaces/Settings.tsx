@@ -18,6 +18,8 @@ export interface SettingsProps {
   readonly onRemove: (profileId: string) => void | Promise<void>;
   readonly onPreferencesChange: (preferences: SettingsPreferences) => void | Promise<void>;
   readonly onLogout: () => void | Promise<void>;
+  readonly onTabChange?: (tabId: string) => void;
+  readonly activeTab?: string;
 }
 
 const definition = WORKSPACE_DEFINITIONS.settings;
@@ -37,8 +39,9 @@ function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number, select:
   event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
 }
 
-export function Settings({ profiles, current, connectivity, onSelect, onSave, onRemove, onPreferencesChange, onLogout }: SettingsProps) {
-  const [activeTab, setActiveTab] = useState(definition.tabs[0]!.id);
+export function Settings({ profiles, current, connectivity, onSelect, onSave, onRemove, onPreferencesChange, onLogout, onTabChange, activeTab: controlledActiveTab }: SettingsProps) {
+  const [localActiveTab, setActiveTab] = useState(definition.tabs[0]!.id);
+  const activeTab = definition.tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const [name, setName] = useState(current?.name ?? "");
   const [origin, setOrigin] = useState(current?.origin ?? "");
   const [environment, setEnvironment] = useState<ServerProfile["environment"]>(current?.environment ?? "pilot");
@@ -143,8 +146,8 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
             aria-selected={active.id === tab.id}
             tabIndex={active.id === tab.id ? 0 : -1}
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            onKeyDown={(event) => moveTab(event, index, setActiveTab)}
+            onClick={() => { setActiveTab(tab.id); onTabChange?.(tab.id); }}
+            onKeyDown={(event) => moveTab(event, index, (tabId) => { setActiveTab(tabId); onTabChange?.(tabId); })}
           >
             {tab.label}
           </button>

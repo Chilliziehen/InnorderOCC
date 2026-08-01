@@ -114,7 +114,7 @@ describe("Resources workspace", () => {
     expect(document.body).not.toHaveTextContent(/REDACT-ME|REDACT-SECRET/);
   });
 
-  it("locks query and mutation controls offline and keeps semantic tab state", () => {
+  it("keeps queries available, locks mutations offline, and keeps semantic tab state", () => {
     render(<Resources
       result={{ state: "offline", count: 1, fetchedAt, items: [{ id: "resource-1", name: "实验台", type: "lab", state: "available", capacity: 1, availableCapacity: 1, reservations: [], conflicts: [] }] }}
       query={initialQuery}
@@ -124,8 +124,8 @@ describe("Resources workspace", () => {
       {...callbacks()}
     />);
 
-    expect(screen.getByLabelText("搜索")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+    expect(screen.getByLabelText("搜索")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled();
     expect(screen.getByLabelText("资源名称")).toBeDisabled();
     const conflictTab = screen.getByRole("tab", { name: "冲突" });
     fireEvent.click(conflictTab);
