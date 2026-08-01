@@ -713,6 +713,16 @@ test('serializes ingestion and gates candidate-first with ordered job locks', ()
   assert.match(sql, /ingestion completion is blocked by finalized gate/iu);
 });
 
+test('scopes every gate corpus job query to the evaluated candidate', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const begin = sql.match(/CREATE FUNCTION ai\.begin_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  const finalize = sql.match(/CREATE FUNCTION ai\.finalize_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.ok((begin.match(/job\.candidate_embedding_space_id = p_candidate_embedding_space_id/giu) ?? []).length >= 2,
+    'begin gate job locks and eligible corpus must be candidate-scoped');
+  assert.ok((finalize.match(/job\.candidate_embedding_space_id = evaluation\.candidate_embedding_space_id/giu) ?? []).length >= 4,
+    'finalize gate locks and recomputed corpus must be candidate-scoped');
+});
+
 test('serializes legal hold placement and cleanup run-first without dangling targets', () => {
   const sql = readMigration('V015__governed_ai_runtime.sql');
   const hold = sql.match(/CREATE FUNCTION ai\.validate_legal_hold_object_target\(\)[\s\S]*?\$\$;/iu)?.[0] ?? '';
@@ -729,4 +739,33 @@ test('serializes legal hold placement and cleanup run-first without dangling tar
   assert.match(live, /deadlock regression/iu);
   assert.match(live, /dangling legal hold/iu);
   assert.match(live, /SET LOCAL lock_timeout/iu);
+});
+
+test('releases append-only legal holds through ordered bounded locking', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const lifecycle = sql.match(/CREATE FUNCTION ai\.enforce_legal_hold_lifecycle\(\)[\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(lifecycle, /legal hold is append-only/iu);
+  assert.match(lifecycle, /legal hold release requires bounded function/iu);
+  assert.match(sql, /CREATE TRIGGER trg_legal_hold_lifecycle[\s\S]*BEFORE INSERT OR UPDATE OR DELETE ON ai\.legal_hold/iu);
+  const release = sql.match(/CREATE FUNCTION ai\.release_legal_hold\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(release, /SECURITY DEFINER/iu);
+  assert.match(release, /FROM ai\.ai_run run[\s\S]*FOR UPDATE/iu);
+  assert.match(release, /FROM ai\.ai_run_artifact artifact[\s\S]*FOR UPDATE/iu);
+  assert.match(release, /FROM ai\.legal_hold hold_row[\s\S]*FOR UPDATE/iu);
+  assert.ok((release.match(/artifact\.legal_hold_id = p_hold_id/giu) ?? []).length >= 2,
+    'release must discover direct artifact holds for both run and artifact locks');
+  const runLock = release.indexOf('PERFORM 1 FROM ai.ai_run run');
+  const releaseArtifactLock = release.indexOf('PERFORM 1 FROM ai.ai_run_artifact artifact', runLock);
+  const releaseHoldLock = release.indexOf('FROM ai.legal_hold hold_row', releaseArtifactLock);
+  assert.ok(runLock >= 0 && releaseArtifactLock > runLock && releaseHoldLock > releaseArtifactLock);
+  const cleanup = sql.match(/CREATE FUNCTION ai\.cleanup_expired_run_artifacts\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(cleanup, /FROM ai\.legal_hold hold_row[\s\S]*FOR UPDATE/iu);
+  const artifactLock = cleanup.indexOf('SELECT * INTO artifact_row FROM ai.ai_run_artifact artifact');
+  const holdLock = cleanup.indexOf('PERFORM 1 FROM ai.legal_hold hold_row', artifactLock);
+  assert.ok(artifactLock >= 0 && holdLock > artifactLock);
+  assert.match(sql, /REVOKE ALL ON FUNCTION ai\.release_legal_hold\(uuid, uuid\) FROM PUBLIC, innorder_ai_runtime/iu);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ai\.release_legal_hold\(uuid, uuid\) TO innorder_runtime/iu);
+  const live = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(live, /released hold was concurrently reactivated/iu);
+  assert.match(live, /release-cleanup/iu);
 });

@@ -388,6 +388,11 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
     END IF;
+    PERFORM 1 FROM ai.legal_hold hold_row
+    WHERE hold_row.id = NEW.hold_id AND hold_row.released_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is not active';
+    END IF;
     RETURN NEW;
 END;
 $$;
@@ -395,6 +400,42 @@ $$;
 CREATE TRIGGER trg_legal_hold_object_target
 BEFORE INSERT ON ai.legal_hold_object
 FOR EACH ROW EXECUTE FUNCTION ai.validate_legal_hold_object_target();
+
+CREATE FUNCTION ai.enforce_legal_hold_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    table_owner text;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.released_by IS NOT NULL OR NEW.released_at IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold must be inserted active';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' OR OLD.released_at IS NOT NULL
+       OR (to_jsonb(NEW) - ARRAY['released_by', 'released_at'])
+          IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['released_by', 'released_at']) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is append-only';
+    END IF;
+    SELECT pg_get_userbyid(relowner) INTO STRICT table_owner
+    FROM pg_class WHERE oid = TG_RELID;
+    IF current_setting('innorder.legal_hold_release', true) IS DISTINCT FROM 'on'
+       OR current_user IS DISTINCT FROM table_owner THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold release requires bounded function';
+    END IF;
+    IF NEW.released_by IS NULL OR NEW.released_at IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is append-only';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_legal_hold_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON ai.legal_hold
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_legal_hold_lifecycle();
 
 ALTER TABLE ai.model_invocation
     ADD CONSTRAINT fk_model_invocation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
@@ -461,6 +502,80 @@ CREATE TRIGGER trg_ai_run_artifact_lifecycle
 BEFORE UPDATE OR DELETE ON ai.ai_run_artifact
 FOR EACH ROW EXECUTE FUNCTION ai.enforce_run_artifact_lifecycle();
 
+CREATE FUNCTION ai.release_legal_hold(p_hold_id uuid, p_released_by uuid)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    target_run_id uuid;
+    target_artifact_id uuid;
+    hold_released_at timestamptz;
+BEGIN
+    IF p_hold_id IS NULL OR p_released_by IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'legal hold release identifiers cannot be NULL';
+    END IF;
+    FOR target_run_id IN
+        SELECT target.id
+        FROM (
+            SELECT run.id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run run ON held.object_kind = 'RUN' AND run.id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.run_id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run_artifact artifact
+              ON held.object_kind = 'ARTIFACT' AND artifact.id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.run_id
+            FROM ai.ai_run_artifact artifact
+            WHERE artifact.legal_hold_id = p_hold_id
+        ) target
+        ORDER BY target.id
+    LOOP
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = target_run_id FOR UPDATE;
+    END LOOP;
+    FOR target_artifact_id IN
+        SELECT target.id
+        FROM (
+            SELECT artifact.id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run_artifact artifact
+              ON held.object_kind = 'ARTIFACT' AND artifact.id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run_artifact artifact
+              ON held.object_kind = 'RUN' AND artifact.run_id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.id
+            FROM ai.ai_run_artifact artifact
+            WHERE artifact.legal_hold_id = p_hold_id
+        ) target
+        ORDER BY target.id
+    LOOP
+        PERFORM 1 FROM ai.ai_run_artifact artifact
+        WHERE artifact.id = target_artifact_id FOR UPDATE;
+    END LOOP;
+    SELECT released_at INTO STRICT hold_released_at
+    FROM ai.legal_hold hold_row WHERE hold_row.id = p_hold_id FOR UPDATE;
+    IF hold_released_at IS NOT NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is already released';
+    END IF;
+    PERFORM set_config('innorder.legal_hold_release', 'on', true);
+    UPDATE ai.legal_hold
+    SET released_by = p_released_by, released_at = statement_timestamp()
+    WHERE id = p_hold_id;
+    PERFORM set_config('innorder.legal_hold_release', 'off', true);
+    RETURN p_hold_id;
+END;
+$$;
+
 CREATE FUNCTION ai.cleanup_expired_run_artifacts(p_before timestamptz, p_limit integer)
 RETURNS TABLE (artifact_id uuid)
 LANGUAGE plpgsql
@@ -507,6 +622,16 @@ BEGIN
         SELECT * INTO artifact_row FROM ai.ai_run_artifact artifact
         WHERE artifact.id = candidate.id AND artifact.run_id = target_run_id FOR UPDATE;
         CONTINUE WHEN NOT FOUND;
+        PERFORM 1 FROM ai.legal_hold hold_row
+        WHERE hold_row.id IN (
+            SELECT artifact_row.legal_hold_id WHERE artifact_row.legal_hold_id IS NOT NULL
+            UNION
+            SELECT held.hold_id FROM ai.legal_hold_object held
+            WHERE (held.object_kind = 'ARTIFACT' AND held.object_id = artifact_row.id)
+               OR (held.object_kind = 'RUN' AND held.object_id = target_run_id)
+        )
+        ORDER BY hold_row.id
+        FOR UPDATE;
         CONTINUE WHEN artifact_row.retention_until > p_before
                    OR artifact_row.retention_until > statement_timestamp();
         CONTINUE WHEN EXISTS (
@@ -1551,14 +1676,16 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
     END IF;
     PERFORM 1 FROM ai.ingestion_job job
-    WHERE job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
+      AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
     ORDER BY job.id
     FOR UPDATE;
     WITH eligible_versions AS MATERIALIZED (
         SELECT DISTINCT version.id, version.content_hash
         FROM ai.ingestion_job job
         JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
-        WHERE job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+        WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
+          AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
     ), eligible_chunks AS (
         SELECT DISTINCT chunk.id
         FROM eligible_versions version
@@ -1668,25 +1795,29 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
     END IF;
     PERFORM 1 FROM ai.ingestion_job job
-    WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
     ORDER BY job.id
     FOR UPDATE;
     PERFORM 1
     FROM ai.ingestion_job job
     JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
-    WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
     FOR UPDATE OF version;
     PERFORM 1
     FROM ai.ingestion_job job
     JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
     JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
-    WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
     FOR SHARE OF chunk;
     WITH eligible_versions AS MATERIALIZED (
         SELECT DISTINCT version.id, version.content_hash
         FROM ai.ingestion_job job
         JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
-        WHERE job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+        WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+          AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
     ), eligible_chunks AS (
         SELECT DISTINCT chunk.id
         FROM eligible_versions version
@@ -1869,11 +2000,13 @@ REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUB
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FROM PUBLIC, innorder_runtime;
+REVOKE ALL ON FUNCTION ai.release_legal_hold(uuid, uuid) FROM PUBLIC, innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.release_legal_hold(uuid, uuid) TO innorder_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_chunk_embedding(uuid, text, uuid, uuid, integer, text, text, integer, jsonb, uuid, public.vector) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.checkpoint_ingestion_attempt(uuid, text, text, jsonb) TO innorder_ai_runtime;

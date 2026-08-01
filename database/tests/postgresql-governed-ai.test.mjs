@@ -169,9 +169,11 @@ function fixtureSql(prefix) {
       (id, model_profile_id, dimensions, distance_metric, corpus_version, status, coverage, activated_at)
     VALUES
       ('${id('000000000009')}', '${id('000000000008')}', 3, 'COSINE', repeat('0', 64), 'ACTIVE', 1, now()),
-      ('${id('000000000029')}', '${id('000000000008')}', 3, 'COSINE', repeat('9', 64), 'BUILDING', 0, NULL);
+      ('${id('000000000029')}', '${id('000000000008')}', 3, 'COSINE', repeat('9', 64), 'BUILDING', 0, NULL),
+      ('${id('000000000619')}', '${id('000000000008')}', 3, 'COSINE', repeat('9', 64), 'BUILDING', 0, NULL);
     SELECT ai.create_embedding_partition('${id('000000000009')}', 3, 'COSINE');
     SELECT ai.create_embedding_partition('${id('000000000029')}', 3, 'COSINE');
+    SELECT ai.create_embedding_partition('${id('000000000619')}', 3, 'COSINE');
 
     INSERT INTO ai.prompt_template (id, prompt_key, name)
     VALUES ('${id('00000000000a')}', 'test.${prefix}', 'Test prompt');
@@ -204,7 +206,8 @@ function fixtureSql(prefix) {
       ('${id('000000000504')}', 'test.status-drift.${prefix}', 'Status drift dataset'),
       ('${id('000000000520')}', 'test.completion-race.${prefix}', 'Completion race dataset'),
       ('${id('000000000522')}', 'test.deadlock.${prefix}', 'Deadlock dataset'),
-      ('${id('000000000524')}', 'test.final-pass.${prefix}', 'Final pass dataset');
+      ('${id('000000000524')}', 'test.final-pass.${prefix}', 'Final pass dataset'),
+      ('${id('000000000620')}', 'test.candidate-isolation.${prefix}', 'Candidate isolation dataset');
     INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status) VALUES
       ('${id('000000000063')}', '${id('000000000060')}', 1, repeat('3', 64), 'DRAFT'),
       ('${id('000000000064')}', '${id('000000000061')}', 1, repeat('4', 64), 'DRAFT'),
@@ -216,20 +219,23 @@ function fixtureSql(prefix) {
       ('${id('000000000505')}', '${id('000000000504')}', 1, repeat('a', 64), 'DRAFT'),
       ('${id('000000000521')}', '${id('000000000520')}', 1, repeat('b', 64), 'DRAFT'),
       ('${id('000000000523')}', '${id('000000000522')}', 1, repeat('c', 64), 'DRAFT'),
-      ('${id('000000000525')}', '${id('000000000524')}', 1, repeat('d', 64), 'DRAFT');
+      ('${id('000000000525')}', '${id('000000000524')}', 1, repeat('d', 64), 'DRAFT'),
+      ('${id('000000000621')}', '${id('000000000620')}', 1, repeat('e', 64), 'DRAFT');
     INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties) VALUES
       ${cases('000000000013', 100, 30)},
       ${cases('00000000003b', 130, 20)},
       ${cases('000000000063', 200, 1)},
       ${cases('000000000064', 300, 19)},
       ${cases('000000000065', 400, 20, 19)},
-      ${cases('000000000525', 700, 20)};
+      ${cases('000000000525', 700, 20)},
+      ${cases('000000000621', 800, 20)};
     UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
     WHERE id IN ('${id('000000000013')}', '${id('00000000003b')}', '${id('000000000063')}',
                  '${id('000000000064')}', '${id('000000000065')}', '${id('000000000077')}',
                  '${id('000000000501')}', '${id('000000000503')}', '${id('000000000505')}');
     UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
-    WHERE id IN ('${id('000000000521')}', '${id('000000000523')}', '${id('000000000525')}');
+    WHERE id IN ('${id('000000000521')}', '${id('000000000523')}', '${id('000000000525')}',
+                 '${id('000000000621')}');
     UPDATE ai.evaluation_dataset_version SET status = 'RETIRED' WHERE id = '${id('000000000077')}';
 
     INSERT INTO ai.knowledge_source
@@ -503,6 +509,10 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
        'INTERNAL', now() - interval '1 year', now() - interval '2 years');
     INSERT INTO ai.legal_hold_object (hold_id, object_kind, object_id)
     VALUES ('${id('000000000514')}', 'ARTIFACT', '${id('000000000512')}');`);
+  expectSqlFailure(`INSERT INTO ai.legal_hold
+      (id, hold_key, reason, placed_by, released_by, released_at)
+    VALUES ('${id('000000000637')}', 'pre-released-${fixture}', 'invalid initial state',
+      '${id('000000000005')}', '${id('000000000005')}', now());`, /legal hold must be inserted active/iu);
   expectCoreFailure(`SELECT * FROM ai.cleanup_expired_run_artifacts(now(), 10);`, /permission denied/iu);
   for (const args of ['now(), NULL', 'now(), 0', 'now(), 101', "now() + interval '1 day', 10"]) {
     expectAiFailure(`SELECT * FROM ai.cleanup_expired_run_artifacts(${args});`, /invalid artifact cleanup bounds/iu);
@@ -510,8 +520,22 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   assert.equal(execAiSql(`SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10);`), '1');
   assert.equal(execAiSql(`SELECT count(*) FROM ai.ai_run_artifact
     WHERE id IN ('${id('000000000511')}', '${id('000000000512')}');`), '1');
-  execSql(`UPDATE ai.legal_hold SET released_by = '${id('000000000005')}', released_at = now()
-    WHERE id = '${id('000000000514')}';`);
+  expectSqlFailure(`UPDATE ai.legal_hold SET reason = 'changed' WHERE id = '${id('000000000514')}';`,
+    /legal hold is append-only/iu);
+  expectSqlFailure(`UPDATE ai.legal_hold SET released_by = '${id('000000000005')}', released_at = now()
+    WHERE id = '${id('000000000514')}';`, /legal hold release requires bounded function/iu);
+  expectAiFailure(`SELECT ai.release_legal_hold('${id('000000000514')}', '${id('000000000005')}');`,
+    /permission denied/iu);
+  assert.equal(execSql(`SELECT ai.release_legal_hold('${id('000000000514')}', '${id('000000000005')}');`,
+    { role: 'innorder_runtime' }), id('000000000514'));
+  expectCoreFailure(`SELECT ai.release_legal_hold('${id('000000000514')}', '${id('000000000005')}');`,
+    /legal hold is already released/iu);
+  expectSqlFailure(`UPDATE ai.legal_hold SET released_by = NULL, released_at = NULL
+    WHERE id = '${id('000000000514')}';`, /legal hold is append-only/iu);
+  expectSqlFailure(`UPDATE ai.legal_hold SET released_at = released_at + interval '1 second'
+    WHERE id = '${id('000000000514')}';`, /legal hold is append-only/iu);
+  expectSqlFailure(`UPDATE ai.legal_hold SET reason = 'changed after release', placed_at = placed_at + interval '1 second'
+    WHERE id = '${id('000000000514')}';`, /legal hold is append-only/iu);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10);`), '1');
 
   execSql(`INSERT INTO ai.legal_hold (id, hold_key, reason, placed_by) VALUES
@@ -550,6 +574,56 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   assert.equal(blockedCleanup.code, 0, blockedCleanup.stderr);
   assert.match(blockedCleanup.stdout, /0/iu);
   assert.equal(execSql(`SELECT count(*) FROM ai.ai_run_artifact WHERE id = '${id('000000000516')}';`), '1');
+
+  execSql(`INSERT INTO ai.ai_run
+      (id, agent_version_id, model_profile_id, prompt_version_id, package_version_id, policy_release_id,
+       triggered_by, target_entity_id, status, embedding_space_id)
+    VALUES
+      ('${id('000000000629')}', '${id('000000000012')}', '${id('000000000008')}',
+       '${id('000000000010')}', '${id('000000000002')}', '${id('000000000019')}',
+       '${id('000000000005')}', '${id('000000000015')}', 'QUEUED', '${id('000000000009')}'),
+      ('${id('000000000634')}', '${id('000000000012')}', '${id('000000000008')}',
+       '${id('000000000010')}', '${id('000000000002')}', '${id('000000000019')}',
+       '${id('000000000005')}', '${id('000000000015')}', 'QUEUED', '${id('000000000009')}');
+    INSERT INTO ai.legal_hold (id, hold_key, reason, placed_by) VALUES
+      ('${id('000000000630')}', 'release-cleanup-${fixture}', 'release cleanup race', '${id('000000000005')}'),
+      ('${id('000000000635')}', 'reactivation-cleanup-${fixture}', 'reactivation cleanup race', '${id('000000000005')}');
+    INSERT INTO ai.ai_run_artifact
+      (id, run_id, artifact_kind, object_key, sha256, data_classification, retention_until, created_at, legal_hold_id)
+    VALUES
+      ('${id('000000000631')}', '${id('000000000629')}', 'TRACE', 'release-cleanup-${fixture}', repeat('1',64),
+       'INTERNAL', now() - interval '1 year', now() - interval '2 years', '${id('000000000630')}'),
+      ('${id('000000000636')}', '${id('000000000634')}', 'TRACE', 'reactivation-cleanup-${fixture}', repeat('2',64),
+       'INTERNAL', now() - interval '1 year', now() - interval '2 years', NULL);
+    INSERT INTO ai.legal_hold_object (hold_id, object_kind, object_id)
+    VALUES ('${id('000000000635')}', 'ARTIFACT', '${id('000000000636')}');`);
+  const releaseFirst = runSql(`BEGIN; SET ROLE innorder_runtime; SET LOCAL lock_timeout = '3s';
+    SELECT ai.release_legal_hold('${id('000000000630')}', '${id('000000000005')}');
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const cleanupAfterRelease = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10); COMMIT;`);
+  const [releaseFirstResult, cleanupAfterReleaseResult] = await Promise.all([releaseFirst, cleanupAfterRelease]);
+  assert.equal(releaseFirstResult.code, 0, releaseFirstResult.stderr);
+  assert.equal(cleanupAfterReleaseResult.code, 0, cleanupAfterReleaseResult.stderr);
+  assert.match(cleanupAfterReleaseResult.stdout, /0/iu);
+  assert.equal(execAiSql(`SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10);`), '1');
+  assert.equal(execSql(`SELECT count(*) FROM ai.ai_run_artifact WHERE id = '${id('000000000631')}';`), '0');
+
+  assert.equal(execSql(`SELECT ai.release_legal_hold('${id('000000000635')}', '${id('000000000005')}');`,
+    { role: 'innorder_runtime' }), id('000000000635'));
+  const cleanupBeforeReactivation = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT count(*) FROM ai.cleanup_expired_run_artifacts(now(), 10);
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const concurrentReactivation = await runSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    UPDATE ai.legal_hold SET released_by = NULL, released_at = NULL
+    WHERE id = '${id('000000000635')}'; COMMIT;`);
+  const cleanupBeforeReactivationResult = await cleanupBeforeReactivation;
+  assert.equal(cleanupBeforeReactivationResult.code, 0, cleanupBeforeReactivationResult.stderr);
+  assert.notEqual(concurrentReactivation.code, 0, 'released hold was concurrently reactivated');
+  assert.match(concurrentReactivation.stderr, /legal hold is append-only/iu);
+  assert.equal(execSql(`SELECT count(*) FROM ai.ai_run_artifact WHERE id = '${id('000000000636')}';`), '0');
 
   const hits = execAiSql(`SELECT string_agg(chunk_id::text, ',') FROM ai.authorized_hybrid_retrieval(
     '${id('000000000030')}', '${id('000000000009')}', 'allowed', '[1,0,0]'::public.vector, 10, 10, 10);`);
@@ -732,6 +806,42 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   const gateEvidence = (evaluationId, start, count, numerator, denominator, recall) =>
     Array.from({ length: count }, (_, index) => `SELECT ai.record_embedding_gate_case('${evaluationId}',
       '${id(String(start + index).padStart(12, '0'))}', ${numerator}, ${denominator}, ${recall}, repeat('b',64));`).join('\n');
+
+  execSql(`INSERT INTO ai.knowledge_document_version
+      (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
+    VALUES ('${id('000000000622')}', '${id('000000000036')}', 5, 'candidate-b-${fixture}',
+      repeat('a',64), 'text/plain', 'parser-v1', 'PUBLIC');
+    INSERT INTO ai.knowledge_chunk
+      (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
+    VALUES ('${id('000000000623')}', '${id('000000000622')}', 0, 'candidate B corpus', repeat('b',64), 3, '{}');
+    INSERT INTO ai.chunk_embedding (embedding_space_id, chunk_id, embedding)
+    VALUES ('${id('000000000619')}', '${id('000000000623')}', '[1,0,0]');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, produced_document_version_id, source_version,
+       source_object_hash, normalized_content_hash, parser_version, chunker_version,
+       candidate_embedding_space_id, corpus_manifest_digest, checkpoint, stage, status,
+       attempts, lease_owner, lease_expires_at, created_at, updated_at)
+    VALUES ('${id('000000000624')}', '${id('000000000014')}', '${id('000000000036')}',
+      '${id('000000000622')}', 'candidate-b', repeat('c',64), repeat('a',64), 'parser-v1', 'chunker-v1',
+      '${id('000000000619')}', repeat('9',64), '{}', 'EMBED', 'PROCESSING', 1, 'candidate-b-worker',
+      now() + interval '5 minutes', now(), now());
+    INSERT INTO ai.ingestion_attempt
+      (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at)
+    VALUES ('${id('000000000625')}', '${id('000000000624')}', 1, 'candidate-b-worker', 'EMBED', '{}',
+      'RUNNING', now() + interval '5 minutes');`);
+  const candidateAGate = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT ai.begin_embedding_space_gate('${id('000000000626')}', '${id('000000000621')}',
+      '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('d',64));
+    SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const candidateBCompletion = runAiSql(`BEGIN; SET LOCAL lock_timeout = '3s';
+    SELECT ai.finalize_ingestion_job('${id('000000000624')}', 'candidate-b-worker', '{}'); COMMIT;`);
+  const [candidateAGateResult, candidateBCompletionResult] = await Promise.all([candidateAGate, candidateBCompletion]);
+  assert.equal(candidateAGateResult.code, 0, candidateAGateResult.stderr);
+  assert.equal(candidateBCompletionResult.code, 0, candidateBCompletionResult.stderr);
+  execAiSql(gateEvidence(id('000000000626'), 800, 20, 1, 1, 1));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000626')}');`), 'PASS',
+    'candidate B completion changed candidate A frozen corpus');
 
   execSql(`INSERT INTO ai.knowledge_chunk
     (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
