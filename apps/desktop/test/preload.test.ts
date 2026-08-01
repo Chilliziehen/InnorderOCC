@@ -1,3 +1,5 @@
+import { serialize } from "node:v8";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const electronMocks = vi.hoisted(() => ({
@@ -114,5 +116,25 @@ describe("preload bridge", () => {
       DESKTOP_CHANNELS.notifications.event,
       wrapped,
     );
+  });
+
+  it("rejects notification events above the 2 MiB serialized output limit", () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
+    const listener = vi.fn();
+    api.notifications.subscribe(listener);
+    const wrapped = electronMocks.on.mock.calls[0]?.[1];
+    const event = {
+      id: "33333333-3333-4333-8333-333333333333",
+      type: "task.updated",
+      occurredAt: "2026-08-01T12:00:00.000Z",
+      title: "Task updated",
+      read: false,
+      data: { value: "x".repeat(2 * 1024 * 1024) },
+    };
+    expect(serialize(event).byteLength).toBeGreaterThan(2 * 1024 * 1024);
+
+    wrapped({}, event);
+
+    expect(listener).not.toHaveBeenCalled();
   });
 });

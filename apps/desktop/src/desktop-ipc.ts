@@ -164,12 +164,13 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     profiles: {
       list: () => dependencies.profiles.list(),
       async save(input) {
-        const previous = dependencies.profiles.selected();
-        const saved = await dependencies.profiles.save(input);
-        if (previous?.id === saved.id && previous.origin !== saved.origin) {
+        const previous = input.id === undefined
+          ? undefined
+          : (await dependencies.profiles.list()).find(({ id }) => id === input.id);
+        if (previous && previous.origin !== new URL(input.origin).origin) {
           await cleanup(previous.id);
         }
-        return saved;
+        return dependencies.profiles.save(input);
       },
       async select(id) {
         const previous = dependencies.profiles.selected();

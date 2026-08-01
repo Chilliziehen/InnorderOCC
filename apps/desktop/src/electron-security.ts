@@ -77,6 +77,13 @@ export function registerPermissionDenial(target: PermissionSession): void {
   target.setPermissionCheckHandler(() => false);
 }
 
+export function isDevelopmentHttpEnabled(
+  packaged: boolean,
+  explicitFlag: string | undefined,
+): boolean {
+  return !packaged && explicitFlag === "true";
+}
+
 interface SingleInstanceApp {
   requestSingleInstanceLock(): boolean;
   quit(): void;

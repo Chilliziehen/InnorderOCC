@@ -14,6 +14,7 @@ import {
 import {
   applyWindowSecurity,
   createWindowOptions,
+  isDevelopmentHttpEnabled,
   registerPermissionDenial,
   registerProductionCsp,
   registerSingleInstanceLifecycle,
@@ -81,7 +82,10 @@ if (ownsInstance) void app.whenReady().then(async () => {
   const profiles = await createProfileStore({
     ...profilePersistence,
     packaged: app.isPackaged,
-    allowDevelopmentHttp: !app.isPackaged,
+    allowDevelopmentHttp: isDevelopmentHttpEnabled(
+      app.isPackaged,
+      process.env.OCC_ALLOW_DEVELOPMENT_HTTP,
+    ),
   });
   let accessToken: string | null = null;
   const selectedProfile = () => {

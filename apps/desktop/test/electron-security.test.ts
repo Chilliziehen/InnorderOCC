@@ -4,6 +4,7 @@ import {
   PRODUCTION_CSP,
   applyWindowSecurity,
   createWindowOptions,
+  isDevelopmentHttpEnabled,
   registerPermissionDenial,
   registerProductionCsp,
   registerSingleInstanceLifecycle,
@@ -83,6 +84,21 @@ describe("Electron security configuration", () => {
     expect(callback).toHaveBeenCalledWith(false);
     expect(setPermissionCheckHandler.mock.calls[0]?.[0]({}, "clipboard-read")).toBe(false);
   });
+
+  it.each([
+    [false, "true", true],
+    [true, "true", false],
+    [false, undefined, false],
+    [false, "", false],
+    [false, "false", false],
+    [false, "1", false],
+    [false, "TRUE", false],
+  ])(
+    "gates development HTTP for packaged=%s and explicit flag=%s",
+    (packaged, flag, expected) => {
+      expect(isDevelopmentHttpEnabled(packaged, flag)).toBe(expected);
+    },
+  );
 
   it("quits when the instance lock fails", () => {
     const app = {

@@ -255,4 +255,45 @@ describe("desktop main composition", () => {
     expect(session.profileSwitched).toHaveBeenLastCalledWith(profileId);
     expect(clearProfile).toHaveBeenLastCalledWith(profileId);
   });
+
+  it("cleans a non-selected profile before persisting its changed origin", async () => {
+    const otherId = "22222222-2222-4222-8222-222222222222";
+    const otherProfile = {
+      ...profile,
+      id: otherId,
+      name: "Production",
+      origin: "https://old.example.com",
+      environment: "production" as const,
+    };
+    const updatedProfile = { ...otherProfile, origin: "https://new.example.com" };
+    const profiles = {
+      list: vi.fn().mockResolvedValue([profile, otherProfile]),
+      save: vi.fn().mockResolvedValue(updatedProfile),
+      select: vi.fn(),
+      remove: vi.fn(),
+      selected: vi.fn(() => profile),
+    };
+    const session = {
+      restore: vi.fn(), login: vi.fn(), logout: vi.fn(),
+      profileSwitched: vi.fn().mockResolvedValue(undefined),
+    };
+    const clearProfile = vi.fn().mockResolvedValue(undefined);
+    const api = createDesktopApi({ profiles, session, statuses: vi.fn(), clearProfile });
+
+    await api.profiles.save({
+      id: otherId,
+      name: otherProfile.name,
+      origin: updatedProfile.origin,
+      environment: otherProfile.environment,
+    });
+
+    expect(session.profileSwitched).toHaveBeenCalledWith(otherId);
+    expect(clearProfile).toHaveBeenCalledWith(otherId);
+    expect(session.profileSwitched.mock.invocationCallOrder[0]).toBeLessThan(
+      profiles.save.mock.invocationCallOrder[0]!,
+    );
+    expect(clearProfile.mock.invocationCallOrder[0]).toBeLessThan(
+      profiles.save.mock.invocationCallOrder[0]!,
+    );
+  });
 });
