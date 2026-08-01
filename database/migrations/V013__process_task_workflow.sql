@@ -162,6 +162,7 @@ CREATE TABLE occ.task_review_projection_fact (
         (fact_kind = 'SUBMITTED'
             AND evidence_id IS NOT NULL AND evidence_version_id IS NOT NULL
             AND submission_idempotency_id IS NOT NULL AND submission_fact_id IS NULL
+            AND prior_assignee_id IS NOT NULL
             AND review_id IS NULL AND review_version IS NULL AND decision IS NULL)
         OR (fact_kind = 'DECIDED'
             AND evidence_id IS NULL AND evidence_version_id IS NULL
@@ -276,6 +277,12 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'DRAFT' THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'cohort must be created in DRAFT';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.customer_instance_id IS DISTINCT FROM OLD.customer_instance_id
        OR NEW.code IS DISTINCT FROM OLD.code
@@ -305,7 +312,7 @@ END;
 $$;
 
 CREATE TRIGGER trg_cohort_lifecycle
-BEFORE UPDATE ON occ.cohort
+BEFORE INSERT OR UPDATE ON occ.cohort
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_cohort_lifecycle();
 
 CREATE TRIGGER trg_cohort_touch
@@ -383,6 +390,12 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state <> 'RUNNING' THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'process must be created RUNNING';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.definition_binding_id IS DISTINCT FROM OLD.definition_binding_id
        OR NEW.package_version_id IS DISTINCT FROM OLD.package_version_id
@@ -410,7 +423,7 @@ END;
 $$;
 
 CREATE TRIGGER trg_process_instance_lifecycle
-BEFORE UPDATE ON occ.process_instance
+BEFORE INSERT OR UPDATE ON occ.process_instance
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_process_instance_lifecycle();
 
 ALTER TABLE occ.process_instance
@@ -425,6 +438,15 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state <> 'AVAILABLE' THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task must be created AVAILABLE';
+        END IF;
+        IF NEW.assignee_id IS NOT NULL OR NEW.claimed_at IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'available task cannot have an assignee or claim time';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.process_instance_id IS DISTINCT FROM OLD.process_instance_id
        OR NEW.activity_key IS DISTINCT FROM OLD.activity_key
@@ -471,12 +493,122 @@ END;
 $$;
 
 CREATE TRIGGER trg_task_projection_lifecycle
-BEFORE UPDATE ON occ.task_projection
+BEFORE INSERT OR UPDATE ON occ.task_projection
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_projection_lifecycle();
 
 CREATE UNIQUE INDEX uq_task_blocker_active
 ON occ.task_blocker (task_id, source_entity_id, blocker_code)
 WHERE resolved_at IS NULL;
+
+CREATE FUNCTION occ.authoritative_entity_row_version(p_entity_id uuid)
+RETURNS bigint
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    current_version bigint;
+BEGIN
+    SELECT row_version INTO current_version FROM occ.evidence WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM occ.managed_resource WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM occ.business_object WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM occ.task_projection WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM occ.process_instance WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM occ.cohort WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM occ.risk WHERE id = p_entity_id;
+    IF FOUND THEN RETURN current_version; END IF;
+    SELECT row_version INTO current_version FROM authz.entity WHERE id = p_entity_id;
+    RETURN current_version;
+END;
+$$;
+
+CREATE FUNCTION occ.enforce_task_gate_requirement()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate requirement is immutable';
+END;
+$$;
+
+CREATE TRIGGER trg_task_gate_requirement_immutable
+BEFORE UPDATE OR DELETE ON occ.task_gate_requirement
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_gate_requirement();
+CREATE TRIGGER trg_task_gate_requirement_no_truncate
+BEFORE TRUNCATE ON occ.task_gate_requirement
+FOR EACH STATEMENT EXECUTE FUNCTION occ.enforce_task_gate_requirement();
+
+CREATE FUNCTION occ.enforce_task_gate_provider_state()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    authoritative_version bigint;
+BEGIN
+    IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider state cannot be deleted';
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.task_id IS DISTINCT FROM OLD.task_id OR NEW.provider_key IS DISTINCT FROM OLD.provider_key THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider identity is immutable';
+        END IF;
+        IF NEW.refreshed_at < OLD.refreshed_at THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider refresh time cannot move backwards';
+        END IF;
+        IF NEW.source_entity_id IS NOT DISTINCT FROM OLD.source_entity_id
+           AND NEW.source_row_version < OLD.source_row_version THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider source version cannot move backwards';
+        END IF;
+    END IF;
+    IF NEW.status = 'READY' THEN
+        IF NEW.source_entity_id IS NULL OR NEW.source_row_version IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'READY gate provider requires a source entity and version';
+        END IF;
+        authoritative_version := occ.authoritative_entity_row_version(NEW.source_entity_id);
+        IF authoritative_version IS NULL OR authoritative_version IS DISTINCT FROM NEW.source_row_version THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'READY gate provider source version is not authoritative';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_task_gate_provider_state_controlled
+BEFORE INSERT OR UPDATE OR DELETE ON occ.task_gate_provider_state
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_gate_provider_state();
+CREATE TRIGGER trg_task_gate_provider_state_no_truncate
+BEFORE TRUNCATE ON occ.task_gate_provider_state
+FOR EACH STATEMENT EXECUTE FUNCTION occ.enforce_task_gate_provider_state();
+
+CREATE FUNCTION occ.enforce_task_blocker_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task blocker cannot be deleted';
+    END IF;
+    IF (to_jsonb(NEW) - 'resolved_at') IS DISTINCT FROM (to_jsonb(OLD) - 'resolved_at') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task blocker facts are immutable';
+    END IF;
+    IF OLD.resolved_at IS NOT NULL OR NEW.resolved_at IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task blocker can only be resolved once';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_task_blocker_lifecycle
+BEFORE UPDATE OR DELETE ON occ.task_blocker
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_blocker_lifecycle();
+CREATE TRIGGER trg_task_blocker_no_truncate
+BEFORE TRUNCATE ON occ.task_blocker
+FOR EACH STATEMENT EXECUTE FUNCTION occ.enforce_task_blocker_lifecycle();
 
 CREATE TRIGGER trg_task_timeline_immutable
 BEFORE UPDATE OR DELETE ON occ.task_timeline
@@ -535,6 +667,12 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.read_at IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification must be created unread';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF (to_jsonb(NEW) - 'read_at') IS DISTINCT FROM (to_jsonb(OLD) - 'read_at') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification identity and content are immutable';
     END IF;
@@ -546,7 +684,7 @@ END;
 $$;
 
 CREATE TRIGGER trg_notification_lifecycle
-BEFORE UPDATE ON occ.notification
+BEFORE INSERT OR UPDATE ON occ.notification
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_notification_lifecycle();
 
 CREATE TABLE audit.dependency_failure_attempt (
@@ -600,13 +738,14 @@ ON audit.dependency_failure_attempt (correlation_id, attempted_at);
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     occ.cohort,
-    occ.task_blocker,
-    occ.task_gate_requirement,
-    occ.task_gate_provider_state,
     occ.task_timeline,
     occ.task_review_projection_fact,
     occ.notification
 TO innorder_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON occ.task_gate_requirement FROM innorder_runtime;
+REVOKE DELETE, TRUNCATE ON occ.task_gate_provider_state, occ.task_blocker FROM innorder_runtime;
+GRANT SELECT, INSERT ON occ.task_gate_requirement TO innorder_runtime;
+GRANT SELECT, INSERT, UPDATE ON occ.task_gate_provider_state, occ.task_blocker TO innorder_runtime;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA occ TO innorder_runtime;
 GRANT SELECT, INSERT ON audit.dependency_failure_attempt TO innorder_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON audit.dependency_failure_attempt FROM innorder_runtime;

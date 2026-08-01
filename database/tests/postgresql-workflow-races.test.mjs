@@ -15,6 +15,17 @@ async function expectOneSuccess(promises, message) {
   return settled;
 }
 
+async function waitForBlockedRelationships(pool, applicationNames) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const result = await pool.query(`SELECT application_name FROM pg_stat_activity
+      WHERE application_name = ANY($1) AND wait_event_type = 'Lock'`, [applicationNames]);
+    if (result.rowCount === applicationNames.length) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`relationship race did not reach lock barrier for ${applicationNames.join(', ')}`);
+}
+
 test('workflow uniqueness, expected-version, and relationship windows serialize races', { timeout: 180_000 }, async () => {
   const migrations = readdirSync(migrationRoot).filter((name) => /^V\d+__.*\.sql$/u.test(name)).sort();
   const schema = `${readFileSync(fileURLToPath(new URL('../bootstrap/001-create-runtime-role.sql', import.meta.url)), 'utf8')}\n${migrations.map((name) => readFileSync(`${migrationRoot}/${name}`, 'utf8')).join('\n')}`;
@@ -86,15 +97,81 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000001', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
     ]);
     assert.deepEqual(claims.map((result) => result.rowCount).sort(), [0, 1], 'expected-version claim race admits one update');
-    const start = new Date(Date.now() + 60_000);
-    const middle = new Date(start.getTime() + 60_000);
+    const start = new Date(Date.now() - 60_000);
+    const middle = new Date(Date.now() + 60_000);
     const end = new Date(middle.getTime() + 60_000);
+    await pool.query(`INSERT INTO authz.relationship (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, source_kind, source_ref)
+      VALUES ('6c000000-0000-7000-8000-000000000001', '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', '68000000-0000-7000-8000-000000000001', $1, 'SYSTEM', 'race-revoked')`, [start]);
+    const revoker = await pool.connect();
+    const replacementA = await pool.connect();
+    const replacementB = await pool.connect();
+    try {
+      await revoker.query('BEGIN');
+      await revoker.query(`UPDATE authz.relationship SET revoked_at=$1 WHERE id='6c000000-0000-7000-8000-000000000001'`, [middle]);
+      await replacementA.query('BEGIN');
+      await replacementB.query('BEGIN');
+      await replacementA.query(`SET LOCAL application_name='relationship-replacement-a'`);
+      await replacementB.query(`SET LOCAL application_name='relationship-replacement-b'`);
+      const insertReplacement = async (client, id, source) => {
+        try {
+          await client.query(`INSERT INTO authz.relationship
+            (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+            VALUES ($1, '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002',
+              '68000000-0000-7000-8000-000000000001', $2, $3, 'SYSTEM', $4)`, [id, middle, end, source]);
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        }
+      };
+      const raceA = insertReplacement(replacementA, '6c000000-0000-7000-8000-000000000002', 'replacement-a');
+      const raceB = insertReplacement(replacementB, '6c000000-0000-7000-8000-000000000003', 'replacement-b');
+      await waitForBlockedRelationships(pool, ['relationship-replacement-a', 'relationship-replacement-b']);
+      await revoker.query('COMMIT');
+      const replacements = await Promise.allSettled([raceA, raceB]);
+      assert.equal(replacements.filter((result) => result.status === 'fulfilled').length, 1,
+        'only one adjacent replacement wins after concurrent revocation');
+    } finally {
+      await revoker.query('ROLLBACK').catch(() => {});
+      await replacementA.query('ROLLBACK').catch(() => {});
+      await replacementB.query('ROLLBACK').catch(() => {});
+      revoker.release();
+      replacementA.release();
+      replacementB.release();
+    }
+    const naturalEnd = new Date(end.getTime() + 60_000);
     await pool.query(`INSERT INTO authz.relationship (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
-      VALUES ('6c000000-0000-7000-8000-000000000001', '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', '68000000-0000-7000-8000-000000000001', $1, $2, 'SYSTEM', 'race-one')`, [start, middle]);
-    await pool.query(`INSERT INTO authz.relationship (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
-      VALUES ('6c000000-0000-7000-8000-000000000002', '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', '68000000-0000-7000-8000-000000000001', $1, $2, 'SYSTEM', 'race-adjacent')`, [middle, end]);
-    await assert.rejects(pool.query(`INSERT INTO authz.relationship (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
-      VALUES ('6c000000-0000-7000-8000-000000000003', '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', '68000000-0000-7000-8000-000000000001', $1, $2, 'SYSTEM', 'race-overlap')`, [new Date(start.getTime() + 30_000), end]), /overlap|exclusion/u);
+      VALUES ('6c000000-0000-7000-8000-000000000004', '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000001', '68000000-0000-7000-8000-000000000001', $1, $2, 'SYSTEM', 'natural-end')`, [middle, naturalEnd]);
+    const naturalA = await pool.connect();
+    const naturalB = await pool.connect();
+    try {
+      await naturalA.query('BEGIN');
+      await naturalB.query('BEGIN');
+      await naturalA.query(`SET LOCAL application_name='natural-reentry-a'`);
+      await naturalB.query(`SET LOCAL application_name='natural-reentry-b'`);
+      const insertNatural = (client, id, source, index) => client.query(`INSERT INTO authz.relationship
+        (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, source_kind, source_ref)
+        VALUES ($1, '66000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000001',
+          '68000000-0000-7000-8000-000000000001', $2, 'SYSTEM', $3)`, [id, naturalEnd, source])
+        .then(() => index);
+      const naturalPromises = [
+        insertNatural(naturalA, '6c000000-0000-7000-8000-000000000005', 'natural-reentry-a', 0),
+        insertNatural(naturalB, '6c000000-0000-7000-8000-000000000006', 'natural-reentry-b', 1),
+      ];
+      const winner = await Promise.race(naturalPromises);
+      const loserName = winner === 0 ? 'natural-reentry-b' : 'natural-reentry-a';
+      await waitForBlockedRelationships(pool, [loserName]);
+      await (winner === 0 ? naturalA : naturalB).query('COMMIT');
+      const naturalRace = await Promise.allSettled(naturalPromises);
+      assert.equal(naturalRace.filter((result) => result.status === 'fulfilled').length, 1,
+        'only one adjacent replacement wins after natural end');
+      await (winner === 0 ? naturalB : naturalA).query('ROLLBACK');
+    } finally {
+      await naturalA.query('ROLLBACK').catch(() => {});
+      await naturalB.query('ROLLBACK').catch(() => {});
+      naturalA.release();
+      naturalB.release();
+    }
     const exclusion = await pool.query(`SELECT 1 FROM pg_constraint WHERE conname='ex_relationship_effective_window' AND contype='x'`);
     assert.equal(exclusion.rowCount, 1, 'relationship overlap protection must be concurrency-safe exclusion');
   } finally {

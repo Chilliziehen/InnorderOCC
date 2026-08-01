@@ -45,9 +45,12 @@ VALUES
   ('56000000-0000-7000-8000-000000000002', '52000000-0000-7000-8000-000000000001', '53000000-0000-7000-8000-000000000001', 'person:participant', 'ACTIVE', '{}', 1),
   ('56000000-0000-7000-8000-000000000003', '52000000-0000-7000-8000-000000000001', '53000000-0000-7000-8000-000000000001', 'person:new-owner', 'ACTIVE', '{}', 1),
   ('57000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000002', '53000000-0000-7000-8000-000000000002', 'cohort:alpha', 'ACTIVE', '{}', 1),
+  ('57000000-0000-7000-8000-000000000002', '52000000-0000-7000-8000-000000000002', '53000000-0000-7000-8000-000000000002', 'cohort:invalid-insert', 'ACTIVE', '{}', 1),
   ('58000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000003', '53000000-0000-7000-8000-000000000003', 'process:one', 'ACTIVE', '{}', 1),
+  ('58000000-0000-7000-8000-000000000002', '52000000-0000-7000-8000-000000000003', '53000000-0000-7000-8000-000000000003', 'process:terminal-insert', 'ACTIVE', '{}', 1),
   ('59000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'task:one', 'ACTIVE', '{}', 1),
-  ('59000000-0000-7000-8000-000000000002', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'task:two', 'ACTIVE', '{}', 1);
+  ('59000000-0000-7000-8000-000000000002', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'task:two', 'ACTIVE', '{}', 1),
+  ('59000000-0000-7000-8000-000000000003', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'task:terminal-insert', 'ACTIVE', '{}', 1);
 INSERT INTO iam.principal (id, principal_kind, display_name, status, profile, row_version)
 VALUES
   ('56000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE', '{}', 1),
@@ -85,6 +88,22 @@ SELECT pg_temp.assert_raises(
       'alpha', 'Duplicate', '51000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001',
       current_date, 'DRAFT', '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001')$$,
   '23505', 'cohort code is unique per customer');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.cohort
+      (id, customer_instance_id, code, name, package_version_id, owner_principal_id, start_date, status, created_by, updated_by)
+    VALUES ('57000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000001',
+      'active-at-insert', 'Invalid active', '51000000-0000-7000-8000-000000000001',
+      '56000000-0000-7000-8000-000000000001', current_date, 'ACTIVE',
+      '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001')$$,
+  '55000', 'cohort must be created in DRAFT');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.cohort
+      (id, customer_instance_id, code, name, package_version_id, owner_principal_id, start_date, status, created_by, updated_by, archived_at)
+    VALUES ('57000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000001',
+      'archived-at-insert', 'Invalid archived', '51000000-0000-7000-8000-000000000001',
+      '56000000-0000-7000-8000-000000000001', current_date, 'ARCHIVED',
+      '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001', transaction_timestamp())$$,
+  '55000', 'cohort cannot be created archived');
 SELECT pg_temp.assert_raises(
   $$UPDATE occ.cohort SET status = 'ARCHIVED', archived_at = transaction_timestamp()
     WHERE id = '57000000-0000-7000-8000-000000000001'$$,
@@ -131,6 +150,15 @@ VALUES ('58000000-0000-7000-8000-000000000001', '5a000000-0000-7000-8000-0000000
   '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000001',
   '56000000-0000-7000-8000-000000000002', '56000000-0000-7000-8000-000000000002', 'route', 1);
 SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.process_instance
+      (id, definition_binding_id, package_version_id, flowable_instance_id, business_key, state,
+       ended_at, cohort_id, started_for_participant_id, participant_id, route_key, route_version)
+    VALUES ('58000000-0000-7000-8000-000000000002', '5a000000-0000-7000-8000-000000000001',
+      '51000000-0000-7000-8000-000000000001', 'terminal-at-insert', 'terminal-at-insert', 'COMPLETED',
+      transaction_timestamp(), '57000000-0000-7000-8000-000000000001',
+      '56000000-0000-7000-8000-000000000003', '56000000-0000-7000-8000-000000000003', 'route', 1)$$,
+  '55000', 'process must be created RUNNING');
+SELECT pg_temp.assert_raises(
   $$UPDATE occ.process_instance SET definition_binding_id = definition_binding_id
     WHERE id = '58000000-0000-7000-8000-000000000001' RETURNING package_version_id + interval '0 seconds'$$,
   '42883', 'test assertion helper remains active');
@@ -145,6 +173,14 @@ VALUES ('59000000-0000-7000-8000-000000000001', '58000000-0000-7000-8000-0000000
   'work', 'Work', 'flowable-task-1', 'execution-1', 'AVAILABLE', 1);
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.task_projection
+      (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id,
+       state, assignee_id, claimed_at, completed_at)
+    VALUES ('59000000-0000-7000-8000-000000000003', '58000000-0000-7000-8000-000000000001',
+      'terminal', 'Terminal', 'flowable-task-terminal', 'execution-terminal', 'COMPLETED',
+      '56000000-0000-7000-8000-000000000002', transaction_timestamp(), transaction_timestamp())$$,
+  '55000', 'task must be created AVAILABLE');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state, created_at)
     SELECT '59000000-0000-7000-8000-000000000002', process_instance_id,
       activity_key, 'Work again', 'flowable-task-2', flowable_execution_id, 'AVAILABLE', created_at
@@ -156,11 +192,60 @@ UPDATE occ.task_projection SET state = 'CLAIMED', assignee_id = '56000000-0000-7
   claimed_at = transaction_timestamp()
 WHERE id = '59000000-0000-7000-8000-000000000001';
 SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state (task_id, provider_key, status)
+    VALUES ('59000000-0000-7000-8000-000000000001', 'evidence', 'READY')$$,
+  '23514', 'READY gate state requires a source');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+    VALUES ('59000000-0000-7000-8000-000000000001', 'evidence', 'READY',
+      '59000000-0000-7000-8000-000000000001', 999)$$,
+  '23514', 'READY gate state requires the exact source version');
+SELECT pg_temp.assert_raises(
   $$UPDATE occ.task_projection SET state = 'COMPLETED', completed_at = transaction_timestamp()
     WHERE id = '59000000-0000-7000-8000-000000000001'$$,
   '55000', 'missing gate provider state fails closed');
-INSERT INTO occ.task_gate_provider_state (task_id, provider_key, status)
-VALUES ('59000000-0000-7000-8000-000000000001', 'evidence', 'READY');
+INSERT INTO occ.task_gate_provider_state
+  (task_id, provider_key, status, source_entity_id, source_row_version)
+VALUES ('59000000-0000-7000-8000-000000000001', 'evidence', 'READY',
+  '59000000-0000-7000-8000-000000000001', 2);
+INSERT INTO occ.task_gate_provider_state
+  (task_id, provider_key, status, source_entity_id, source_row_version, safe_failure_code, refreshed_at)
+VALUES ('59000000-0000-7000-8000-000000000001', 'evidence', 'UNAVAILABLE',
+  '59000000-0000-7000-8000-000000000001', 2, 'provider_timeout', transaction_timestamp() + interval '1 second')
+ON CONFLICT (task_id, provider_key) DO UPDATE
+SET status = EXCLUDED.status, source_entity_id = EXCLUDED.source_entity_id,
+    source_row_version = EXCLUDED.source_row_version, safe_failure_code = EXCLUDED.safe_failure_code,
+    refreshed_at = EXCLUDED.refreshed_at;
+INSERT INTO occ.task_gate_provider_state
+  (task_id, provider_key, status, source_entity_id, source_row_version, refreshed_at)
+VALUES ('59000000-0000-7000-8000-000000000001', 'evidence', 'READY',
+  '59000000-0000-7000-8000-000000000001', 2, transaction_timestamp() + interval '2 seconds')
+ON CONFLICT (task_id, provider_key) DO UPDATE
+SET status = EXCLUDED.status, source_entity_id = EXCLUDED.source_entity_id,
+    source_row_version = EXCLUDED.source_row_version, safe_failure_code = NULL,
+    refreshed_at = EXCLUDED.refreshed_at;
+INSERT INTO occ.task_blocker
+  (id, task_id, source_entity_id, source_row_version, blocker_code, severity)
+VALUES ('59000000-0000-7000-8000-000000000010', '59000000-0000-7000-8000-000000000001',
+  '59000000-0000-7000-8000-000000000001', 2, 'EVIDENCE_REQUIRED', 'HARD');
+UPDATE occ.task_blocker SET resolved_at = transaction_timestamp()
+WHERE id = '59000000-0000-7000-8000-000000000010';
+SELECT pg_temp.assert_raises(
+  $$UPDATE occ.task_blocker SET resolved_at = resolved_at + interval '1 second'
+    WHERE id = '59000000-0000-7000-8000-000000000010'$$,
+  '55000', 'resolved task blocker cannot be rewritten');
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.task_gate_requirement
+    WHERE task_id = '59000000-0000-7000-8000-000000000001' AND provider_key = 'evidence'$$,
+  '55000', 'gate requirements cannot be deleted');
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.task_gate_provider_state
+    WHERE task_id = '59000000-0000-7000-8000-000000000001' AND provider_key = 'evidence'$$,
+  '55000', 'gate provider states cannot be deleted');
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.task_blocker WHERE id = '59000000-0000-7000-8000-000000000010'$$,
+  '55000', 'task blockers cannot be deleted');
 UPDATE occ.task_projection SET state = 'COMPLETED', completed_at = transaction_timestamp()
 WHERE id = '59000000-0000-7000-8000-000000000001';
 INSERT INTO occ.task_gate_requirement (task_id, provider_key)
@@ -200,6 +285,13 @@ INSERT INTO occ.task_review_projection_fact
 VALUES ('5e000000-0000-7000-8000-000000000001', '59000000-0000-7000-8000-000000000001',
   'SUBMITTED', 1, '5e000000-0000-7000-8000-000000000010', '5e000000-0000-7000-8000-000000000011',
   '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_review_projection_fact
+      (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id)
+    VALUES ('5e000000-0000-7000-8000-000000000004', '59000000-0000-7000-8000-000000000001',
+      'SUBMITTED', 2, '5e000000-0000-7000-8000-000000000012', '5e000000-0000-7000-8000-000000000013',
+      '5d000000-0000-7000-8000-000000000001')$$,
+  '23514', 'submitted review projection requires the prior assignee');
 INSERT INTO occ.task_review_projection_fact
   (id, task_id, fact_kind, review_sequence, submission_fact_id, review_id, review_version, decision)
 VALUES ('5e000000-0000-7000-8000-000000000002', '59000000-0000-7000-8000-000000000001',
@@ -219,6 +311,13 @@ INSERT INTO occ.notification
 VALUES ('5f000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002',
   'task.completed', 'INFO', 'task', '59000000-0000-7000-8000-000000000001',
   '5b000000-0000-7000-8000-000000000001');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.notification
+      (id, recipient_id, type, severity, resource_type, resource_id, event_id, read_at)
+    VALUES ('5f000000-0000-7000-8000-000000000002', '56000000-0000-7000-8000-000000000003',
+      'task.completed', 'INFO', 'task', '59000000-0000-7000-8000-000000000001',
+      '5b000000-0000-7000-8000-000000000001', transaction_timestamp())$$,
+  '55000', 'notification must be created unread');
 UPDATE occ.notification SET read_at = transaction_timestamp()
 WHERE id = '5f000000-0000-7000-8000-000000000001';
 SELECT pg_temp.assert_raises(
@@ -247,6 +346,12 @@ SELECT pg_temp.assert_raises(
 SELECT pg_temp.assert_true(
   has_table_privilege('innorder_runtime', 'occ.cohort', 'SELECT,INSERT,UPDATE,DELETE')
   AND has_table_privilege('innorder_runtime', 'occ.task_projection', 'SELECT,INSERT,UPDATE,DELETE')
+  AND has_table_privilege('innorder_runtime', 'occ.task_gate_requirement', 'SELECT,INSERT')
+  AND NOT has_table_privilege('innorder_runtime', 'occ.task_gate_requirement', 'UPDATE,DELETE')
+  AND has_table_privilege('innorder_runtime', 'occ.task_gate_provider_state', 'SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege('innorder_runtime', 'occ.task_gate_provider_state', 'DELETE')
+  AND has_table_privilege('innorder_runtime', 'occ.task_blocker', 'SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege('innorder_runtime', 'occ.task_blocker', 'DELETE')
   AND has_table_privilege('innorder_runtime', 'audit.dependency_failure_attempt', 'SELECT,INSERT')
   AND NOT has_table_privilege('innorder_runtime', 'audit.dependency_failure_attempt', 'UPDATE,DELETE'),
   'runtime has bounded workflow DML');
