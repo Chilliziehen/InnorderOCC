@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, chmod, symlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, chmod, lstat, open, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,10 +7,10 @@ import { providerConfigSchema, type ProviderConfig } from "@innorder/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { calculateAccounting } from "../src/provider/accounting.js";
-import { readCredentialFile } from "../src/provider/credential-reader.js";
+import { readCredentialFile, type CredentialFileSystem, type CredentialMetadata } from "../src/provider/credential-reader.js";
 import { ProviderError, ProviderPolicy } from "../src/provider/provider-policy.js";
 import { ProfileRateLimiter } from "../src/provider/rate-limiter.js";
-import { executeWithRetry } from "../src/provider/retry-policy.js";
+import { createOperationDeadline, executeWithRetry } from "../src/provider/retry-policy.js";
 
 const ID = "00000000-0000-4000-8000-000000000001";
 
@@ -29,6 +30,36 @@ function config(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
 
 const dns = (...addresses: string[]) => async () =>
   addresses.map((address) => ({ address, family: address.includes(":") ? 6 as const : 4 as const }));
+
+function metadata(stat: Awaited<ReturnType<typeof lstat>>, trustedAcl = true): CredentialMetadata {
+  return {
+    type: stat.isSymbolicLink() ? "symlink" : stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other",
+    mode: stat.mode, uid: stat.uid, dev: stat.dev, ino: stat.ino, size: stat.size, trustedAcl,
+  };
+}
+
+const testCredentialFileSystem: CredentialFileSystem = {
+  platform: process.platform === "win32" ? "windows-verified" : "posix",
+  inspect: async (path) => metadata(await lstat(path)),
+  openNoFollow: async (path) => {
+    const handle = await open(path, constants.O_RDONLY | ("O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0));
+    return {
+      inspect: async () => metadata(await handle.stat()),
+      read: async (buffer) => (await handle.read(buffer, 0, buffer.length, 0)).bytesRead,
+      close: async () => handle.close(),
+    };
+  },
+};
+
+function credentialOptions(trustedRoot: string) {
+  return {
+    trustedRoot,
+    fileSystem: testCredentialFileSystem,
+    trustedOwnerIds: [typeof process.getuid === "function" ? process.getuid() : 0],
+    serviceUid: -1,
+    maxBytes: 64,
+  } as const;
+}
 
 describe("provider URL and DNS policy", () => {
   it("accepts only the exact origin and fixed API prefix and pins a public address", async () => {
@@ -65,14 +96,19 @@ describe("provider URL and DNS policy", () => {
     "127.0.0.0", "127.255.255.255", "169.254.0.0", "169.254.169.254",
     "172.16.0.0", "172.31.255.255", "192.0.0.0", "192.0.2.1", "192.168.0.0", "198.18.0.0", "198.19.255.255",
     "198.51.100.1", "203.0.113.1", "224.0.0.0", "239.255.255.255", "240.0.0.0", "255.255.255.255",
-    "::", "::1", "::ffff:127.0.0.1", "::ffff:169.254.169.254", "fe80::1", "fe80::1%3", "fc00::", "fdff:ffff::",
-    "2001:db8::1", "ff00::1",
+    "::", "::1", "::127.0.0.1", "::10.0.0.1", "::169.254.169.254",
+    "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254",
+    "64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::a9fe:a9fe", "64:ff9b:1::7f00:1",
+    "2001::1", "2001:0000:4136:e378:8000:63bf:3fff:fdd2", "2002:7f00:1::", "2002:a9fe:a9fe::",
+    "2001:4860:0:1:0:5efe:7f00:1", "2001:4860:0:1:0:5efe:a9fe:a9fe",
+    "fe80::1", "fe80::1%3", "fec0::", "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+    "fc00::", "fdff:ffff::", "2001:db8::1", "ff00::1",
   ])("rejects non-public address boundary %s", async (address) => {
     await expect(new ProviderPolicy(config(), dns(address)).resolve("/v1/models"))
       .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-ADDRESS" });
   });
 
-  it.each(["9.255.255.255", "11.0.0.0", "100.63.255.255", "100.128.0.0", "169.253.255.255", "169.255.255.255", "223.255.255.254", "2001:4860:4860::8888"])(
+  it.each(["9.255.255.255", "11.0.0.0", "100.63.255.255", "100.128.0.0", "169.253.255.255", "169.255.255.255", "223.255.255.254", "::ffff:93.184.216.34", "2001:4860:4860::8888", "2606:4700:4700::1111"])(
     "accepts public boundary %s", async (address) => {
       await expect(new ProviderPolicy(config(), dns(address)).resolve("/v1/models")).resolves.toMatchObject({ address });
     },
@@ -81,8 +117,12 @@ describe("provider URL and DNS policy", () => {
   it("allows a private address only when wholly contained by an approved CIDR", async () => {
     const approved = config({ approvedPrivateCidrs: ["10.20.0.0/16", "fd12:3456::/32"] });
     await expect(new ProviderPolicy(approved, dns("10.20.255.255")).resolve("/v1/models")).resolves.toBeDefined();
+    await expect(new ProviderPolicy(approved, dns("::ffff:10.20.0.1")).resolve("/v1/models")).resolves.toBeDefined();
     await expect(new ProviderPolicy(approved, dns("fd12:3456::1")).resolve("/v1/models")).resolves.toBeDefined();
     await expect(new ProviderPolicy(approved, dns("10.21.0.1")).resolve("/v1/models")).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-ADDRESS" });
+    for (const transition of ["::10.20.0.1", "64:ff9b::a14:1", "2001:4860:0:1:0:5efe:a14:1"]) {
+      await expect(new ProviderPolicy(approved, dns(transition)).resolve("/v1/models")).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-ADDRESS" });
+    }
   });
 
   it("rejects mixed safe and unsafe DNS answers", async () => {
@@ -109,7 +149,7 @@ describe("credential reader", () => {
     await writeFile(path, "top-secret\n", { mode: 0o600 });
     if (process.platform !== "win32") await chmod(path, 0o600);
 
-    const credential = await readCredentialFile(path, { maxBytes: 64, enforcePermissions: process.platform !== "win32" });
+    const credential = await readCredentialFile(path, credentialOptions(directory));
     expect(credential.toString("utf8")).toBe("top-secret");
     credential.fill(0);
   });
@@ -119,7 +159,7 @@ describe("credential reader", () => {
     const path = join(directory, "credential");
     await writeFile(path, content, { mode: 0o600 });
 
-    const error = await readCredentialFile(path, { maxBytes: 64, enforcePermissions: false }).catch((caught: unknown) => caught);
+    const error = await readCredentialFile(path, credentialOptions(directory)).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
     expect(JSON.stringify(error)).not.toContain(path);
     if (content !== "") expect(JSON.stringify(error)).not.toContain(content);
@@ -133,7 +173,54 @@ describe("credential reader", () => {
     await writeFile(join(target, "credential"), "dummy-secret", { mode: 0o600 });
     await symlink(target, linked, process.platform === "win32" ? "junction" : "dir");
 
-    await expect(readCredentialFile(join(linked, "credential"), { enforcePermissions: false }))
+    await expect(readCredentialFile(join(linked, "credential"), credentialOptions(directory)))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
+  });
+
+  it("requires a direct normalized descendant of the configured trusted root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "occ-provider-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "occ-provider-outside-"));
+    const path = join(outside, "credential");
+    await writeFile(path, "dummy-secret", { mode: 0o600 });
+    const error = await readCredentialFile(path, credentialOptions(root)).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
+    expect(JSON.stringify(error)).not.toContain(path);
+  });
+
+  it("rejects writable trusted ancestors and ancestor identity changes after open", async () => {
+    const root = process.platform === "win32" ? "C:\\run\\secrets" : "/run/secrets";
+    const path = join(root, "provider", "credential");
+    const base: CredentialMetadata = { type: "directory", mode: 0o755, uid: 0, dev: 1, ino: 1, size: 0, trustedAcl: true };
+    const file: CredentialMetadata = { ...base, type: "file", mode: 0o600, ino: 3, size: 12 };
+    const writable: CredentialFileSystem = {
+      platform: "posix",
+      inspect: async (candidate) => candidate === join(root, "provider") ? { ...base, mode: 0o775, ino: 2 } : candidate === path ? file : base,
+      openNoFollow: async () => ({ inspect: async () => file, read: async () => 12, close: async () => undefined }),
+    };
+    await expect(readCredentialFile(path, { trustedRoot: root, fileSystem: writable, trustedOwnerIds: [0], serviceUid: 1000 }))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
+
+    let rootChecks = 0;
+    const swapped: CredentialFileSystem = {
+      platform: "posix",
+      inspect: async (candidate) => {
+        if (candidate === root) return { ...base, ino: ++rootChecks === 1 ? 1 : 99 };
+        return candidate === path ? file : { ...base, ino: 2 };
+      },
+      openNoFollow: async () => ({ inspect: async () => file, read: async (buffer) => { buffer.write("dummy-secret"); return 12; }, close: async () => undefined }),
+    };
+    await expect(readCredentialFile(path, { trustedRoot: root, fileSystem: swapped, trustedOwnerIds: [0], serviceUid: 1000 }))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
+  });
+
+  it("rejects Windows production mode without an injected ACL-verifying adapter", async () => {
+    const root = "C:\\run\\secrets";
+    const unverified: CredentialFileSystem = {
+      platform: "windows-unverified",
+      inspect: async () => { throw new Error("must not inspect"); },
+      openNoFollow: async () => { throw new Error("must not open"); },
+    };
+    await expect(readCredentialFile("C:\\run\\secrets\\provider", { trustedRoot: root, fileSystem: unverified }))
       .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
   });
 });
@@ -192,6 +279,43 @@ describe("rate, retry, and accounting", () => {
     const operation = vi.fn(async () => { throw new ProviderError("OCC-AI-PROVIDER-TRANSIENT", true); });
     const error = await executeWithRetry({ operationId: "op", deadline: 1_000, now: () => 0, sleep: sleeping, signal: controller.signal }, operation).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-CANCELLED", cause: controller.signal.reason });
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a hanging sleeper exceed the original deadline", async () => {
+    const deadline = createOperationDeadline(20, new AbortController().signal);
+    const operation = vi.fn(async () => { throw new ProviderError("OCC-AI-PROVIDER-TRANSIENT", true); });
+    const startedAt = Date.now();
+    const error = await executeWithRetry({ operationId: "op", deadline: deadline.expiresAt, signal: deadline.signal, sleep: async () => new Promise(() => undefined) }, operation).catch((caught: unknown) => caught);
+    deadline.dispose();
+
+    expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-TIMEOUT" });
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps 100/500ms backoff exact and uses Retry-After only to suppress impossible retries", async () => {
+    const sleep = vi.fn(async () => undefined);
+    let attempts = 0;
+    await executeWithRetry({ operationId: "op", deadline: 10_000, now: () => 0, sleep }, async () => {
+      attempts += 1;
+      if (attempts === 1) throw new ProviderError("OCC-AI-PROVIDER-TRANSIENT", true, { retryAfterMs: 900 });
+      if (attempts === 2) throw new ProviderError("OCC-AI-PROVIDER-TRANSIENT", true, { retryAfterMs: 50 });
+      return "ok";
+    });
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([100, 500]);
+
+    const suppressed = vi.fn(async () => { throw new ProviderError("OCC-AI-PROVIDER-TRANSIENT", true, { retryAfterMs: 2_000 }); });
+    await expect(executeWithRetry({ operationId: "op", deadline: 1_000, now: () => 0, sleep }, suppressed))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-TIMEOUT" });
+    expect(suppressed).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not start another attempt when the injected clock reaches the deadline during backoff", async () => {
+    let now = 0;
+    const operation = vi.fn(async () => { throw new ProviderError("OCC-AI-PROVIDER-TRANSIENT", true); });
+    await expect(executeWithRetry({ operationId: "op", deadline: 500, now: () => now, sleep: async () => { now = 500; } }, operation))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-TIMEOUT" });
     expect(operation).toHaveBeenCalledTimes(1);
   });
 

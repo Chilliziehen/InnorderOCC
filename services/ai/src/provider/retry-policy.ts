@@ -9,29 +9,61 @@ export type RetryOptions = Readonly<{
   signal?: AbortSignal;
 }>;
 
+export type OperationDeadline = Readonly<{
+  expiresAt: number;
+  signal: AbortSignal;
+  dispose(): void;
+}>;
+
 const BACKOFF = [100, 500] as const;
+
+export function abortProviderError(signal: AbortSignal): ProviderError {
+  return signal.reason instanceof ProviderError
+    ? signal.reason
+    : new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: signal.reason });
+}
+
+export function createOperationDeadline(totalMs: number, caller: AbortSignal, now: () => number = Date.now): OperationDeadline {
+  if (!Number.isSafeInteger(totalMs) || totalMs < 1) throw new ProviderError("OCC-AI-PROVIDER-POLICY");
+  const controller = new AbortController();
+  const expiresAt = now() + totalMs;
+  const cancel = () => controller.abort(abortProviderError(caller));
+  if (caller.aborted) cancel();
+  else caller.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(new ProviderError("OCC-AI-PROVIDER-TIMEOUT")), totalMs);
+  return {
+    expiresAt,
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+      caller.removeEventListener("abort", cancel);
+    },
+  };
+}
 
 export async function executeWithRetry<T>(options: RetryOptions, operation: (context: RetryContext) => Promise<T>): Promise<T> {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   for (let attempt = 0; ; attempt += 1) {
+    if (options.signal?.aborted) throw abortProviderError(options.signal);
+    if (now() >= options.deadline) throw new ProviderError("OCC-AI-PROVIDER-TIMEOUT");
     try {
       return await operation({ operationId: options.operationId, attempt });
     } catch (error) {
       const delay = BACKOFF[attempt];
       if (!(error instanceof ProviderError) || !error.retryable || delay === undefined) throw error;
-      const wait = error.retryAfterMs === undefined ? delay : Math.max(delay, error.retryAfterMs);
-      if (!Number.isSafeInteger(wait) || wait < 0 || now() + wait >= options.deadline) throw new ProviderError("OCC-AI-PROVIDER-TIMEOUT");
-      if (options.signal?.aborted) throw new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: options.signal.reason });
+      if (error.retryAfterMs !== undefined && (!Number.isSafeInteger(error.retryAfterMs) || error.retryAfterMs < 0 || now() + error.retryAfterMs >= options.deadline)) throw new ProviderError("OCC-AI-PROVIDER-TIMEOUT");
+      if (now() + delay >= options.deadline) throw new ProviderError("OCC-AI-PROVIDER-TIMEOUT");
+      if (options.signal?.aborted) throw abortProviderError(options.signal);
       let cancel: (() => void) | undefined;
       try {
         const cancellation = options.signal === undefined ? undefined : new Promise<never>((_resolve, reject) => {
-          cancel = () => reject(new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: options.signal!.reason }));
+          cancel = () => reject(abortProviderError(options.signal!));
           if (options.signal!.aborted) cancel();
           else options.signal!.addEventListener("abort", cancel, { once: true });
         });
         await Promise.race([
-          sleep(wait),
+          sleep(delay),
           ...(cancellation === undefined ? [] : [cancellation]),
         ]);
       } finally {

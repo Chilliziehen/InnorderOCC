@@ -1,4 +1,5 @@
 import { ProviderError } from "./provider-policy.js";
+import { abortProviderError } from "./retry-policy.js";
 
 export type RateLimit = Readonly<{ maxConcurrency: number; requestsPerMinute: number; tokensPerMinute: number }>;
 type Waiter = { tokens: number; signal: AbortSignal; resolve: (release: () => void) => void; reject: (error: ProviderError) => void; cancel: () => void };
@@ -18,7 +19,7 @@ export class ProfileRateLimiter {
 
   acquire(tokens: number, signal: AbortSignal): Promise<() => void> {
     if (!Number.isSafeInteger(tokens) || tokens < 0 || tokens > this.limit.tokensPerMinute) return Promise.reject(new ProviderError("OCC-AI-PROVIDER-RATE-LIMIT"));
-    if (signal.aborted) return Promise.reject(new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: signal.reason }));
+    if (signal.aborted) return Promise.reject(abortProviderError(signal));
     this.refill();
     if (this.active < this.limit.maxConcurrency && this.requests >= 1 && this.tokens >= tokens) return Promise.resolve(this.grant(tokens));
     if (this.requests < 1 || this.tokens < tokens) return Promise.reject(new ProviderError("OCC-AI-PROVIDER-RATE-LIMIT"));
@@ -29,7 +30,7 @@ export class ProfileRateLimiter {
           const index = this.queue.indexOf(waiter);
           if (index >= 0) this.queue.splice(index, 1);
           signal.removeEventListener("abort", waiter.cancel);
-          reject(new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: signal.reason }));
+          reject(abortProviderError(signal));
         },
       };
       signal.addEventListener("abort", waiter.cancel, { once: true });

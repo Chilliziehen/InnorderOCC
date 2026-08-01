@@ -3,6 +3,7 @@ import { request as httpsRequest, type RequestOptions } from "node:https";
 
 import { readCredentialFile } from "./credential-reader.js";
 import { ProviderError, type ProviderPolicy, type ResolvedProviderTarget } from "./provider-policy.js";
+import { abortProviderError, createOperationDeadline } from "./retry-policy.js";
 
 export type ProviderTransportRequest = Readonly<{
   operationId: string;
@@ -12,7 +13,8 @@ export type ProviderTransportRequest = Readonly<{
   method: "GET" | "POST";
   body?: Uint8Array;
   connectMs: number;
-  totalMs: number;
+  totalMs?: number;
+  deadline?: number;
   maxResponseBytes: number;
   maxResponseHeaderBytes?: number;
   signal: AbortSignal;
@@ -32,6 +34,7 @@ export type RawRequest = Readonly<{
   maxResponseBytes: number;
   maxResponseHeaderBytes: number;
   signal: AbortSignal;
+  ca?: string | Buffer;
 }>;
 export type RawResponse = Readonly<{ status: number; headers: Readonly<Record<string, string | string[] | undefined>>; body: Uint8Array }>;
 export type RawRequestFactory = (request: RawRequest) => Promise<RawResponse>;
@@ -53,6 +56,7 @@ type SecureTransportDependencies = Readonly<{
   requestFactory?: RawRequestFactory;
   credentialReader?: (path: string) => Promise<Buffer>;
   credentialPath?: string;
+  tlsCa?: string | Buffer;
   telemetry?: (event: TransportTelemetry) => void | Promise<void>;
   now?: () => number;
 }>;
@@ -79,12 +83,22 @@ function defaultRawRequestFactory(input: RawRequest): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let connected = false;
+    let finished = false;
+    let bodyDispatched = false;
+    const updateDispatch = () => { bodyDispatched = connected && finished; };
     const options: RequestOptions = {
       protocol: "https:", hostname: input.url.hostname, port: input.url.port, path: input.url.pathname,
       method: input.method, headers: input.headers, servername: input.servername, rejectUnauthorized: true,
-      maxHeaderSize: input.maxResponseHeaderBytes,
-      lookup: (_hostname, _options, callback) => callback(null, input.address, input.family),
+      maxHeaderSize: input.maxResponseHeaderBytes, agent: false,
+      lookup: (_hostname, lookupOptions, callback) => {
+        if (lookupOptions.all) {
+          (callback as unknown as (error: NodeJS.ErrnoException | null, addresses: readonly { address: string; family: 4 | 6 }[]) => void)(null, [{ address: input.address, family: input.family }]);
+        } else {
+          callback(null, input.address, input.family);
+        }
+      },
       signal: input.signal,
+      ...(input.ca === undefined ? {} : { ca: input.ca }),
     };
     const request = httpsRequest(options, (response) => {
       const chunks: Buffer[] = [];
@@ -92,19 +106,24 @@ function defaultRawRequestFactory(input: RawRequest): Promise<RawResponse> {
       response.on("data", (chunk: Buffer) => {
         length += chunk.length;
         if (length > input.maxResponseBytes) {
-          request.destroy(new ProviderError("OCC-AI-PROVIDER-LIMIT"));
+          settled = true;
+          const error = new ProviderError("OCC-AI-PROVIDER-LIMIT");
+          response.destroy(error);
+          request.destroy(error);
+          reject(error);
           return;
         }
         chunks.push(chunk);
       });
       response.once("end", () => {
+        if (settled) return;
         settled = true;
         resolve({ status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks, length) });
       });
     });
     const connectTimer = setTimeout(() => request.destroy(new ProviderError("OCC-AI-PROVIDER-TIMEOUT")), input.connectMs);
     request.once("socket", (socket) => {
-      const markConnected = () => { connected = true; clearTimeout(connectTimer); };
+      const markConnected = () => { connected = true; updateDispatch(); clearTimeout(connectTimer); };
       if ((socket as { secureConnecting?: boolean }).secureConnecting === false) markConnected();
       else socket.once("secureConnect", markConnected);
     });
@@ -112,10 +131,12 @@ function defaultRawRequestFactory(input: RawRequest): Promise<RawResponse> {
       clearTimeout(connectTimer);
       if (settled) return;
       if (error instanceof ProviderError) return reject(error);
-      if (input.signal.aborted) return reject(new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: input.signal.reason }));
-      if (error.code?.startsWith("ERR_TLS") || error.code?.startsWith("CERT_") || error.code === "DEPTH_ZERO_SELF_SIGNED_CERT") return reject(new ProviderError("OCC-AI-PROVIDER-TLS"));
-      reject(new ProviderError(connected ? "OCC-AI-PROVIDER-DISPATCHED" : "OCC-AI-PROVIDER-TRANSIENT", !connected));
+      if (input.signal.aborted) return reject(abortProviderError(input.signal));
+      if (error.code === "HPE_HEADER_OVERFLOW" || error.code === "ERR_HTTP_HEADERS_OVERFLOW") return reject(new ProviderError("OCC-AI-PROVIDER-LIMIT"));
+      if (error.code?.startsWith("ERR_TLS") || error.code?.startsWith("ERR_SSL") || error.code?.startsWith("CERT_") || error.code === "DEPTH_ZERO_SELF_SIGNED_CERT" || error.code === "SELF_SIGNED_CERT_IN_CHAIN" || error.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || error.code === "UNABLE_TO_GET_ISSUER_CERT_LOCALLY") return reject(new ProviderError("OCC-AI-PROVIDER-TLS"));
+      reject(new ProviderError(bodyDispatched ? "OCC-AI-PROVIDER-DISPATCHED" : "OCC-AI-PROVIDER-TRANSIENT", !bodyDispatched));
     });
+    request.once("finish", () => { finished = true; updateDispatch(); });
     if (input.body !== undefined) request.end(input.body);
     else request.end();
   });
@@ -131,30 +152,33 @@ export class SecureTransport implements ProviderTransport {
   }
 
   async request(input: ProviderTransportRequest): Promise<ProviderTransportResponse> {
-    if ((input.method !== "GET" && input.method !== "POST") || !Number.isSafeInteger(input.totalMs) || input.totalMs < 1 || !Number.isSafeInteger(input.connectMs) || input.connectMs < 1 || input.connectMs > input.totalMs || !Number.isSafeInteger(input.maxResponseBytes) || input.maxResponseBytes < 1) {
+    const suppliedDeadline = input.deadline;
+    const suppliedTotal = input.totalMs;
+    if ((input.method !== "GET" && input.method !== "POST") || (suppliedDeadline === undefined && (!Number.isSafeInteger(suppliedTotal) || suppliedTotal! < 1)) || (suppliedDeadline !== undefined && (!Number.isSafeInteger(suppliedDeadline) || suppliedDeadline <= this.now())) || !Number.isSafeInteger(input.connectMs) || input.connectMs < 1 || !Number.isSafeInteger(input.maxResponseBytes) || input.maxResponseBytes < 1) {
       throw new ProviderError("OCC-AI-PROVIDER-POLICY");
     }
     const startedAt = this.now();
+    const ownedDeadline = suppliedDeadline === undefined ? createOperationDeadline(suppliedTotal!, input.signal, this.now) : undefined;
+    const operationSignal = ownedDeadline?.signal ?? input.signal;
+    const expiresAt = ownedDeadline?.expiresAt ?? suppliedDeadline!;
+    if (input.connectMs > expiresAt - startedAt) {
+      ownedDeadline?.dispose();
+      throw new ProviderError("OCC-AI-PROVIDER-POLICY");
+    }
     const requestHash = sha256(input.body ?? new Uint8Array());
     let code = "OCC-AI-PROVIDER-FAILURE";
     let status: number | undefined;
     let responseHash: string | undefined;
     let providerRequestIdHash: string | undefined;
     let credential: Buffer | undefined;
-    const controller = new AbortController();
-    const cancel = () => controller.abort(input.signal.reason);
-    input.signal.addEventListener("abort", cancel, { once: true });
-    const timer = setTimeout(() => controller.abort(new ProviderError("OCC-AI-PROVIDER-TIMEOUT")), input.totalMs);
-    const rejectOnAbort = (_resolve: (value: never) => void, reject: (reason: ProviderError) => void) => reject(this.abortError(input.signal, controller.signal));
     let abortReject: ((reason: ProviderError) => void) | undefined;
-    const abortPromise = new Promise<never>((resolve, reject) => {
+    const abortPromise = new Promise<never>((_resolve, reject) => {
       abortReject = reject;
-      if (controller.signal.aborted) rejectOnAbort(resolve, reject);
     });
-    const onCombinedAbort = () => abortReject?.(this.abortError(input.signal, controller.signal));
-    controller.signal.addEventListener("abort", onCombinedAbort, { once: true });
+    const onCombinedAbort = () => abortReject?.(abortProviderError(operationSignal));
+    if (!operationSignal.aborted) operationSignal.addEventListener("abort", onCombinedAbort, { once: true });
     try {
-      if (input.signal.aborted) throw new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: input.signal.reason });
+      if (operationSignal.aborted) throw abortProviderError(operationSignal);
       const target = await Promise.race([this.dependencies.policy.resolve(input.path), abortPromise]);
       credential = await Promise.race([(this.dependencies.credentialReader ?? readCredentialFile)(this.dependencies.credentialPath ?? ""), abortPromise]);
       const headers: Record<string, string> = { accept: "application/json", authorization: `Bearer ${credential.toString("utf8")}`, host: target.hostHeader };
@@ -163,7 +187,7 @@ export class SecureTransport implements ProviderTransport {
         headers["content-length"] = String(input.body.byteLength);
       }
       const raw = await Promise.race([
-        this.factory({ ...target, method: input.method, headers, connectMs: input.connectMs, maxResponseBytes: input.maxResponseBytes, maxResponseHeaderBytes: input.maxResponseHeaderBytes ?? 16_384, signal: controller.signal, ...(input.body === undefined ? {} : { body: input.body }) }),
+        this.factory({ ...target, method: input.method, headers, connectMs: input.connectMs, maxResponseBytes: input.maxResponseBytes, maxResponseHeaderBytes: input.maxResponseHeaderBytes ?? 16_384, signal: operationSignal, ...(this.dependencies.tlsCa === undefined ? {} : { ca: this.dependencies.tlsCa }), ...(input.body === undefined ? {} : { body: input.body }) }),
         abortPromise,
       ]);
       status = raw.status;
@@ -183,9 +207,8 @@ export class SecureTransport implements ProviderTransport {
       code = safe.code;
       throw safe;
     } finally {
-      clearTimeout(timer);
-      input.signal.removeEventListener("abort", cancel);
-      controller.signal.removeEventListener("abort", onCombinedAbort);
+      operationSignal.removeEventListener("abort", onCombinedAbort);
+      ownedDeadline?.dispose();
       credential?.fill(0);
       const event: TransportTelemetry = {
         operationId: input.operationId, profileId: input.profileId, model: input.model, requestHash,
@@ -201,9 +224,4 @@ export class SecureTransport implements ProviderTransport {
     }
   }
 
-  private abortError(caller: AbortSignal, combined: AbortSignal): ProviderError {
-    return caller.aborted
-      ? new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: caller.reason })
-      : combined.reason instanceof ProviderError ? combined.reason : new ProviderError("OCC-AI-PROVIDER-TIMEOUT");
-  }
 }

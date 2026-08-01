@@ -94,9 +94,9 @@ const FORBIDDEN_V4: readonly [string, number][] = [
 ];
 
 const FORBIDDEN_V6: readonly [string, number][] = [
-  ["::", 128], ["::1", 128], ["64:ff9b:1::", 48], ["100::", 64], ["2001:2::", 48],
+  ["::", 128], ["::1", 128], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64], ["2001:2::", 48],
   ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20], ["5f00::", 16],
-  ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
+  ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ];
 
 function mappedIpv4(value: bigint): string | undefined {
@@ -105,14 +105,31 @@ function mappedIpv4(value: bigint): string | undefined {
   return [24n, 16n, 8n, 0n].map((shift) => Number((v4 >> shift) & 255n)).join(".");
 }
 
+function embeddedIpv4(value: bigint): string | undefined {
+  const mapped = mappedIpv4(value);
+  if (mapped !== undefined) return mapped;
+  if (value >> 32n === 0n && value > 1n) {
+    const v4 = value & 0xffffffffn;
+    return [24n, 16n, 8n, 0n].map((shift) => Number((v4 >> shift) & 255n)).join(".");
+  }
+  if (((value >> 32n) & 0xffffffffn) === 0x00005efen) {
+    const v4 = value & 0xffffffffn;
+    return [24n, 16n, 8n, 0n].map((shift) => Number((v4 >> shift) & 255n)).join(".");
+  }
+  return undefined;
+}
+
 function isForbidden(address: string): boolean {
   const parsed = parseIp(address);
   if (parsed === undefined) return true;
   if (parsed.bits === 32) {
     return FORBIDDEN_V4.some(([network, prefix]) => inPrefix(parsed.value, parseIpv4(network)!, 32, prefix));
   }
-  const mapped = mappedIpv4(parsed.value);
-  if (mapped !== undefined) return isForbidden(mapped);
+  const embedded = embeddedIpv4(parsed.value);
+  if (embedded !== undefined) {
+    if (parsed.value >> 32n === 0n) return true;
+    return isForbidden(embedded);
+  }
   return FORBIDDEN_V6.some(([network, prefix]) => inPrefix(parsed.value, parseIpv6(network)!, 128, prefix));
 }
 
