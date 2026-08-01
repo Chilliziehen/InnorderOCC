@@ -4,6 +4,18 @@ info:
   version: 0.1.0
 security:
   - bearerAuth: []
+x-command-parameters: &commandParameters
+  - $ref: "#/components/parameters/IdempotencyKey"
+  - $ref: "#/components/parameters/CorrelationId"
+x-update-command-parameters: &updateCommandParameters
+  - $ref: "#/components/parameters/IdempotencyKey"
+  - $ref: "#/components/parameters/CorrelationId"
+  - $ref: "#/components/parameters/ExpectedVersion"
+x-command-response-headers: &commandResponseHeaders
+  X-Correlation-ID:
+    $ref: "#/components/headers/CorrelationId"
+  Idempotency-Replayed:
+    $ref: "#/components/headers/IdempotencyReplayed"
 paths:
   /api/v1/system/status:
     get:
@@ -98,12 +110,1032 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/requirements:
+    get:
+      operationId: listEvidenceRequirements
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Published evidence requirements
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceRequirementPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/requirements/{requirementId}:
+    parameters:
+      - $ref: "#/components/parameters/RequirementId"
+    get:
+      operationId: getEvidenceRequirement
+      responses:
+        "200":
+          description: Published evidence requirement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceRequirement"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/upload-sessions:
+    post:
+      operationId: createEvidenceUploadSession
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersionIfResubmitting"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEvidenceUploadSessionRequest"
+      responses:
+        "201":
+          description: Upload session created
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceUploadSession"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/upload-sessions/{uploadSessionId}:
+    parameters:
+      - $ref: "#/components/parameters/UploadSessionId"
+    get:
+      operationId: getEvidenceUploadSession
+      responses:
+        "200":
+          description: Current upload processing status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceUploadSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/upload-sessions/{uploadSessionId}/content:
+    parameters:
+      - $ref: "#/components/parameters/UploadSessionId"
+    put:
+      operationId: uploadEvidenceContent
+      parameters: *commandParameters
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              maxLength: 104857600
+      responses:
+        "200":
+          description: Terminal or observable upload result
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceContentResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    get:
+      operationId: getEvidenceMetadata
+      responses:
+        "200":
+          description: Authorized evidence metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceMetadata"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}/submit:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    post:
+      operationId: submitEvidence
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitEvidenceRequest"
+      responses:
+        "200":
+          description: Submitted evidence
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceMetadata"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}/reviews:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    get:
+      operationId: listEvidenceReviews
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Immutable evidence review history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceReviewPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      operationId: reviewEvidence
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReviewEvidenceRequest"
+      responses:
+        "201":
+          description: Immutable evidence review
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceReview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}/versions:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    get:
+      operationId: listEvidenceVersions
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Immutable evidence version history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceVersionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}/preview:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    get:
+      operationId: getEvidencePreview
+      responses:
+        "200":
+          description: Metadata for a separately generated sanitized preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidencePreviewMetadata"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}/download:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    get:
+      operationId: downloadEvidence
+      responses:
+        "200":
+          description: Authorized evidence attachment streamed by Core
+          headers:
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+            X-Content-Type-Options:
+              required: true
+              schema:
+                type: string
+                const: nosniff
+            Digest:
+              required: true
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                maxLength: 104857600
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          $ref: "#/components/responses/InvalidRange"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/evidence/{evidenceId}/download-metadata:
+    parameters:
+      - $ref: "#/components/parameters/EvidenceId"
+    get:
+      operationId: getEvidenceDownloadMetadata
+      responses:
+        "200":
+          description: Safe attachment metadata without internal object identifiers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceDownloadMetadata"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks:
+    get:
+      operationId: listRisks
+      parameters:
+        - $ref: "#/components/parameters/RiskSeverityFilter"
+        - $ref: "#/components/parameters/RiskStateFilter"
+        - $ref: "#/components/parameters/RiskSlaStatusFilter"
+        - $ref: "#/components/parameters/TargetEntityFilter"
+        - $ref: "#/components/parameters/OwnerRelationshipFilter"
+        - $ref: "#/components/parameters/SignificantOnlyFilter"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Authorized risks matching the supplied filters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks/{riskId}:
+    parameters:
+      - $ref: "#/components/parameters/RiskId"
+    get:
+      operationId: getRisk
+      responses:
+        "200":
+          description: Authorized risk
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Risk"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks/{riskId}/actions:
+    parameters:
+      - $ref: "#/components/parameters/RiskId"
+    get:
+      operationId: listRiskActions
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Immutable risk action history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskActionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      operationId: actOnRisk
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RiskActionCommandRequest"
+      responses:
+        "201":
+          description: Immutable risk action
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskAction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks/interventions:
+    get:
+      operationId: listRiskInterventions
+      parameters:
+        - $ref: "#/components/parameters/RiskSeverityFilter"
+        - $ref: "#/components/parameters/RiskStateFilter"
+        - $ref: "#/components/parameters/RiskSlaStatusFilter"
+        - $ref: "#/components/parameters/TargetEntityFilter"
+        - $ref: "#/components/parameters/OwnedByMeFilter"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Authorized intervention queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InterventionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks/adjudications:
+    get:
+      operationId: listRiskAdjudications
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Immutable risk adjudication history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskAdjudicationPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      operationId: createRiskAdjudication
+      parameters: *commandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRiskAdjudicationRequest"
+      responses:
+        "201":
+          description: Immutable risk adjudication
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskAdjudication"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks/metrics:
+    get:
+      operationId: getRiskMetrics
+      responses:
+        "200":
+          description: Metrics derived from persisted risk facts and adjudications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskMetrics"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/resources:
+    get:
+      operationId: listManagedResources
+      parameters:
+        - $ref: "#/components/parameters/ResourceTypeFilter"
+        - $ref: "#/components/parameters/ResourceStateFilter"
+        - $ref: "#/components/parameters/MinimumCapacityFilter"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Authorized managed resources
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedResourcePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/resources/{resourceId}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      operationId: getManagedResource
+      responses:
+        "200":
+          description: Authorized managed resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedResource"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    patch:
+      operationId: updateManagedResource
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateResourceRequest"
+      responses:
+        "200":
+          description: Updated managed resource
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/resources/{resourceId}/availability:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      operationId: listResourceAvailability
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Immutable availability windows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailabilityWindowPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      operationId: createResourceAvailability
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAvailabilityWindowRequest"
+      responses:
+        "201":
+          description: Immutable availability window
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailabilityWindow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/resources/{resourceId}/availability-checks:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    post:
+      operationId: checkReservationAvailability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReservationAvailabilityRequest"
+      responses:
+        "200":
+          description: Capacity and conflict result at the evaluation instant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationAvailability"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/resources/{resourceId}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      operationId: getResourceSchedule
+      parameters:
+        - $ref: "#/components/parameters/ScheduleFrom"
+        - $ref: "#/components/parameters/ScheduleUntil"
+        - $ref: "#/components/parameters/ReservationStateFilter"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Authorized and identity-redacted reservation schedule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationSchedulePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/reservations:
+    post:
+      operationId: reserveResource
+      parameters: *commandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReserveResourceRequest"
+      responses:
+        "201":
+          description: Created resource reservation
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ReservationConflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/reservations/{reservationId}:
+    parameters:
+      - $ref: "#/components/parameters/ReservationId"
+    get:
+      operationId: getReservation
+      responses:
+        "200":
+          description: Authorized reservation with identity redaction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/reservations/{reservationId}/change:
+    parameters:
+      - $ref: "#/components/parameters/ReservationId"
+    post:
+      operationId: changeReservation
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeReservationRequest"
+      responses:
+        "200":
+          description: Changed reservation
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ReservationConflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/reservations/{reservationId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/ReservationId"
+    post:
+      operationId: cancelReservation
+      parameters: *updateCommandParameters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelReservationRequest"
+      responses:
+        "200":
+          description: Cancelled reservation
+          headers: *commandResponseHeaders
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[!-~]{1,128}$"
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ExpectedVersion:
+      name: Expected-Version
+      in: header
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 9007199254740991
+    ExpectedVersionIfResubmitting:
+      name: Expected-Version
+      in: header
+      required: false
+      description: Required when evidenceId identifies an existing evidence head for resubmission
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        maximum: 9007199254740991
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/OpaqueCursor"
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    RiskSeverityFilter:
+      name: severity
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 3
+        items:
+          $ref: "#/components/schemas/RiskSeverity"
+    RiskStateFilter:
+      name: state
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 4
+        items:
+          $ref: "#/components/schemas/RiskState"
+    RiskSlaStatusFilter:
+      name: slaStatus
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 4
+        items:
+          $ref: "#/components/schemas/RiskSlaStatus"
+    TargetEntityFilter:
+      name: targetEntityId
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    OwnerRelationshipFilter:
+      name: ownerRelationshipId
+      in: query
+      required: false
+      schema:
+        type: string
+        format: uuid
+    SignificantOnlyFilter:
+      name: significantOnly
+      in: query
+      required: false
+      schema:
+        type: boolean
+    OwnedByMeFilter:
+      name: ownedByMe
+      in: query
+      required: false
+      schema:
+        type: boolean
+    ResourceTypeFilter:
+      name: resourceType
+      in: query
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    ResourceStateFilter:
+      name: state
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 4
+        items:
+          $ref: "#/components/schemas/ResourceState"
+    MinimumCapacityFilter:
+      name: minimumCapacity
+      in: query
+      required: false
+      schema:
+        type: number
+        exclusiveMinimum: 0
+        maximum: 9007199254740991
+    ScheduleFrom:
+      name: from
+      in: query
+      required: true
+      schema:
+        $ref: "#/components/schemas/OffsetInstant"
+    ScheduleUntil:
+      name: until
+      in: query
+      required: true
+      schema:
+        $ref: "#/components/schemas/OffsetInstant"
+    ReservationStateFilter:
+      name: state
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 4
+        items:
+          $ref: "#/components/schemas/ReservationState"
+    RequirementId:
+      name: requirementId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UploadSessionId:
+      name: uploadSessionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EvidenceId:
+      name: evidenceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RiskId:
+      name: riskId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ResourceId:
+      name: resourceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ReservationId:
+      name: reservationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  headers:
+    CorrelationId:
+      description: Correlation UUID for this request and its emitted work
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyReplayed:
+      description: True when the command response was replayed from the idempotency record
+      required: true
+      schema:
+        type: boolean
   responses:
     BadRequest:
       description: Invalid request
@@ -113,6 +1145,48 @@ components:
             $ref: "#/components/schemas/ProblemDetails"
     Unauthorized:
       description: Authentication is required or invalid
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    Forbidden:
+      description: The authenticated principal is not authorized for the target
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    NotFound:
+      description: The authorized target does not exist
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    Conflict:
+      description: Idempotency, optimistic version, or lifecycle conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    ReservationConflict:
+      description: Reservation overlaps exclusivity, capacity, or availability constraints
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    PayloadTooLarge:
+      description: Evidence content exceeds the declared or 100 MiB limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    UnprocessableContent:
+      description: Evidence digest, media, inspection, or scanner validation failed closed
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    InvalidRange:
+      description: Requested evidence byte range is invalid
       content:
         application/problem+json:
           schema:
@@ -362,3 +1436,655 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ComponentStatus"
+    OccProblemCode:
+      type: string
+      enum:
+        - OCC-INVALID-REQUEST
+        - OCC-AUTHENTICATION-REQUIRED
+        - OCC-FORBIDDEN
+        - OCC-NOT-FOUND
+        - OCC-IDEMPOTENCY-CONFLICT
+        - OCC-VERSION-CONFLICT
+        - OCC-EVIDENCE-TOO-LARGE
+        - OCC-EVIDENCE-DIGEST-MISMATCH
+        - OCC-EVIDENCE-INVALID-CONTENT
+        - OCC-EVIDENCE-UPLOAD-CONFLICT
+        - OCC-EVIDENCE-REVIEW-CONFLICT
+        - OCC-RISK-INVALID-TRANSITION
+        - OCC-RESOURCE-UNAVAILABLE
+        - OCC-RESERVATION-CONFLICT
+        - OCC-INTERNAL-ERROR
+    OpaqueCursor:
+      type: string
+      minLength: 8
+      maxLength: 2048
+      pattern: "^[A-Za-z0-9._~-]{8,2048}$"
+    SafeVersion:
+      type: integer
+      format: int64
+      minimum: 0
+      maximum: 9007199254740991
+    PositiveVersion:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 9007199254740991
+    Sha256:
+      type: string
+      minLength: 64
+      maxLength: 64
+      pattern: "^[0-9a-f]{64}$"
+    OffsetInstant:
+      type: string
+      format: date-time
+      pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+    HalfOpenInterval:
+      type: object
+      additionalProperties: false
+      required: [start, end]
+      description: Positive canonical half-open interval [start, end); end must be later than start
+      properties:
+        start:
+          $ref: "#/components/schemas/OffsetInstant"
+        end:
+          $ref: "#/components/schemas/OffsetInstant"
+    EvidenceState:
+      type: string
+      enum: [PENDING, SUBMITTED, ACCEPTED, REJECTED, ARCHIVED]
+    EvidenceUploadStatus:
+      type: string
+      enum: [CREATED, UPLOADED, STREAMING, INSPECTING, SCANNING, PROMOTING, CONFIRMED, FAILED, EXPIRED]
+    EvidenceReviewDecision:
+      type: string
+      enum: [ACCEPTED, REJECTED, CONDITIONAL]
+    EvidenceArchivePolicy:
+      type: object
+      additionalProperties: false
+      required: [maximumEntries, maximumExpandedBytes, maximumCompressionRatio]
+      properties:
+        maximumEntries:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        maximumExpandedBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 209715200
+        maximumCompressionRatio:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 100
+    EvidenceRequirement:
+      type: object
+      additionalProperties: false
+      required: [id, code, allowedExtensions, allowedMediaTypes, maximumBytes, minimumCount, hardGate, conditionalAdvancement, conditionalFollowUpHours, archive]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, minLength: 1, maxLength: 128 }
+        allowedExtensions:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,31}$" }
+        allowedMediaTypes:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items: { type: string, minLength: 1, maxLength: 128 }
+        maximumBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        minimumCount: { type: integer, minimum: 1, maximum: 100 }
+        hardGate: { type: boolean }
+        conditionalAdvancement: { type: boolean }
+        conditionalFollowUpHours: { type: integer, minimum: 1, maximum: 8760 }
+        archive: { $ref: "#/components/schemas/EvidenceArchivePolicy" }
+    EvidenceRequirementPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/EvidenceRequirement" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    CreateEvidenceUploadSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [requirementId, targetEntityId, slotKey, extension, expectedSha256, expectedSizeBytes]
+      properties:
+        requirementId: { type: string, format: uuid }
+        targetEntityId: { type: string, format: uuid }
+        evidenceId: { type: string, format: uuid }
+        slotKey: { type: string, minLength: 1, maxLength: 128 }
+        extension: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,31}$" }
+        expectedSha256: { $ref: "#/components/schemas/Sha256" }
+        expectedSizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+    EvidenceUploadSession:
+      type: object
+      additionalProperties: false
+      required: [id, evidenceId, status, expectedSha256, expectedSizeBytes, createdAt, expiresAt, version]
+      properties:
+        id: { type: string, format: uuid }
+        evidenceId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/EvidenceUploadStatus" }
+        expectedSha256: { $ref: "#/components/schemas/Sha256" }
+        expectedSizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        actualSha256: { $ref: "#/components/schemas/Sha256" }
+        actualSizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        detectedMediaType: { type: string, minLength: 1, maxLength: 128 }
+        failureCode: { type: string, minLength: 1, maxLength: 128 }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+        expiresAt: { $ref: "#/components/schemas/OffsetInstant" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+    EvidenceContentResult:
+      type: object
+      additionalProperties: false
+      required: [uploadSessionId, evidenceId, status, version]
+      properties:
+        uploadSessionId: { type: string, format: uuid }
+        evidenceId: { type: string, format: uuid }
+        status: { type: string, enum: [CONFIRMED, FAILED] }
+        sha256: { $ref: "#/components/schemas/Sha256" }
+        sizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        detectedMediaType: { type: string, minLength: 1, maxLength: 128 }
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        failureCode: { type: string, minLength: 1, maxLength: 128 }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+    EvidenceMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, requirementId, targetEntityId, slotKey, state, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        requirementId: { type: string, format: uuid }
+        targetEntityId: { type: string, format: uuid }
+        slotKey: { type: string, minLength: 1, maxLength: 128 }
+        state: { $ref: "#/components/schemas/EvidenceState" }
+        currentVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+        updatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    SubmitEvidenceRequest:
+      type: object
+      additionalProperties: false
+      required: [evidenceVersion]
+      properties:
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+    EvidenceReviewCondition:
+      type: object
+      additionalProperties: false
+      required: [code, detail]
+      properties:
+        code: { type: string, minLength: 1, maxLength: 128 }
+        detail: { type: string, minLength: 1, maxLength: 1024 }
+    ReviewEvidenceRequest:
+      type: object
+      additionalProperties: false
+      required: [evidenceVersion, decision, reason]
+      properties:
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        decision: { $ref: "#/components/schemas/EvidenceReviewDecision" }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        conditions:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/EvidenceReviewCondition" }
+    EvidenceVersion:
+      type: object
+      additionalProperties: false
+      required: [id, evidenceId, version, uploadSessionId, sha256, mediaType, extension, sizeBytes, submittedAt]
+      properties:
+        id: { type: string, format: uuid }
+        evidenceId: { type: string, format: uuid }
+        version: { $ref: "#/components/schemas/PositiveVersion" }
+        uploadSessionId: { type: string, format: uuid }
+        sha256: { $ref: "#/components/schemas/Sha256" }
+        mediaType: { type: string, minLength: 1, maxLength: 128 }
+        extension: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,31}$" }
+        sizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        submittedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    EvidenceReview:
+      type: object
+      additionalProperties: false
+      required: [id, evidenceId, evidenceVersion, decision, reason, conditions, gateSatisfied, reviewedAt]
+      properties:
+        id: { type: string, format: uuid }
+        evidenceId: { type: string, format: uuid }
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        decision: { $ref: "#/components/schemas/EvidenceReviewDecision" }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        conditions: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/EvidenceReviewCondition" } }
+        followUpDueAt: { $ref: "#/components/schemas/OffsetInstant" }
+        gateSatisfied: { type: boolean }
+        reviewedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    EvidenceVersionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/EvidenceVersion" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    EvidenceReviewPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/EvidenceReview" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    EvidencePreviewMetadata:
+      type: object
+      additionalProperties: false
+      required: [evidenceId, evidenceVersion, mediaType, sizeBytes, generatedAt]
+      properties:
+        evidenceId: { type: string, format: uuid }
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        mediaType: { type: string, minLength: 1, maxLength: 128 }
+        sizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        generatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    EvidenceDownloadMetadata:
+      type: object
+      additionalProperties: false
+      required: [evidenceId, evidenceVersion, filename, mediaType, sizeBytes, sha256, disposition]
+      properties:
+        evidenceId: { type: string, format: uuid }
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        filename: { type: string, minLength: 1, maxLength: 255 }
+        mediaType: { type: string, minLength: 1, maxLength: 128 }
+        sizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
+        sha256: { $ref: "#/components/schemas/Sha256" }
+        disposition: { type: string, const: attachment }
+    RiskSeverity:
+      type: string
+      enum: [INFO, YELLOW, RED]
+    RiskState:
+      type: string
+      enum: [OPEN, ACKNOWLEDGED, RESOLVED, DISMISSED]
+    RiskActionType:
+      type: string
+      enum: [ACKNOWLEDGED, ASSIGNED, ESCALATED, MITIGATED, RESOLVED, DISMISSED]
+    RiskSlaStatus:
+      type: string
+      enum: [NOT_DUE, DUE, BREACHED, COMPLETED]
+    RiskAdjudicationOutcome:
+      type: string
+      enum: [TRUE_POSITIVE, FALSE_POSITIVE, MISSED, NOT_APPLICABLE]
+    Risk:
+      type: object
+      additionalProperties: false
+      required: [id, ruleDefinitionId, targetEntityId, severity, state, reason, detectedAt, evaluatedAt, version]
+      properties:
+        id: { type: string, format: uuid }
+        ruleDefinitionId: { type: string, format: uuid }
+        targetEntityId: { type: string, format: uuid }
+        severity: { $ref: "#/components/schemas/RiskSeverity" }
+        state: { $ref: "#/components/schemas/RiskState" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        detectedAt: { $ref: "#/components/schemas/OffsetInstant" }
+        evaluatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+        dueAt: { $ref: "#/components/schemas/OffsetInstant" }
+        ownerRelationshipId: { type: string, format: uuid }
+        lastEscalationLevel: { type: integer, minimum: 0, maximum: 100 }
+        resolvedAt: { $ref: "#/components/schemas/OffsetInstant" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+    RiskPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/Risk" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    RiskAction:
+      type: object
+      additionalProperties: false
+      required: [id, riskId, action, actedAt]
+      properties:
+        id: { type: string, format: uuid }
+        riskId: { type: string, format: uuid }
+        action: { $ref: "#/components/schemas/RiskActionType" }
+        escalationLevel: { type: integer, minimum: 0, maximum: 100 }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        ownerRelationshipId: { type: string, format: uuid }
+        interventionType: { type: string, minLength: 1, maxLength: 128 }
+        actedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    RiskActionCommandRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, reason]
+          properties:
+            action: { type: string, const: ACKNOWLEDGE }
+            reason: { type: string, minLength: 1, maxLength: 2048 }
+        - type: object
+          additionalProperties: false
+          required: [action, ownerRelationshipId, reason]
+          properties:
+            action: { type: string, const: ASSIGN }
+            ownerRelationshipId: { type: string, format: uuid }
+            reason: { type: string, minLength: 1, maxLength: 2048 }
+        - type: object
+          additionalProperties: false
+          required: [action, level, severity, reason]
+          properties:
+            action: { type: string, const: ESCALATE }
+            level: { type: integer, minimum: 0, maximum: 100 }
+            severity: { $ref: "#/components/schemas/RiskSeverity" }
+            ownerRelationshipId: { type: string, format: uuid }
+            reason: { type: string, minLength: 1, maxLength: 2048 }
+        - type: object
+          additionalProperties: false
+          required: [action, interventionType, reason]
+          properties:
+            action: { type: string, const: MITIGATE }
+            interventionType: { type: string, minLength: 1, maxLength: 128 }
+            reason: { type: string, minLength: 1, maxLength: 2048 }
+        - type: object
+          additionalProperties: false
+          required: [action, reason]
+          properties:
+            action: { type: string, const: RESOLVE }
+            reason: { type: string, minLength: 1, maxLength: 2048 }
+        - type: object
+          additionalProperties: false
+          required: [action, reason]
+          properties:
+            action: { type: string, const: DISMISS }
+            reason: { type: string, minLength: 1, maxLength: 2048 }
+    RiskActionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/RiskAction" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    InterventionItem:
+      type: object
+      additionalProperties: false
+      required: [id, riskId, targetEntityId, interventionType, severity, state, slaStatus, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        riskId: { type: string, format: uuid }
+        targetEntityId: { type: string, format: uuid }
+        interventionType: { type: string, minLength: 1, maxLength: 128 }
+        severity: { $ref: "#/components/schemas/RiskSeverity" }
+        state: { $ref: "#/components/schemas/RiskState" }
+        slaStatus: { $ref: "#/components/schemas/RiskSlaStatus" }
+        dueAt: { $ref: "#/components/schemas/OffsetInstant" }
+        ownerRelationshipId: { type: string, format: uuid }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+    InterventionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/InterventionItem" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    CreateRiskAdjudicationRequest:
+      type: object
+      additionalProperties: false
+      required: [reportingPeriodStart, reportingPeriodEnd, knownEventKey, targetEntityId, severeEvent, outcome, reason]
+      properties:
+        reportingPeriodStart: { type: string, format: date }
+        reportingPeriodEnd: { type: string, format: date }
+        knownEventKey: { type: string, minLength: 1, maxLength: 512 }
+        targetEntityId: { type: string, format: uuid }
+        severeEvent: { type: boolean }
+        riskId: { type: string, format: uuid }
+        outcome: { $ref: "#/components/schemas/RiskAdjudicationOutcome" }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        supersedesAdjudicationId: { type: string, format: uuid }
+    RiskAdjudication:
+      type: object
+      additionalProperties: false
+      required: [id, reportingPeriodStart, reportingPeriodEnd, knownEventKey, targetEntityId, severeEvent, outcome, reason, adjudicationVersion, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        reportingPeriodStart: { type: string, format: date }
+        reportingPeriodEnd: { type: string, format: date }
+        knownEventKey: { type: string, minLength: 1, maxLength: 512 }
+        targetEntityId: { type: string, format: uuid }
+        severeEvent: { type: boolean }
+        riskId: { type: string, format: uuid }
+        outcome: { $ref: "#/components/schemas/RiskAdjudicationOutcome" }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        adjudicationVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        supersedesAdjudicationId: { type: string, format: uuid }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+    RiskAdjudicationPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/RiskAdjudication" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    RiskMetrics:
+      type: object
+      additionalProperties: false
+      required: [reportingPeriodStart, reportingPeriodEnd, evaluatedCount, severeEventCount, truePositiveCount, falsePositiveCount, missedCount, acknowledgedWithinSlaCount, resolvedCount, generatedAt]
+      properties:
+        reportingPeriodStart: { type: string, format: date }
+        reportingPeriodEnd: { type: string, format: date }
+        evaluatedCount: { $ref: "#/components/schemas/SafeVersion" }
+        severeEventCount: { $ref: "#/components/schemas/SafeVersion" }
+        truePositiveCount: { $ref: "#/components/schemas/SafeVersion" }
+        falsePositiveCount: { $ref: "#/components/schemas/SafeVersion" }
+        missedCount: { $ref: "#/components/schemas/SafeVersion" }
+        acknowledgedWithinSlaCount: { $ref: "#/components/schemas/SafeVersion" }
+        resolvedCount: { $ref: "#/components/schemas/SafeVersion" }
+        generatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    ResourceState:
+      type: string
+      enum: [AVAILABLE, UNAVAILABLE, MAINTENANCE, ARCHIVED]
+    AvailabilityMode:
+      type: string
+      enum: [AVAILABLE, UNAVAILABLE]
+    ReservationState:
+      type: string
+      enum: [PENDING, CONFIRMED, CANCELLED, COMPLETED]
+    ReservationConflictKind:
+      type: string
+      enum: [EXCLUSIVE, CAPACITY, UNAVAILABLE]
+    ResourceData:
+      type: object
+      propertyNames:
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z][A-Za-z0-9_.-]*$"
+      additionalProperties:
+        oneOf:
+          - { type: string, maxLength: 512 }
+          - { type: number }
+          - { type: boolean }
+          - { type: "null" }
+    ManagedResource:
+      type: object
+      additionalProperties: false
+      required: [id, resourceType, capacity, state, data, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        resourceType: { type: string, minLength: 1, maxLength: 128 }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        state: { $ref: "#/components/schemas/ResourceState" }
+        data: { $ref: "#/components/schemas/ResourceData" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+        updatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    ManagedResourcePage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/ManagedResource" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    UpdateResourceRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        state: { $ref: "#/components/schemas/ResourceState" }
+        data: { $ref: "#/components/schemas/ResourceData" }
+    AvailabilityWindow:
+      type: object
+      additionalProperties: false
+      required: [id, resourceId, interval, mode, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        mode: { $ref: "#/components/schemas/AvailabilityMode" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+    CreateAvailabilityWindowRequest:
+      type: object
+      additionalProperties: false
+      required: [interval, mode]
+      properties:
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        mode: { $ref: "#/components/schemas/AvailabilityMode" }
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    AvailabilityWindowPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/AvailabilityWindow" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    ReservationConflict:
+      type: object
+      additionalProperties: false
+      required: [resourceId, interval, kind, redacted]
+      properties:
+        resourceId: { type: string, format: uuid }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        kind: { $ref: "#/components/schemas/ReservationConflictKind" }
+        redacted: { type: boolean }
+        reservationId: { type: string, format: uuid }
+    ReservationAvailabilityRequest:
+      type: object
+      additionalProperties: false
+      required: [interval, capacity, exclusive]
+      properties:
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        exclusive: { type: boolean }
+        excludingReservationId: { type: string, format: uuid }
+    ReservationAvailability:
+      type: object
+      additionalProperties: false
+      required: [resourceId, interval, requestedCapacity, available, remainingCapacity, conflicts]
+      properties:
+        resourceId: { type: string, format: uuid }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        requestedCapacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        available: { type: boolean }
+        remainingCapacity: { type: number, minimum: 0, maximum: 9007199254740991 }
+        conflicts: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/ReservationConflict" } }
+    Reservation:
+      type: object
+      additionalProperties: false
+      required: [id, resourceId, interval, capacity, exclusive, state, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        requesterEntityId: { type: string, format: uuid }
+        processInstanceId: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        exclusive: { type: boolean }
+        state: { $ref: "#/components/schemas/ReservationState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        createdAt: { $ref: "#/components/schemas/OffsetInstant" }
+        updatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    ReservationSchedulePage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/Reservation" } }
+        nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    ReserveResourceRequest:
+      type: object
+      additionalProperties: false
+      required: [resourceId, requesterEntityId, interval, capacity, exclusive]
+      properties:
+        resourceId: { type: string, format: uuid }
+        requesterEntityId: { type: string, format: uuid }
+        processInstanceId: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        exclusive: { type: boolean }
+    ChangeReservationRequest:
+      type: object
+      additionalProperties: false
+      required: [interval, capacity, exclusive]
+      properties:
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        exclusive: { type: boolean }
+    CancelReservationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 512 }
+    EvidenceEventPayload:
+      type: object
+      additionalProperties: false
+      required: [evidenceId, state, version]
+      properties:
+        evidenceId: { type: string, format: uuid }
+        uploadSessionId: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/EvidenceState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        decision: { $ref: "#/components/schemas/EvidenceReviewDecision" }
+        reasonCode: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,127}$" }
+    RiskEventPayload:
+      type: object
+      additionalProperties: false
+      required: [riskId, state, severity, version]
+      properties:
+        riskId: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/RiskState" }
+        severity: { $ref: "#/components/schemas/RiskSeverity" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        action: { $ref: "#/components/schemas/RiskActionType" }
+        escalationLevel: { type: integer, minimum: 0, maximum: 100 }
+        reasonCode: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,127}$" }
+    ResourceEventPayload:
+      type: object
+      additionalProperties: false
+      required: [resourceId, state, version]
+      properties:
+        resourceId: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/ResourceState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        availabilityMode: { $ref: "#/components/schemas/AvailabilityMode" }
+        reasonCode: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,127}$" }
+    ReservationEventPayload:
+      type: object
+      additionalProperties: false
+      required: [reservationId, resourceId, state, version, interval, capacity, exclusive]
+      properties:
+        reservationId: { type: string, format: uuid }
+        resourceId: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/ReservationState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        capacity: { type: number, exclusiveMinimum: 0, maximum: 9007199254740991 }
+        exclusive: { type: boolean }
+        conflictKind: { $ref: "#/components/schemas/ReservationConflictKind" }
+        reasonCode: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,127}$" }

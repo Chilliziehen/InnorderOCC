@@ -39,3 +39,5 @@ export type {
   AuthorizationDecision,
   AuthorizationInput,
 } from "./authorization.js";
+
+export * from "./evidence-risk-resource.js";
