@@ -733,7 +733,7 @@ trap - EXIT
 - [ ] 已确认单客户、单主机、仅本机访问符合用途；远程、HA、Kubernetes需求不在当前支持范围。
 - [ ] 按第 02 章完成 OS/AMD64、Engine/Compose、Node 22、host `psql`、JDK 21 toolchain、真实 OPA、CPU/内存/磁盘/inode、时间、DNS/TLS和最终八端口预检。
 - [ ] 仓库 revision、工作区差异、审批、角色、维护/恢复窗口已记录。
-- [ ] 八个外部密钥互异、权限合格；`.env` 只有八路径和十二非敏感项，已忽略且 config通过。
+- [ ] 九个外部密钥（含 cursor key）互异、权限合格；`.env` 只有九路径和十二非敏感项，已忽略且 config通过。
 - [ ] `install:verified`、Electron来源守卫、Gradle strict、真实 OPA和 `verify:full` 无失败/跳过。
 - [ ] 六外部镜像 tag+digest和四本地 image ID/revision已记录；构建成功。
 - [ ] `up -d` 后两个 one-shot `exited 0`、八服务 `running healthy`；这些容器状态不是 Core聚合依赖结论。
