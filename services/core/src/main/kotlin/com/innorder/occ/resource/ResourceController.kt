@@ -29,7 +29,7 @@ class ResourceController(private val resources: ResourceService, private val map
         servletRequest: HttpServletRequest,
         @RequestHeader("Idempotency-Key") key: String,
         @Valid @RequestBody request: CreateResourceRequest,
-    ) = ResponseEntity.ok(resources.create(metadata(authentication, servletRequest, key, null), bytes(request), request))
+    ) = response(resources.create(metadata(authentication, servletRequest, key, null), bytes(request), request))
 
     @PatchMapping("/resources/{id}")
     fun update(
@@ -39,7 +39,7 @@ class ResourceController(private val resources: ResourceService, private val map
         @RequestHeader("Idempotency-Key") key: String,
         @RequestHeader("Expected-Version") expectedVersion: Long,
         @Valid @RequestBody request: UpdateResourceRequest,
-    ) = ResponseEntity.ok(
+    ) = response(
         resources.update(id, metadata(authentication, servletRequest, key, expectedVersion), bytes(request), request),
     )
 
@@ -51,7 +51,7 @@ class ResourceController(private val resources: ResourceService, private val map
         @RequestHeader("Idempotency-Key") key: String,
         @RequestHeader("Expected-Version") expectedVersion: Long,
         @Valid @RequestBody request: AddAvailabilityRequest,
-    ) = ResponseEntity.ok(
+    ) = response(
         resources.addAvailability(id, metadata(authentication, servletRequest, key, expectedVersion), bytes(request), request),
     )
 
@@ -62,7 +62,7 @@ class ResourceController(private val resources: ResourceService, private val map
         @PathVariable id: UUID,
         @RequestHeader("Idempotency-Key") key: String,
         @Valid @RequestBody request: ReserveResourceRequest,
-    ) = ResponseEntity.ok(resources.reserve(id, metadata(authentication, servletRequest, key, null), bytes(request), request))
+    ) = response(resources.reserve(id, metadata(authentication, servletRequest, key, null), bytes(request), request))
 
     @PatchMapping("/reservations/{id}")
     fun change(
@@ -72,7 +72,7 @@ class ResourceController(private val resources: ResourceService, private val map
         @RequestHeader("Idempotency-Key") key: String,
         @RequestHeader("Expected-Version") expectedVersion: Long,
         @Valid @RequestBody request: ChangeReservationRequest,
-    ) = ResponseEntity.ok(
+    ) = response(
         resources.change(id, metadata(authentication, servletRequest, key, expectedVersion), bytes(request), request),
     )
 
@@ -83,7 +83,7 @@ class ResourceController(private val resources: ResourceService, private val map
         @PathVariable id: UUID,
         @RequestHeader("Idempotency-Key") key: String,
         @RequestHeader("Expected-Version") expectedVersion: Long,
-    ) = ResponseEntity.ok(
+    ) = response(
         resources.cancel(id, metadata(authentication, servletRequest, key, expectedVersion), "{}".toByteArray()),
     )
 
@@ -128,4 +128,8 @@ class ResourceController(private val resources: ResourceService, private val map
     private fun correlation(request: HttpServletRequest) =
         UUID.fromString(request.getAttribute(CorrelationIdFilter.REQUEST_ATTRIBUTE) as String)
     private fun bytes(value: Any) = mapper.writeValueAsBytes(value)
+    private fun <T> response(result: ResourceCommandResult<T>): ResponseEntity<T> = ResponseEntity
+        .status(result.status)
+        .header("X-Idempotent-Replay", result.replayed.toString())
+        .body(result.body)
 }

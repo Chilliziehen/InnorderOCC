@@ -56,7 +56,9 @@ abstract class ResourceIntegrationSupport {
             UUID::class.java,
         )!!
 
-    protected fun entity(label: String): UUID = UUID.randomUUID().also { id ->
+    protected fun entity(label: String): UUID = entity(UUID.randomUUID(), label)
+
+    protected fun entity(id: UUID, label: String): UUID = id.also {
         jdbc.update(
             """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
                SELECT ?, entity_type_id, entity_type_version_id, ?, 'ACTIVE'
@@ -79,7 +81,7 @@ abstract class ResourceIntegrationSupport {
     protected fun createResource(capacity: Int = 10, state: ResourceState = ResourceState.AVAILABLE): ManagedResource {
         val id = entity("resource")
         val request = CreateResourceRequest(id, "ROOM", capacity.toBigDecimal(), state, mapOf("label" to "Room"))
-        return resources.create(metadata(), mapper.writeValueAsBytes(request), request)
+        return resources.create(metadata(), mapper.writeValueAsBytes(request), request).body
     }
 
     protected fun reserve(
@@ -94,7 +96,7 @@ abstract class ResourceIntegrationSupport {
         val request = ReserveResourceRequest(
             UUID.randomUUID(), requesterId, null, null, start, end, capacity.toBigDecimal(), exclusive,
         )
-        return resources.reserve(resourceId, metadata(key), mapper.writeValueAsBytes(request), request)
+        return resources.reserve(resourceId, metadata(key), mapper.writeValueAsBytes(request), request).body
     }
 
     @TestConfiguration(proxyBeanMethods = false)
@@ -191,7 +193,7 @@ abstract class ResourceIntegrationSupport {
             if (process?.isAlive == true) return
             process = ProcessBuilder(executable, "run", "--server", "--addr=127.0.0.1:$port", policyDirectory.toString())
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start()
-            repeat(100) {
+            repeat(400) {
                 if (process?.isAlive != true) error("OPA exited before readiness")
                 if (runCatching {
                         (URI("http://127.0.0.1:$port/health").toURL().openConnection() as HttpURLConnection).run {

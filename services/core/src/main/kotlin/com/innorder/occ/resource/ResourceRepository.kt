@@ -83,7 +83,7 @@ class ResourceRepository(
         resourceId, start, end,
     )
 
-    fun inventory(afterId: UUID?, limit: Int): List<ManagedResource> = if (afterId == null) {
+    fun inventory(afterId: UUID?, inclusive: Boolean, limit: Int): List<ManagedResource> = if (afterId == null) {
         jdbc.query(
             """SELECT id, resource_type, capacity, state, data::text, row_version
                FROM occ.managed_resource ORDER BY id LIMIT ?""",
@@ -93,7 +93,7 @@ class ResourceRepository(
     } else {
         jdbc.query(
             """SELECT id, resource_type, capacity, state, data::text, row_version
-               FROM occ.managed_resource WHERE id > ? ORDER BY id LIMIT ?""",
+               FROM occ.managed_resource WHERE id ${if (inclusive) ">=" else ">"} ? ORDER BY id LIMIT ?""",
             ::mapResource,
             afterId, limit,
         )
@@ -157,9 +157,11 @@ class ResourceRepository(
         end: OffsetDateTime,
         afterStart: OffsetDateTime?,
         afterId: UUID?,
+        inclusive: Boolean,
         limit: Int,
     ): List<Reservation> {
-        val cursorClause = if (afterStart == null) "" else "AND (lower(time_range), id) > (?::timestamptz, ?)"
+        val cursorClause = if (afterStart == null) "" else
+            "AND (lower(time_range), id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
         val arguments = mutableListOf<Any>(resourceId, start, end)
         if (afterStart != null) {
             arguments += afterStart
