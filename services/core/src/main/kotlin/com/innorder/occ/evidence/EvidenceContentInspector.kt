@@ -1,11 +1,8 @@
 package com.innorder.occ.evidence
 
-import org.xml.sax.InputSource
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
-import java.io.StringReader
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
@@ -24,7 +21,9 @@ import java.util.concurrent.TimeoutException
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
 import javax.xml.XMLConstants
-import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.stream.XMLInputFactory
+import javax.xml.stream.XMLStreamConstants
+import javax.xml.stream.XMLStreamException
 
 data class InspectionRequest(
     val path: Path,
@@ -66,6 +65,7 @@ enum class EvidenceRejectionCode {
     POLYGLOT,
     PDF_ENCRYPTED,
     PDF_ACTIVE_CONTENT,
+    MALFORMED_PDF,
     ARCHIVE_ENCRYPTED,
     ARCHIVE_TRAVERSAL,
     NESTED_ARCHIVE,
@@ -102,7 +102,7 @@ class EvidenceContentInspector(
         ) reject(EvidenceRejectionCode.POLYGLOT)
 
         val mediaType = when {
-            observation.magic.startsWith(PDF_MAGIC) -> inspectPdf(observation)
+            observation.magic.startsWith(PDF_MAGIC) -> inspectPdf(request)
             observation.magic.isZipMagic() -> inspectArchive(request)
             observation.magic.startsWith(OLE_MAGIC) && extension in OOXML_EXTENSIONS -> reject(EvidenceRejectionCode.OOXML_ENCRYPTED)
             observation.magic.startsWith(OLE_MAGIC) -> reject(EvidenceRejectionCode.UNSUPPORTED_SIGNATURE)
@@ -122,10 +122,10 @@ class EvidenceContentInspector(
 
         val scanRequest = ScanRequest(request.path, observation.sizeBytes, observation.sha256, mediaType, request.deadline)
         val scanResult = scanWithDeadline(scanRequest)
-        when (scanResult) {
-            ScanResult.CLEAN -> Unit
-            ScanResult.INFECTED -> reject(EvidenceRejectionCode.MALWARE_DETECTED)
-            ScanResult.ERROR -> reject(EvidenceRejectionCode.SCANNER_ERROR)
+        when (scanResult.status) {
+            ScanStatus.CLEAN -> Unit
+            ScanStatus.INFECTED -> reject(EvidenceRejectionCode.MALWARE_DETECTED)
+            ScanStatus.ERROR -> reject(EvidenceRejectionCode.SCANNER_ERROR)
         }
         return InspectedEvidence(observation.sha256, observation.sizeBytes, mediaType, extension, scanResult)
     }
@@ -138,8 +138,6 @@ class EvidenceContentInspector(
         var sawPdf = false
         var sawZip = false
         var sawUnsupportedSignature = false
-        var pdfEncrypted = false
-        var pdfActive = false
         try {
             Files.newInputStream(request.path).buffered().use { input ->
                 val buffer = ByteArray(BUFFER_SIZE)
@@ -160,8 +158,6 @@ class EvidenceContentInspector(
                     sawPdf = sawPdf || text.contains(PDF_SIGNATURE)
                     sawZip = sawZip || ZIP_SIGNATURES.any { text.contains(it) }
                     sawUnsupportedSignature = sawUnsupportedSignature || UNSUPPORTED_SIGNATURES.any { text.contains(it) }
-                    pdfEncrypted = pdfEncrypted || PDF_ENCRYPTED_MARKERS.any(text::contains)
-                    pdfActive = pdfActive || PDF_ACTIVE_MARKERS.any(text::contains)
                     tail = window.takeLastBytes(SCAN_OVERLAP)
                 }
             }
@@ -177,14 +173,13 @@ class EvidenceContentInspector(
             sawPdf,
             sawZip,
             sawUnsupportedSignature,
-            pdfEncrypted,
-            pdfActive,
         )
     }
 
-    private fun inspectPdf(observation: Observation): String {
-        if (observation.pdfEncrypted) reject(EvidenceRejectionCode.PDF_ENCRYPTED)
-        if (observation.pdfActive) reject(EvidenceRejectionCode.PDF_ACTIVE_CONTENT)
+    private fun inspectPdf(request: InspectionRequest): String {
+        runWithDeadline(request.deadline, EvidenceRejectionCode.DEADLINE_EXCEEDED) {
+            PdfContentValidator(request.policy) { checkDeadline(request.deadline) }.validate(request.path)
+        }
         return "application/pdf"
     }
 
@@ -192,11 +187,11 @@ class EvidenceContentInspector(
         if (observeArchiveFlags(request.path, request.deadline)) {
             reject(if (request.fileName.substringAfterLast('.', "") in OOXML_EXTENSIONS) EvidenceRejectionCode.OOXML_ENCRYPTED else EvidenceRejectionCode.ARCHIVE_ENCRYPTED)
         }
-        validateZipEnd(request.path, request.deadline, request.policy.archiveLimits.maximumEntries)
+        validateZipStructure(request.path, request.deadline, request.policy.archiveLimits)
         val names = HashSet<String>()
         var expandedBytes = 0L
         var compressedBytes = 0L
-        var contentTypes: ByteArray? = null
+        val xmlParts = HashMap<String, ByteArray>()
         var officeRoot: String? = null
         try {
             ZipFile(request.path.toFile(), ZipFile.OPEN_READ, StandardCharsets.UTF_8).use { archive ->
@@ -213,7 +208,7 @@ class EvidenceContentInspector(
                     val compressed = entry.compressedSize
                     if (compressed < 0) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
                     compressedBytes = addBounded(compressedBytes, compressed, EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
-                    val captureXml = entry.name == CONTENT_TYPES || entry.name.endsWith(".rels")
+                    val captureXml = entry.name == CONTENT_TYPES || entry.name.endsWith(".rels") || entry.name in OOXML_MAIN_PART_BY_ROOT.values
                     val captured = if (captureXml) ByteArrayOutputStream() else null
                     var entryBytes = 0L
                     var firstBytes = ByteArray(0)
@@ -231,8 +226,8 @@ class EvidenceContentInspector(
                             if (ratio(entryBytes, compressed) > request.policy.archiveLimits.maximumCompressionRatio ||
                                 ratio(expandedBytes, compressedBytes) > request.policy.archiveLimits.maximumCompressionRatio
                             ) reject(EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
-                            if (firstBytes.size < MAGIC_BYTES) {
-                                val needed = minOf(MAGIC_BYTES - firstBytes.size, count)
+                            if (firstBytes.size < ARCHIVE_MAGIC_BYTES) {
+                                val needed = minOf(ARCHIVE_MAGIC_BYTES - firstBytes.size, count)
                                 firstBytes += buffer.copyOfRange(0, needed)
                             }
                             if (captured != null) {
@@ -251,15 +246,24 @@ class EvidenceContentInspector(
                         reject(EvidenceRejectionCode.OOXML_ACTIVE_CONTENT)
                     }
                     captured?.toByteArray()?.let { xml ->
-                        if (entry.name == CONTENT_TYPES) contentTypes = xml
-                        if (entry.name.endsWith(".rels")) inspectRelationships(xml)
+                        xmlParts[entry.name] = xml
                     }
                 }
             }
-            contentTypes?.let { officeRoot = inspectContentTypes(it) }
+            xmlParts[CONTENT_TYPES]?.let { officeRoot = inspectContentTypes(it, request.deadline) }
             officeRoot?.let { root ->
                 val requiredPart = OOXML_MAIN_PART_BY_ROOT.getValue(root)
                 if (requiredPart !in names) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                validateXml(xmlParts[requiredPart] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE), request.deadline)
+                val rootRelationships = xmlParts[ROOT_RELATIONSHIPS]
+                    ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                val relationships = inspectRelationships(rootRelationships, request.deadline)
+                val officeRelationships = relationships.filter { it.type.endsWith("/officeDocument") }
+                if (officeRelationships.size != 1 || normalizeRelationshipTarget(officeRelationships.single().target) != requiredPart) {
+                    reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                }
+                xmlParts.filterKeys { it.endsWith(".rels") && it != ROOT_RELATIONSHIPS }
+                    .values.forEach { inspectRelationships(it, request.deadline) }
             }
         } catch (rejected: EvidenceRejectedException) {
             throw rejected
@@ -277,50 +281,106 @@ class EvidenceContentInspector(
         }
     }
 
-    private fun inspectContentTypes(xml: ByteArray): String? {
-        val document = parseXml(xml)
-        val elements = document.getElementsByTagNameNS("*", "Override")
+    private fun inspectContentTypes(xml: ByteArray, deadline: Instant): String? {
         var root: String? = null
-        for (index in 0 until elements.length) {
-            val element = elements.item(index)
-            val type = element.attributes?.getNamedItem("ContentType")?.nodeValue ?: continue
-            if (type.contains("macroEnabled", ignoreCase = true) || type.contains("vbaProject", ignoreCase = true)) {
-                reject(EvidenceRejectionCode.OOXML_MACRO)
-            }
-            OOXML_MAIN_TYPES[type]?.let { detected ->
-                if (root != null && root != detected) reject(EvidenceRejectionCode.POLYGLOT)
-                root = detected
+        val rootElement = parseXml(xml, deadline) { name, attributes ->
+            if (name == "Override") {
+                val type = attributes["ContentType"] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                if (type.contains("macroEnabled", ignoreCase = true) || type.contains("vbaProject", ignoreCase = true)) {
+                    reject(EvidenceRejectionCode.OOXML_MACRO)
+                }
+                OOXML_MAIN_TYPES[type]?.let { detected ->
+                    val partName = attributes["PartName"]?.removePrefix("/")
+                    if (partName != OOXML_MAIN_PART_BY_ROOT.getValue(detected)) {
+                        reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                    }
+                    if (root != null && root != detected) reject(EvidenceRejectionCode.POLYGLOT)
+                    root = detected
+                }
             }
         }
-        if (root == null && document.documentElement.localName == "Types") reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        if (rootElement != "Types" || root == null) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
         return root
     }
 
-    private fun inspectRelationships(xml: ByteArray) {
-        val document = parseXml(xml)
-        val relationships = document.getElementsByTagNameNS("*", "Relationship")
-        for (index in 0 until relationships.length) {
-            val attributes = relationships.item(index).attributes ?: continue
-            if (attributes.getNamedItem("TargetMode")?.nodeValue.equals("External", ignoreCase = true)) {
-                reject(EvidenceRejectionCode.OOXML_ACTIVE_CONTENT)
+    private fun inspectRelationships(xml: ByteArray, deadline: Instant): List<PackageRelationship> {
+        val relationships = mutableListOf<PackageRelationship>()
+        val rootElement = parseXml(xml, deadline) { name, attributes ->
+            if (name == "Relationship") {
+                val target = attributes["Target"] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                if (attributes["TargetMode"].equals("External", ignoreCase = true) || isExternalRelationshipTarget(target)) {
+                    reject(EvidenceRejectionCode.OOXML_ACTIVE_CONTENT)
+                }
+                relationships += PackageRelationship(
+                    type = attributes["Type"] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE),
+                    target = target,
+                )
             }
         }
+        if (rootElement != "Relationships") reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        return relationships
     }
 
-    private fun parseXml(xml: ByteArray) = try {
-        val factory = DocumentBuilderFactory.newInstance()
-        factory.isNamespaceAware = true
-        factory.isXIncludeAware = false
-        factory.isExpandEntityReferences = false
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
-        factory.newDocumentBuilder().apply { setEntityResolver { _, _ -> InputSource(StringReader("")) } }
-            .parse(ByteArrayInputStream(xml))
-    } catch (failure: Exception) {
-        throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_ARCHIVE, failure)
+    private fun validateXml(xml: ByteArray, deadline: Instant) {
+        parseXml(xml, deadline) { _, _ -> }
+    }
+
+    private fun parseXml(
+        xml: ByteArray,
+        deadline: Instant,
+        onStartElement: (String, Map<String, String>) -> Unit,
+    ): String {
+        try {
+            checkDeadline(deadline)
+            val factory = XMLInputFactory.newFactory().apply {
+                setProperty(XMLInputFactory.SUPPORT_DTD, false)
+                setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false)
+                setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, false)
+                setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "")
+                setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
+            }
+            val reader = factory.createXMLStreamReader(xml.inputStream(), StandardCharsets.UTF_8.name())
+            var depth = 0
+            var events = 0
+            var textCharacters = 0L
+            var rootElement: String? = null
+            try {
+                while (reader.hasNext()) {
+                    checkDeadline(deadline)
+                    events++
+                    if (events > MAXIMUM_XML_EVENTS) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                    when (reader.next()) {
+                        XMLStreamConstants.START_ELEMENT -> {
+                            depth++
+                            if (depth > MAXIMUM_XML_DEPTH || reader.attributeCount > MAXIMUM_XML_ATTRIBUTES) {
+                                reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                            }
+                            if (rootElement == null) rootElement = reader.localName
+                            val attributes = buildMap {
+                                for (index in 0 until reader.attributeCount) put(reader.getAttributeLocalName(index), reader.getAttributeValue(index))
+                            }
+                            onStartElement(reader.localName, attributes)
+                        }
+                        XMLStreamConstants.END_ELEMENT -> depth--
+                        XMLStreamConstants.CHARACTERS, XMLStreamConstants.CDATA -> {
+                            textCharacters += reader.textLength
+                            if (textCharacters > MAXIMUM_XML_TEXT_CHARACTERS) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                        }
+                        XMLStreamConstants.DTD, XMLStreamConstants.ENTITY_REFERENCE -> reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                    }
+                }
+            } finally {
+                reader.close()
+            }
+            checkDeadline(deadline)
+            return rootElement ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        } catch (rejected: EvidenceRejectedException) {
+            throw rejected
+        } catch (failure: XMLStreamException) {
+            throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_ARCHIVE, failure)
+        } catch (failure: IllegalArgumentException) {
+            throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_ARCHIVE, failure)
+        }
     }
 
     private fun isUtf8Text(path: Path, deadline: Instant): Boolean = try {
@@ -337,28 +397,39 @@ class EvidenceContentInspector(
             }
         }
         true
-    } catch (_: Exception) {
+    } catch (rejected: EvidenceRejectedException) {
+        throw rejected
+    } catch (_: IOException) {
         false
     }
 
     private fun scanWithDeadline(request: ScanRequest): ScanResult {
-        checkDeadline(request.deadline)
-        val remaining = Duration.between(clock.instant(), request.deadline).toMillis()
-        if (remaining <= 0) reject(EvidenceRejectionCode.DEADLINE_EXCEEDED)
-        val executor = Executors.newSingleThreadExecutor { work ->
-            Thread(work, "evidence-malware-scan").apply { isDaemon = true }
+        return runWithDeadline(request.deadline, EvidenceRejectionCode.SCANNER_ERROR, propagateRejection = false) {
+            malwareScanner.scan(request)
         }
+    }
+
+    private fun <T> runWithDeadline(
+        deadline: Instant,
+        timeoutCode: EvidenceRejectionCode,
+        propagateRejection: Boolean = true,
+        action: () -> T,
+    ): T {
+        checkDeadline(deadline)
+        val remaining = Duration.between(clock.instant(), deadline).toMillis()
+        if (remaining <= 0) reject(EvidenceRejectionCode.DEADLINE_EXCEEDED)
+        val executor = Executors.newSingleThreadExecutor { work -> Thread(work, "evidence-hostile-parser").apply { isDaemon = true } }
         return try {
-            val result = executor.submit<ScanResult> { malwareScanner.scan(request) }.get(remaining, TimeUnit.MILLISECONDS)
-            checkDeadline(request.deadline)
-            result ?: reject(EvidenceRejectionCode.SCANNER_ERROR)
+            executor.submit<T> { action() }.get(remaining, TimeUnit.MILLISECONDS) ?: reject(timeoutCode)
+        } catch (failure: ExecutionException) {
+            val cause = failure.cause
+            if (propagateRejection && cause is EvidenceRejectedException) throw cause
+            reject(timeoutCode)
         } catch (_: TimeoutException) {
-            reject(EvidenceRejectionCode.SCANNER_ERROR)
-        } catch (_: ExecutionException) {
-            reject(EvidenceRejectionCode.SCANNER_ERROR)
+            reject(timeoutCode)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            reject(EvidenceRejectionCode.SCANNER_ERROR)
+            reject(timeoutCode)
         } finally {
             executor.shutdownNow()
         }
@@ -374,7 +445,21 @@ class EvidenceContentInspector(
 
     private fun isNestedArchive(name: String, firstBytes: ByteArray): Boolean =
         name.substringAfterLast('.', "").lowercase() in ARCHIVE_EXTENSIONS ||
-            firstBytes.startsWith(ZIP_MAGIC) || firstBytes.startsWith(OLE_MAGIC)
+            NESTED_ARCHIVE_MAGICS.any { firstBytes.startsWith(it) } || firstBytes.isTarArchive()
+
+    private fun normalizeRelationshipTarget(target: String): String {
+        val normalized = target.replace('\\', '/').removePrefix("/")
+        if (normalized.isBlank() || ':' in normalized || normalized.split('/').any { it == ".." || it == "." || it.isEmpty() }) {
+            reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        }
+        return normalized
+    }
+
+    private fun isExternalRelationshipTarget(target: String): Boolean = try {
+        target.startsWith("//") || java.net.URI(target).isAbsolute
+    } catch (failure: java.net.URISyntaxException) {
+        throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_ARCHIVE, failure)
+    }
 
     private fun observeArchiveFlags(path: Path, deadline: Instant): Boolean {
         try {
@@ -397,7 +482,7 @@ class EvidenceContentInspector(
         }
     }
 
-    private fun validateZipEnd(path: Path, deadline: Instant, maximumEntries: Int) {
+    private fun validateZipStructure(path: Path, deadline: Instant, limits: ArchiveLimits) {
         try {
             Files.newByteChannel(path, StandardOpenOption.READ).use { channel ->
                 val fileSize = channel.size()
@@ -424,16 +509,82 @@ class EvidenceContentInspector(
                 if (diskNumber != 0 || centralDirectoryDisk != 0 || entriesOnDisk != entryCount) {
                     reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
                 }
-                if (entryCount > maximumEntries) reject(EvidenceRejectionCode.ARCHIVE_ENTRY_LIMIT)
+                if (entryCount > limits.maximumEntries) reject(EvidenceRejectionCode.ARCHIVE_ENTRY_LIMIT)
                 val commentLength = (bytes[endIndex + 20].toInt() and 0xff) or ((bytes[endIndex + 21].toInt() and 0xff) shl 8)
-                val absoluteEnd = fileSize - tailSize + endIndex + ZIP_END_MINIMUM_BYTES + commentLength
+                val absoluteEndIndex = fileSize - tailSize + endIndex
+                val absoluteEnd = absoluteEndIndex + ZIP_END_MINIMUM_BYTES + commentLength
                 if (absoluteEnd != fileSize) reject(EvidenceRejectionCode.POLYGLOT)
+                val centralSize = unsignedInt(bytes, endIndex + 12)
+                val centralOffset = unsignedInt(bytes, endIndex + 16)
+                if (centralOffset > absoluteEndIndex || centralSize > absoluteEndIndex - centralOffset ||
+                    centralOffset + centralSize != absoluteEndIndex
+                ) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                inspectCentralDirectory(channel, centralOffset, centralSize, entryCount, limits, deadline)
             }
         } catch (rejected: EvidenceRejectedException) {
             throw rejected
         } catch (failure: IOException) {
             throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_ARCHIVE, failure)
         }
+    }
+
+    private fun inspectCentralDirectory(
+        channel: java.nio.channels.SeekableByteChannel,
+        offset: Long,
+        size: Long,
+        expectedEntries: Int,
+        limits: ArchiveLimits,
+        deadline: Instant,
+    ) {
+        channel.position(offset)
+        var remaining = size
+        var entries = 0
+        var expandedBytes = 0L
+        var compressedBytes = 0L
+        while (remaining > 0) {
+            checkDeadline(deadline)
+            if (remaining < ZIP_CENTRAL_HEADER_BYTES) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            val fixed = readExactly(channel, ZIP_CENTRAL_HEADER_BYTES, deadline)
+            remaining -= ZIP_CENTRAL_HEADER_BYTES
+            if (!fixed.matchesAt(0, ZIP_CENTRAL_MAGIC)) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            val flags = unsignedShort(fixed, 8)
+            if (flags and 1 != 0) reject(EvidenceRejectionCode.ARCHIVE_ENCRYPTED)
+            val compressed = unsignedInt(fixed, 20)
+            val expanded = unsignedInt(fixed, 24)
+            if (compressed == ZIP64_SENTINEL || expanded == ZIP64_SENTINEL) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            val nameLength = unsignedShort(fixed, 28)
+            val extraLength = unsignedShort(fixed, 30)
+            val commentLength = unsignedShort(fixed, 32)
+            val variableLength = nameLength.toLong() + extraLength + commentLength
+            if (variableLength > remaining) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            val nameBytes = readExactly(channel, nameLength, deadline)
+            val charset = if (flags and UTF8_ZIP_FLAG != 0) StandardCharsets.UTF_8 else ZIP_LEGACY_CHARSET
+            validateEntryName(String(nameBytes, charset))
+            channel.position(channel.position() + extraLength + commentLength)
+            remaining -= variableLength
+            entries++
+            if (entries > limits.maximumEntries) reject(EvidenceRejectionCode.ARCHIVE_ENTRY_LIMIT)
+            expandedBytes = addBounded(expandedBytes, expanded, EvidenceRejectionCode.ARCHIVE_EXPANDED_SIZE_LIMIT)
+            compressedBytes = addBounded(compressedBytes, compressed, EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
+            if (expandedBytes > limits.maximumExpandedBytes) reject(EvidenceRejectionCode.ARCHIVE_EXPANDED_SIZE_LIMIT)
+            if (ratio(expanded, compressed) > limits.maximumCompressionRatio ||
+                ratio(expandedBytes, compressedBytes) > limits.maximumCompressionRatio
+            ) reject(EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
+        }
+        if (entries != expectedEntries) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+    }
+
+    private fun readExactly(
+        channel: java.nio.channels.SeekableByteChannel,
+        count: Int,
+        deadline: Instant,
+    ): ByteArray {
+        val buffer = ByteBuffer.allocate(count)
+        while (buffer.hasRemaining()) {
+            checkDeadline(deadline)
+            if (channel.read(buffer) < 0) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        }
+        return buffer.array()
     }
 
     private fun hasEncryptedZipHeader(bytes: ByteArray): Boolean {
@@ -462,6 +613,12 @@ class EvidenceContentInspector(
     private fun unsignedShort(bytes: ByteArray, offset: Int): Int =
         (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
 
+    private fun unsignedInt(bytes: ByteArray, offset: Int): Long =
+        (bytes[offset].toLong() and 0xff) or
+            ((bytes[offset + 1].toLong() and 0xff) shl 8) or
+            ((bytes[offset + 2].toLong() and 0xff) shl 16) or
+            ((bytes[offset + 3].toLong() and 0xff) shl 24)
+
     private fun checkDeadline(deadline: Instant) {
         if (!clock.instant().isBefore(deadline)) reject(EvidenceRejectionCode.DEADLINE_EXCEEDED)
     }
@@ -475,22 +632,33 @@ class EvidenceContentInspector(
         val sawPdf: Boolean,
         val sawZip: Boolean,
         val sawUnsupportedSignature: Boolean,
-        val pdfEncrypted: Boolean,
-        val pdfActive: Boolean,
     )
+
+    private data class PackageRelationship(val type: String, val target: String)
 
     companion object {
         private const val BUFFER_SIZE = 8 * 1024
         private const val MAGIC_BYTES = 16
+        private const val ARCHIVE_MAGIC_BYTES = 512
         private const val SCAN_OVERLAP = 64
         private const val MAXIMUM_XML_BYTES = 1024 * 1024
+        private const val MAXIMUM_XML_EVENTS = 20_000
+        private const val MAXIMUM_XML_DEPTH = 64
+        private const val MAXIMUM_XML_ATTRIBUTES = 32
+        private const val MAXIMUM_XML_TEXT_CHARACTERS = 1_048_576L
         private const val ZIP_END_MINIMUM_BYTES = 22
         private const val MAXIMUM_ZIP_END_BYTES = ZIP_END_MINIMUM_BYTES + 65_535
+        private const val ZIP_CENTRAL_HEADER_BYTES = 46
+        private const val UTF8_ZIP_FLAG = 1 shl 11
+        private const val ZIP64_SENTINEL = 0xffff_ffffL
         private const val CONTENT_TYPES = "[Content_Types].xml"
+        private const val ROOT_RELATIONSHIPS = "_rels/.rels"
         private val PDF_MAGIC = "%PDF-".toByteArray(StandardCharsets.ISO_8859_1)
         private const val PDF_SIGNATURE = "%PDF-"
         private val ZIP_MAGIC = byteArrayOf(0x50, 0x4b, 0x03, 0x04)
         private val ZIP_END_MAGIC = byteArrayOf(0x50, 0x4b, 0x05, 0x06)
+        private val ZIP_CENTRAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x01, 0x02)
+        private val ZIP_LEGACY_CHARSET = java.nio.charset.Charset.forName("IBM437")
         private val ZIP_SIGNATURES = listOf("PK\u0003\u0004", "PK\u0005\u0006", "PK\u0007\u0008")
         private val UNSUPPORTED_SIGNATURE_BYTES = listOf(
             byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
@@ -505,10 +673,15 @@ class EvidenceContentInspector(
         )
         private val UNSUPPORTED_SIGNATURES = UNSUPPORTED_SIGNATURE_BYTES.map { String(it, StandardCharsets.ISO_8859_1) }
         private val OLE_MAGIC = byteArrayOf(0xd0.toByte(), 0xcf.toByte(), 0x11, 0xe0.toByte(), 0xa1.toByte(), 0xb1.toByte(), 0x1a, 0xe1.toByte())
-        private val PDF_ENCRYPTED_MARKERS = listOf("/Encrypt")
-        private val PDF_ACTIVE_MARKERS = listOf(
-            "/EmbeddedFile", "/Filespec", "/OpenAction", "/AA", "/JavaScript", "/JS", "/Launch",
-            "/RichMedia", "/URI", "/AcroForm", "/SubmitForm", "/ImportData", "/GoToR", "/Sound", "/Movie",
+        private val NESTED_ARCHIVE_MAGICS = listOf(
+            ZIP_MAGIC,
+            OLE_MAGIC,
+            byteArrayOf(0x1f, 0x8b.toByte()),
+            byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c),
+            "Rar!\u001a\u0007".toByteArray(StandardCharsets.ISO_8859_1),
+            byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00),
+            "BZh".toByteArray(StandardCharsets.ISO_8859_1),
+            byteArrayOf(0x28, 0xb5.toByte(), 0x2f, 0xfd.toByte()),
         )
         private val OOXML_EXTENSIONS = setOf("docx", "xlsx", "pptx")
         private val ARCHIVE_EXTENSIONS = setOf("zip", "jar", "docx", "xlsx", "pptx", "odt", "ods", "odp", "7z", "rar", "gz", "tar")
@@ -535,6 +708,9 @@ class EvidenceContentInspector(
         private fun ByteArray.isZipMagic(): Boolean = startsWith(ZIP_MAGIC) || startsWith(ZIP_END_MAGIC)
 
         private fun ByteArray.hasUnsupportedMagic(): Boolean = UNSUPPORTED_SIGNATURE_BYTES.any { startsWith(it) }
+
+        private fun ByteArray.isTarArchive(): Boolean = size >= 262 &&
+            copyOfRange(257, 262).contentEquals("ustar".toByteArray(StandardCharsets.ISO_8859_1))
 
         private fun ByteArray.matchesAt(offset: Int, expected: ByteArray): Boolean =
             offset >= 0 && size - offset >= expected.size && expected.indices.all { this[offset + it] == expected[it] }
