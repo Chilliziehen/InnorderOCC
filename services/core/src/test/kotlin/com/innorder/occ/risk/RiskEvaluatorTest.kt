@@ -166,6 +166,29 @@ class RiskEvaluatorTest {
         }.isInstanceOf(IllegalArgumentException::class.java)
     }
 
+    @Test
+    fun `inactivity rejects elapsed days outside signed long range`() {
+        assertThatThrownBy {
+            rule("""{"type":"INACTIVITY","elapsedDays":18446744073709551623}""")
+        }.isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun `numeric trigger fields reject integer overflow and fractional coercion`() {
+        listOf(
+            """{"type":"CONSECUTIVE_RETURNS","threshold":4294967298}""",
+            """{"type":"BLOCKER_AGE","businessDays":4294967298}""",
+            """{"type":"CONSECUTIVE_RETURNS","threshold":2.0}""",
+            """{"type":"INACTIVITY","elapsedDays":7.0}""",
+            """{"type":"BLOCKER_AGE","businessDays":2.0}""",
+        ).forEach { trigger ->
+            val metadata = if (trigger.contains("BLOCKER_AGE")) BUSINESS_METADATA else DEFAULT_METADATA
+            assertThatThrownBy { rule(trigger, metadata) }
+                .describedAs(trigger)
+                .isInstanceOf(IllegalArgumentException::class.java)
+        }
+    }
+
     private fun evaluate(rule: RiskRule, facts: RiskEvaluationFacts, at: Instant): RiskDecision? =
         evaluator.evaluate(rule, facts, at)
 
@@ -176,7 +199,7 @@ class RiskEvaluatorTest {
 
     private fun businessRule(): RiskRule = rule(
         """{"type":"BLOCKER_AGE"}""",
-        extra = """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":[],"thresholdKind":"BUSINESS"""",
+        extra = BUSINESS_METADATA,
     )
 
     private fun ruleJson(trigger: String, extra: String = DEFAULT_METADATA): String =
@@ -193,5 +216,6 @@ class RiskEvaluatorTest {
         private val FACT_2 = UUID.fromString("30000000-0000-0000-0000-000000000002")
         private val FACT_3 = UUID.fromString("30000000-0000-0000-0000-000000000003")
         private const val DEFAULT_METADATA = """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":[],"thresholdKind":"ELAPSED""""
+        private const val BUSINESS_METADATA = """"severity":"YELLOW","sla":"PT8H","ownerRelationship":"TEACHER","escalationSteps":[],"thresholdKind":"BUSINESS""""
     }
 }

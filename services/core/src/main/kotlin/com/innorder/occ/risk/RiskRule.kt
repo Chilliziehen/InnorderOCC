@@ -144,7 +144,7 @@ class RiskRule private constructor(
 
         private inline fun <T> ObjectNode.optionalPositiveLong(name: String, default: Long, factory: (Long) -> T): T {
             objectWithOnly(setOf("type", name))
-            val value = get(name)?.let { require(it.isIntegralNumber); it.longValue() } ?: default
+            val value = get(name)?.let { require(it.isIntegralNumber && it.canConvertToLong()); it.longValue() } ?: default
             require(value > 0)
             return factory(value)
         }
