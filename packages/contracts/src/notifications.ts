@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { workflowEventSchema } from "./events.js";
+import { workflowEventSchema, workflowEventTypeSchema } from "./events.js";
 import {
   cursorPageInfoSchema,
   cursorSchema,
@@ -44,9 +44,9 @@ export const markNotificationReadRequestSchema = z
 
 export const eventCatchUpQuerySchema = z
   .object({
-    afterCursor: safeIntegerSchema.optional(),
     cursor: cursorSchema.optional(),
-    pageSize: pageSizeSchema,
+    limit: pageSizeSchema,
+    filter: workflowEventTypeSchema.optional(),
   })
   .strict();
 export const workflowEventPageSchema = z

@@ -112,4 +112,14 @@ describe("workflow typed event registry", () => {
       })).toThrow();
     }
   });
+
+  it("keeps owner changes out of member event roles", () => {
+    for (const type of ["cohort.member-added", "cohort.member-removed"] as const) {
+      const event = eventFor(type);
+      expect(() => workflowEventSchema.parse({
+        ...event,
+        payload: { ...event.payload, role: "OWNER" },
+      })).toThrow();
+    }
+  });
 });

@@ -106,8 +106,26 @@ export const taskGateUnavailableProblemDetailsSchema = problemDetailsSchema
   })
   .strict();
 
+export const taskCompletionConflictProblemDetailsSchema = problemDetailsSchema
+  .extend({ status: z.literal(409) })
+  .strict()
+  .refine((problem) => problem.code !== "OCC_TASK_BLOCKED", {
+    path: ["code"],
+    message: "OCC_TASK_BLOCKED requires blockerCodes",
+  });
+
+export const taskCompletionDependencyProblemDetailsSchema = problemDetailsSchema
+  .extend({ status: z.literal(503) })
+  .strict()
+  .refine((problem) => problem.code !== "OCC_TASK_GATE_UNAVAILABLE", {
+    path: ["code"],
+    message: "OCC_TASK_GATE_UNAVAILABLE requires providerKeys",
+  });
+
 export type WorkflowErrorCode = z.infer<typeof workflowErrorCodeSchema>;
 export type PlatformProblemCode = z.infer<typeof platformProblemCodeSchema>;
 export type ProblemCode = z.infer<typeof problemCodeSchema>;
 export type TaskBlockedProblemDetails = z.infer<typeof taskBlockedProblemDetailsSchema>;
 export type TaskGateUnavailableProblemDetails = z.infer<typeof taskGateUnavailableProblemDetailsSchema>;
+export type TaskCompletionConflictProblemDetails = z.infer<typeof taskCompletionConflictProblemDetailsSchema>;
+export type TaskCompletionDependencyProblemDetails = z.infer<typeof taskCompletionDependencyProblemDetailsSchema>;

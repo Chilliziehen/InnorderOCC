@@ -45,6 +45,8 @@ import {
   taskPageSchema,
   taskPresentationStateSchema,
   taskBlockedProblemDetailsSchema,
+  taskCompletionConflictProblemDetailsSchema,
+  taskCompletionDependencyProblemDetailsSchema,
   taskGateUnavailableProblemDetailsSchema,
   transferCohortOwnerRequestSchema,
   transferProcessRequestSchema,
@@ -235,7 +237,13 @@ describe("notification and event catch-up contracts", () => {
     } as const;
     expect(notificationPageSchema.parse({ items: [notification], page: {} })).toBeDefined();
     expect(markNotificationReadRequestSchema.parse({ expectedVersion: 0 })).toEqual({ expectedVersion: 0 });
-    expect(eventCatchUpQuerySchema.parse({ afterCursor: 0 })).toMatchObject({ pageSize: 25 });
+    expect(eventCatchUpQuerySchema.parse({})).toEqual({ limit: 25 });
+    expect(eventCatchUpQuerySchema.parse({ cursor: "opaque", limit: 100, filter: "task.completed" })).toEqual({
+      cursor: "opaque", limit: 100, filter: "task.completed",
+    });
+    for (const invalid of [{ afterCursor: 0 }, { pageSize: 25 }, { filter: "unknown.event" }]) {
+      expect(() => eventCatchUpQuerySchema.parse(invalid)).toThrow();
+    }
     expect(workflowEventPageSchema.parse({ items: [], page: {} })).toBeDefined();
     expect(() => workflowEventPageSchema.parse({
       items: [{
@@ -303,5 +311,18 @@ describe("workflow Problem Details", () => {
         correlationId: id,
       })).toBeDefined();
     }
+  });
+
+  it("requires specialized fields whenever completion uses a specialized code", () => {
+    expect(() => taskCompletionConflictProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_TASK_BLOCKED",
+    })).toThrow();
+    expect(() => taskCompletionDependencyProblemDetailsSchema.parse(problem)).toThrow();
+    expect(taskCompletionConflictProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_STALE_VERSION",
+    })).toBeDefined();
+    expect(taskCompletionDependencyProblemDetailsSchema.parse({
+      ...problem, code: "OCC_WORKFLOW_UNAVAILABLE",
+    })).toBeDefined();
   });
 });

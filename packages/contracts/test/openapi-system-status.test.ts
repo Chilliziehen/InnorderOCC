@@ -207,7 +207,10 @@ describe("OCC Core OpenAPI system status", () => {
       const schema = response.content?.["application/problem+json"]?.schema;
       if (name === "TaskBlocked" || name === "TaskGateUnavailable") {
         expect(schema?.oneOf).toHaveLength(2);
-        expect(schema?.oneOf?.[1]?.$ref).toBe("#/components/schemas/ProblemDetails");
+        const genericSchema = name === "TaskBlocked"
+          ? "TaskCompletionConflictProblem"
+          : "TaskCompletionDependencyProblem";
+        expect(schema?.oneOf?.[1]?.$ref).toBe(`#/components/schemas/${genericSchema}`);
       } else {
         expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
       }
@@ -251,7 +254,10 @@ describe("OCC Core OpenAPI system status", () => {
           const schema = resolvedResponse?.content?.["application/problem+json"]?.schema;
           if (path === "/api/v1/tasks/{taskId}/complete" && ["409", "503"].includes(status)) {
             expect(schema?.oneOf).toHaveLength(2);
-            expect(schema?.oneOf?.[1]?.$ref).toBe("#/components/schemas/ProblemDetails");
+            const genericSchema = status === "409"
+              ? "TaskCompletionConflictProblem"
+              : "TaskCompletionDependencyProblem";
+            expect(schema?.oneOf?.[1]?.$ref).toBe(`#/components/schemas/${genericSchema}`);
           } else {
             expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
           }

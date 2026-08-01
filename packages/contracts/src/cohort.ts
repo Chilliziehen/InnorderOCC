@@ -22,6 +22,7 @@ const hasValidDateOrder = (value: {
 
 export const cohortStatusSchema = z.enum(["DRAFT", "ACTIVE", "ARCHIVED"]);
 export const cohortMemberRoleSchema = z.enum(["OWNER", "TEACHER", "PARTICIPANT"]);
+export const cohortManageableMemberRoleSchema = z.enum(["TEACHER", "PARTICIPANT"]);
 
 export const createCohortRequestSchema = z
   .object({
@@ -58,7 +59,7 @@ export const addCohortMemberRequestSchema = z
   .object({
     expectedVersion: safeVersionSchema,
     principalId: uuidSchema,
-    role: z.enum(["TEACHER", "PARTICIPANT"]),
+    role: cohortManageableMemberRoleSchema,
     validUntil: instantSchema.optional(),
   })
   .strict();
@@ -67,7 +68,7 @@ export const removeCohortMemberRequestSchema = z
   .object({
     expectedVersion: safeVersionSchema,
     principalId: uuidSchema,
-    role: z.enum(["TEACHER", "PARTICIPANT"]),
+    role: cohortManageableMemberRoleSchema,
   })
   .strict();
 

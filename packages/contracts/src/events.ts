@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { cohortMemberRoleSchema, cohortStatusSchema } from "./cohort.js";
+import { cohortManageableMemberRoleSchema, cohortStatusSchema } from "./cohort.js";
 import { blockerCodeSchema } from "./task.js";
 import {
   activityKeySchema,
@@ -90,12 +90,12 @@ export const workflowEventSchemas = {
   "cohort.member-added": typedEvent("cohort.member-added", "COHORT", "cohortId", strictPayload({
     cohortId: uuidSchema,
     principalId: uuidSchema,
-    role: cohortMemberRoleSchema,
+    role: cohortManageableMemberRoleSchema,
   })),
   "cohort.member-removed": typedEvent("cohort.member-removed", "COHORT", "cohortId", strictPayload({
     cohortId: uuidSchema,
     principalId: uuidSchema,
-    role: cohortMemberRoleSchema,
+    role: cohortManageableMemberRoleSchema,
   })),
   "cohort.activated": typedEvent("cohort.activated", "COHORT", "cohortId", strictPayload({
     cohortId: uuidSchema,
@@ -204,6 +204,9 @@ export const workflowEventSchemas = {
 } as const;
 
 export type WorkflowEventType = keyof typeof workflowEventSchemas;
+export const workflowEventTypeSchema = z.enum(
+  Object.keys(workflowEventSchemas) as [WorkflowEventType, ...WorkflowEventType[]],
+);
 
 export const workflowEventSchema = z.unknown().transform((value, context) => {
   const type = typeof value === "object" && value !== null && "type" in value

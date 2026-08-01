@@ -17,6 +17,8 @@ export {
   problemCodeSchema,
   platformProblemCodeSchema,
   taskBlockedProblemDetailsSchema,
+  taskCompletionConflictProblemDetailsSchema,
+  taskCompletionDependencyProblemDetailsSchema,
   taskGateUnavailableProblemDetailsSchema,
   workflowErrorCodeSchema,
   PLATFORM_PROBLEM_CODES,
@@ -27,6 +29,8 @@ export type {
   PlatformProblemCode,
   ProblemCode,
   TaskBlockedProblemDetails,
+  TaskCompletionConflictProblemDetails,
+  TaskCompletionDependencyProblemDetails,
   TaskGateUnavailableProblemDetails,
   WorkflowErrorCode,
 } from "./problem-details.js";
@@ -44,7 +48,12 @@ export type {
   TokenResponse,
 } from "./auth.js";
 
-export { eventEnvelopeSchema, workflowEventSchema, workflowEventSchemas } from "./events.js";
+export {
+  eventEnvelopeSchema,
+  workflowEventSchema,
+  workflowEventSchemas,
+  workflowEventTypeSchema,
+} from "./events.js";
 export type { EventEnvelope, WorkflowEvent, WorkflowEventType } from "./events.js";
 
 export {

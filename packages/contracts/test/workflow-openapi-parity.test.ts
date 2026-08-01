@@ -28,6 +28,7 @@ type Schema = {
   allOf?: Schema[];
   anyOf?: Schema[];
   oneOf?: Schema[];
+  not?: Schema;
   const?: unknown;
   maxLength?: number;
   maximum?: number;
@@ -159,12 +160,12 @@ describe("workflow OpenAPI surface", () => {
           if (path === "/api/v1/tasks/{taskId}/complete" && status === "409") {
             expect(schema?.oneOf).toEqual([
               { $ref: "#/components/schemas/TaskBlockedProblem" },
-              { $ref: "#/components/schemas/ProblemDetails" },
+              { $ref: "#/components/schemas/TaskCompletionConflictProblem" },
             ]);
           } else if (path === "/api/v1/tasks/{taskId}/complete" && status === "503") {
             expect(schema?.oneOf).toEqual([
               { $ref: "#/components/schemas/TaskGateUnavailableProblem" },
-              { $ref: "#/components/schemas/ProblemDetails" },
+              { $ref: "#/components/schemas/TaskCompletionDependencyProblem" },
             ]);
           } else {
             expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
@@ -230,13 +231,19 @@ describe("workflow OpenAPI schema parity", () => {
       "/api/v1/tasks/{taskId}/history": ["cursor", "pageSize"],
       "/api/v1/tasks/{taskId}/blockers": ["cursor", "pageSize"],
       "/api/v1/me/notifications": ["unread", "type", "severity", "createdBefore", "cursor", "pageSize"],
-      "/api/v1/events": ["afterCursor", "cursor", "pageSize"],
+      "/api/v1/events": ["cursor", "limit", "filter"],
     };
     for (const [path, names] of Object.entries(expectedQueries)) {
       const query = parametersFor(document.paths[path].get).filter((parameter) => parameter.in === "query");
       expect(query.map((parameter) => parameter.name)).toEqual(names);
-      expect(query.find((parameter) => parameter.name === "pageSize")?.schema).toEqual({ type: "integer", minimum: 1, maximum: 100, default: 25 });
+      const sizeParameter = query.find((parameter) => parameter.name === (path === "/api/v1/events" ? "limit" : "pageSize"));
+      expect(sizeParameter?.schema).toEqual({ type: "integer", minimum: 1, maximum: 100, default: 25 });
     }
+    const eventQuery = parametersFor(document.paths["/api/v1/events"].get);
+    expect(eventQuery.find((parameter) => parameter.name === "cursor")?.schema).toEqual({
+      type: "string", minLength: 1, maxLength: 4096,
+    });
+    expect(eventQuery.find((parameter) => parameter.name === "filter")?.schema?.enum).toEqual(Object.keys(workflowEventSchemas));
     const source = JSON.stringify(document);
     expect(source).not.toMatch(/flowable/i);
     expect(source).not.toMatch(/"total"\s*:/i);
@@ -261,6 +268,31 @@ describe("workflow OpenAPI schema parity", () => {
           { type: "null" },
         ],
       },
+    });
+  });
+
+  it("excludes specialized completion codes from generic response branches", () => {
+    expect(document.components.schemas.TaskCompletionConflictProblem).toEqual({
+      allOf: [
+        { $ref: "#/components/schemas/ProblemDetails" },
+        {
+          type: "object",
+          required: ["status", "code"],
+          properties: { status: { const: 409 } },
+          not: { type: "object", required: ["code"], properties: { code: { const: "OCC_TASK_BLOCKED" } } },
+        },
+      ],
+    });
+    expect(document.components.schemas.TaskCompletionDependencyProblem).toEqual({
+      allOf: [
+        { $ref: "#/components/schemas/ProblemDetails" },
+        {
+          type: "object",
+          required: ["status", "code"],
+          properties: { status: { const: 503 } },
+          not: { type: "object", required: ["code"], properties: { code: { const: "OCC_TASK_GATE_UNAVAILABLE" } } },
+        },
+      ],
     });
   });
 
@@ -347,5 +379,10 @@ describe("workflow OpenAPI schema parity", () => {
       { required: ["previousAssigneeId"] },
       { required: ["assigneeId"] },
     ]);
+    for (const name of ["CohortMemberAddedPayload", "CohortMemberRemovedPayload"]) {
+      expect(document.components.schemas[name].properties?.role).toEqual({
+        type: "string", enum: ["TEACHER", "PARTICIPANT"],
+      });
+    }
   });
 });
