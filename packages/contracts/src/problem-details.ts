@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
 import { blockerCodeSchema } from "./task.js";
-import { activityKeySchema } from "./workflow-common.js";
+import { activityKeySchema, safeVersionSchema, uuidSchema } from "./workflow-common.js";
 
 export const PROBLEM_TITLE_MIN_LENGTH = 1;
 export const PROBLEM_TITLE_MAX_LENGTH = 256;
@@ -58,6 +58,10 @@ export const problemCodeSchema = z.enum([
   ...PLATFORM_PROBLEM_CODES,
   ...WORKFLOW_ERROR_CODES,
 ]);
+export const baseProblemCodeSchema = problemCodeSchema.exclude([
+  "OCC_STALE_VERSION",
+  "OCC_PARTICIPANT_PROCESS_EXISTS",
+]);
 
 export const problemDetailsSchema = z
   .object({
@@ -72,7 +76,7 @@ export const problemDetailsSchema = z
         ),
       ),
     status: z.number().int().min(PROBLEM_STATUS_MIN).max(PROBLEM_STATUS_MAX),
-    code: problemCodeSchema,
+    code: baseProblemCodeSchema,
     correlationId: z.uuid(),
     detail: z
       .string()
@@ -155,64 +159,98 @@ export const workflowCommonProblemDetailsSchema = z.discriminatedUnion("status",
   workflowUnavailableProblemDetailsSchema,
 ]);
 
+export const staleVersionProblemDetailsSchema = problemDetailsSchema
+  .extend({
+    status: z.literal(409),
+    code: z.literal("OCC_STALE_VERSION"),
+    currentVersion: safeVersionSchema,
+  })
+  .strict();
+
+export const participantProcessExistsProblemDetailsSchema = problemDetailsSchema
+  .extend({
+    status: z.literal(409),
+    code: z.literal("OCC_PARTICIPANT_PROCESS_EXISTS"),
+    existingProcessId: uuidSchema,
+  })
+  .strict();
+
 export const cohortCreationConflictProblemDetailsSchema = statusProblemDetails(
   409,
   z.enum(["OCC_IDEMPOTENCY_CONFLICT", "OCC_DUPLICATE_COHORT_CODE"]),
 );
-export const versionedCommandConflictProblemDetailsSchema = statusProblemDetails(
+export const versionedCommandGenericConflictProblemDetailsSchema = statusProblemDetails(
   409,
-  z.enum(["OCC_STALE_VERSION", "OCC_IDEMPOTENCY_CONFLICT", "OCC_INVALID_TRANSITION"]),
+  z.enum(["OCC_IDEMPOTENCY_CONFLICT", "OCC_INVALID_TRANSITION"]),
 );
-export const participantProcessStartConflictProblemDetailsSchema = statusProblemDetails(
+export const versionedCommandConflictProblemDetailsSchema = z.union([
+  versionedCommandGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+]);
+export const participantProcessStartGenericConflictProblemDetailsSchema = statusProblemDetails(
   409,
   z.enum([
-    "OCC_STALE_VERSION",
     "OCC_IDEMPOTENCY_CONFLICT",
     "OCC_INVALID_TRANSITION",
-    "OCC_PARTICIPANT_PROCESS_EXISTS",
   ]),
 );
-export const processCommandConflictProblemDetailsSchema = statusProblemDetails(
+export const participantProcessStartConflictProblemDetailsSchema = z.union([
+  participantProcessStartGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+  participantProcessExistsProblemDetailsSchema,
+]);
+export const processCommandGenericConflictProblemDetailsSchema = statusProblemDetails(
   409,
   z.enum([
-    "OCC_STALE_VERSION",
+    "OCC_IDEMPOTENCY_CONFLICT",
+    "OCC_INVALID_TRANSITION",
+    "OCC_PROCESS_NOT_RUNNING",
+  ]),
+);
+export const processCommandConflictProblemDetailsSchema = z.union([
+  processCommandGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+]);
+export const processTransferGenericConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum([
     "OCC_IDEMPOTENCY_CONFLICT",
     "OCC_INVALID_TRANSITION",
     "OCC_PROCESS_NOT_RUNNING",
   ]),
 );
-export const processTransferConflictProblemDetailsSchema = statusProblemDetails(
+export const processTransferConflictProblemDetailsSchema = z.union([
+  processTransferGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+  participantProcessExistsProblemDetailsSchema,
+]);
+export const processWaitReleaseGenericConflictProblemDetailsSchema = statusProblemDetails(
   409,
   z.enum([
-    "OCC_STALE_VERSION",
-    "OCC_IDEMPOTENCY_CONFLICT",
-    "OCC_INVALID_TRANSITION",
-    "OCC_PROCESS_NOT_RUNNING",
-    "OCC_PARTICIPANT_PROCESS_EXISTS",
-  ]),
-);
-export const processWaitReleaseConflictProblemDetailsSchema = statusProblemDetails(
-  409,
-  z.enum([
-    "OCC_STALE_VERSION",
     "OCC_IDEMPOTENCY_CONFLICT",
     "OCC_PROCESS_NOT_RUNNING",
     "OCC_WAIT_NOT_ACTIVE",
   ]),
 );
-export const taskClaimConflictProblemDetailsSchema = statusProblemDetails(
+export const processWaitReleaseConflictProblemDetailsSchema = z.union([
+  processWaitReleaseGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+]);
+export const taskClaimGenericConflictProblemDetailsSchema = statusProblemDetails(
   409,
   z.enum([
-    "OCC_STALE_VERSION",
     "OCC_IDEMPOTENCY_CONFLICT",
     "OCC_INVALID_TRANSITION",
     "OCC_PROCESS_NOT_RUNNING",
     "OCC_CLAIM_CONFLICT",
   ]),
 );
+export const taskClaimConflictProblemDetailsSchema = z.union([
+  taskClaimGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+]);
 
 export const taskCompletionConflictCodeSchema = z.enum([
-  "OCC_STALE_VERSION",
   "OCC_IDEMPOTENCY_CONFLICT",
   "OCC_INVALID_TRANSITION",
   "OCC_PROCESS_NOT_RUNNING",
@@ -223,14 +261,17 @@ export const taskCompletionDependencyCodeSchema = z.enum([
   "OCC_WORKFLOW_UNAVAILABLE",
 ]);
 
-export const taskCommandConflictProblemDetailsSchema = statusProblemDetails(
+export const taskCompletionGenericConflictProblemDetailsSchema = statusProblemDetails(
   409,
   taskCompletionConflictCodeSchema,
 );
-
-export const taskCompletionGenericConflictProblemDetailsSchema = taskCommandConflictProblemDetailsSchema;
+export const taskCommandConflictProblemDetailsSchema = z.union([
+  taskCompletionGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+]);
 export const taskCompletionConflictProblemDetailsSchema = z.union([
   taskCompletionGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
   taskBlockedProblemDetailsSchema,
 ]);
 
@@ -288,37 +329,47 @@ export const cohortCreationOperationProblemDetailsSchema = z.discriminatedUnion(
   ...workflowCommandProblemSchemas,
   cohortCreationConflictProblemDetailsSchema,
 ]);
-export const versionedCommandOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const versionedCommandOperationProblemDetailsSchema = z.union([
   ...workflowCommandProblemSchemas,
-  versionedCommandConflictProblemDetailsSchema,
+  versionedCommandGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
 ]);
-export const participantProcessStartOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const participantProcessStartOperationProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
-  participantProcessStartConflictProblemDetailsSchema,
+  participantProcessStartGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+  participantProcessExistsProblemDetailsSchema,
 ]);
-export const processCommandOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const processCommandOperationProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
-  processCommandConflictProblemDetailsSchema,
+  processCommandGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
 ]);
-export const processTransferOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const processTransferOperationProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
-  processTransferConflictProblemDetailsSchema,
+  processTransferGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
+  participantProcessExistsProblemDetailsSchema,
 ]);
-export const processWaitReleaseOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const processWaitReleaseOperationProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
-  processWaitReleaseConflictProblemDetailsSchema,
+  processWaitReleaseGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
 ]);
-export const taskClaimOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const taskClaimOperationProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
-  taskClaimConflictProblemDetailsSchema,
+  taskClaimGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
 ]);
-export const taskCommandOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+export const taskCommandOperationProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
-  taskCommandConflictProblemDetailsSchema,
+  taskCompletionGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
 ]);
 export const taskCompletionProblemDetailsSchema = z.union([
   ...workflowEngineCommandProblemSchemas,
   taskCompletionGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
   taskBlockedProblemDetailsSchema,
   taskGateUnavailableProblemDetailsSchema,
 ]);

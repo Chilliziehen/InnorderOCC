@@ -394,9 +394,7 @@ components:
       content:
         application/problem+json:
           schema:
-            oneOf:
-              - $ref: "#/components/schemas/TaskBlockedProblem"
-              - $ref: "#/components/schemas/TaskCompletionConflictProblem"
+            $ref: "#/components/schemas/TaskCompletionConflictProblem"
     TaskGateUnavailable:
       description: Authorized provider details are unavailable or stale
       content:
@@ -466,6 +464,9 @@ components:
         - OCC_AUTHORIZATION_UNAVAILABLE
         - OCC_WORKFLOW_UNAVAILABLE
         - OCC_INTERNAL_ERROR
+    BaseProblemCode:
+      type: string
+      enum: [OCC-API-VALIDATION, OCC-API-AUTHENTICATION, OCC-AUTH-INVALID-CREDENTIALS, OCC-API-FORBIDDEN, OCC-API-CONFLICT, OCC-COMMAND-IDEMPOTENCY-KEY, OCC-COMMAND-IDEMPOTENCY-CONFLICT, OCC-COMMAND-METADATA, OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS, OCC-COMMAND-IDEMPOTENCY-EXPIRED, OCC-COMMAND-INTEGRITY, OCC-COMMAND-OPTIMISTIC-CONFLICT, OCC-AUTHZ-UNAVAILABLE, OCC-API-INTERNAL, OCC-API-REQUEST, OCC_INVALID_REQUEST, OCC_INVALID_CURSOR, OCC_UNAUTHENTICATED, OCC_FORBIDDEN, OCC_NOT_FOUND, OCC_IDEMPOTENCY_CONFLICT, OCC_DUPLICATE_COHORT_CODE, OCC_CLAIM_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_TASK_BLOCKED, OCC_WAIT_NOT_ACTIVE, OCC_TASK_GATE_UNAVAILABLE, OCC_AUTHORIZATION_UNAVAILABLE, OCC_WORKFLOW_UNAVAILABLE, OCC_INTERNAL_ERROR]
     ProblemDetails:
       type: object
       additionalProperties: false
@@ -488,7 +489,7 @@ components:
           minimum: 400
           maximum: 599
         code:
-          $ref: "#/components/schemas/ProblemCode"
+          $ref: "#/components/schemas/BaseProblemCode"
         correlationId:
           type: string
           format: uuid
@@ -1313,13 +1314,45 @@ components:
     WorkflowAuthorizationUnavailableProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 503 }, code: { type: string, const: OCC_AUTHORIZATION_UNAVAILABLE } } }] }
     WorkflowUnavailableProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 503 }, code: { type: string, enum: [OCC_AUTHORIZATION_UNAVAILABLE, OCC_WORKFLOW_UNAVAILABLE] } } }] }
     CohortCreationConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_DUPLICATE_COHORT_CODE] } } }] }
-    VersionedCommandConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION] } } }] }
-    ParticipantProcessStartConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PARTICIPANT_PROCESS_EXISTS] } } }] }
-    ProcessCommandConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
-    ProcessTransferConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_PARTICIPANT_PROCESS_EXISTS] } } }] }
-    ProcessWaitReleaseConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_PROCESS_NOT_RUNNING, OCC_WAIT_NOT_ACTIVE] } } }] }
-    TaskClaimConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_CLAIM_CONFLICT] } } }] }
-    TaskCommandConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    StaleVersionProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, correlationId, currentVersion]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 409 }
+        code: { type: string, const: OCC_STALE_VERSION }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        currentVersion: { $ref: "#/components/schemas/SafeVersion" }
+    ParticipantProcessExistsProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, correlationId, existingProcessId]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 409 }
+        code: { type: string, const: OCC_PARTICIPANT_PROCESS_EXISTS }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        currentVersion: { $ref: "#/components/schemas/SafeVersion" }
+        existingProcessId: { type: string, format: uuid, x-occ-visibility: authorized }
+    VersionedCommandGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION] } } }] }
+    VersionedCommandConflictProblem: { oneOf: [{ $ref: "#/components/schemas/VersionedCommandGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    ParticipantProcessStartGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION] } } }] }
+    ParticipantProcessStartConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ParticipantProcessStartGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }, { $ref: "#/components/schemas/ParticipantProcessExistsProblem" }] }
+    ProcessCommandGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    ProcessCommandConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ProcessCommandGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    ProcessTransferGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    ProcessTransferConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ProcessTransferGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }, { $ref: "#/components/schemas/ParticipantProcessExistsProblem" }] }
+    ProcessWaitReleaseGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_PROCESS_NOT_RUNNING, OCC_WAIT_NOT_ACTIVE] } } }] }
+    ProcessWaitReleaseConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ProcessWaitReleaseGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    TaskClaimGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_CLAIM_CONFLICT] } } }] }
+    TaskClaimConflictProblem: { oneOf: [{ $ref: "#/components/schemas/TaskClaimGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    TaskCommandGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    TaskCommandConflictProblem: { oneOf: [{ $ref: "#/components/schemas/TaskCommandGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
     TaskGateUnavailableProblem:
       type: object
       additionalProperties: false
@@ -1346,7 +1379,7 @@ components:
         detail: { type: string, minLength: 0, maxLength: 4096 }
         currentVersion: { $ref: "#/components/schemas/SafeVersion" }
         blockerCodes: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BlockerCode" } }
-    TaskCompletionConflictProblem:
+    TaskCompletionGenericConflictProblem:
       allOf:
         - $ref: "#/components/schemas/ProblemDetails"
         - type: object
@@ -1355,7 +1388,12 @@ components:
             status: { type: integer, const: 409 }
             code:
               type: string
-              enum: [OCC_STALE_VERSION, OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING]
+              enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING]
+    TaskCompletionConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/TaskCompletionGenericConflictProblem"
+        - $ref: "#/components/schemas/StaleVersionProblem"
+        - $ref: "#/components/schemas/TaskBlockedProblem"
     TaskCompletionDependencyProblem:
       allOf:
         - $ref: "#/components/schemas/ProblemDetails"

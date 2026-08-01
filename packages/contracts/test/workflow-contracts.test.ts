@@ -52,12 +52,14 @@ import {
   taskGateUnavailableProblemDetailsSchema,
   cohortCreationConflictProblemDetailsSchema,
   participantProcessStartConflictProblemDetailsSchema,
+  participantProcessExistsProblemDetailsSchema,
   processCommandConflictProblemDetailsSchema,
   processTransferConflictProblemDetailsSchema,
   processWaitReleaseConflictProblemDetailsSchema,
   taskClaimConflictProblemDetailsSchema,
   taskCommandConflictProblemDetailsSchema,
   versionedCommandConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
   workflowAuthorizationUnavailableProblemDetailsSchema,
   workflowBadRequestProblemDetailsSchema,
   workflowCommonProblemDetailsSchema,
@@ -360,10 +362,10 @@ describe("workflow Problem Details", () => {
   it("binds conflict codes to the operation that can emit them", () => {
     const cases = [
       [cohortCreationConflictProblemDetailsSchema, "OCC_DUPLICATE_COHORT_CODE", "OCC_STALE_VERSION"],
-      [versionedCommandConflictProblemDetailsSchema, "OCC_STALE_VERSION", "OCC_CLAIM_CONFLICT"],
-      [participantProcessStartConflictProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS", "OCC_CLAIM_CONFLICT"],
+      [versionedCommandConflictProblemDetailsSchema, "OCC_IDEMPOTENCY_CONFLICT", "OCC_CLAIM_CONFLICT"],
+      [participantProcessStartConflictProblemDetailsSchema, "OCC_INVALID_TRANSITION", "OCC_CLAIM_CONFLICT"],
       [processCommandConflictProblemDetailsSchema, "OCC_PROCESS_NOT_RUNNING", "OCC_WAIT_NOT_ACTIVE"],
-      [processTransferConflictProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS", "OCC_WAIT_NOT_ACTIVE"],
+      [processTransferConflictProblemDetailsSchema, "OCC_PROCESS_NOT_RUNNING", "OCC_WAIT_NOT_ACTIVE"],
       [processWaitReleaseConflictProblemDetailsSchema, "OCC_WAIT_NOT_ACTIVE", "OCC_CLAIM_CONFLICT"],
       [taskClaimConflictProblemDetailsSchema, "OCC_CLAIM_CONFLICT", "OCC_WAIT_NOT_ACTIVE"],
       [taskCommandConflictProblemDetailsSchema, "OCC_INVALID_TRANSITION", "OCC_CLAIM_CONFLICT"],
@@ -373,6 +375,55 @@ describe("workflow Problem Details", () => {
       expect(() => schema.parse({ ...problem, status: 503, code })).toThrow();
       expect(() => schema.parse({ ...problem, status: 409, code: unrelatedCode })).toThrow();
     }
+  });
+
+  it("requires recovery fields only on their specialized conflict variants", () => {
+    const stale = { ...problem, status: 409, code: "OCC_STALE_VERSION" } as const;
+    expect(() => problemDetailsSchema.parse(stale)).toThrow();
+    for (const schema of [
+      staleVersionProblemDetailsSchema,
+      versionedCommandConflictProblemDetailsSchema,
+      participantProcessStartConflictProblemDetailsSchema,
+      processCommandConflictProblemDetailsSchema,
+      processTransferConflictProblemDetailsSchema,
+      processWaitReleaseConflictProblemDetailsSchema,
+      taskClaimConflictProblemDetailsSchema,
+      taskCommandConflictProblemDetailsSchema,
+      taskCompletionConflictProblemDetailsSchema,
+      versionedCommandOperationProblemDetailsSchema,
+      participantProcessStartOperationProblemDetailsSchema,
+      processCommandOperationProblemDetailsSchema,
+      processTransferOperationProblemDetailsSchema,
+      processWaitReleaseOperationProblemDetailsSchema,
+      taskClaimOperationProblemDetailsSchema,
+      taskCommandOperationProblemDetailsSchema,
+      taskCompletionProblemDetailsSchema,
+    ]) {
+      expect(() => schema.parse(stale)).toThrow();
+      expect(schema.parse({ ...stale, currentVersion: 7 })).toBeDefined();
+      expect(() => schema.parse({ ...stale, currentVersion: -1 })).toThrow();
+    }
+
+    const existing = { ...problem, status: 409, code: "OCC_PARTICIPANT_PROCESS_EXISTS" } as const;
+    expect(() => problemDetailsSchema.parse(existing)).toThrow();
+    for (const schema of [
+      participantProcessExistsProblemDetailsSchema,
+      participantProcessStartConflictProblemDetailsSchema,
+      processTransferConflictProblemDetailsSchema,
+      participantProcessStartOperationProblemDetailsSchema,
+      processTransferOperationProblemDetailsSchema,
+    ]) {
+      expect(() => schema.parse(existing)).toThrow();
+      expect(() => schema.parse({ ...existing, existingProcessId: "not-a-uuid" })).toThrow();
+      expect(schema.parse({ ...existing, existingProcessId: otherId })).toBeDefined();
+    }
+
+    expect(versionedCommandConflictProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_IDEMPOTENCY_CONFLICT",
+    })).toBeDefined();
+    expect(participantProcessStartConflictProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_INVALID_TRANSITION",
+    })).toBeDefined();
   });
 
   it("exports complete status-discriminated error contracts per operation family", () => {
@@ -390,10 +441,10 @@ describe("workflow Problem Details", () => {
     })).toBeDefined();
     const cases = [
       [cohortCreationOperationProblemDetailsSchema, "OCC_DUPLICATE_COHORT_CODE"],
-      [versionedCommandOperationProblemDetailsSchema, "OCC_STALE_VERSION"],
-      [participantProcessStartOperationProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS"],
+      [versionedCommandOperationProblemDetailsSchema, "OCC_IDEMPOTENCY_CONFLICT"],
+      [participantProcessStartOperationProblemDetailsSchema, "OCC_INVALID_TRANSITION"],
       [processCommandOperationProblemDetailsSchema, "OCC_PROCESS_NOT_RUNNING"],
-      [processTransferOperationProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS"],
+      [processTransferOperationProblemDetailsSchema, "OCC_PROCESS_NOT_RUNNING"],
       [processWaitReleaseOperationProblemDetailsSchema, "OCC_WAIT_NOT_ACTIVE"],
       [taskClaimOperationProblemDetailsSchema, "OCC_CLAIM_CONFLICT"],
       [taskCommandOperationProblemDetailsSchema, "OCC_INVALID_TRANSITION"],
@@ -422,7 +473,7 @@ describe("workflow Problem Details", () => {
       ...problem, providerKeys: ["evidence"],
     })).toBeDefined();
     expect(taskCompletionConflictProblemDetailsSchema.parse({
-      ...problem, status: 409, code: "OCC_STALE_VERSION",
+      ...problem, status: 409, code: "OCC_STALE_VERSION", currentVersion: 7,
     })).toBeDefined();
     expect(taskCompletionDependencyProblemDetailsSchema.parse({
       ...problem, code: "OCC_WORKFLOW_UNAVAILABLE",
@@ -431,7 +482,6 @@ describe("workflow Problem Details", () => {
 
   it("allows only status-specific generic completion codes", () => {
     expect(taskCompletionConflictCodeSchema.options).toEqual([
-      "OCC_STALE_VERSION",
       "OCC_IDEMPOTENCY_CONFLICT",
       "OCC_INVALID_TRANSITION",
       "OCC_PROCESS_NOT_RUNNING",

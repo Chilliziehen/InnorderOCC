@@ -21,13 +21,14 @@ import {
   taskCompletionGenericConflictProblemDetailsSchema,
   taskCompletionGenericDependencyProblemDetailsSchema,
   cohortCreationConflictProblemDetailsSchema,
-  participantProcessStartConflictProblemDetailsSchema,
-  processCommandConflictProblemDetailsSchema,
-  processTransferConflictProblemDetailsSchema,
-  processWaitReleaseConflictProblemDetailsSchema,
-  taskClaimConflictProblemDetailsSchema,
-  taskCommandConflictProblemDetailsSchema,
-  versionedCommandConflictProblemDetailsSchema,
+  participantProcessStartGenericConflictProblemDetailsSchema,
+  participantProcessExistsProblemDetailsSchema,
+  processCommandGenericConflictProblemDetailsSchema,
+  processTransferGenericConflictProblemDetailsSchema,
+  processWaitReleaseGenericConflictProblemDetailsSchema,
+  taskClaimGenericConflictProblemDetailsSchema,
+  versionedCommandGenericConflictProblemDetailsSchema,
+  staleVersionProblemDetailsSchema,
   workflowAuthorizationUnavailableProblemDetailsSchema,
   workflowBadRequestProblemDetailsSchema,
   workflowForbiddenProblemDetailsSchema,
@@ -286,7 +287,10 @@ describe("workflow OpenAPI schema parity", () => {
     expect(document.components.schemas.SafeVersion).toEqual({ type: "integer", format: "int64", minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
     expect(document.components.schemas.PageSize).toEqual({ type: "integer", minimum: 1, maximum: 100, default: 25 });
     expect(document.components.schemas.ProblemCode.enum).toEqual(problemCodeSchema.options);
-    expect(document.components.schemas.ProblemDetails.properties?.code).toEqual({ $ref: "#/components/schemas/ProblemCode" });
+    expect(document.components.schemas.BaseProblemCode.enum).toEqual(
+      problemCodeSchema.options.filter((code) => !["OCC_STALE_VERSION", "OCC_PARTICIPANT_PROCESS_EXISTS"].includes(code)),
+    );
+    expect(document.components.schemas.ProblemDetails.properties?.code).toEqual({ $ref: "#/components/schemas/BaseProblemCode" });
   });
 
   it("keeps every reusable and operation conflict schema aligned with Zod", () => {
@@ -300,14 +304,14 @@ describe("workflow OpenAPI schema parity", () => {
       WorkflowAuthorizationUnavailableProblem: workflowAuthorizationUnavailableProblemDetailsSchema,
       WorkflowUnavailableProblem: workflowUnavailableProblemDetailsSchema,
       CohortCreationConflictProblem: cohortCreationConflictProblemDetailsSchema,
-      VersionedCommandConflictProblem: versionedCommandConflictProblemDetailsSchema,
-      ParticipantProcessStartConflictProblem: participantProcessStartConflictProblemDetailsSchema,
-      ProcessCommandConflictProblem: processCommandConflictProblemDetailsSchema,
-      ProcessTransferConflictProblem: processTransferConflictProblemDetailsSchema,
-      ProcessWaitReleaseConflictProblem: processWaitReleaseConflictProblemDetailsSchema,
-      TaskClaimConflictProblem: taskClaimConflictProblemDetailsSchema,
-      TaskCommandConflictProblem: taskCommandConflictProblemDetailsSchema,
-      TaskCompletionConflictProblem: taskCompletionGenericConflictProblemDetailsSchema,
+      VersionedCommandGenericConflictProblem: versionedCommandGenericConflictProblemDetailsSchema,
+      ParticipantProcessStartGenericConflictProblem: participantProcessStartGenericConflictProblemDetailsSchema,
+      ProcessCommandGenericConflictProblem: processCommandGenericConflictProblemDetailsSchema,
+      ProcessTransferGenericConflictProblem: processTransferGenericConflictProblemDetailsSchema,
+      ProcessWaitReleaseGenericConflictProblem: processWaitReleaseGenericConflictProblemDetailsSchema,
+      TaskClaimGenericConflictProblem: taskClaimGenericConflictProblemDetailsSchema,
+      TaskCommandGenericConflictProblem: taskCompletionGenericConflictProblemDetailsSchema,
+      TaskCompletionGenericConflictProblem: taskCompletionGenericConflictProblemDetailsSchema,
       TaskCompletionDependencyProblem: taskCompletionGenericDependencyProblemDetailsSchema,
     };
     for (const [name, zodSchema] of Object.entries(variants)) {
@@ -321,6 +325,57 @@ describe("workflow OpenAPI schema parity", () => {
       expect(openApi?.properties?.code?.const, `${name}.code.const`).toBe(zodJson.properties?.code?.const);
       expect(openApi?.properties?.code?.enum, `${name}.code.enum`).toEqual(zodJson.properties?.code?.enum);
     }
+  });
+
+  it("requires recovery fields through every operation conflict union", () => {
+    const expectedRefs: Record<string, string[]> = {
+      VersionedCommandConflictProblem: ["VersionedCommandGenericConflictProblem", "StaleVersionProblem"],
+      ParticipantProcessStartConflictProblem: ["ParticipantProcessStartGenericConflictProblem", "StaleVersionProblem", "ParticipantProcessExistsProblem"],
+      ProcessCommandConflictProblem: ["ProcessCommandGenericConflictProblem", "StaleVersionProblem"],
+      ProcessTransferConflictProblem: ["ProcessTransferGenericConflictProblem", "StaleVersionProblem", "ParticipantProcessExistsProblem"],
+      ProcessWaitReleaseConflictProblem: ["ProcessWaitReleaseGenericConflictProblem", "StaleVersionProblem"],
+      TaskClaimConflictProblem: ["TaskClaimGenericConflictProblem", "StaleVersionProblem"],
+      TaskCommandConflictProblem: ["TaskCommandGenericConflictProblem", "StaleVersionProblem"],
+      TaskCompletionConflictProblem: ["TaskCompletionGenericConflictProblem", "StaleVersionProblem", "TaskBlockedProblem"],
+    };
+    for (const [name, refs] of Object.entries(expectedRefs)) {
+      expect(document.components.schemas[name].oneOf, name).toEqual(
+        refs.map((ref) => ({ $ref: `#/components/schemas/${ref}` })),
+      );
+    }
+
+    const stale = document.components.schemas.StaleVersionProblem;
+    expect(stale.additionalProperties).toBe(false);
+    expect(stale.required).toEqual(["type", "title", "status", "code", "correlationId", "currentVersion"]);
+    expect(stale.properties?.status).toEqual({ type: "integer", const: 409 });
+    expect(stale.properties?.code).toEqual({ type: "string", const: "OCC_STALE_VERSION" });
+    expect(stale.properties?.currentVersion).toEqual({ $ref: "#/components/schemas/SafeVersion" });
+    expect(staleVersionProblemDetailsSchema.parse({
+      type: "https://innorder.example/problems/stale-version",
+      title: "Stale version",
+      status: 409,
+      code: "OCC_STALE_VERSION",
+      correlationId: "550e8400-e29b-41d4-a716-446655440000",
+      currentVersion: 7,
+    })).toBeDefined();
+
+    const existing = document.components.schemas.ParticipantProcessExistsProblem;
+    expect(document.components.schemas.ProblemDetails.properties?.existingProcessId).toBeUndefined();
+    expect(existing.additionalProperties).toBe(false);
+    expect(existing.required).toEqual(["type", "title", "status", "code", "correlationId", "existingProcessId"]);
+    expect(existing.properties?.status).toEqual({ type: "integer", const: 409 });
+    expect(existing.properties?.code).toEqual({ type: "string", const: "OCC_PARTICIPANT_PROCESS_EXISTS" });
+    expect(existing.properties?.existingProcessId).toEqual({
+      type: "string", format: "uuid", "x-occ-visibility": "authorized",
+    });
+    expect(participantProcessExistsProblemDetailsSchema.parse({
+      type: "https://innorder.example/problems/participant-process-exists",
+      title: "Participant process exists",
+      status: 409,
+      code: "OCC_PARTICIPANT_PROCESS_EXISTS",
+      correlationId: "550e8400-e29b-41d4-a716-446655440000",
+      existingProcessId: "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+    })).toBeDefined();
   });
 
   it("keeps all workflow object schemas closed with exact required fields", () => {
@@ -397,7 +452,7 @@ describe("workflow OpenAPI schema parity", () => {
   });
 
   it("excludes specialized completion codes from generic response branches", () => {
-    expect(document.components.schemas.TaskCompletionConflictProblem).toEqual({
+    expect(document.components.schemas.TaskCompletionGenericConflictProblem).toEqual({
       allOf: [
         { $ref: "#/components/schemas/ProblemDetails" },
         {
