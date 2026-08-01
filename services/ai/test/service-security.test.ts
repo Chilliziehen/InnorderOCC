@@ -105,37 +105,10 @@ describe("AI grant verification", () => {
 });
 
 describe("service route direction", () => {
-  it("rejects bearer credentials and missing or wrong service identities before consuming", async () => {
-    const consume = vi.fn();
-    const app = buildApp(undefined, {
-      authenticateCore: (request) => request.headers["x-test-service"] === "core",
-      verifyGrant: vi.fn().mockResolvedValue({ claims, tokenHash: digest("a") }),
-      consumeGrant: consume,
-    });
-
-    const bearer = await app.inject({
-      method: "POST",
-      url: "/internal/v1/ai/operations/start",
-      headers: { authorization: "Bearer end-user", "x-test-service": "core" },
-      payload: { grantToken: "a.b.c" },
-    });
-    const wrong = await app.inject({
-      method: "POST",
-      url: "/internal/v1/ai/operations/start",
-      headers: { "x-test-service": "ai" },
-      payload: { grantToken: "a.b.c" },
-    });
-    const unknown = await app.inject({
-      method: "POST",
-      url: "/internal/v1/ai/operations/start",
-      headers: { "x-test-service": "core" },
-      payload: { grantToken: "a.b.c", harmless: true },
-    });
-
-    expect(bearer.statusCode).toBe(400);
-    expect(wrong.statusCode).toBe(401);
-    expect(unknown.statusCode).toBe(400);
-    expect(consume).not.toHaveBeenCalled();
+  it("does not expose an HTTP grant start trigger", async () => {
+    const app = buildApp(undefined, { authenticateCore: () => true });
+    const response = await app.inject({ method: "POST", url: "/internal/v1/ai/operations/start", payload: { grantToken: "a.b.c" } });
+    expect(response.statusCode).toBe(404);
     await app.close();
   });
 
@@ -186,11 +159,11 @@ describe("service route direction", () => {
 describe("PostgreSQL grant consumption", () => {
   it("calls only the V015 function with every signed binding", async () => {
     const query = vi.fn().mockResolvedValue({
-      rows: [{ run_id: claims.operationId, authorized_document_version_ids: [], bounded_context: {} }],
+      rows: [{ run_id: claims.operationId, authorized_document_version_ids: [], bounded_context: {}, replayed: true }],
     });
     const repository = new PostgresAiRepository({ query } as never);
 
-    await repository.consumeGrant({ claims, tokenHash: digest("a") });
+    await expect(repository.consumeGrant({ claims, tokenHash: digest("a") })).resolves.toMatchObject({ replayed: true });
 
     expect(query).toHaveBeenCalledOnce();
     const [sql, values] = query.mock.calls[0]!;
@@ -201,18 +174,20 @@ describe("PostgreSQL grant consumption", () => {
       digest("a"), claims.eventId, claims.operationId, claims.authorizationRevision,
       claims.policyReleaseDigest, claims.authorizedSetDigest, claims.contextDigest,
       claims.operationId, claims.agentVersionId, claims.modelProfileId,
-      claims.promptVersionId, claims.packageVersionId,
+      claims.promptVersionId, claims.packageVersionId, claims.embeddingSpaceId,
     ]);
   });
 
   it("reads status and cancels only through the bounded transition function", async () => {
     const query = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: ids[2], status: "RUNNING" }] })
+      .mockResolvedValueOnce({ rows: [{ operation_id: ids[2], status: "RUNNING" }] })
       .mockResolvedValueOnce({ rows: [{ status: "CANCELLED" }] });
     const repository = new PostgresAiRepository({ query } as never);
 
     await expect(repository.operationStatus(ids[2]!)).resolves.toEqual({ operationId: ids[2], status: "RUNNING" });
     await expect(repository.cancelOperation(ids[2]!)).resolves.toEqual({ operationId: ids[2], status: "CANCELLED" });
+    expect(query.mock.calls[0]![0]).toContain("ai.get_ai_operation_status");
+    expect(query.mock.calls[0]![0]).not.toContain("ai.ai_run");
     expect(query.mock.calls[1]![0]).toContain("ai.transition_ai_run");
     expect(query.mock.calls[1]![0]).not.toMatch(/UPDATE|DELETE|INSERT/iu);
   });

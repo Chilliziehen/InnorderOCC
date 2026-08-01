@@ -6,12 +6,13 @@ import type { Pool } from "pg";
 import { buildApp } from "./app.js";
 import type { ServiceConfig } from "./config.js";
 import { CoreClient, readBoundedFile } from "./core/core-client.js";
+import { GrantConsumer } from "./core/grant-consumer.js";
 import { createPostgresPool, PostgresAiRepository } from "./persistence/postgres.js";
-import { verifyAiGrant } from "./security/grant-verifier.js";
 import { parseRevokedSerials, verifyServiceIdentity } from "./security/service-identity.js";
 
 export interface CompositionRoot {
   app: FastifyInstance;
+  grantConsumer?: GrantConsumer;
   close(): Promise<void>;
 }
 
@@ -37,6 +38,7 @@ export async function createCompositionRoot(config: ServiceConfig): Promise<Comp
     ssl: { key, cert: Buffer.concat(certificates), ca: cas, rejectUnauthorized: true },
   });
   const repository = new PostgresAiRepository(pool);
+  const grantConsumer = new GrantConsumer({ keys: grantKeys }, repository);
   const core = new CoreClient({ origin: config.coreOrigin!, key, cert: certificates, ca: cas, revokedSerials: revoked });
   const app = buildApp(config, {
     https: { key, cert: certificates, ca: cas, requestCert: true, rejectUnauthorized: false, minVersion: "TLSv1.3" },
@@ -44,8 +46,6 @@ export async function createCompositionRoot(config: ServiceConfig): Promise<Comp
       const socket = request.raw.socket as TLSSocket;
       return verifyServiceIdentity(socket.getPeerCertificate(), socket.authorized, "spiffe://innorder/core", revoked);
     },
-    verifyGrant: (token) => verifyAiGrant(token, { keys: grantKeys }),
-    consumeGrant: (grant, signal) => repository.consumeGrant(grant, signal),
     operationStatus: (operationId) => repository.operationStatus(operationId),
     cancelOperation: (operationId) => repository.cancelOperation(operationId),
   });
@@ -56,5 +56,5 @@ export async function createCompositionRoot(config: ServiceConfig): Promise<Comp
     core.close();
     await pool.end();
   });
-  return { app, close: async () => app.close() };
+  return { app, grantConsumer, close: async () => app.close() };
 }

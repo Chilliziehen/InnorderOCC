@@ -346,6 +346,10 @@ test('defines the governed AI persistence and retention contracts', () => {
   assert.match(sql, /authorized document limit of 500 exceeded/iu);
   assert.doesNotMatch(sql, /LIMIT\s+500[\s\S]*INSERT INTO authz\.ai_authorized_document/iu);
   assert.match(sql, /CREATE TRIGGER trg_ai_authorization_grant_lifecycle/iu);
+  assert.match(sql, /claim_idempotency_key_hash text[\s\S]*\^\[0-9a-f\]\{64\}\$/iu);
+  assert.match(sql, /CREATE FUNCTION authz\.bind_ai_grant_claim_idempotency\(p_operation_id uuid, p_key_hash text\)[\s\S]*SECURITY DEFINER/iu);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION authz\.bind_ai_grant_claim_idempotency\(uuid, text\) TO innorder_runtime/iu);
+  assert.match(sql, /REVOKE UPDATE, DELETE ON authz\.ai_authorization_grant FROM innorder_runtime/iu);
   assert.match(sql, /CREATE TRIGGER trg_ai_authorized_document_immutable/iu);
   assert.match(sql, /retention_until[\s\S]*interval '1 year'/iu);
   assert.match(sql, /legal_hold/iu);
@@ -381,6 +385,7 @@ test('exposes only hardened bounded AI capabilities', () => {
   const sql = readMigration('V015__governed_ai_runtime.sql');
   for (const name of [
     'authz.consume_ai_authorization_grant',
+    'ai.get_ai_operation_status',
     'ai.claim_ingestion_jobs',
     'ai.claim_event_consumptions',
     'ai.authorized_hybrid_retrieval',
@@ -446,7 +451,10 @@ test('binds grant consumption to every signed token claim and 32 KiB canonical c
   for (const parameter of [
     'p_event_id uuid', 'p_operation text', 'p_authorization_revision bigint',
     'p_policy_release_digest text', 'p_authorized_set_digest text', 'p_context_digest text',
+    'p_embedding_space_id uuid',
   ]) assert.match(consume, new RegExp(parameter, 'iu'), parameter);
+  assert.match(consume, /replayed boolean/iu);
+  assert.match(consume, /RETURN QUERY SELECT p_run_id, authorized_ids, grant_row\.bounded_context, true/iu);
   assert.match(consume, /grant token event mismatch/iu);
   assert.match(consume, /grant token operation mismatch/iu);
   assert.match(consume, /grant token authorized-set digest mismatch/iu);
@@ -457,6 +465,10 @@ test('binds grant consumption to every signed token claim and 32 KiB canonical c
     'authorized_set_digest', 'context_digest',
   ]) assert.match(consume, new RegExp(`${comparison} IS DISTINCT FROM p_${comparison}`, 'iu'));
   assert.match(consume, /signed AI grant claims cannot be NULL/iu);
+  assert.match(sql, /CREATE FUNCTION ai\.get_ai_operation_status\(p_operation_id uuid\)[\s\S]*SECURITY DEFINER/iu);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ai\.get_ai_operation_status\(uuid\) TO innorder_ai_runtime/iu);
+  assert.doesNotMatch(sql, /GRANT SELECT ON[^;]*ai\.ai_run(?:\s|,|;)/iu);
+  assert.doesNotMatch(sql, /claim_idempotency_key(?!_hash)/iu);
 });
 
 test('fails embedding gates closed with fixed manifest-bound evidence', () => {

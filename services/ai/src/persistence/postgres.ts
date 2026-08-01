@@ -7,6 +7,7 @@ export interface ConsumedGrant {
   runId: string;
   authorizedDocumentVersionIds: string[];
   boundedContext: Record<string, unknown>;
+  replayed: boolean;
 }
 
 interface Queryable {
@@ -21,10 +22,10 @@ export class PostgresAiRepository {
       if (signal?.aborted) throw new Error("cancelled");
       const c = grant.claims;
       const result = await this.database.query(
-        "SELECT run_id, authorized_document_version_ids, bounded_context FROM authz.consume_ai_authorization_grant($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        "SELECT run_id, authorized_document_version_ids, bounded_context, replayed FROM authz.consume_ai_authorization_grant($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         [grant.tokenHash, c.eventId, c.operationId, c.authorizationRevision, c.policyReleaseDigest,
           c.authorizedSetDigest, c.contextDigest, c.operationId, c.agentVersionId, c.modelProfileId,
-          c.promptVersionId, c.packageVersionId],
+          c.promptVersionId, c.packageVersionId, c.embeddingSpaceId],
       );
       if (result.rows.length !== 1) throw new Error("invalid result");
       const row = result.rows[0] as Record<string, unknown>;
@@ -32,6 +33,7 @@ export class PostgresAiRepository {
         runId: String(row.run_id),
         authorizedDocumentVersionIds: row.authorized_document_version_ids as string[],
         boundedContext: row.bounded_context as Record<string, unknown>,
+        replayed: row.replayed === true,
       };
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
@@ -43,9 +45,9 @@ export class PostgresAiRepository {
 
   async operationStatus(operationId: string): Promise<{ operationId: string; status: string }> {
     try {
-      const result = await this.database.query("SELECT id, status FROM ai.ai_run WHERE id = $1", [operationId]);
+      const result = await this.database.query("SELECT operation_id, status FROM ai.get_ai_operation_status($1)", [operationId]);
       if (result.rows.length !== 1) throw new Error();
-      return { operationId: String(result.rows[0]!.id), status: String(result.rows[0]!.status) };
+      return { operationId: String(result.rows[0]!.operation_id), status: String(result.rows[0]!.status) };
     } catch { throw new Error("OCC-AI-OPERATION-NOT-AVAILABLE"); }
   }
 

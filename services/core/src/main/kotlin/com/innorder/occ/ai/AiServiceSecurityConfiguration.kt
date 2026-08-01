@@ -70,13 +70,13 @@ class AiServiceIdentityFilter(
 ) : OncePerRequestFilter() {
     override fun doFilterInternal(request: HttpServletRequest, response: HttpServletResponse, chain: FilterChain) {
         if (request.getHeader("Authorization") != null) {
-            response.sendError(400)
+            response.status = HttpServletResponse.SC_BAD_REQUEST
             return
         }
         val certificates = request.getAttribute("jakarta.servlet.request.X509Certificate") as? Array<*>
         val leaf = certificates?.firstOrNull() as? X509Certificate
         if (leaf == null || !valid(leaf)) {
-            response.sendError(401)
+            response.status = HttpServletResponse.SC_UNAUTHORIZED
             return
         }
         val authentication = UsernamePasswordAuthenticationToken.authenticated(

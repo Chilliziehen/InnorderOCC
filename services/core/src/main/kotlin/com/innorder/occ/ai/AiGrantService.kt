@@ -5,6 +5,11 @@ import org.springframework.stereotype.Repository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.dao.DataIntegrityViolationException
+import com.innorder.occ.command.IdempotencyConflictException
+import com.innorder.occ.command.InvalidIdempotencyKeyException
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Clock
@@ -47,6 +52,7 @@ interface AiGrantStore {
     fun lockAuthorizationSnapshot(policyReleaseId: UUID): AuthorizationSnapshotBinding
     fun insert(record: StoredAiGrant, documentVersionIds: List<UUID>)
     fun findByOperationId(operationId: UUID): StoredAiGrant?
+    fun bindClaimIdempotency(grantId: UUID, keyHash: String)
 }
 
 @Repository
@@ -92,9 +98,25 @@ class JdbcAiGrantStore(private val jdbc: JdbcOperations) : AiGrantStore {
                   context_digest, bounded_context::text, classification_ceiling, agent_version_id,
                   model_profile_id, prompt_version_id, package_version_id, embedding_space_id,
                   issued_at, expires_at
-           FROM authz.ai_authorization_grant WHERE intended_run_id = ?""",
+           FROM authz.ai_authorization_grant WHERE intended_run_id = ? FOR UPDATE""",
         { rs, _ -> mapGrant(rs, operationId) }, operationId,
     ).singleOrNull()
+
+    override fun bindClaimIdempotency(grantId: UUID, keyHash: String) {
+        try {
+            val boundId = jdbc.queryForObject(
+                "SELECT authz.bind_ai_grant_claim_idempotency(?, ?)", UUID::class.java,
+                findOperationId(grantId), keyHash,
+            )
+            if (boundId != grantId) throw AiGrantIntegrityException()
+        } catch (_: DataIntegrityViolationException) {
+            throw IdempotencyConflictException()
+        }
+    }
+
+    private fun findOperationId(grantId: UUID): UUID = jdbc.queryForObject(
+        "SELECT intended_run_id FROM authz.ai_authorization_grant WHERE id = ?", UUID::class.java, grantId,
+    ) ?: throw AiGrantInvalidException()
 
     private fun mapGrant(rs: ResultSet, operationId: UUID): StoredAiGrant = StoredAiGrant(
         id = rs.getObject("id", UUID::class.java),
@@ -150,16 +172,25 @@ class AiGrantService(
         return AiGrantCreated(request.operationId)
     }
 
-    @Transactional(readOnly = true)
-    fun claim(operationId: UUID): AiGrantClaimResponse {
+    @Transactional
+    fun claim(operationId: UUID, idempotencyKey: String): AiGrantClaimResponse {
+        if (!IDEMPOTENCY_KEY.matches(idempotencyKey)) throw InvalidIdempotencyKeyException()
         val record = store.findByOperationId(operationId) ?: throw AiGrantInvalidException()
         val snapshot = store.lockAuthorizationSnapshot(record.policyReleaseId)
         if (snapshot.revision != record.claims.authorizationRevision ||
             snapshot.policyReleaseDigest != record.claims.policyReleaseDigest) throw AiGrantStaleException()
         if (clock.instant() >= record.claims.expiresAt) throw AiGrantExpiredException()
+        store.bindClaimIdempotency(record.id, sha256(idempotencyKey))
         val token = tokens.issue(record.claims)
         if (tokens.sha256(token) != record.tokenHash) throw AiGrantIntegrityException()
         return AiGrantClaimResponse(operationId, token)
+    }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(StandardCharsets.US_ASCII)).joinToString("") { "%02x".format(it) }
+
+    private companion object {
+        val IDEMPOTENCY_KEY = Regex("^[!-~]{1,128}${'$'}")
     }
 }
 

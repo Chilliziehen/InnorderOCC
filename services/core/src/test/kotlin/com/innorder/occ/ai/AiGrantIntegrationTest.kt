@@ -12,6 +12,8 @@ import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import com.innorder.occ.command.IdempotencyConflictException
+import com.innorder.occ.command.InvalidIdempotencyKeyException
 
 class AiGrantIntegrationTest {
     private val now = Instant.parse("2026-08-02T12:00:00Z")
@@ -93,7 +95,7 @@ class AiGrantIntegrationTest {
 
         val executor = Executors.newFixedThreadPool(4)
         val tokens = try {
-            (1..8).map { executor.submit<String> { grants.claim(request.operationId).grantToken } }.map { it.get() }
+            (1..8).map { executor.submit<String> { grants.claim(request.operationId, "claim-key") .grantToken } }.map { it.get() }
         } finally {
             executor.shutdownNow()
         }
@@ -102,7 +104,15 @@ class AiGrantIntegrationTest {
         assertThat(store.records).hasSize(1)
         assertThat(store.records.single().tokenHash).isEqualTo(service.sha256(tokens.first()))
         assertThat(store.records.single().toString()).doesNotContain(tokens.first())
+        assertThat(store.claimKeyHashes.single()).matches("^[a-f0-9]{64}$").isNotEqualTo("claim-key")
+        assertThat(store.toString()).doesNotContain("claim-key")
         assertThat(store.documents.single()).containsExactlyElementsOf(request.documentVersionIds)
+        assertThatThrownBy { grants.claim(request.operationId, "other-key") }
+            .isInstanceOf(IdempotencyConflictException::class.java)
+        listOf("", "contains space", "x".repeat(129), "non-ascii-\u00e9").forEach { key ->
+            assertThatThrownBy { grants.claim(request.operationId, key) }
+                .isInstanceOf(InvalidIdempotencyKeyException::class.java)
+        }
     }
 
     private class InMemoryGrantStore(
@@ -111,6 +121,7 @@ class AiGrantIntegrationTest {
     ) : AiGrantStore {
         val records = mutableListOf<StoredAiGrant>()
         val documents = mutableListOf<List<UUID>>()
+        val claimKeyHashes = mutableListOf<String>()
         private val byOperation = ConcurrentHashMap<UUID, StoredAiGrant>()
 
         override fun lockAuthorizationSnapshot(policyReleaseId: UUID) = AuthorizationSnapshotBinding(revision, releaseDigest)
@@ -120,6 +131,15 @@ class AiGrantIntegrationTest {
             byOperation[record.claims.operationId] = record
         }
         override fun findByOperationId(operationId: UUID): StoredAiGrant? = byOperation[operationId]
+        override fun bindClaimIdempotency(grantId: UUID, keyHash: String) {
+            synchronized(claimKeyHashes) {
+                val existing = claimKeyHashes.singleOrNull()
+                if (existing != null && existing != keyHash) throw IdempotencyConflictException()
+                if (existing == null) claimKeyHashes += keyHash
+            }
+        }
+
+        override fun toString(): String = "InMemoryGrantStore(records=${records.size},claimKeyHashes=$claimKeyHashes)"
     }
 
     private fun claims() = AiGrantClaims(

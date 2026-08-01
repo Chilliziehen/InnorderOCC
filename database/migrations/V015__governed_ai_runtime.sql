@@ -9,6 +9,7 @@ FOR EACH ROW EXECUTE FUNCTION platform.touch_updated_at();
 CREATE TABLE authz.ai_authorization_grant (
     id uuid PRIMARY KEY,
     token_hash text NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+    claim_idempotency_key_hash text CHECK (claim_idempotency_key_hash IS NULL OR claim_idempotency_key_hash ~ '^[0-9a-f]{64}$'),
     operation text NOT NULL CHECK (operation <> ''),
     jti text NOT NULL UNIQUE CHECK (octet_length(jti) BETWEEN 1 AND 256),
     principal_id uuid NOT NULL REFERENCES authz.entity(id),
@@ -77,6 +78,12 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI authorization grant cannot be deleted';
     END IF;
+    IF current_setting('innorder.ai_grant_claim_bind', true) = 'on'
+       AND OLD.claim_idempotency_key_hash IS NULL
+       AND NEW.claim_idempotency_key_hash ~ '^[0-9a-f]{64}$'
+       AND (to_jsonb(NEW) - 'claim_idempotency_key_hash') = (to_jsonb(OLD) - 'claim_idempotency_key_hash') THEN
+        RETURN NEW;
+    END IF;
     IF OLD.consumed_at IS NOT NULL
        OR (to_jsonb(NEW) - ARRAY['consumed_at', 'run_id'])
           IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['consumed_at', 'run_id'])
@@ -91,6 +98,36 @@ $$;
 CREATE TRIGGER trg_ai_authorization_grant_lifecycle
 BEFORE UPDATE OR DELETE ON authz.ai_authorization_grant
 FOR EACH ROW EXECUTE FUNCTION authz.enforce_ai_authorization_grant_lifecycle();
+
+CREATE FUNCTION authz.bind_ai_grant_claim_idempotency(p_operation_id uuid, p_key_hash text)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+BEGIN
+    IF p_operation_id IS NULL OR p_key_hash IS NULL OR p_key_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid AI grant claim idempotency binding';
+    END IF;
+    SELECT * INTO grant_row FROM authz.ai_authorization_grant
+    WHERE intended_run_id = p_operation_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant is invalid';
+    END IF;
+    IF grant_row.claim_idempotency_key_hash IS NULL THEN
+        PERFORM set_config('innorder.ai_grant_claim_bind', 'on', true);
+        UPDATE authz.ai_authorization_grant
+        SET claim_idempotency_key_hash = p_key_hash
+        WHERE id = grant_row.id;
+        PERFORM set_config('innorder.ai_grant_claim_bind', 'off', true);
+    ELSIF grant_row.claim_idempotency_key_hash <> p_key_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'AI grant claim idempotency key conflict';
+    END IF;
+    RETURN grant_row.id;
+END;
+$$;
 
 CREATE FUNCTION authz.enforce_ai_authorized_document_limit()
 RETURNS trigger
@@ -942,9 +979,10 @@ CREATE FUNCTION authz.consume_ai_authorization_grant(
     p_agent_version_id uuid,
     p_model_profile_id uuid,
     p_prompt_version_id uuid,
-    p_package_version_id uuid
+    p_package_version_id uuid,
+    p_embedding_space_id uuid
 )
-RETURNS TABLE (run_id uuid, authorized_document_version_ids uuid[], bounded_context jsonb)
+RETURNS TABLE (run_id uuid, authorized_document_version_ids uuid[], bounded_context jsonb, replayed boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -959,7 +997,8 @@ BEGIN
        OR p_authorization_revision IS NULL OR p_policy_release_digest IS NULL
        OR p_authorized_set_digest IS NULL OR p_context_digest IS NULL OR p_run_id IS NULL
        OR p_agent_version_id IS NULL OR p_model_profile_id IS NULL
-       OR p_prompt_version_id IS NULL OR p_package_version_id IS NULL THEN
+       OR p_prompt_version_id IS NULL OR p_package_version_id IS NULL
+       OR p_embedding_space_id IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'signed AI grant claims cannot be NULL';
     END IF;
     SELECT * INTO grant_row
@@ -968,12 +1007,6 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant is invalid';
-    END IF;
-    IF grant_row.consumed_at IS NOT NULL THEN
-        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI authorization grant replay: already consumed';
-    END IF;
-    IF transaction_timestamp() < grant_row.issued_at OR transaction_timestamp() >= grant_row.expires_at THEN
-        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant expired';
     END IF;
     IF grant_row.event_id IS DISTINCT FROM p_event_id THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token event mismatch';
@@ -1009,6 +1042,25 @@ BEGIN
     IF grant_row.package_version_id IS DISTINCT FROM p_package_version_id THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token package version mismatch';
     END IF;
+    IF grant_row.embedding_space_id IS DISTINCT FROM p_embedding_space_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token embedding space mismatch';
+    END IF;
+    SELECT coalesce(array_agg(document_version_id ORDER BY document_version_id), ARRAY[]::uuid[])
+    INTO authorized_ids
+    FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
+    IF grant_row.consumed_at IS NOT NULL THEN
+        IF grant_row.run_id IS DISTINCT FROM p_run_id OR NOT EXISTS (
+            SELECT 1 FROM ai.ai_run run
+            WHERE run.id = p_run_id AND run.authorization_grant_id = grant_row.id
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI authorization grant replay binding is invalid';
+        END IF;
+        RETURN QUERY SELECT p_run_id, authorized_ids, grant_row.bounded_context, true;
+        RETURN;
+    END IF;
+    IF transaction_timestamp() < grant_row.issued_at OR transaction_timestamp() >= grant_row.expires_at THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant expired';
+    END IF;
     SELECT current_revision INTO STRICT current_auth_revision
     FROM authz.authorization_state WHERE singleton FOR SHARE;
     IF current_auth_revision <> grant_row.authorization_revision THEN
@@ -1019,10 +1071,6 @@ BEGIN
     IF current_release_digest <> grant_row.policy_release_digest THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant has stale policy release';
     END IF;
-    SELECT coalesce(array_agg(document_version_id ORDER BY document_version_id), ARRAY[]::uuid[])
-    INTO authorized_ids
-    FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
-
     INSERT INTO ai.ai_run (
         id, agent_version_id, model_profile_id, prompt_version_id, package_version_id,
         policy_release_id, triggered_by, target_entity_id, status, authorization_grant_id,
@@ -1036,7 +1084,7 @@ BEGIN
     UPDATE authz.ai_authorization_grant
     SET consumed_at = transaction_timestamp(), run_id = p_run_id
     WHERE id = grant_row.id;
-    RETURN QUERY SELECT p_run_id, authorized_ids, grant_row.bounded_context;
+    RETURN QUERY SELECT p_run_id, authorized_ids, grant_row.bounded_context, false;
 END;
 $$;
 
@@ -1512,6 +1560,31 @@ BEGIN
         completed_at = CASE WHEN p_status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN statement_timestamp() ELSE NULL END
     WHERE id = p_run_id;
     RETURN p_status;
+END;
+$$;
+
+CREATE FUNCTION ai.get_ai_operation_status(p_operation_id uuid)
+RETURNS TABLE (operation_id uuid, status text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_operation_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'AI operation identifier cannot be NULL';
+    END IF;
+    RETURN QUERY
+    SELECT run.id, run.status
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row
+      ON grant_row.id = run.authorization_grant_id
+     AND grant_row.run_id = run.id
+     AND grant_row.intended_run_id = p_operation_id
+     AND grant_row.consumed_at IS NOT NULL
+    WHERE run.id = p_operation_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI operation is invalid';
+    END IF;
 END;
 $$;
 
@@ -2003,13 +2076,18 @@ TO innorder_ai_runtime;
 
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai FROM PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai TO innorder_runtime;
-REVOKE ALL ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE UPDATE, DELETE ON authz.ai_authorization_grant FROM innorder_runtime;
+REVOKE ALL ON FUNCTION authz.bind_ai_grant_claim_idempotency(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION authz.bind_ai_grant_claim_idempotency(uuid, text) TO innorder_runtime;
+REVOKE ALL ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.get_ai_operation_status(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FROM PUBLIC, innorder_runtime;
 REVOKE ALL ON FUNCTION ai.release_legal_hold(uuid, uuid) FROM PUBLIC, innorder_ai_runtime;
-GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_ai_operation_status(uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;

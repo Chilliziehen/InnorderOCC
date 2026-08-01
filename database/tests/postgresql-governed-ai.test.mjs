@@ -435,20 +435,32 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     WHERE id = '${id('000000000080')}';`, { role: 'innorder_runtime' }), '1500|1');
 
   const revision = Number(execSql('SELECT current_revision FROM authz.authorization_state WHERE singleton;'));
+  const bindClaim = `SET ROLE innorder_runtime;
+    SELECT authz.bind_ai_grant_claim_idempotency('${id('000000000030')}', repeat('1',64));`;
+  const [claimBindA, claimBindB] = await Promise.all([runSql(bindClaim), runSql(bindClaim)]);
+  assert.equal([claimBindA, claimBindB].filter((result) => result.code === 0).length, 2,
+    'same claim idempotency hash must bind concurrently');
+  assert.equal(execSql(`SELECT claim_idempotency_key_hash FROM authz.ai_authorization_grant
+    WHERE intended_run_id = '${id('000000000030')}';`), '1'.repeat(64));
+  expectCoreFailure(`SELECT authz.bind_ai_grant_claim_idempotency('${id('000000000030')}', repeat('2',64));`,
+    /idempotency key conflict/iu);
+  expectCoreFailure(`UPDATE authz.ai_authorization_grant SET claim_idempotency_key_hash = repeat('3',64)
+    WHERE intended_run_id = '${id('000000000030')}';`, /permission denied/iu);
   const sqlText = (value) => value === null ? 'NULL' : `'${value}'`;
   const consume = ({ token, event, operation = 'RETRIEVE', tokenRevision = revision,
     releaseDigest = 'd'.repeat(64), authorizedDigest = '6'.repeat(64),
     contextDigest = '7'.repeat(64), run, agent = id('000000000012'),
-    model = id('000000000008'), prompt = id('000000000010'), packageVersion = id('000000000002') }) => `
-      SELECT run_id FROM authz.consume_ai_authorization_grant(
+    model = id('000000000008'), prompt = id('000000000010'), packageVersion = id('000000000002'),
+    embeddingSpace = id('000000000009') }) => `
+      SELECT run_id, authorized_document_version_ids, bounded_context, replayed FROM authz.consume_ai_authorization_grant(
         ${token === null ? 'NULL' : `repeat('${token}', 64)`}, ${sqlText(event)}, ${sqlText(operation)}, ${tokenRevision ?? 'NULL'},
         ${sqlText(releaseDigest)}, ${sqlText(authorizedDigest)}, ${sqlText(contextDigest)}, ${sqlText(run)},
-        ${sqlText(agent)}, ${sqlText(model)}, ${sqlText(prompt)}, ${sqlText(packageVersion)});`;
+        ${sqlText(agent)}, ${sqlText(model)}, ${sqlText(prompt)}, ${sqlText(packageVersion)}, ${sqlText(embeddingSpace)});`;
 
   for (const nullClaim of [
     { token: null }, { event: null }, { operation: null }, { tokenRevision: null },
     { releaseDigest: null }, { authorizedDigest: null }, { contextDigest: null }, { run: null },
-    { agent: null }, { model: null }, { prompt: null }, { packageVersion: null },
+    { agent: null }, { model: null }, { prompt: null }, { packageVersion: null }, { embeddingSpace: null },
   ]) {
     expectAiFailure(consume({ token: 'b', event: id('000000000035'), run: id('000000000031'), ...nullClaim }),
       /signed AI grant claims cannot be NULL/iu);
@@ -463,13 +475,22 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   expectAiFailure(consume({ token: 'b', event: id('000000000035'), run: id('000000000031'), model: id('000000000080') }), /model profile mismatch/iu);
   expectAiFailure(consume({ token: 'b', event: id('000000000035'), run: id('000000000031'), prompt: id('000000000099') }), /prompt version mismatch/iu);
   expectAiFailure(consume({ token: 'b', event: id('000000000035'), run: id('000000000031'), packageVersion: id('000000000099') }), /package version mismatch/iu);
+  expectAiFailure(consume({ token: 'b', event: id('000000000035'), run: id('000000000031'), embeddingSpace: id('000000000099') }), /embedding space mismatch/iu);
   expectAiFailure(consume({ token: 'c', event: id('000000000039'), run: id('000000000032') }), /expired/iu);
   expectAiFailure(consume({ token: 'e', event: id('00000000003d'), tokenRevision: revision + 1, run: id('000000000033') }), /stale authorization revision/iu);
 
   const consumeSql = consume({ token: 'a', event: id('000000000025'), run: id('000000000030') });
   const [consumeA, consumeB] = await Promise.all([runAiSql(consumeSql), runAiSql(consumeSql)]);
-  assert.equal([consumeA, consumeB].filter((result) => result.code === 0).length, 1, 'grant must be consumed once');
-  assert.match([consumeA, consumeB].find((result) => result.code !== 0)?.stderr ?? '', /consumed|replay/iu);
+  assert.equal([consumeA, consumeB].filter((result) => result.code === 0).length, 2, 'exact grant retry must be idempotent');
+  assert.match(`${consumeA.stdout}\n${consumeB.stdout}`, /\|f\s/iu);
+  assert.match(`${consumeA.stdout}\n${consumeB.stdout}`, /\|t\s/iu);
+  assert.equal(execSql(`SELECT count(*) FROM ai.ai_run WHERE id = '${id('000000000030')}';`), '1');
+  expectAiFailure(consume({ token: 'a', event: id('000000000025'), operation: 'WRITE', run: id('000000000030') }), /operation mismatch/iu);
+  expectAiFailure(consume({ token: 'a', event: id('000000000025'), run: id('000000000099') }), /run mismatch/iu);
+  expectAiFailure(`SELECT status FROM ai.ai_run WHERE id = '${id('000000000030')}';`, /permission denied/iu);
+  assert.equal(execAiSql(`SELECT operation_id || '|' || status FROM ai.get_ai_operation_status('${id('000000000030')}');`),
+    `${id('000000000030')}|QUEUED`);
+  expectAiFailure(`SELECT * FROM ai.get_ai_operation_status('${id('000000000099')}');`, /operation is invalid/iu);
   assert.equal(execSql(`SELECT agent_version_id || '|' || model_profile_id || '|' || prompt_version_id || '|' ||
     package_version_id || '|' || embedding_space_id FROM ai.ai_run WHERE id = '${id('000000000030')}';`),
   [id('000000000012'), id('000000000008'), id('000000000010'), id('000000000002'), id('000000000009')].join('|'));
