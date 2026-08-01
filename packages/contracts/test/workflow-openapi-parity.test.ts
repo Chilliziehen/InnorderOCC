@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { z } from "zod";
 
 import {
   ACTIVITY_KEY_PATTERN,
@@ -15,6 +16,8 @@ import {
   processStateSchema,
   taskTimelineTypeSchema,
   taskPresentationStateSchema,
+  taskCompletionConflictCodeSchema,
+  taskCompletionDependencyCodeSchema,
   workflowEventSchemas,
 } from "../src/index.js";
 
@@ -31,8 +34,10 @@ type Schema = {
   not?: Schema;
   const?: unknown;
   maxLength?: number;
+  maxItems?: number;
   maximum?: number;
   minLength?: number;
+  minItems?: number;
   minimum?: number;
   pattern?: string;
   properties?: Record<string, Schema>;
@@ -56,6 +61,29 @@ let document: Document;
 beforeAll(async () => {
   document = parse(await readFile(new URL("../openapi/occ-core.yaml", import.meta.url), "utf8")) as Document;
 });
+
+const dereferenceSchema = (schema: Schema): Schema => {
+  if (schema.$ref === undefined) return schema;
+  const name = schema.$ref.replace("#/components/schemas/", "");
+  return document.components.schemas[name];
+};
+
+const expectConstraintParity = (zodSchema: Schema, openApiSchema: Schema, field: string): void => {
+  const actual = dereferenceSchema(openApiSchema);
+  for (const keyword of [
+    "type", "format", "enum", "const", "minLength", "maxLength", "minimum", "maximum",
+    "minItems", "maxItems", "pattern",
+  ] as const) {
+    if (keyword === "pattern" && zodSchema.format === "uuid") continue;
+    if (zodSchema[keyword] !== undefined) {
+      expect(actual[keyword], `${field}.${keyword}`).toEqual(zodSchema[keyword]);
+    }
+  }
+  if (zodSchema.items !== undefined) {
+    expect(actual.items, `${field}.items`).toBeDefined();
+    expectConstraintParity(zodSchema.items, actual.items ?? {}, `${field}.items`);
+  }
+};
 
 const operations = {
   "/api/v1/cohorts": { get: undefined, post: "CreateCohortRequest" },
@@ -257,17 +285,8 @@ describe("workflow OpenAPI schema parity", () => {
     expect(gateProblem.properties?.status).toEqual({ type: "integer", const: 503 });
     expect(gateProblem.properties?.code).toEqual({ type: "string", const: "OCC_TASK_GATE_UNAVAILABLE" });
     expect(gateProblem.properties?.providerKeys).toEqual({ type: "array", minItems: 1, maxItems: 100, items: { type: "string", minLength: 1, maxLength: 128, pattern: ACTIVITY_KEY_PATTERN } });
-    expect(document.components.schemas.CompleteTaskRequest.properties?.variables).toEqual({
-      type: "object",
-      propertyNames: { minLength: 1, maxLength: 128 },
-      additionalProperties: {
-        oneOf: [
-          { type: "string", maxLength: 4096 },
-          { type: "number" },
-          { type: "boolean" },
-          { type: "null" },
-        ],
-      },
+    expect(document.components.schemas.CompleteTaskRequest.properties).toEqual({
+      expectedVersion: { $ref: "#/components/schemas/SafeVersion" },
     });
   });
 
@@ -278,8 +297,10 @@ describe("workflow OpenAPI schema parity", () => {
         {
           type: "object",
           required: ["status", "code"],
-          properties: { status: { const: 409 } },
-          not: { type: "object", required: ["code"], properties: { code: { const: "OCC_TASK_BLOCKED" } } },
+          properties: {
+            status: { const: 409 },
+            code: { type: "string", enum: taskCompletionConflictCodeSchema.options },
+          },
         },
       ],
     });
@@ -289,8 +310,10 @@ describe("workflow OpenAPI schema parity", () => {
         {
           type: "object",
           required: ["status", "code"],
-          properties: { status: { const: 503 } },
-          not: { type: "object", required: ["code"], properties: { code: { const: "OCC_TASK_GATE_UNAVAILABLE" } } },
+          properties: {
+            status: { const: 503 },
+            code: { type: "string", enum: taskCompletionDependencyCodeSchema.options },
+          },
         },
       ],
     });
@@ -355,9 +378,11 @@ describe("workflow OpenAPI schema parity", () => {
     for (const type of types) {
       const name = eventName(type);
       const aggregateType = type.startsWith("cohort.") ? "COHORT" : type.startsWith("process.") ? "PROCESS" : "TASK";
+      const aggregateIdField = `payload.${aggregateType.toLowerCase()}Id`;
       const event = document.components.schemas[`${name}Event`];
       const payload = document.components.schemas[`${name}Payload`];
-      const zodPayload = (workflowEventSchemas[type as keyof typeof workflowEventSchemas] as unknown as {
+      const zodEvent = workflowEventSchemas[type as keyof typeof workflowEventSchemas];
+      const zodPayload = (zodEvent as unknown as {
         shape: { payload: { shape: Record<string, { isOptional: () => boolean }> } };
       }).shape.payload;
       const zodPayloadFields = Object.keys(zodPayload.shape);
@@ -370,10 +395,20 @@ describe("workflow OpenAPI schema parity", () => {
       expect(event.allOf?.[1]?.properties?.aggregateType).toEqual({ const: aggregateType });
       expect(event.allOf?.[1]?.properties?.payload).toEqual({ $ref: `#/components/schemas/${name}Payload` });
       expect(event.allOf?.[1]?.required).toEqual(["type", "schemaVersion", "aggregateType", "payload"]);
+      expect(zodEvent.meta()?.aggregateIdField).toBe(aggregateIdField);
+      expect(event["x-occ-aggregate-id-field"]).toBe(zodEvent.meta()?.aggregateIdField);
       expect(payload.type).toBe("object");
       expect(payload.additionalProperties).toBe(false);
       expect(Object.keys(payload.properties ?? {})).toEqual(zodPayloadFields);
       expect(payload.required ?? []).toEqual(zodRequiredFields);
+      const zodJsonSchema = z.toJSONSchema(zodPayload as unknown as z.ZodType) as Schema;
+      for (const field of zodPayloadFields) {
+        expectConstraintParity(
+          zodJsonSchema.properties?.[field] ?? {},
+          payload.properties?.[field] ?? {},
+          `${name}Payload.${field}`,
+        );
+      }
     }
     expect(document.components.schemas.TaskAssigneeChangedPayload.anyOf).toEqual([
       { required: ["previousAssigneeId"] },

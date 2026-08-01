@@ -45,7 +45,9 @@ import {
   taskPageSchema,
   taskPresentationStateSchema,
   taskBlockedProblemDetailsSchema,
+  taskCompletionConflictCodeSchema,
   taskCompletionConflictProblemDetailsSchema,
+  taskCompletionDependencyCodeSchema,
   taskCompletionDependencyProblemDetailsSchema,
   taskGateUnavailableProblemDetailsSchema,
   transferCohortOwnerRequestSchema,
@@ -199,7 +201,8 @@ describe("process contracts", () => {
 describe("task contracts", () => {
   it("strictly validates claim, complete, and fail commands", () => {
     expect(claimTaskRequestSchema.parse({ expectedVersion: 1 })).toEqual({ expectedVersion: 1 });
-    expect(completeTaskRequestSchema.parse({ expectedVersion: 1, variables: { accepted: true } })).toBeDefined();
+    expect(completeTaskRequestSchema.parse({ expectedVersion: 1 })).toEqual({ expectedVersion: 1 });
+    expect(() => completeTaskRequestSchema.parse({ expectedVersion: 1, variables: { accepted: true } })).toThrow();
     expect(failTaskRequestSchema.parse({ expectedVersion: 1, code: "SAFETY_FAILED", reason: "Failed gate" })).toBeDefined();
     expect(() => claimTaskRequestSchema.parse({ expectedVersion: 1, flowableTaskId: "x" })).toThrow();
   });
@@ -324,5 +327,37 @@ describe("workflow Problem Details", () => {
     expect(taskCompletionDependencyProblemDetailsSchema.parse({
       ...problem, code: "OCC_WORKFLOW_UNAVAILABLE",
     })).toBeDefined();
+  });
+
+  it("allows only status-specific generic completion codes", () => {
+    expect(taskCompletionConflictCodeSchema.options).toEqual([
+      "OCC-API-CONFLICT",
+      "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
+      "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
+      "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
+      "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+      "OCC_IDEMPOTENCY_CONFLICT",
+      "OCC_DUPLICATE_COHORT_CODE",
+      "OCC_STALE_VERSION",
+      "OCC_CLAIM_CONFLICT",
+      "OCC_PARTICIPANT_PROCESS_EXISTS",
+      "OCC_INVALID_TRANSITION",
+      "OCC_PROCESS_NOT_RUNNING",
+      "OCC_WAIT_NOT_ACTIVE",
+    ]);
+    expect(taskCompletionDependencyCodeSchema.options).toEqual([
+      "OCC_AUTHORIZATION_UNAVAILABLE",
+      "OCC_WORKFLOW_UNAVAILABLE",
+    ]);
+    for (const code of [...taskCompletionDependencyCodeSchema.options, "OCC_TASK_BLOCKED", "OCC_TASK_GATE_UNAVAILABLE"] as const) {
+      expect(() => taskCompletionConflictProblemDetailsSchema.parse({
+        ...problem, status: 409, code,
+      })).toThrow();
+    }
+    for (const code of [...taskCompletionConflictCodeSchema.options, "OCC_TASK_BLOCKED", "OCC_TASK_GATE_UNAVAILABLE"] as const) {
+      expect(() => taskCompletionDependencyProblemDetailsSchema.parse({
+        ...problem, status: 503, code,
+      })).toThrow();
+    }
   });
 });

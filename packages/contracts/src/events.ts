@@ -82,7 +82,8 @@ const typedEvent = <
       return candidate.aggregateId === candidate.payload[aggregateIdKey];
     },
     { path: ["payload", aggregateIdKey], message: "payload aggregate ID must match envelope" },
-  );
+  )
+  .meta({ aggregateIdField: `payload.${aggregateIdKey}` });
 
 const cohortStatePayload = strictPayload({ cohortId: uuidSchema, status: cohortStatusSchema });
 

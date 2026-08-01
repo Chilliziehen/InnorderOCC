@@ -106,21 +106,34 @@ export const taskGateUnavailableProblemDetailsSchema = problemDetailsSchema
   })
   .strict();
 
+export const taskCompletionConflictCodeSchema = z.enum([
+  "OCC-API-CONFLICT",
+  "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
+  "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
+  "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
+  "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+  "OCC_IDEMPOTENCY_CONFLICT",
+  "OCC_DUPLICATE_COHORT_CODE",
+  "OCC_STALE_VERSION",
+  "OCC_CLAIM_CONFLICT",
+  "OCC_PARTICIPANT_PROCESS_EXISTS",
+  "OCC_INVALID_TRANSITION",
+  "OCC_PROCESS_NOT_RUNNING",
+  "OCC_WAIT_NOT_ACTIVE",
+]);
+
+export const taskCompletionDependencyCodeSchema = z.enum([
+  "OCC_AUTHORIZATION_UNAVAILABLE",
+  "OCC_WORKFLOW_UNAVAILABLE",
+]);
+
 export const taskCompletionConflictProblemDetailsSchema = problemDetailsSchema
-  .extend({ status: z.literal(409) })
-  .strict()
-  .refine((problem) => problem.code !== "OCC_TASK_BLOCKED", {
-    path: ["code"],
-    message: "OCC_TASK_BLOCKED requires blockerCodes",
-  });
+  .extend({ status: z.literal(409), code: taskCompletionConflictCodeSchema })
+  .strict();
 
 export const taskCompletionDependencyProblemDetailsSchema = problemDetailsSchema
-  .extend({ status: z.literal(503) })
-  .strict()
-  .refine((problem) => problem.code !== "OCC_TASK_GATE_UNAVAILABLE", {
-    path: ["code"],
-    message: "OCC_TASK_GATE_UNAVAILABLE requires providerKeys",
-  });
+  .extend({ status: z.literal(503), code: taskCompletionDependencyCodeSchema })
+  .strict();
 
 export type WorkflowErrorCode = z.infer<typeof workflowErrorCodeSchema>;
 export type PlatformProblemCode = z.infer<typeof platformProblemCodeSchema>;

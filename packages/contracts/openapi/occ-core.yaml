@@ -630,31 +630,31 @@ components:
         payload:
           type: object
           additionalProperties: true
-    CohortCreatedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.created }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortCreatedPayload" } } }] }
-    CohortUpdatedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.updated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortUpdatedPayload" } } }] }
-    CohortOwnerTransferredEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.owner-transferred }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortOwnerTransferredPayload" } } }] }
-    CohortMemberAddedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-added }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberAddedPayload" } } }] }
-    CohortMemberRemovedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-removed }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberRemovedPayload" } } }] }
-    CohortActivatedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.activated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortActivatedPayload" } } }] }
-    CohortArchivedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.archived }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortArchivedPayload" } } }] }
-    ProcessStartedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.started }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessStartedPayload" } } }] }
-    ProcessSuspendedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.suspended }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessSuspendedPayload" } } }] }
-    ProcessResumedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.resumed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessResumedPayload" } } }] }
-    ProcessTransferredEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.transferred }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessTransferredPayload" } } }] }
-    ProcessCompletedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.completed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCompletedPayload" } } }] }
-    ProcessCancelledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCancelledPayload" } } }] }
-    ProcessFailedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.failed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessFailedPayload" } } }] }
-    ProcessProjectionReconciledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessProjectionReconciledPayload" } } }] }
-    TaskAvailableEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.available }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAvailablePayload" } } }] }
-    TaskClaimedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.claimed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskClaimedPayload" } } }] }
-    TaskAssigneeChangedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.assignee-changed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAssigneeChangedPayload" } } }] }
-    TaskBlockedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.blocked }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskBlockedPayload" } } }] }
-    TaskPendingReviewEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.pending-review }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskPendingReviewPayload" } } }] }
-    TaskReturnedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.returned }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskReturnedPayload" } } }] }
-    TaskCompletedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.completed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCompletedPayload" } } }] }
-    TaskCancelledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCancelledPayload" } } }] }
-    TaskFailedEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.failed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskFailedPayload" } } }] }
-    TaskProjectionReconciledEvent: { allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskProjectionReconciledPayload" } } }] }
+    CohortCreatedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.created }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortCreatedPayload" } } }] }
+    CohortUpdatedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.updated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortUpdatedPayload" } } }] }
+    CohortOwnerTransferredEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.owner-transferred }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortOwnerTransferredPayload" } } }] }
+    CohortMemberAddedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-added }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberAddedPayload" } } }] }
+    CohortMemberRemovedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-removed }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberRemovedPayload" } } }] }
+    CohortActivatedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.activated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortActivatedPayload" } } }] }
+    CohortArchivedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.archived }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortArchivedPayload" } } }] }
+    ProcessStartedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.started }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessStartedPayload" } } }] }
+    ProcessSuspendedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.suspended }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessSuspendedPayload" } } }] }
+    ProcessResumedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.resumed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessResumedPayload" } } }] }
+    ProcessTransferredEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.transferred }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessTransferredPayload" } } }] }
+    ProcessCompletedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.completed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCompletedPayload" } } }] }
+    ProcessCancelledEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCancelledPayload" } } }] }
+    ProcessFailedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.failed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessFailedPayload" } } }] }
+    ProcessProjectionReconciledEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessProjectionReconciledPayload" } } }] }
+    TaskAvailableEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.available }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAvailablePayload" } } }] }
+    TaskClaimedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.claimed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskClaimedPayload" } } }] }
+    TaskAssigneeChangedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.assignee-changed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAssigneeChangedPayload" } } }] }
+    TaskBlockedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.blocked }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskBlockedPayload" } } }] }
+    TaskPendingReviewEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.pending-review }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskPendingReviewPayload" } } }] }
+    TaskReturnedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.returned }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskReturnedPayload" } } }] }
+    TaskCompletedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.completed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCompletedPayload" } } }] }
+    TaskCancelledEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCancelledPayload" } } }] }
+    TaskFailedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.failed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskFailedPayload" } } }] }
+    TaskProjectionReconciledEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskProjectionReconciledPayload" } } }] }
     CohortCreatedPayload:
       type: object
       additionalProperties: false
@@ -663,7 +663,7 @@ components:
         cohortId: { type: string, format: uuid }
         packageVersionId: { type: string, format: uuid }
         ownerPrincipalId: { type: string, format: uuid }
-        status: { const: DRAFT }
+        status: { type: string, const: DRAFT }
     CohortUpdatedPayload:
       type: object
       additionalProperties: false
@@ -701,14 +701,14 @@ components:
       required: [cohortId, status]
       properties:
         cohortId: { type: string, format: uuid }
-        status: { const: ACTIVE }
+        status: { type: string, const: ACTIVE }
     CohortArchivedPayload:
       type: object
       additionalProperties: false
       required: [cohortId, status]
       properties:
         cohortId: { type: string, format: uuid }
-        status: { const: ARCHIVED }
+        status: { type: string, const: ARCHIVED }
     ProcessStartedPayload:
       type: object
       additionalProperties: false
@@ -718,21 +718,21 @@ components:
         cohortId: { type: string, format: uuid }
         participantId: { type: string, format: uuid }
         packageVersionId: { type: string, format: uuid }
-        state: { const: RUNNING }
+        state: { type: string, const: RUNNING }
     ProcessSuspendedPayload:
       type: object
       additionalProperties: false
       required: [processId, state]
       properties:
         processId: { type: string, format: uuid }
-        state: { const: SUSPENDED }
+        state: { type: string, const: SUSPENDED }
     ProcessResumedPayload:
       type: object
       additionalProperties: false
       required: [processId, state]
       properties:
         processId: { type: string, format: uuid }
-        state: { const: RUNNING }
+        state: { type: string, const: RUNNING }
     ProcessTransferredPayload:
       type: object
       additionalProperties: false
@@ -747,14 +747,14 @@ components:
       required: [processId, state]
       properties:
         processId: { type: string, format: uuid }
-        state: { const: COMPLETED }
+        state: { type: string, const: COMPLETED }
     ProcessCancelledPayload:
       type: object
       additionalProperties: false
       required: [processId, state, code]
       properties:
         processId: { type: string, format: uuid }
-        state: { const: CANCELLED }
+        state: { type: string, const: CANCELLED }
         code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
     ProcessFailedPayload:
       type: object
@@ -762,7 +762,7 @@ components:
       required: [processId, state, code]
       properties:
         processId: { type: string, format: uuid }
-        state: { const: FAILED }
+        state: { type: string, const: FAILED }
         code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
     ProcessProjectionReconciledPayload:
       type: object
@@ -833,7 +833,7 @@ components:
       properties:
         taskId: { type: string, format: uuid }
         processId: { type: string, format: uuid }
-        state: { const: COMPLETED }
+        state: { type: string, const: COMPLETED }
     TaskCancelledPayload:
       type: object
       additionalProperties: false
@@ -841,7 +841,7 @@ components:
       properties:
         taskId: { type: string, format: uuid }
         processId: { type: string, format: uuid }
-        state: { const: CANCELLED }
+        state: { type: string, const: CANCELLED }
         code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
     TaskFailedPayload:
       type: object
@@ -850,7 +850,7 @@ components:
       properties:
         taskId: { type: string, format: uuid }
         processId: { type: string, format: uuid }
-        state: { const: FAILED }
+        state: { type: string, const: FAILED }
         code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
     TaskProjectionReconciledPayload:
       type: object
@@ -998,15 +998,6 @@ components:
       required: [expectedVersion]
       properties:
         expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
-        variables:
-          type: object
-          propertyNames: { minLength: 1, maxLength: 128 }
-          additionalProperties:
-            oneOf:
-              - { type: string, maxLength: 4096 }
-              - { type: number }
-              - { type: boolean }
-              - { type: "null" }
     FailTaskRequest: *failureCommand
     MarkNotificationReadRequest:
       type: object
@@ -1330,11 +1321,9 @@ components:
           required: [status, code]
           properties:
             status: { const: 409 }
-          not:
-            type: object
-            required: [code]
-            properties:
-              code: { const: OCC_TASK_BLOCKED }
+            code:
+              type: string
+              enum: [OCC-API-CONFLICT, OCC-COMMAND-IDEMPOTENCY-CONFLICT, OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS, OCC-COMMAND-IDEMPOTENCY-EXPIRED, OCC-COMMAND-OPTIMISTIC-CONFLICT, OCC_IDEMPOTENCY_CONFLICT, OCC_DUPLICATE_COHORT_CODE, OCC_STALE_VERSION, OCC_CLAIM_CONFLICT, OCC_PARTICIPANT_PROCESS_EXISTS, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_WAIT_NOT_ACTIVE]
     TaskCompletionDependencyProblem:
       allOf:
         - $ref: "#/components/schemas/ProblemDetails"
@@ -1342,11 +1331,7 @@ components:
           required: [status, code]
           properties:
             status: { const: 503 }
-          not:
-            type: object
-            required: [code]
-            properties:
-              code: { const: OCC_TASK_GATE_UNAVAILABLE }
+            code: { type: string, enum: [OCC_AUTHORIZATION_UNAVAILABLE, OCC_WORKFLOW_UNAVAILABLE] }
     ServiceState:
       type: string
       enum:

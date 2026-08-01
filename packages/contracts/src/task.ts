@@ -35,12 +35,8 @@ export const taskTimelineTypeSchema = z.enum([
 
 export const claimTaskRequestSchema = z.object({ expectedVersion: safeVersionSchema }).strict();
 
-const taskVariableSchema = z.union([z.string().max(4096), z.number().finite(), z.boolean(), z.null()]);
 export const completeTaskRequestSchema = z
-  .object({
-    expectedVersion: safeVersionSchema,
-    variables: z.record(z.string().min(1).max(128), taskVariableSchema).optional(),
-  })
+  .object({ expectedVersion: safeVersionSchema })
   .strict();
 export const failTaskRequestSchema = z
   .object({ expectedVersion: safeVersionSchema, code: stableCodeSchema, reason: reasonSchema })
