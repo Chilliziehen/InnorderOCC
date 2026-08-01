@@ -19,6 +19,7 @@
     "test:deployment-docs": "node --test scripts/deployment-docs.test.mjs",
     "test:database:pglite": "node scripts/verify.mjs --pglite",
     "test:database:postgresql-race": "node --test database/tests/postgresql-idempotency-race.test.mjs",
+    "test:database:postgresql-reservation-race": "node --test database/tests/postgresql-reservation-race.test.mjs",
     "build": "npm run build --workspace @innorder/contracts && npm run build --workspace @innorder/ai-service && npm run build --workspace @innorder/desktop",
     "typecheck": "npm run build --workspace @innorder/contracts && npm run typecheck --workspaces --if-present",
     "verify": "node scripts/verify.mjs",
