@@ -152,7 +152,7 @@ ALTER TABLE occ.evidence
 
 CREATE UNIQUE INDEX uq_evidence_target_requirement_slot
 ON occ.evidence (target_entity_id, requirement_id, slot_key)
-WHERE target_entity_id IS NOT NULL AND slot_key IS NOT NULL AND state <> 'ARCHIVED';
+WHERE target_entity_id IS NOT NULL AND slot_key IS NOT NULL;
 
 ALTER TABLE occ.evidence_version
     ADD COLUMN upload_session_id uuid REFERENCES occ.upload_session(id),
@@ -208,6 +208,10 @@ CREATE UNIQUE INDEX uq_evidence_object_disposition_version
 ON occ.evidence_object_disposition (evidence_version_id)
 WHERE evidence_version_id IS NOT NULL;
 
+CREATE UNIQUE INDEX uq_evidence_object_disposition_upload
+ON occ.evidence_object_disposition (upload_session_id)
+WHERE upload_session_id IS NOT NULL;
+
 CREATE INDEX ix_evidence_object_disposition_cleanup
 ON occ.evidence_object_disposition (cleanup_lease_expires_at, retained_until, id)
 WHERE disposition_state IN ('CLEANUP_PENDING', 'DELETE_FAILED');
@@ -215,8 +219,10 @@ WHERE disposition_state IN ('CLEANUP_PENDING', 'DELETE_FAILED');
 CREATE FUNCTION occ.validate_upload_session_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
+DECLARE
+    evidence_head occ.evidence%ROWTYPE;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.status <> 'CREATED' THEN
@@ -227,6 +233,26 @@ BEGIN
            OR NEW.immutable_object_key IS NULL OR NEW.absolute_deadline_at IS NULL THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'new upload session requires complete lease and object provenance';
         END IF;
+        IF NEW.object_key IS DISTINCT FROM NEW.quarantine_object_key THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'new upload object key must identify its quarantine object';
+        END IF;
+    END IF;
+
+    IF NEW.evidence_id IS NOT NULL THEN
+        SELECT * INTO STRICT evidence_head
+        FROM occ.evidence
+        WHERE id = NEW.evidence_id
+        FOR UPDATE;
+        IF NEW.requirement_id IS DISTINCT FROM evidence_head.requirement_id
+           OR NEW.target_entity_id IS DISTINCT FROM evidence_head.target_entity_id
+           OR NEW.slot_key IS DISTINCT FROM evidence_head.slot_key THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'upload session does not match evidence requirement, target, and slot';
+        END IF;
+    END IF;
+    IF NEW.absolute_deadline_at <= NEW.created_at
+       OR NEW.absolute_deadline_at > NEW.created_at + interval '2 hours'
+       OR NEW.expires_at > NEW.created_at + interval '30 minutes' THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'upload session deadlines exceed bounded lifetime';
     END IF;
     IF TG_OP = 'UPDATE' THEN
         IF NEW.uploader_id IS DISTINCT FROM OLD.uploader_id
@@ -240,6 +266,7 @@ BEGIN
            OR NEW.normalized_extension IS DISTINCT FROM OLD.normalized_extension
            OR NEW.quarantine_object_key IS DISTINCT FROM OLD.quarantine_object_key
            OR NEW.immutable_object_key IS DISTINCT FROM OLD.immutable_object_key
+           OR NEW.absolute_deadline_at IS DISTINCT FROM OLD.absolute_deadline_at
            OR NEW.created_at IS DISTINCT FROM OLD.created_at
            OR NEW.expires_at IS DISTINCT FROM OLD.expires_at THEN
             RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'upload session provenance is immutable';
@@ -263,8 +290,38 @@ BEGIN
         NEW.lease_owner IS NULL OR NEW.lease_acquired_at IS NULL
         OR NEW.lease_heartbeat_at IS NULL OR NEW.lease_expires_at IS NULL
         OR NEW.absolute_deadline_at IS NULL OR NEW.lease_expires_at > NEW.absolute_deadline_at
+        OR NEW.lease_acquired_at < NEW.created_at
+        OR NEW.lease_acquired_at > NEW.lease_heartbeat_at
+        OR NEW.lease_heartbeat_at >= NEW.lease_expires_at
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'active upload session requires a bounded lease';
+    END IF;
+    IF NEW.status IN ('PROMOTING', 'CONFIRMED') AND (
+        NEW.actual_sha256 IS DISTINCT FROM NEW.expected_sha256
+        OR NEW.actual_size_bytes IS DISTINCT FROM NEW.expected_size_bytes
+        OR NEW.detected_media_type IS NULL OR NEW.scanner_engine IS NULL
+        OR NEW.scanner_version IS NULL OR NEW.scanner_result_ref IS NULL
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'promoted upload requires verified content and scanner provenance';
+    END IF;
+    IF NEW.status = 'CONFIRMED' AND (TG_OP = 'INSERT' OR OLD.status <> 'CONFIRMED') THEN
+        PERFORM 1
+        FROM occ.evidence_version ev
+        WHERE ev.upload_session_id = NEW.id
+          AND ev.evidence_id = NEW.evidence_id
+          AND ev.version = evidence_head.current_version
+          AND ev.object_key = NEW.immutable_object_key
+          AND ev.sha256 = NEW.actual_sha256
+          AND ev.size_bytes = NEW.actual_size_bytes
+          AND ev.detected_media_type = NEW.detected_media_type
+          AND ev.normalized_extension = NEW.normalized_extension
+          AND ev.scanner_engine = NEW.scanner_engine
+          AND ev.scanner_version = NEW.scanner_version
+          AND ev.scanner_result_ref = NEW.scanner_result_ref
+        FOR KEY SHARE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'confirmed upload requires a matching immutable evidence version';
+        END IF;
     END IF;
     RETURN NEW;
 END;
@@ -277,7 +334,7 @@ FOR EACH ROW EXECUTE FUNCTION occ.validate_upload_session_lifecycle();
 CREATE FUNCTION occ.validate_evidence_version_provenance()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 DECLARE
     upload occ.upload_session%ROWTYPE;
@@ -285,7 +342,8 @@ DECLARE
 BEGIN
     IF NEW.upload_session_id IS NULL OR NEW.detected_media_type IS NULL
        OR NEW.normalized_extension IS NULL OR NEW.scanner_engine IS NULL
-       OR NEW.scanner_version IS NULL OR NEW.scanner_result IS NULL THEN
+       OR NEW.scanner_version IS NULL OR NEW.scanner_result IS NULL
+       OR NEW.scanner_result_ref IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'new evidence version requires complete upload and scanner provenance';
     END IF;
 
@@ -299,6 +357,9 @@ BEGIN
     FOR UPDATE;
 
     IF upload.evidence_id IS DISTINCT FROM NEW.evidence_id
+       OR upload.requirement_id IS DISTINCT FROM evidence_head.requirement_id
+       OR upload.target_entity_id IS DISTINCT FROM evidence_head.target_entity_id
+       OR upload.slot_key IS DISTINCT FROM evidence_head.slot_key
        OR upload.status NOT IN ('PROMOTING', 'CONFIRMED')
        OR upload.immutable_object_key IS DISTINCT FROM NEW.object_key
        OR upload.actual_sha256 IS DISTINCT FROM NEW.sha256
@@ -306,10 +367,14 @@ BEGIN
        OR upload.uploader_id IS DISTINCT FROM NEW.submitted_by
        OR upload.detected_media_type IS DISTINCT FROM NEW.detected_media_type
        OR upload.normalized_extension IS DISTINCT FROM NEW.normalized_extension
+       OR upload.scanner_engine IS DISTINCT FROM NEW.scanner_engine
+       OR upload.scanner_version IS DISTINCT FROM NEW.scanner_version
+       OR upload.scanner_result_ref IS DISTINCT FROM NEW.scanner_result_ref
+       OR NEW.mime_type IS DISTINCT FROM NEW.detected_media_type
        OR NEW.scanner_result <> 'CLEAN' THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evidence version does not match confirmed upload provenance';
     END IF;
-    IF NEW.version <> pg_catalog.coalesce(evidence_head.current_version, 0) + 1 THEN
+    IF NEW.version <> coalesce(evidence_head.current_version, 0) + 1 THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evidence version must increase by exactly one';
     END IF;
     RETURN NEW;
@@ -323,7 +388,7 @@ FOR EACH ROW EXECUTE FUNCTION occ.validate_evidence_version_provenance();
 CREATE FUNCTION occ.validate_evidence_review_insert()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 DECLARE
     evidence_row occ.evidence%ROWTYPE;
@@ -371,7 +436,7 @@ FOR EACH ROW EXECUTE FUNCTION occ.validate_evidence_review_insert();
 CREATE FUNCTION occ.validate_evidence_head_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -419,8 +484,15 @@ FOR EACH ROW EXECUTE FUNCTION occ.validate_evidence_head_lifecycle();
 CREATE FUNCTION occ.validate_evidence_object_disposition()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
+DECLARE
+    disposition_evidence_id uuid;
+    version_upload_session_id uuid;
+    version_object_key text;
+    upload_evidence_id uuid;
+    upload_object_key text;
+    evidence_legal_hold_at timestamptz;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evidence object disposition cannot be deleted';
@@ -444,14 +516,43 @@ BEGIN
         END IF;
         NEW.updated_at := statement_timestamp();
     END IF;
+
+    IF NEW.evidence_version_id IS NOT NULL THEN
+        SELECT ev.evidence_id, ev.upload_session_id, ev.object_key
+        INTO STRICT disposition_evidence_id, version_upload_session_id, version_object_key
+        FROM occ.evidence_version ev
+        WHERE ev.id = NEW.evidence_version_id;
+    END IF;
+    IF NEW.upload_session_id IS NOT NULL THEN
+        SELECT us.evidence_id,
+               CASE WHEN us.status = 'CONFIRMED' THEN us.immutable_object_key ELSE us.quarantine_object_key END
+        INTO STRICT upload_evidence_id, upload_object_key
+        FROM occ.upload_session us
+        WHERE id = NEW.upload_session_id
+        FOR KEY SHARE;
+    END IF;
+    IF NEW.evidence_version_id IS NOT NULL AND NEW.upload_session_id IS NOT NULL AND (
+        version_upload_session_id IS DISTINCT FROM NEW.upload_session_id
+        OR disposition_evidence_id IS DISTINCT FROM upload_evidence_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'mismatched disposition provenance';
+    END IF;
+    disposition_evidence_id := coalesce(disposition_evidence_id, upload_evidence_id);
+    IF NEW.evidence_version_id IS NOT NULL
+       AND NEW.object_key IS DISTINCT FROM version_object_key THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'disposition object key does not match evidence version';
+    END IF;
+    IF NEW.evidence_version_id IS NULL
+       AND NEW.object_key IS DISTINCT FROM upload_object_key THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'disposition object key does not match upload session';
+    END IF;
+    SELECT e.legal_hold_at INTO STRICT evidence_legal_hold_at
+    FROM occ.evidence e
+    WHERE id = disposition_evidence_id
+    FOR UPDATE;
     IF NEW.disposition_state IN ('CLEANUP_PENDING', 'DELETING', 'DELETE_FAILED') AND (
-        NEW.legal_hold_at IS NOT NULL OR NEW.backup_snapshot_id IS NOT NULL OR EXISTS (
-            SELECT 1
-            FROM occ.evidence_version ev
-            JOIN occ.evidence e ON e.id = ev.evidence_id
-            WHERE ev.id = NEW.evidence_version_id
-              AND e.legal_hold_at IS NOT NULL
-        )
+        NEW.legal_hold_at IS NOT NULL OR NEW.backup_snapshot_id IS NOT NULL
+        OR evidence_legal_hold_at IS NOT NULL
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold or backup snapshot prevents object cleanup';
     END IF;
@@ -553,9 +654,17 @@ WHERE severity IN ('YELLOW', 'RED') AND state IN ('OPEN', 'ACKNOWLEDGED');
 CREATE FUNCTION occ.validate_risk_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state <> 'OPEN' OR NEW.occurrence_key IS NULL
+           OR NEW.detected_at IS NULL OR NEW.evaluated_at IS NULL
+           OR NEW.calendar_version IS NULL OR NEW.resolved_at IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'new risk requires immutable occurrence facts in OPEN state';
+        END IF;
+        RETURN NEW;
+    END IF;
     IF NEW.rule_definition_id IS DISTINCT FROM OLD.rule_definition_id
        OR NEW.target_entity_id IS DISTINCT FROM OLD.target_entity_id
        OR NEW.occurrence_key IS DISTINCT FROM OLD.occurrence_key
@@ -582,13 +691,64 @@ END;
 $$;
 
 CREATE TRIGGER trg_risk_lifecycle
-BEFORE UPDATE ON occ.risk
+BEFORE INSERT OR UPDATE ON occ.risk
 FOR EACH ROW EXECUTE FUNCTION occ.validate_risk_lifecycle();
+
+CREATE FUNCTION occ.validate_risk_occurrence_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, occ, pg_temp
+AS $$
+DECLARE
+    risk_head occ.risk%ROWTYPE;
+BEGIN
+    SELECT * INTO STRICT risk_head
+    FROM occ.risk
+    WHERE id = NEW.risk_id
+    FOR UPDATE;
+    IF risk_head.rule_definition_id IS DISTINCT FROM NEW.rule_definition_id
+       OR risk_head.target_entity_id IS DISTINCT FROM NEW.target_entity_id
+       OR risk_head.occurrence_key IS DISTINCT FROM NEW.occurrence_key
+       OR risk_head.calendar_version IS DISTINCT FROM NEW.calendar_version
+       OR risk_head.evaluated_at IS DISTINCT FROM NEW.evaluated_at
+       OR risk_head.detected_at IS DISTINCT FROM NEW.detected_at THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'risk occurrence does not match risk head facts';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_risk_occurrence_validate
+BEFORE INSERT ON occ.risk_occurrence
+FOR EACH ROW EXECUTE FUNCTION occ.validate_risk_occurrence_insert();
+
+CREATE FUNCTION occ.validate_risk_action_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, occ, pg_temp
+AS $$
+DECLARE
+    risk_state text;
+BEGIN
+    SELECT state INTO STRICT risk_state
+    FROM occ.risk
+    WHERE id = NEW.risk_id
+    FOR UPDATE;
+    IF risk_state IN ('RESOLVED', 'DISMISSED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal risk rejects new actions';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_risk_action_validate
+BEFORE INSERT ON occ.risk_action
+FOR EACH ROW EXECUTE FUNCTION occ.validate_risk_action_insert();
 
 CREATE FUNCTION occ.validate_risk_adjudication_insert()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 DECLARE
     prior occ.risk_adjudication%ROWTYPE;
@@ -677,7 +837,7 @@ WHERE state IN ('PENDING', 'CONFIRMED');
 CREATE FUNCTION occ.validate_resource_availability()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 BEGIN
     PERFORM 1
@@ -713,7 +873,7 @@ FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 CREATE FUNCTION occ.validate_resource_reservation()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 DECLARE
     resource occ.managed_resource%ROWTYPE;
@@ -842,7 +1002,7 @@ FOR EACH ROW EXECUTE FUNCTION occ.validate_resource_reservation();
 CREATE FUNCTION occ.reject_resource_reservation_delete()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 BEGIN
     RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'reservation history cannot be deleted';
@@ -856,7 +1016,7 @@ FOR EACH ROW EXECUTE FUNCTION occ.reject_resource_reservation_delete();
 CREATE FUNCTION occ.validate_managed_resource_change()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ
+SET search_path = pg_catalog, occ, pg_temp
 AS $$
 DECLARE
     peak_capacity numeric;
@@ -885,7 +1045,7 @@ BEGIN
                    ) AS committed_capacity
             FROM events
         )
-        SELECT pg_catalog.coalesce(pg_catalog.max(committed_capacity), 0)
+        SELECT coalesce(pg_catalog.max(committed_capacity), 0)
         INTO peak_capacity
         FROM running_capacity;
         IF peak_capacity > NEW.capacity THEN
@@ -900,12 +1060,16 @@ CREATE TRIGGER trg_managed_resource_capacity
 BEFORE UPDATE OF capacity, state ON occ.managed_resource
 FOR EACH ROW EXECUTE FUNCTION occ.validate_managed_resource_change();
 
+-- V014 exposes no callable function API. Trigger functions stay invoker-rights and
+-- cannot be attached or invoked directly by the runtime role.
 REVOKE EXECUTE ON FUNCTION occ.validate_upload_session_lifecycle() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_version_provenance() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_review_insert() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_head_lifecycle() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_object_disposition() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_risk_lifecycle() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION occ.validate_risk_occurrence_insert() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION occ.validate_risk_action_insert() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_risk_adjudication_insert() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_resource_availability() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_resource_reservation() FROM PUBLIC;
@@ -920,15 +1084,3 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     occ.risk_intervention,
     occ.resource_availability
 TO innorder_runtime;
-
-GRANT EXECUTE ON FUNCTION occ.validate_upload_session_lifecycle() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_evidence_version_provenance() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_evidence_review_insert() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_evidence_head_lifecycle() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_evidence_object_disposition() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_risk_lifecycle() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_risk_adjudication_insert() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_resource_availability() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_resource_reservation() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.reject_resource_reservation_delete() TO innorder_runtime;
-GRANT EXECUTE ON FUNCTION occ.validate_managed_resource_change() TO innorder_runtime;

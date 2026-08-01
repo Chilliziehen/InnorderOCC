@@ -32,6 +32,40 @@ test('extends evidence storage without invalidating legacy rows', () => {
   assert.doesNotMatch(sql, /DROP TRIGGER\s+trg_evidence_(?:version|review)_immutable/i);
 });
 
+test('locks and validates complete upload to version provenance', () => {
+  for (const comparison of [
+    'upload.requirement_id IS DISTINCT FROM evidence_head.requirement_id',
+    'upload.target_entity_id IS DISTINCT FROM evidence_head.target_entity_id',
+    'upload.slot_key IS DISTINCT FROM evidence_head.slot_key',
+    'upload.scanner_engine IS DISTINCT FROM NEW.scanner_engine',
+    'upload.scanner_version IS DISTINCT FROM NEW.scanner_version',
+    'upload.scanner_result_ref IS DISTINCT FROM NEW.scanner_result_ref',
+  ]) {
+    assert.match(sql, new RegExp(comparison.replaceAll('.', '\\.'), 'i'), comparison);
+  }
+  assert.match(sql, /IF NEW\.status = 'CONFIRMED'[\s\S]*FROM occ\.evidence_version[\s\S]*upload_session_id = NEW\.id/i);
+  assert.match(sql, /ev\.version = evidence_head\.current_version/i);
+  assert.match(sql, /WHERE id = NEW\.evidence_id[\s\S]*FOR UPDATE/i);
+  assert.match(sql, /WHERE id = NEW\.upload_session_id[\s\S]*FOR UPDATE/i);
+});
+
+test('enforces bounded upload lease chronology', () => {
+  assert.match(sql, /NEW\.absolute_deadline_at > NEW\.created_at \+ interval '2 hours'/i);
+  assert.match(sql, /NEW\.expires_at > NEW\.created_at \+ interval '30 minutes'/i);
+  assert.match(sql, /NEW\.lease_acquired_at < NEW\.created_at/i);
+  assert.match(sql, /NEW\.lease_acquired_at > NEW\.lease_heartbeat_at/i);
+  assert.match(sql, /NEW\.lease_heartbeat_at >= NEW\.lease_expires_at/i);
+  assert.match(sql, /NEW\.absolute_deadline_at IS DISTINCT FROM OLD\.absolute_deadline_at/i);
+});
+
+test('resolves and locks legal holds for version and upload dispositions', () => {
+  assert.match(sql, /CREATE UNIQUE INDEX uq_evidence_object_disposition_upload/i);
+  assert.match(sql, /NEW\.evidence_version_id IS NOT NULL AND NEW\.upload_session_id IS NOT NULL[\s\S]*mismatched disposition provenance/i);
+  assert.match(sql, /NEW\.object_key IS DISTINCT FROM (?:version_object_key|upload_object_key)/i);
+  assert.match(sql, /FROM occ\.upload_session[\s\S]*WHERE id = NEW\.upload_session_id/i);
+  assert.match(sql, /FROM occ\.evidence[\s\S]*WHERE id = disposition_evidence_id[\s\S]*FOR UPDATE/i);
+});
+
 test('enforces review segregation, follow-up facts, and one future review', () => {
   assert.match(sql, /ADD COLUMN follow_up_due_at timestamptz/i);
   assert.match(sql, /ADD COLUMN gate_satisfied boolean/i);
@@ -56,6 +90,14 @@ test('adds immutable risk occurrence, action, adjudication, and intervention fac
   assert.match(sql, /CREATE TRIGGER trg_risk_adjudication_immutable/i);
   assert.match(sql, /CREATE TRIGGER trg_risk_occurrence_immutable/i);
   assert.match(sql, /CREATE TRIGGER trg_risk_lifecycle/i);
+  assert.match(sql, /TG_OP = 'INSERT'[\s\S]*NEW\.state <> 'OPEN'[\s\S]*NEW\.occurrence_key IS NULL/i);
+  assert.match(sql, /CREATE TRIGGER trg_risk_occurrence_validate[\s\S]*BEFORE INSERT ON occ\.risk_occurrence/i);
+  assert.match(sql, /risk_head\.rule_definition_id IS DISTINCT FROM NEW\.rule_definition_id/i);
+  assert.match(sql, /risk_head\.target_entity_id IS DISTINCT FROM NEW\.target_entity_id/i);
+  assert.match(sql, /risk_head\.occurrence_key IS DISTINCT FROM NEW\.occurrence_key/i);
+  assert.match(sql, /CREATE TRIGGER trg_risk_action_validate[\s\S]*BEFORE INSERT ON occ\.risk_action/i);
+  assert.match(sql, /risk_state IN \('RESOLVED', 'DISMISSED'\)/i);
+  assert.match(sql, /FROM occ\.risk[\s\S]*FOR UPDATE/i);
 });
 
 test('serializes resource availability and reservation capacity on the parent row', () => {
@@ -88,14 +130,16 @@ test('preflights immutable legacy history and reservations under migration locks
   assert.doesNotMatch(sql, /UPDATE occ\.evidence_review/i);
 });
 
-test('bounds privileged functions and grants only runtime execution', () => {
+test('keeps bounded trigger functions invoker-rights and unavailable for direct runtime calls', () => {
   const functions = [...sql.matchAll(/CREATE FUNCTION occ\.([a-z0-9_]+)\([^]*?\$\$;/giu)];
   assert.ok(functions.length >= 8, 'expected bounded domain trigger functions');
   for (const [, name] of functions) {
     const definition = functions.find((match) => match[1] === name)?.[0] ?? '';
-    assert.match(definition, /SET search_path = pg_catalog, occ/i, `${name} fixes search_path`);
+    assert.match(definition, /RETURNS trigger/i, `${name} remains trigger-only`);
+    assert.match(definition, /SET search_path = pg_catalog, occ, pg_temp/i, `${name} fixes search_path`);
+    assert.doesNotMatch(definition, /SECURITY DEFINER/i, `${name} remains invoker-rights`);
     assert.match(sql, new RegExp(`REVOKE (?:ALL|EXECUTE) ON FUNCTION occ\\.${name}\\([^;]* FROM PUBLIC`, 'i'));
-    assert.match(sql, new RegExp(`GRANT EXECUTE ON FUNCTION occ\\.${name}\\([^;]* TO innorder_runtime`, 'i'));
+    assert.doesNotMatch(sql, new RegExp(`GRANT EXECUTE ON FUNCTION occ\\.${name}\\([^;]* TO innorder_runtime`, 'i'));
   }
   assert.doesNotMatch(sql, /GRANT EXECUTE ON ALL FUNCTIONS/i);
 });
@@ -108,4 +152,7 @@ test('adds supporting evidence, risk, and schedule indexes', () => {
   ]) {
     assert.match(sql, new RegExp(`CREATE (?:UNIQUE )?INDEX ${index}\\b`, 'i'), index);
   }
+  const slotIndex = sql.match(/CREATE UNIQUE INDEX uq_evidence_target_requirement_slot[^;]+;/i)?.[0] ?? '';
+  assert.match(slotIndex, /WHERE target_entity_id IS NOT NULL AND slot_key IS NOT NULL;/i);
+  assert.doesNotMatch(slotIndex, /state <> 'ARCHIVED'/i);
 });
