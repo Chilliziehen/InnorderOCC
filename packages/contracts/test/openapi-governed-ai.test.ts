@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { z } from "zod";
 
 import {
   STABLE_AI_ERROR_CODE_PATTERN,
@@ -49,6 +50,7 @@ import {
 } from "../src/index.js";
 
 type Schema = {
+  "x-occ-validation"?: string[];
   additionalProperties?: boolean;
   dependentRequired?: Record<string, string[]>;
   properties?: Record<string, Record<string, unknown>>;
@@ -144,8 +146,46 @@ const OBJECT_SCHEMA_PARITY = [
   ["AiOperationDeadLetteredPayload", aiOperationDeadLetteredPayloadSchema],
 ] as const;
 
+const GOVERNED_SCHEMA_MANIFEST = [
+  "DataClassification",
+  "ProviderPurpose",
+  ...OBJECT_SCHEMA_PARITY.map(([name]) => name),
+] as const;
+
+const SEMANTIC_VALIDATION_IDS = {
+  AiGrantClaims: ["grant-lifetime"],
+  ProviderTimeouts: ["timeout-order"],
+  CapabilitySnapshot: ["embedding-dimensions-required"],
+  ProviderProfile: ["profile-purpose-capability-compatibility"],
+  ProviderProfileCreate: ["profile-purpose-capability-compatibility"],
+  ProviderProfileUpdate: ["profile-purpose-capability-compatibility"],
+  CapabilityProbe: ["probe-terminal-discriminant"],
+  KnowledgeIngestionJob: ["ingestion-status-discriminant"],
+  KnowledgeGateMetrics: ["gate-threshold-consistency"],
+  KnowledgeGateResult: ["gate-threshold-consistency"],
+  GuidanceStatus: ["guidance-status-discriminant"],
+  GeneratedRecommendation: ["citation-referential-integrity"],
+  ServiceOperationOutcome: ["operation-outcome-discriminant"],
+  ServiceIngestionOutcome: ["ingestion-outcome-discriminant"],
+  ServiceProviderProbeOutcome: ["probe-outcome-discriminant"],
+} as const;
+
 const requiredKeys = (shape: Record<string, { isOptional: () => boolean }>): string[] =>
   Object.entries(shape).filter(([, value]) => !value.isOptional()).map(([key]) => key);
+
+const VALIDATION_KEYWORDS = [
+  "type",
+  "format",
+  "minLength",
+  "maxLength",
+  "minimum",
+  "maximum",
+  "enum",
+  "const",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+] as const;
 
 describe("OCC Core governed AI OpenAPI", () => {
   let document: Document;
@@ -226,6 +266,10 @@ describe("OCC Core governed AI OpenAPI", () => {
   });
 
   it("keeps every governed OpenAPI object strict and aligned with Zod", () => {
+    const schemaNames = Object.keys(document.components.schemas);
+    expect(schemaNames.slice(schemaNames.indexOf("DataClassification")).sort()).toEqual(
+      [...GOVERNED_SCHEMA_MANIFEST].sort(),
+    );
     for (const [name, zodSchema] of OBJECT_SCHEMA_PARITY) {
       const schema = document.components.schemas[name];
       expect(schema?.type).toBe("object");
@@ -235,11 +279,72 @@ describe("OCC Core governed AI OpenAPI", () => {
     }
   });
 
+  it("matches every expressible governed property constraint from Zod", () => {
+    const resolve = (schema: Record<string, unknown>): Record<string, unknown> => {
+      const reference = schema.$ref;
+      if (typeof reference !== "string") return schema;
+      const name = reference.split("/").at(-1) ?? "";
+      return document.components.schemas[name] as unknown as Record<string, unknown>;
+    };
+    const compare = (
+      actualInput: Record<string, unknown>,
+      expected: Record<string, unknown>,
+      path: string,
+    ): void => {
+      const actual = resolve(actualInput);
+      for (const keyword of VALIDATION_KEYWORDS) {
+        if (expected[keyword] === undefined) continue;
+        if (keyword === "type" && expected[keyword] === "number" && actual[keyword] === "integer") continue;
+        expect(actual[keyword], `${path}.${keyword}`).toEqual(expected[keyword]);
+      }
+      const expectedFormat = expected.format;
+      if (
+        typeof expected.pattern === "string" &&
+        expectedFormat !== "uuid" &&
+        expectedFormat !== "date-time"
+      ) {
+        expect(typeof actual.pattern, `${path}.pattern`).toBe("string");
+        expect(new RegExp(actual.pattern as string).source, `${path}.pattern`).toBe(
+          new RegExp(expected.pattern).source,
+        );
+      }
+      if (Array.isArray(expected.anyOf) && Array.isArray(actual.anyOf)) {
+        expect(actual.anyOf, `${path}.anyOf length`).toHaveLength(expected.anyOf.length);
+        expected.anyOf.forEach((entry, index) => compare(
+          (actual.anyOf as Record<string, unknown>[])[index] ?? {},
+          entry as Record<string, unknown>,
+          `${path}.anyOf[${index}]`,
+        ));
+      }
+      if (
+        expected.items !== undefined &&
+        actual.items !== undefined &&
+        !Array.isArray(expected.items) &&
+        !Array.isArray(actual.items)
+      ) {
+        compare(
+          actual.items as Record<string, unknown>,
+          expected.items as Record<string, unknown>,
+          `${path}.items`,
+        );
+      }
+    };
+
+    for (const [name, zodSchema] of OBJECT_SCHEMA_PARITY) {
+      const expected = z.toJSONSchema(zodSchema) as Record<string, unknown>;
+      const expectedProperties = expected.properties as Record<string, Record<string, unknown>>;
+      const actualProperties = document.components.schemas[name]?.properties ?? {};
+      for (const [property, expectedProperty] of Object.entries(expectedProperties)) {
+        compare(actualProperties[property] ?? {}, expectedProperty, `${name}.${property}`);
+      }
+    }
+  });
+
   it("preserves provider and profile scalar bounds and patterns", () => {
     const expectedFields = {
       ProviderConfig: {
         name: { type: "string", minLength: 1, maxLength: 128 },
-        origin: { type: "string", format: "uri", minLength: 9, maxLength: 2048, pattern: "^https://[^/?#]+$" },
+        origin: { type: "string", format: "uri", minLength: 9, maxLength: 2048, pattern: "^https://(?![^/?#]*@)[^/?#]+$" },
         apiPrefix: { type: "string", minLength: 1, maxLength: 256, pattern: "^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?$" },
         credentialFile: { type: "string", minLength: 1, maxLength: 1024, pattern: "^(?:/|[A-Za-z]:\\\\)" },
       },
@@ -311,5 +416,44 @@ describe("OCC Core governed AI OpenAPI", () => {
       requiredCapabilities: ["purpose", "capabilitySnapshot"],
       capabilitySnapshot: ["purpose", "requiredCapabilities"],
     });
+  });
+
+  it("keeps CIDR syntax and approved-private containment explicit", () => {
+    for (const name of ["ProviderConfig", "ProviderConfigCreate", "ProviderConfigUpdate"]) {
+      const cidrs = document.components.schemas[name]?.properties?.approvedPrivateCidrs;
+      expect(cidrs?.["x-occ-validation"]).toEqual({
+        id: "approved-private-cidr-containment",
+        allowedBlocks: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"],
+      });
+      expect(cidrs?.items).toMatchObject({
+        anyOf: [
+          { type: "string", format: "cidrv4", pattern: expect.any(String) },
+          { type: "string", format: "cidrv6", pattern: expect.any(String) },
+        ],
+      });
+    }
+  });
+
+  it("preserves stale-reason enums in list and detail contracts", () => {
+    const expected = [
+      "PACKAGE_VERSION_CHANGED",
+      "POLICY_RELEASE_CHANGED",
+      "DOCUMENT_VERSION_CHANGED",
+      "PROVIDER_CAPABILITY_CHANGED",
+      "TARGET_VERSION_CHANGED",
+      "AI_UNAVAILABLE",
+    ];
+    for (const name of ["RecommendationItem", "RecommendationDetail"]) {
+      expect(document.components.schemas[name]?.properties?.staleReasons?.items).toMatchObject({
+        type: "string",
+        enum: expected,
+      });
+    }
+  });
+
+  it("declares every semantic refinement that JSON Schema cannot express", () => {
+    for (const [name, ids] of Object.entries(SEMANTIC_VALIDATION_IDS)) {
+      expect(document.components.schemas[name]?.["x-occ-validation"]).toEqual(ids);
+    }
   });
 });

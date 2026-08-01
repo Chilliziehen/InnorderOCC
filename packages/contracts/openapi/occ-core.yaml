@@ -999,6 +999,7 @@ components:
     AiGrantClaims:
       type: object
       additionalProperties: false
+      x-occ-validation: [grant-lifetime]
       required: [iss, aud, typ, jti, eventId, operationId, principalId, targetId, purpose, authorizationRevision, policyReleaseDigest, authorizedSetDigest, contextDigest, classificationCeiling, iat, nbf, exp, agentVersionId, modelProfileId, promptVersionId, packageVersionId, embeddingSpaceId]
       properties:
         iss:
@@ -1086,7 +1087,7 @@ components:
         origin:
           type: string
           format: uri
-          pattern: "^https://[^/?#]+$"
+          pattern: "^https://(?![^/?#]*@)[^/?#]+$"
           minLength: 9
           maxLength: 2048
           x-occ-validation:
@@ -1103,10 +1104,17 @@ components:
         approvedPrivateCidrs:
           type: array
           maxItems: 32
+          x-occ-validation:
+            id: approved-private-cidr-containment
+            allowedBlocks: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "fc00::/7"]
           items:
-            type: string
-            minLength: 3
-            maxLength: 64
+            anyOf:
+              - type: string
+                format: cidrv4
+                pattern: "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\/([0-9]|[1-2][0-9]|3[0-2])$"
+              - type: string
+                format: cidrv6
+                pattern: "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$"
         credentialFile:
           type: string
           minLength: 1
@@ -1130,7 +1138,7 @@ components:
         origin:
           type: string
           format: uri
-          pattern: "^https://[^/?#]+$"
+          pattern: "^https://(?![^/?#]*@)[^/?#]+$"
           minLength: 9
           maxLength: 2048
           x-occ-validation:
@@ -1147,10 +1155,17 @@ components:
         approvedPrivateCidrs:
           type: array
           maxItems: 32
+          x-occ-validation:
+            id: approved-private-cidr-containment
+            allowedBlocks: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "fc00::/7"]
           items:
-            type: string
-            minLength: 3
-            maxLength: 64
+            anyOf:
+              - type: string
+                format: cidrv4
+                pattern: "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\/([0-9]|[1-2][0-9]|3[0-2])$"
+              - type: string
+                format: cidrv6
+                pattern: "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$"
         credentialFile:
           type: string
           minLength: 1
@@ -1171,7 +1186,7 @@ components:
         origin:
           type: string
           format: uri
-          pattern: "^https://[^/?#]+$"
+          pattern: "^https://(?![^/?#]*@)[^/?#]+$"
           minLength: 9
           maxLength: 2048
           x-occ-validation:
@@ -1188,10 +1203,17 @@ components:
         approvedPrivateCidrs:
           type: array
           maxItems: 32
+          x-occ-validation:
+            id: approved-private-cidr-containment
+            allowedBlocks: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, "fc00::/7"]
           items:
-            type: string
-            minLength: 3
-            maxLength: 64
+            anyOf:
+              - type: string
+                format: cidrv4
+                pattern: "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\\/([0-9]|[1-2][0-9]|3[0-2])$"
+              - type: string
+                format: cidrv6
+                pattern: "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|::|([0-9a-fA-F]{1,4})?::([0-9a-fA-F]{1,4}:?){0,6})\\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$"
         credentialFile:
           type: string
           minLength: 1
@@ -1220,6 +1242,7 @@ components:
     ProviderTimeouts:
       type: object
       additionalProperties: false
+      x-occ-validation: [timeout-order]
       required: [connectMs, totalMs]
       properties:
         connectMs:
@@ -1279,6 +1302,7 @@ components:
     CapabilitySnapshot:
       type: object
       additionalProperties: false
+      x-occ-validation: [embedding-dimensions-required]
       required: [chat, embeddings, structuredOutput, maxInputTokens, maxOutputTokens, probedAt, snapshotHash]
       properties:
         chat:
@@ -1308,6 +1332,7 @@ components:
     ProviderProfile:
       type: object
       additionalProperties: false
+      x-occ-validation: [profile-purpose-capability-compatibility]
       required: [id, providerId, name, purpose, model, maxClassification, requiredCapabilities, timeouts, rateLimit, cost, capabilitySnapshot, enabled, version]
       properties:
         id:
@@ -1347,6 +1372,7 @@ components:
     ProviderProfileCreate:
       type: object
       additionalProperties: false
+      x-occ-validation: [profile-purpose-capability-compatibility]
       required: [providerId, name, purpose, model, maxClassification, requiredCapabilities, timeouts, rateLimit, cost, capabilitySnapshot, enabled]
       properties:
         providerId:
@@ -1379,6 +1405,7 @@ components:
     ProviderProfileUpdate:
       type: object
       additionalProperties: false
+      x-occ-validation: [profile-purpose-capability-compatibility]
       minProperties: 2
       dependentRequired:
         model: [purpose, requiredCapabilities, capabilitySnapshot]
@@ -1443,6 +1470,7 @@ components:
     CapabilityProbe:
       type: object
       additionalProperties: false
+      x-occ-validation: [probe-terminal-discriminant]
       required: [id, providerId, status, requestedAt]
       properties:
         id:
@@ -1499,6 +1527,7 @@ components:
     KnowledgeIngestionJob:
       type: object
       additionalProperties: false
+      x-occ-validation: [ingestion-status-discriminant]
       required: [id, sourceId, sourceVersion, sourceObjectHash, normalizedContentHash, parserVersion, chunkerVersion, candidateEmbeddingSpaceId, corpusManifestDigest, checkpoint, stage, status, attempts, maxAttempts, nextAttemptAt, createdAt, updatedAt]
       properties:
         id:
@@ -1569,9 +1598,9 @@ components:
           format: date-time
         sanitizedError:
           type: string
-          minLength: 1
-          maxLength: 2048
-          pattern: "^[^\\x00-\\x1F\\x7F]+$"
+          minLength: 8
+          maxLength: 119
+          pattern: "^OCC-AI-[A-Z0-9-]{1,112}$"
         createdAt:
           type: string
           format: date-time
@@ -1584,6 +1613,7 @@ components:
     KnowledgeGateMetrics:
       type: object
       additionalProperties: false
+      x-occ-validation: [gate-threshold-consistency]
       required: [eligibleCount, embeddedCount, coverage, leakageCount, citationSupportedCount, citationTotalCount, citationPrecision, recallAt10Sum, recallAt10CaseCount, recallAt10Mean, minimumCoverage, maximumLeakage, minimumCitationPrecision, minimumRecallAt10, decision]
       properties:
         eligibleCount:
@@ -1644,6 +1674,7 @@ components:
     KnowledgeGateResult:
       type: object
       additionalProperties: false
+      x-occ-validation: [gate-threshold-consistency]
       required: [id, status, datasetVersionId, datasetContentHash, corpusManifestDigest, documentManifest, candidateEmbeddingSpaceId, expectedActiveSpaceId, eligibleCount, embeddedCount, coverage, leakageCount, citationSupportedCount, citationTotalCount, citationPrecision, recallAt10Sum, recallAt10CaseCount, recallAt10Mean, minimumCoverage, maximumLeakage, minimumCitationPrecision, minimumRecallAt10, decision, evidenceHash, evaluatedAt]
       properties:
         id:
@@ -1792,6 +1823,7 @@ components:
     GuidanceStatus:
       type: object
       additionalProperties: false
+      x-occ-validation: [guidance-status-discriminant]
       required: [operationId, status, requestedAt, updatedAt]
       properties:
         operationId:
@@ -1850,6 +1882,7 @@ components:
     GeneratedRecommendation:
       type: object
       additionalProperties: false
+      x-occ-validation: [citation-referential-integrity]
       required: [generatedContent, summary, steps, confidence, citations]
       properties:
         generatedContent:
@@ -1951,6 +1984,7 @@ components:
           maxItems: 6
           items:
             type: string
+            enum: [PACKAGE_VERSION_CHANGED, POLICY_RELEASE_CHANGED, DOCUMENT_VERSION_CHANGED, PROVIDER_CAPABILITY_CHANGED, TARGET_VERSION_CHANGED, AI_UNAVAILABLE]
         version:
           type: integer
           minimum: 0
@@ -2020,6 +2054,7 @@ components:
     ServiceOperationOutcome:
       type: object
       additionalProperties: false
+      x-occ-validation: [operation-outcome-discriminant]
       required: [operationId, status, expectedVersion]
       properties:
         operationId:
@@ -2040,6 +2075,7 @@ components:
     ServiceIngestionOutcome:
       type: object
       additionalProperties: false
+      x-occ-validation: [ingestion-outcome-discriminant]
       required: [operationId, jobId, status, expectedVersion]
       properties:
         operationId:
@@ -2066,6 +2102,7 @@ components:
     ServiceProviderProbeOutcome:
       type: object
       additionalProperties: false
+      x-occ-validation: [probe-outcome-discriminant]
       required: [operationId, probeId, status, completedAt, expectedVersion]
       properties:
         operationId:

@@ -4,6 +4,7 @@ import {
   aiGuidanceRequestedEventSchema,
   aiOperationDeadLetteredEventSchema,
   aiRecommendationProposedEventSchema,
+  approvedPrivateCidrSchema,
   aiGrantClaimsSchema,
   capabilityProbeSchema,
   capabilitySnapshotSchema,
@@ -65,6 +66,42 @@ describe("governed AI provider contracts", () => {
       "CONFIDENTIAL",
       "RESTRICTED",
     ]);
+  });
+
+  it.each([
+    "10.0.0.0/8",
+    "10.255.255.255/32",
+    "172.16.0.0/12",
+    "172.31.255.255/32",
+    "192.168.0.0/16",
+    "192.168.255.255/32",
+    "fc00::/7",
+    "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+  ])("accepts an approved private CIDR wholly inside its containing block: %s", (cidr) => {
+    expect(approvedPrivateCidrSchema.parse(cidr)).toBe(cidr);
+  });
+
+  it.each([
+    "0.0.0.0/0",
+    "::/0",
+    "8.8.8.0/24",
+    "10.0.0.0/7",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "169.254.169.254/32",
+    "172.16.0.0/11",
+    "192.0.2.0/24",
+    "192.168.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "fc00::/6",
+    "fe80::/10",
+    "::1/128",
+    "2001:db8::/32",
+  ])("rejects a public, special, or spillover CIDR: %s", (cidr) => {
+    expect(() => approvedPrivateCidrSchema.parse(cidr)).toThrow();
   });
 
   it("accepts an exact HTTPS provider origin and normalized API prefix", () => {
@@ -302,6 +339,17 @@ describe("governed knowledge contracts", () => {
       status: "COMPLETED",
       completedAt: LATER,
     })).toBeDefined();
+    expect(knowledgeIngestionJobSchema.parse({
+      ...job,
+      sanitizedError: "OCC-AI-INGESTION-RETRY",
+    })).toBeDefined();
+    expect(knowledgeIngestionJobSchema.parse({
+      ...job,
+      stage: "COMPLETE",
+      status: "FAILED",
+      sanitizedError: "OCC-AI-INGESTION-FAILED",
+      completedAt: LATER,
+    })).toBeDefined();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, stage: "QUALITY_GATE" })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "RUNNING" })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, attempts: 6 })).toThrow();
@@ -313,6 +361,50 @@ describe("governed knowledge contracts", () => {
     })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "COMPLETED", stage: "COMPLETE", completedAt: LATER })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, status: "FAILED", completedAt: LATER })).toThrow();
+    expect(() => knowledgeIngestionJobSchema.parse({
+      ...job,
+      stage: "COMPLETE",
+      status: "FAILED",
+      sanitizedError: "parser exploded",
+      completedAt: LATER,
+    })).toThrow();
+    expect(() => knowledgeIngestionJobSchema.parse({
+      ...job,
+      producedDocumentVersionId: UUID_2,
+      stage: "COMPLETE",
+      status: "COMPLETED",
+      sanitizedError: "OCC-AI-UNEXPECTED",
+      completedAt: LATER,
+    })).toThrow();
+    expect(() => knowledgeIngestionJobSchema.parse({
+      ...job,
+      producedDocumentVersionId: UUID_2,
+      stage: "COMPLETE",
+      status: "FAILED",
+      sanitizedError: "OCC-AI-INGESTION-FAILED",
+      completedAt: LATER,
+    })).toThrow();
+    for (const status of ["PENDING", "PROCESSING"] as const) {
+      const lease = status === "PROCESSING"
+        ? { leaseOwner: "worker-1", leaseExpiresAt: LATER }
+        : {};
+      expect(() => knowledgeIngestionJobSchema.parse({
+        ...job,
+        ...lease,
+        status,
+        sanitizedError: "OCC-AI-UNEXPECTED",
+      })).toThrow();
+      expect(() => knowledgeIngestionJobSchema.parse({
+        ...job,
+        ...lease,
+        status,
+        producedDocumentVersionId: UUID_2,
+      })).toThrow();
+    }
+    expect(() => knowledgeIngestionJobSchema.parse({
+      ...job,
+      producedDocumentVersionId: UUID_2,
+    })).toThrow();
     expect(() => knowledgeIngestionJobSchema.parse({ ...job, providerBody: "secret" })).toThrow();
   });
 

@@ -52,7 +52,25 @@ const isNormalizedApiPrefix = (value: string): boolean =>
 
 export const exactHttpsProviderOriginSchema = z.string().min(9).max(2048).refine(isExactHttpsOrigin);
 export const normalizedApiPrefixSchema = z.string().min(1).max(256).refine(isNormalizedApiPrefix);
-export const approvedPrivateCidrSchema = z.union([z.cidrv4(), z.cidrv6()]);
+export const approvedPrivateCidrSchema = z
+  .union([z.cidrv4(), z.cidrv6()])
+  .refine((cidr) => {
+    const separator = cidr.lastIndexOf("/");
+    const address = cidr.slice(0, separator);
+    const prefix = Number(cidr.slice(separator + 1));
+    if (address.includes(":")) {
+      const firstHextet = Number.parseInt(address.split(":", 1)[0] ?? "", 16);
+      return prefix >= 7 && Number.isInteger(firstHextet) && (firstHextet & 0xfe00) === 0xfc00;
+    }
+    const octets = address.split(".").map(Number);
+    const first = octets[0];
+    const second = octets[1];
+    return (
+      (first === 10 && prefix >= 8) ||
+      (first === 172 && second !== undefined && second >= 16 && second <= 31 && prefix >= 12) ||
+      (first === 192 && second === 168 && prefix >= 16)
+    );
+  });
 
 export const providerConfigSchema = z
   .object({
@@ -297,7 +315,7 @@ export const knowledgeIngestionJobSchema = z
     nextAttemptAt: timestampSchema,
     leaseOwner: z.string().min(1).max(256).optional(),
     leaseExpiresAt: timestampSchema.optional(),
-    sanitizedError: z.string().min(1).max(2048).regex(/^[^\x00-\x1F\x7F]+$/u).optional(),
+    sanitizedError: stableAiErrorCodeSchema.optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
     completedAt: timestampSchema.optional(),
@@ -317,11 +335,19 @@ export const knowledgeIngestionJobSchema = z
     if (job.leaseExpiresAt !== undefined && Date.parse(job.leaseExpiresAt) <= Date.parse(job.createdAt)) {
       context.addIssue({ code: "custom", message: "Lease expiry must follow job creation", path: ["leaseExpiresAt"] });
     }
-    if (job.status === "COMPLETED" && (job.producedDocumentVersionId === undefined || job.completedAt === undefined || job.stage !== "COMPLETE")) {
-      context.addIssue({ code: "custom", message: "Completed jobs require their produced version", path: ["status"] });
+    const produced = job.producedDocumentVersionId !== undefined;
+    const errored = job.sanitizedError !== undefined;
+    if (job.status === "COMPLETED" && (!produced || errored || job.completedAt === undefined || job.stage !== "COMPLETE")) {
+      context.addIssue({ code: "custom", message: "Completed jobs require only their produced version", path: ["status"] });
     }
-    if (job.status === "FAILED" && (job.sanitizedError === undefined || job.completedAt === undefined)) {
-      context.addIssue({ code: "custom", message: "Failed jobs require a sanitized error", path: ["status"] });
+    if (job.status === "FAILED" && (!errored || produced || job.completedAt === undefined)) {
+      context.addIssue({ code: "custom", message: "Failed jobs require only a sanitized error", path: ["status"] });
+    }
+    if ((job.status === "PENDING" || job.status === "PROCESSING") && (produced || errored)) {
+      context.addIssue({ code: "custom", message: "Pending and processing jobs cannot contain outcomes", path: ["status"] });
+    }
+    if (job.status === "RETRY" && produced) {
+      context.addIssue({ code: "custom", message: "Retry jobs cannot contain a produced version", path: ["status"] });
     }
     if (job.status !== "COMPLETED" && job.status !== "FAILED" && job.completedAt !== undefined) {
       context.addIssue({ code: "custom", message: "Only terminal jobs have completion times", path: ["completedAt"] });
