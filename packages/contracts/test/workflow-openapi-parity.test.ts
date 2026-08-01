@@ -6,14 +6,31 @@ import { z } from "zod";
 
 import {
   ACTIVITY_KEY_PATTERN,
+  BLOCKER_SEVERITIES,
   blockerCodeSchema,
+  blockerSeveritySchema,
   COHORT_DATE_ORDER_CONSTRAINT,
+  CONDITIONAL_RULE_VERSION_MAX_LENGTH,
+  CONDITIONAL_RULE_VERSION_MIN_LENGTH,
+  CONDITIONAL_RULE_VERSION_PATTERN,
+  conditionalRuleVersionSchema,
   cohortStatusSchema,
   gateProviderStatusSchema,
   problemCodeSchema,
+  NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH,
+  NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH,
+  NOTIFICATION_PERSISTENCE_TOKEN_PATTERN,
+  NOTIFICATION_SEVERITIES,
+  notificationResourceTypeSchema,
+  notificationSchema,
+  notificationSeveritySchema,
+  notificationTypeSchema,
   processTimelineTypeSchema,
   STABLE_CODE_PATTERN,
   processStateSchema,
+  REVIEW_SEQUENCE_MIN,
+  reviewSequenceSchema,
+  SAFE_INTEGER_MAX,
   taskTimelineTypeSchema,
   taskPresentationStateSchema,
   taskCompletionConflictCodeSchema,
@@ -80,8 +97,14 @@ type Document = {
 };
 
 let document: Document;
+let persistenceDdl: string;
 beforeAll(async () => {
-  document = parse(await readFile(new URL("../openapi/occ-core.yaml", import.meta.url), "utf8")) as Document;
+  const [openApiSource, ddl] = await Promise.all([
+    readFile(new URL("../openapi/occ-core.yaml", import.meta.url), "utf8"),
+    readFile(new URL("../../../database/migrations/V013__process_task_workflow.sql", import.meta.url), "utf8"),
+  ]);
+  document = parse(openApiSource) as Document;
+  persistenceDdl = ddl;
 });
 
 const dereferenceSchema = (schema: Schema): Schema => {
@@ -291,6 +314,67 @@ describe("workflow OpenAPI schema parity", () => {
       problemCodeSchema.options.filter((code) => !["OCC_STALE_VERSION", "OCC_PARTICIPANT_PROCESS_EXISTS"].includes(code)),
     );
     expect(document.components.schemas.ProblemDetails.properties?.code).toEqual({ $ref: "#/components/schemas/BaseProblemCode" });
+  });
+
+  it("binds notification, blocker, rule-version, and review constraints to V013", () => {
+    expect(persistenceDdl).toContain(`type text NOT NULL CHECK (type = lower(btrim(type)) AND type ~ '${NOTIFICATION_PERSISTENCE_TOKEN_PATTERN}')`);
+    expect(persistenceDdl).toContain(`resource_type text NOT NULL CHECK (resource_type = lower(btrim(resource_type)) AND resource_type ~ '${NOTIFICATION_PERSISTENCE_TOKEN_PATTERN}')`);
+    expect(persistenceDdl).toContain("severity text NOT NULL CHECK (severity IN ('INFO', 'WARNING', 'CRITICAL'))");
+    expect(persistenceDdl).toContain("severity text NOT NULL CHECK (severity IN ('SOFT', 'HARD'))");
+    expect(persistenceDdl).toContain("review_sequence bigint NOT NULL CHECK (review_sequence > 0)");
+    expect(persistenceDdl).toContain("conditional_rule_version text");
+    expect(persistenceDdl).toContain("row_version bigint NOT NULL DEFAULT 0 CHECK (row_version >= 0)");
+
+    expect(document.components.schemas.NotificationType).toEqual({
+      type: "string",
+      minLength: NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH,
+      maxLength: NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH,
+      pattern: NOTIFICATION_PERSISTENCE_TOKEN_PATTERN,
+    });
+    expect(document.components.schemas.NotificationResourceType).toEqual(document.components.schemas.NotificationType);
+    expect(document.components.schemas.NotificationSeverity).toEqual({ type: "string", enum: NOTIFICATION_SEVERITIES });
+    expect(document.components.schemas.BlockerSeverity).toEqual({ type: "string", enum: BLOCKER_SEVERITIES });
+    expect(document.components.schemas.ConditionalRuleVersion).toEqual({
+      type: "string",
+      minLength: CONDITIONAL_RULE_VERSION_MIN_LENGTH,
+      maxLength: CONDITIONAL_RULE_VERSION_MAX_LENGTH,
+      pattern: CONDITIONAL_RULE_VERSION_PATTERN,
+    });
+    expect(document.components.schemas.ReviewSequence).toEqual({
+      type: "integer", format: "int64", minimum: REVIEW_SEQUENCE_MIN, maximum: SAFE_INTEGER_MAX,
+    });
+    for (const [name, zodSchema] of [
+      ["NotificationType", notificationTypeSchema],
+      ["NotificationResourceType", notificationResourceTypeSchema],
+      ["NotificationSeverity", notificationSeveritySchema],
+      ["BlockerSeverity", blockerSeveritySchema],
+      ["ConditionalRuleVersion", conditionalRuleVersionSchema],
+      ["ReviewSequence", reviewSequenceSchema],
+    ] as const) {
+      expectConstraintParity(
+        z.toJSONSchema(zodSchema, { unrepresentable: "any" }) as Schema,
+        document.components.schemas[name],
+        name,
+      );
+    }
+
+    const notification = document.components.schemas.Notification;
+    const zodNotification = z.toJSONSchema(notificationSchema, { unrepresentable: "any" }) as Schema;
+    expect(notification.required).toEqual(zodNotification.required);
+    expect(notification.required).toEqual(["id", "type", "severity", "resourceType", "resourceId", "cursor", "version", "createdAt"]);
+    expect(notification.properties?.type).toEqual({ $ref: "#/components/schemas/NotificationType" });
+    expect(notification.properties?.severity).toEqual({ $ref: "#/components/schemas/NotificationSeverity" });
+    expect(notification.properties?.resourceType).toEqual({ $ref: "#/components/schemas/NotificationResourceType" });
+    expect(notification.properties?.version).toEqual({ $ref: "#/components/schemas/SafeVersion" });
+
+    const notificationQuery = parametersFor(document.paths["/api/v1/me/notifications"].get);
+    expect(notificationQuery.find((parameter) => parameter.name === "type")?.schema).toEqual({ $ref: "#/components/schemas/NotificationType" });
+    expect(notificationQuery.find((parameter) => parameter.name === "severity")?.schema).toEqual({ $ref: "#/components/schemas/NotificationSeverity" });
+    expect(document.components.schemas.TaskBlocker.properties?.severity).toEqual({ $ref: "#/components/schemas/BlockerSeverity" });
+    for (const name of ["TaskSummary", "TaskDetail"]) {
+      expect(document.components.schemas[name].properties?.conditionalRuleVersion).toEqual({ $ref: "#/components/schemas/ConditionalRuleVersion" });
+    }
+    expect(document.components.schemas.TaskPendingReviewPayload.properties?.reviewSequence).toEqual({ $ref: "#/components/schemas/ReviewSequence" });
   });
 
   it("keeps every reusable and operation conflict schema aligned with Zod", () => {

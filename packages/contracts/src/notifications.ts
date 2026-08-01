@@ -11,16 +11,28 @@ import {
   uuidSchema,
 } from "./workflow-common.js";
 
-export const notificationSeveritySchema = z.enum(["INFO", "WARNING", "ERROR"]);
-export const notificationResourceTypeSchema = z.enum(["COHORT", "PROCESS", "TASK"]);
+export const NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH = 1;
+export const NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH = 64;
+export const NOTIFICATION_PERSISTENCE_TOKEN_PATTERN = "^[a-z0-9][a-z0-9._-]{0,63}$";
+export const NOTIFICATION_SEVERITIES = ["INFO", "WARNING", "CRITICAL"] as const;
+
+const notificationPersistenceTokenSchema = z
+  .string()
+  .min(NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH)
+  .max(NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH)
+  .regex(new RegExp(NOTIFICATION_PERSISTENCE_TOKEN_PATTERN));
+export const notificationTypeSchema = notificationPersistenceTokenSchema;
+export const notificationSeveritySchema = z.enum(NOTIFICATION_SEVERITIES);
+export const notificationResourceTypeSchema = notificationPersistenceTokenSchema;
 export const notificationSchema = z
   .object({
     id: uuidSchema,
-    type: z.string().min(1).max(128).regex(/^[A-Z][A-Z0-9_]*$/),
+    type: notificationTypeSchema,
     severity: notificationSeveritySchema,
     resourceType: notificationResourceTypeSchema,
     resourceId: uuidSchema,
     cursor: safeIntegerSchema,
+    version: safeVersionSchema,
     createdAt: instantSchema,
     readAt: instantSchema.optional(),
   })
@@ -28,7 +40,7 @@ export const notificationSchema = z
 export const notificationListQuerySchema = z
   .object({
     unread: z.boolean().optional(),
-    type: z.string().min(1).max(128).optional(),
+    type: notificationTypeSchema.optional(),
     severity: notificationSeveritySchema.optional(),
     createdBefore: instantSchema.optional(),
     cursor: cursorSchema.optional(),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { workflowEventSchema, workflowEventSchemas } from "../src/index.js";
+import { reviewSequenceSchema, workflowEventSchema, workflowEventSchemas } from "../src/index.js";
 
 const id = "550e8400-e29b-41d4-a716-446655440000";
 const otherId = "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
@@ -121,5 +121,15 @@ describe("workflow typed event registry", () => {
         payload: { ...event.payload, role: "OWNER" },
       })).toThrow();
     }
+  });
+
+  it("requires persisted review sequences to start at one", () => {
+    expect(reviewSequenceSchema.parse(1)).toBe(1);
+    expect(() => reviewSequenceSchema.parse(0)).toThrow();
+    const event = eventFor("task.pending-review");
+    expect(() => workflowEventSchema.parse({
+      ...event,
+      payload: { ...event.payload, reviewSequence: 0 },
+    })).toThrow();
   });
 });

@@ -12,9 +12,11 @@ export const DISPLAY_TEXT_MAX_LENGTH = 256;
 export const ACTIVITY_KEY_MAX_LENGTH = 128;
 export const ACTIVITY_KEY_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
 export const STABLE_CODE_PATTERN = "^[A-Z][A-Z0-9_]*$";
+export const REVIEW_SEQUENCE_MIN = 1;
 
 export const safeIntegerSchema = z.number().int().min(0).max(SAFE_INTEGER_MAX);
 export const safeVersionSchema = safeIntegerSchema;
+export const reviewSequenceSchema = safeIntegerSchema.min(REVIEW_SEQUENCE_MIN);
 export const uuidSchema = z.uuid();
 export const dateSchema = z.iso.date();
 export const instantSchema = z.iso.datetime({ offset: true });

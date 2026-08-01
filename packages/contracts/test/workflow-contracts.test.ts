@@ -4,6 +4,7 @@ import {
   addCohortMemberRequestSchema,
   archiveCohortRequestSchema,
   blockerCodeSchema,
+  blockerSeveritySchema,
   cancelProcessRequestSchema,
   claimTaskRequestSchema,
   cohortDetailSchema,
@@ -21,6 +22,9 @@ import {
   markNotificationReadRequestSchema,
   notificationListQuerySchema,
   notificationPageSchema,
+  notificationResourceTypeSchema,
+  notificationSeveritySchema,
+  notificationTypeSchema,
   processDetailSchema,
   processProgressSchema,
   processListQuerySchema,
@@ -33,6 +37,7 @@ import {
   removeCohortMemberRequestSchema,
   resumeProcessRequestSchema,
   safeVersionSchema,
+  conditionalRuleVersionSchema,
   startParticipantProcessRequestSchema,
   suspendProcessRequestSchema,
   taskBlockerPageSchema,
@@ -249,6 +254,20 @@ describe("task contracts", () => {
   });
 
   it("applies stable key and failure-code patterns to every task field", () => {
+    expect(blockerSeveritySchema.options).toEqual(["SOFT", "HARD"]);
+    expect(taskBlockerSchema.parse({
+      id, code: "EVIDENCE_REQUIRED", severity: "SOFT", sourceType: "EVIDENCE", createdAt: at,
+    })).toBeDefined();
+    expect(() => taskBlockerSchema.parse({
+      id, code: "EVIDENCE_REQUIRED", severity: "INFO", sourceType: "EVIDENCE", createdAt: at,
+    })).toThrow();
+    expect(conditionalRuleVersionSchema.parse("conditional.v1+published")).toBe("conditional.v1+published");
+    for (const invalid of ["", "conditional rule", 1, "x".repeat(129)]) {
+      expect(() => conditionalRuleVersionSchema.parse(invalid)).toThrow();
+    }
+    expect(taskDetailSchema.parse({
+      ...task, conditionalRuleVersion: "conditional.v1+published", blockers: [],
+    })).toBeDefined();
     expect(() => processProgressSchema.parse({
       processId: id, state: "RUNNING", completedActivities: 0,
       activeActivities: ["Invalid Activity"], version: 1, updatedAt: at,
@@ -266,10 +285,29 @@ describe("task contracts", () => {
 describe("notification and event catch-up contracts", () => {
   it("validates notification list/read and authorized event catch-up pages", () => {
     const notification = {
-      id, type: "TASK_AVAILABLE", severity: "INFO", resourceType: "TASK",
-      resourceId: otherId, cursor: 1, createdAt: at,
+      id, type: "task.available", severity: "CRITICAL", resourceType: "task",
+      resourceId: otherId, cursor: 1, version: 0, createdAt: at,
     } as const;
     expect(notificationPageSchema.parse({ items: [notification], page: {} })).toBeDefined();
+    expect(notificationSeveritySchema.options).toEqual(["INFO", "WARNING", "CRITICAL"]);
+    for (const resourceType of ["cohort", "process", "task", "evidence.record"]) {
+      expect(notificationResourceTypeSchema.parse(resourceType)).toBe(resourceType);
+    }
+    for (const invalid of ["TASK_AVAILABLE", "task available", "Task.Available"]) {
+      expect(() => notificationTypeSchema.parse(invalid)).toThrow();
+    }
+    expect(() => notificationPageSchema.parse({
+      items: [{ ...notification, severity: "ERROR" }], page: {},
+    })).toThrow();
+    expect(() => notificationPageSchema.parse({
+      items: [{ ...notification, resourceType: "TASK" }], page: {},
+    })).toThrow();
+    const { version: _version, ...unversionedNotification } = notification;
+    expect(() => notificationPageSchema.parse({ items: [unversionedNotification], page: {} })).toThrow();
+    expect(notificationListQuerySchema.parse({
+      type: "task.available", severity: "CRITICAL",
+    })).toEqual({ type: "task.available", severity: "CRITICAL", pageSize: 25 });
+    expect(() => notificationListQuerySchema.parse({ type: "TASK_AVAILABLE" })).toThrow();
     expect(markNotificationReadRequestSchema.parse({ expectedVersion: 0 })).toEqual({ expectedVersion: 0 });
     expect(eventCatchUpQuerySchema.parse({})).toEqual({ limit: 25 });
     expect(eventCatchUpQuerySchema.parse({ cursor: "opaque", limit: 100, filter: "task.completed" })).toEqual({

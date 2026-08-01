@@ -25,7 +25,16 @@ export const blockerCodeSchema = z.enum([
   "PROCESS_SUSPENDED", "PROCESS_CANCELLED", "POLICY_DENIED",
   "GATE_PROVIDER_UNAVAILABLE",
 ]);
-export const blockerSeveritySchema = z.enum(["INFO", "WARNING", "HARD"]);
+export const BLOCKER_SEVERITIES = ["SOFT", "HARD"] as const;
+export const blockerSeveritySchema = z.enum(BLOCKER_SEVERITIES);
+export const CONDITIONAL_RULE_VERSION_MIN_LENGTH = 1;
+export const CONDITIONAL_RULE_VERSION_MAX_LENGTH = 128;
+export const CONDITIONAL_RULE_VERSION_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._+-]*$";
+export const conditionalRuleVersionSchema = z
+  .string()
+  .min(CONDITIONAL_RULE_VERSION_MIN_LENGTH)
+  .max(CONDITIONAL_RULE_VERSION_MAX_LENGTH)
+  .regex(new RegExp(CONDITIONAL_RULE_VERSION_PATTERN));
 export const gateProviderStatusSchema = z.enum(["READY", "UNAVAILABLE", "STALE"]);
 export const taskTimelineTypeSchema = z.enum([
   "AVAILABLE", "CLAIMED", "ASSIGNEE_CHANGED", "BLOCKED", "UNBLOCKED",
@@ -73,7 +82,7 @@ export const taskSummarySchema = z
     completedAt: instantSchema.optional(),
     failureCode: stableCodeSchema.optional(),
     followUpDueAt: instantSchema.optional(),
-    conditionalRuleVersion: safeVersionSchema.optional(),
+    conditionalRuleVersion: conditionalRuleVersionSchema.optional(),
   })
   .strict();
 export const taskDetailSchema = taskSummarySchema

@@ -5,6 +5,7 @@ import { blockerCodeSchema } from "./task.js";
 import {
   activityKeySchema,
   safeVersionSchema,
+  reviewSequenceSchema,
   stableCodeSchema,
   uuidSchema,
 } from "./workflow-common.js";
@@ -185,7 +186,7 @@ export const workflowEventSchemas = {
     taskId: uuidSchema,
     processId: uuidSchema,
     evidenceVersionId: uuidSchema,
-    reviewSequence: safeVersionSchema,
+    reviewSequence: reviewSequenceSchema,
   })),
   "task.returned": typedEvent("task.returned", "TASK", "taskId", strictPayload({
     taskId: uuidSchema,
