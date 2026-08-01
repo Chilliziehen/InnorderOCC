@@ -44,9 +44,19 @@ class ProcessParserSandboxDockerIntegrationTest {
             val name = commands.single { it.getOrNull(1) == "run" }
                 .single { it.startsWith("--name=") }
                 .removePrefix("--name=")
-            val inspection = docker(docker, "inspect", name)
-            assertThat(inspection.exitCode).isNotZero()
-            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+            val verification = docker(
+                docker,
+                "ps",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                "name=^/$name$",
+                "--format",
+                "{{.Names}}",
+            )
+            assertThat(verification.exitCode).isZero()
+            assertThat(verification.output).isBlank()
+            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
         } finally {
             docker(docker, "image", "rm", "-f", image)
         }

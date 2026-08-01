@@ -66,7 +66,7 @@ class ProcessParserSandboxTest {
         assertThat(runCommand).doesNotContain(ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER)
         assertThat(runCommand.single { it.startsWith("--name=") })
             .matches("--name=occ-evidence-[a-f0-9]{24}")
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
     }
 
     @Test
@@ -109,19 +109,62 @@ class ProcessParserSandboxTest {
         val name = commands.first().single { it.startsWith("--name=") }.removePrefix("--name=")
         assertThat(commands.takeLast(2)).containsExactly(
             listOf(fakeDockerExecutable().toString(), "rm", "-f", name),
-            listOf(fakeDockerExecutable().toString(), "inspect", name),
+            listOf(
+                fakeDockerExecutable().toString(),
+                "ps",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                "name=^/$name$",
+                "--format",
+                "{{.Names}}",
+            ),
         )
     }
 
     @Test
-    fun `successful parser result fails closed unless cleanup verifies container absence`() {
+    fun `successful parser result fails closed when exact-name container remains`() {
         val commands = mutableListOf<List<String>>()
-        val sandbox = sandbox("clean", commands = commands, inspectExitCode = 0)
+        val sandbox = sandbox("clean", commands = commands, verificationOutput = "occ-evidence-still-running\n")
         val path = Files.writeString(tempDirectory.resolve("claim.pdf"), "fixture")
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+    }
+
+    @Test
+    fun `daemon unavailable during absence verification fails closed`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox(
+            "clean",
+            commands = commands,
+            verificationExitCode = 1,
+            verificationOutput = "Cannot connect to the Docker daemon",
+        )
+        val path = Files.writeString(tempDirectory.resolve("daemon-unavailable.pdf"), "fixture")
+
+        assertThat(sandbox.inspect(parserRequest(path)))
+            .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+    }
+
+    @Test
+    fun `absence verification timeout fails closed`() {
+        val sandbox = sandbox("clean", verificationDelayMillis = 5_000)
+        val path = Files.writeString(tempDirectory.resolve("verification-timeout.pdf"), "fixture")
+
+        assertThat(sandbox.inspect(parserRequest(path)))
+            .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+    }
+
+    @Test
+    fun `oversized absence verification output fails closed`() {
+        val sandbox = sandbox("clean", verificationOutput = "x".repeat(2048))
+        val path = Files.writeString(tempDirectory.resolve("verification-oversized.pdf"), "fixture")
+
+        assertThat(sandbox.inspect(parserRequest(path)))
+            .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
     }
 
     @Test
@@ -149,7 +192,7 @@ class ProcessParserSandboxTest {
             assertThat(sandbox.inspect(parserRequest(path)))
                 .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
             assertThat(Thread.interrupted()).isTrue()
-            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
         } finally {
             Thread.interrupted()
             interrupter.shutdownNow()
@@ -164,7 +207,7 @@ class ProcessParserSandboxTest {
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
     }
 
     @Test
@@ -193,7 +236,9 @@ class ProcessParserSandboxTest {
         maximumRuntime: Duration = Duration.ofSeconds(8),
         maximumRequestBytes: Int = 4096,
         commands: MutableList<List<String>> = mutableListOf(),
-        inspectExitCode: Int = 1,
+        verificationExitCode: Int = 0,
+        verificationOutput: String = "",
+        verificationDelayMillis: Long = 0,
     ): ProcessParserSandbox {
         val javaExecutable = Path.of(
             System.getProperty("java.home"),
@@ -205,7 +250,7 @@ class ProcessParserSandboxTest {
             argumentFile,
             "-cp\n${System.getProperty("java.class.path")}\n${ParserWorkerFixture::class.java.name}\n$mode\n$pidFile\n",
         )
-        val controlArgumentFile = tempDirectory.resolve("docker-control-$mode-$inspectExitCode.args")
+        val controlArgumentFile = tempDirectory.resolve("docker-control-$mode-$verificationExitCode.args")
         Files.writeString(
             controlArgumentFile,
             "-cp\n${System.getProperty("java.class.path")}\n${DockerControlFixture::class.java.name}\n",
@@ -218,8 +263,17 @@ class ProcessParserSandboxTest {
                 val processArguments = if (command.getOrNull(1) == "run") {
                     listOf(javaExecutable.toString(), "@$argumentFile", command.last())
                 } else {
-                    val exitCode = if (command.getOrNull(1) == "inspect") inspectExitCode else 0
-                    listOf(javaExecutable.toString(), "@$controlArgumentFile", exitCode.toString())
+                    val verifiesAbsence = command.getOrNull(1) == "ps"
+                    val exitCode = if (verifiesAbsence) verificationExitCode else 0
+                    val output = if (verifiesAbsence) verificationOutput else ""
+                    val delayMillis = if (verifiesAbsence) verificationDelayMillis else 0
+                    listOf(
+                        javaExecutable.toString(),
+                        "@$controlArgumentFile",
+                        exitCode.toString(),
+                        output,
+                        delayMillis.toString(),
+                    )
                 }
                 ProcessBuilder(processArguments)
                     .redirectErrorStream(true)
@@ -312,7 +366,9 @@ class ProcessParserSandboxTest {
 object DockerControlFixture {
     @JvmStatic
     fun main(args: Array<String>) {
-        exitProcess(args.single().toInt())
+        Thread.sleep(args[2].toLong())
+        print(args[1])
+        exitProcess(args[0].toInt())
     }
 }
 

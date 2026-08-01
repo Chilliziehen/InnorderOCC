@@ -64,9 +64,18 @@ class ProcessParserSandboxConfiguration(
         return listOf(executable.toString(), "rm", "-f", name)
     }
 
-    internal fun inspectionCommand(name: String): List<String> {
+    internal fun absenceVerificationCommand(name: String): List<String> {
         require(CONTAINER_NAME.matches(name))
-        return listOf(executable.toString(), "inspect", name)
+        return listOf(
+            executable.toString(),
+            "ps",
+            "-a",
+            "--no-trunc",
+            "--filter",
+            "name=^/$name$",
+            "--format",
+            "{{.Names}}",
+        )
     }
 
     private fun validateArguments() {
@@ -174,10 +183,13 @@ class ProcessParserSandbox internal constructor(
 
     private fun cleanup(containerName: String): CleanupOutcome {
         val removal = control(configuration.removalCommand(containerName))
-        val inspection = control(configuration.inspectionCommand(containerName))
+        val verification = control(configuration.absenceVerificationCommand(containerName))
         return CleanupOutcome(
-            absent = inspection.completed && !inspection.oversized && inspection.exitCode != 0,
-            interrupted = removal.interrupted || inspection.interrupted,
+            absent = verification.completed &&
+                !verification.oversized &&
+                verification.exitCode == 0 &&
+                verification.output.toString(Charsets.UTF_8).trim().isEmpty(),
+            interrupted = removal.interrupted || verification.interrupted,
         )
     }
 
@@ -185,7 +197,7 @@ class ProcessParserSandbox internal constructor(
         val process = try {
             processStarter.start(command)
         } catch (_: Exception) {
-            return ControlOutcome(-1, completed = false, oversized = false, interrupted = false)
+            return ControlOutcome(-1, ByteArray(0), completed = false, oversized = false, interrupted = false)
         }
         val readerExecutor = Executors.newSingleThreadExecutor { work ->
             Thread(work, "evidence-parser-docker-control-output").apply { isDaemon = true }
@@ -195,7 +207,7 @@ class ProcessParserSandbox internal constructor(
             process.outputStream.close()
             if (!process.waitFor(CONTROL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
                 terminate(process)
-                ControlOutcome(-1, completed = false, oversized = false, interrupted = false)
+                ControlOutcome(-1, ByteArray(0), completed = false, oversized = false, interrupted = false)
             } else {
                 val bounded = try {
                     outputFuture.get(CONTROL_OUTPUT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
@@ -206,14 +218,20 @@ class ProcessParserSandbox internal constructor(
                     terminate(process)
                     BoundedOutput(ByteArray(0), oversized = true)
                 }
-                ControlOutcome(process.exitValue(), completed = true, oversized = bounded.oversized, interrupted = false)
+                ControlOutcome(
+                    process.exitValue(),
+                    bounded.bytes,
+                    completed = true,
+                    oversized = bounded.oversized,
+                    interrupted = false,
+                )
             }
         } catch (_: InterruptedException) {
             terminateWithoutWaiting(process)
-            ControlOutcome(-1, completed = false, oversized = false, interrupted = true)
+            ControlOutcome(-1, ByteArray(0), completed = false, oversized = false, interrupted = true)
         } catch (_: Exception) {
             terminateWithoutWaiting(process)
-            ControlOutcome(-1, completed = false, oversized = false, interrupted = false)
+            ControlOutcome(-1, ByteArray(0), completed = false, oversized = false, interrupted = false)
         } finally {
             if (process.isAlive) terminateWithoutWaiting(process)
             outputFuture.cancel(true)
@@ -289,6 +307,7 @@ class ProcessParserSandbox internal constructor(
     private data class BoundedOutput(val bytes: ByteArray, val oversized: Boolean)
     private data class ControlOutcome(
         val exitCode: Int,
+        val output: ByteArray,
         val completed: Boolean,
         val oversized: Boolean,
         val interrupted: Boolean,
