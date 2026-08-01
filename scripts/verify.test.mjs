@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -163,6 +163,33 @@ async function fakeTool(t, cwd, name, exitCode, output = name.startsWith("opa-av
   t.after(() => rm(path, { force: true }));
   return path;
 }
+
+async function fakeNpmStoppingBeforeGradle(t, cwd) {
+  const path = join(cwd, process.platform === "win32" ? "npm.cmd" : "npm");
+  const content = process.platform === "win32"
+    ? '@echo off\r\nif "%~1 %~2"=="run test:database" exit /b 19\r\nexit /b 0\r\n'
+    : '#!/bin/sh\n[ "$1 $2" = "run test:database" ] && exit 19\nexit 0\n';
+  await writeFile(path, content, "utf8");
+  if (process.platform !== "win32") await chmod(path, 0o755);
+  t.after(() => rm(path, { force: true }));
+  return path;
+}
+
+test("real OPA status logging does not disclose the configured executable path", async (t) => {
+  const cwd = await temporaryToolCwd(t);
+  const opa = await fakeTool(t, cwd, "opa-available-secret-sentinel", 0);
+  await fakeNpmStoppingBeforeGradle(t, cwd);
+
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--tests"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${cwd}${delimiter}${process.env.PATH ?? ""}`, OPA_PATH: opa },
+  });
+
+  assert.equal(result.status, 19, result.stderr);
+  assert.match(result.stdout, /real OPA checks enabled/u);
+  assert.doesNotMatch(result.stdout, /opa-available-secret-sentinel/u);
+});
 
 function runStrictFull(environment) {
   return spawnSync(process.execPath, ["scripts/verify.mjs", "--full"], {

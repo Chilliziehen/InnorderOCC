@@ -149,7 +149,7 @@ async function main() {
 
   const opa = requiredOpa ?? findOpa();
   if (opa) {
-    console.log(`[verify] real OPA checks enabled with ${opa}`);
+    console.log("[verify] real OPA checks enabled");
   } else {
     console.log("[verify] OPA binary unavailable; running static Rego contracts");
   }
