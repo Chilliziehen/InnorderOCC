@@ -287,6 +287,9 @@ BEGIN
         END IF;
         RETURN NEW;
     END IF;
+    IF OLD.status = 'ARCHIVED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'archived cohort is immutable';
+    END IF;
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.customer_instance_id IS DISTINCT FROM OLD.customer_instance_id
        OR NEW.code IS DISTINCT FROM OLD.code
@@ -301,9 +304,6 @@ BEGIN
         OR (OLD.status = 'ACTIVE' AND NEW.status = 'ARCHIVED')
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid cohort lifecycle transition';
-    END IF;
-    IF OLD.status = 'ARCHIVED' AND to_jsonb(NEW) IS DISTINCT FROM to_jsonb(OLD) THEN
-        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'archived cohort is immutable';
     END IF;
     IF NEW.status = 'ARCHIVED' AND EXISTS (
         SELECT 1 FROM occ.process_instance p
@@ -393,7 +393,18 @@ CREATE FUNCTION occ.enforce_process_instance_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    cohort_status text;
 BEGIN
+    IF TG_OP = 'INSERT' OR NEW.cohort_id IS DISTINCT FROM OLD.cohort_id THEN
+        SELECT status INTO STRICT cohort_status
+        FROM occ.cohort
+        WHERE id = NEW.cohort_id
+        FOR UPDATE;
+        IF cohort_status = 'ARCHIVED' THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'process cannot use an archived cohort';
+        END IF;
+    END IF;
     IF TG_OP = 'INSERT' THEN
         IF NEW.state <> 'RUNNING' THEN
             RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'process must be created RUNNING';

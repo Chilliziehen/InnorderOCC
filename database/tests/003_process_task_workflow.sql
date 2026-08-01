@@ -487,6 +487,10 @@ UPDATE occ.cohort SET status = 'ACTIVE'
 WHERE id = '57000000-0000-7000-8000-000000000002';
 UPDATE occ.cohort SET status = 'ARCHIVED', archived_at = transaction_timestamp()
 WHERE id = '57000000-0000-7000-8000-000000000002';
+SELECT pg_temp.assert_raises(
+  $$UPDATE occ.cohort SET name = name
+    WHERE id = '57000000-0000-7000-8000-000000000002'$$,
+  '55000', 'archived cohort rejects no-op updates before touch triggers run');
 INSERT INTO occ.task_projection
   (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
 VALUES ('59000000-0000-7000-8000-000000000003', '58000000-0000-7000-8000-000000000002',

@@ -67,8 +67,10 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('67000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000001', '64000000-0000-7000-8000-000000000001', 'person:owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000001', '64000000-0000-7000-8000-000000000001', 'person:participant', 'ACTIVE'),
         ('68000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000002', '64000000-0000-7000-8000-000000000002', 'cohort:race', 'ACTIVE'),
+        ('68000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000002', '64000000-0000-7000-8000-000000000002', 'cohort:archive-race', 'ACTIVE'),
         ('69000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:one', 'ACTIVE'),
         ('69000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:two', 'ACTIVE'),
+        ('69000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:archive-race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:blocker-race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:requirement-race', 'ACTIVE');
@@ -76,7 +78,10 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('67000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', 'USER', 'Participant', 'ACTIVE');
       INSERT INTO occ.cohort (id, customer_instance_id, code, name, package_version_id, owner_principal_id, start_date, status, created_by, updated_by)
-        VALUES ('68000000-0000-7000-8000-000000000001', '00000000-0000-7000-8000-000000000001', 'race', 'Race', '62000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000001', current_date, 'DRAFT', '67000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000001');
+        VALUES
+          ('68000000-0000-7000-8000-000000000001', '00000000-0000-7000-8000-000000000001', 'race', 'Race', '62000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000001', current_date, 'DRAFT', '67000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000001'),
+          ('68000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000001', 'archive-race', 'Archive race', '62000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000001', current_date, 'DRAFT', '67000000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000001');
+      UPDATE occ.cohort SET status='ACTIVE' WHERE id='68000000-0000-7000-8000-000000000002';
       INSERT INTO occ.process_definition_binding (id, workflow_definition_id, package_version_id, bpmn_key, flowable_deployment_id, flowable_definition_id, content_hash)
         VALUES ('6b000000-0000-7000-8000-000000000001', '65000000-0000-7000-8000-000000000001', '62000000-0000-7000-8000-000000000001', 'route', 'race-deployment', 'race-definition', repeat('c',64));
     `);
@@ -90,6 +95,38 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       processInsert('69000000-0000-7000-8000-000000000001', 'race-instance-one'),
       processInsert('69000000-0000-7000-8000-000000000002', 'race-instance-two'),
     ], 'participant start race must admit one process');
+    const archiver = await pool.connect();
+    const processStarter = await pool.connect();
+    try {
+      await archiver.query('BEGIN');
+      await archiver.query(`UPDATE occ.cohort SET status='ARCHIVED', archived_at=now()
+        WHERE id='68000000-0000-7000-8000-000000000002'`);
+      await processStarter.query('BEGIN');
+      await processStarter.query(`SET LOCAL application_name='process-start-during-cohort-archive'`);
+      const processStart = processStarter.query(`INSERT INTO occ.process_instance
+        (id, definition_binding_id, package_version_id, flowable_instance_id, business_key, state, cohort_id,
+         started_for_participant_id, participant_id, route_key, route_version)
+        VALUES ('69000000-0000-7000-8000-000000000003', '6b000000-0000-7000-8000-000000000001',
+          '62000000-0000-7000-8000-000000000001', 'archive-race-instance', 'archive-race-instance', 'RUNNING',
+          '68000000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002',
+          '67000000-0000-7000-8000-000000000002', 'route', 1)`);
+      const processStartRejection = assert.rejects(processStart, /archived|cohort|process/i);
+      await waitForBlockedApplications(pool, ['process-start-during-cohort-archive']);
+      await archiver.query('COMMIT');
+      await processStartRejection;
+      await processStarter.query('ROLLBACK');
+    } finally {
+      await archiver.query('ROLLBACK').catch(() => {});
+      await processStarter.query('ROLLBACK').catch(() => {});
+      archiver.release();
+      processStarter.release();
+    }
+    const archiveRaceState = await pool.query(`SELECT cohort.status,
+      count(process.id) FILTER (WHERE process.state IN ('RUNNING', 'SUSPENDED'))::int AS active_processes
+      FROM occ.cohort cohort LEFT JOIN occ.process_instance process ON process.cohort_id=cohort.id
+      WHERE cohort.id='68000000-0000-7000-8000-000000000002' GROUP BY cohort.status`);
+    assert.deepEqual(archiveRaceState.rows, [{ status: 'ARCHIVED', active_processes: 0 }],
+      'archive and process start cannot commit ARCHIVED plus RUNNING');
     const processId = (await pool.query(`SELECT id FROM occ.process_instance WHERE cohort_id='68000000-0000-7000-8000-000000000001'`)).rows[0].id;
     await pool.query(`INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
