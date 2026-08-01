@@ -35,6 +35,16 @@ describe("server profile validation", () => {
     });
   });
 
+  it.each([
+    ["https://OCC.TEST/", "https://occ.test"],
+    ["HTTPS://occ.test", "https://occ.test"],
+    ["https://occ.test:443/", "https://occ.test"],
+  ])("accepts URL-normalizable root origin %s", (origin, expected) => {
+    expect(parseServerProfile({ name: "Pilot", origin }, true).origin).toBe(
+      expected,
+    );
+  });
+
   it("normalizes a SHA-256 CA fingerprint to uppercase hex", () => {
     const profile = parseServerProfile(
       {
@@ -84,6 +94,9 @@ describe("server profile validation", () => {
     ["empty query", "https://occ.test?"],
     ["fragment", "https://occ.test/#secret"],
     ["empty fragment", "https://occ.test#"],
+    ["backslash path", "https://occ.test\\api"],
+    ["backslash authority", "https:\\\\occ.test"],
+    ["extra authority slash", "https:////occ.test"],
     ["unsupported scheme", "ftp://occ.test"],
   ])("rejects an origin containing %s", (_case, origin) => {
     expect(() =>
@@ -94,6 +107,9 @@ describe("server profile validation", () => {
   it.each([
     "https://occ.test/a/..",
     "https://occ.test?",
+    "https://OCC.TEST/",
+    "HTTPS://occ.test",
+    "https://occ.test:443",
     "ftp://occ.test",
   ])("applies strict origin validation to persisted profile %s", (origin) => {
     expect(

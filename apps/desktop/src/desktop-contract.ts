@@ -16,18 +16,24 @@ const caFingerprintSchema = z
   .transform((value) => value.replaceAll(":", "").toUpperCase())
   .pipe(z.string().regex(/^[0-9A-F]{64}$/));
 
-function isExactRootOrigin(value: string, allowTrailingSlash: boolean): boolean {
-  if (value.includes("?") || value.includes("#")) {
+const ROOT_ORIGIN_INPUT_PATTERN =
+  /^[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s/?#\\@]+\/?$/;
+
+function isExactRootOrigin(value: string, requireCanonical: boolean): boolean {
+  if (!ROOT_ORIGIN_INPUT_PATTERN.test(value)) {
     return false;
   }
 
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" && url.protocol !== "http:") {
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username ||
+      url.password
+    ) {
       return false;
     }
-    const { origin } = url;
-    return value === origin || (allowTrailingSlash && value === `${origin}/`);
+    return !requireCanonical || value === url.origin;
   } catch {
     return false;
   }
@@ -37,13 +43,13 @@ const profileOriginInputSchema = z
   .string()
   .trim()
   .min(1)
-  .refine((value) => isExactRootOrigin(value, true), {
+  .refine((value) => isExactRootOrigin(value, false), {
     message: "Server origin must be an exact root origin",
   });
 
 const persistedProfileOriginSchema = z
   .string()
-  .refine((value) => isExactRootOrigin(value, false), {
+  .refine((value) => isExactRootOrigin(value, true), {
     message: "Server origin must be a canonical root origin",
   });
 
