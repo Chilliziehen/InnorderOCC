@@ -101,7 +101,7 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     expect(rendererBoundary).toEqual({
       requireType: "undefined",
       processType: "undefined",
-      occKeys: ["getSystemStatuses"],
+      occKeys: ["runtime"],
     });
 
     const metaCsp = await page

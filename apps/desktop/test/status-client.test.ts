@@ -14,7 +14,9 @@ describe("status client", () => {
     Object.defineProperty(window, "occ", {
       configurable: true,
       value: {
-        getSystemStatuses: vi.fn().mockRejectedValue(new Error("secret path")),
+        runtime: {
+          statuses: vi.fn().mockRejectedValue(new Error("secret path")),
+        },
       },
     });
 
@@ -35,7 +37,7 @@ describe("status client", () => {
     );
     Object.defineProperty(window, "occ", {
       configurable: true,
-      value: { getSystemStatuses: getStatuses },
+      value: { runtime: { statuses: getStatuses } },
     });
     const onStatuses = vi.fn();
 

@@ -19,13 +19,14 @@ describe("preload bridge", () => {
     await import("../src/preload");
   });
 
-  it("exposes only getSystemStatuses on the fixed channel", async () => {
+  it("exposes statuses in the grouped runtime API on the fixed channel", async () => {
     expect(electronMocks.exposeInMainWorld).toHaveBeenCalledOnce();
     const [name, api] = electronMocks.exposeInMainWorld.mock.calls[0] ?? [];
     expect(name).toBe("occ");
-    expect(Object.keys(api)).toEqual(["getSystemStatuses"]);
+    expect(Object.keys(api)).toEqual(["runtime"]);
+    expect(Object.keys(api.runtime)).toEqual(["statuses"]);
 
-    await api.getSystemStatuses();
+    await api.runtime.statuses();
     expect(electronMocks.invoke).toHaveBeenCalledWith(SYSTEM_STATUSES_CHANNEL);
   });
 });

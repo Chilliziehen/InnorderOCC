@@ -9,13 +9,48 @@ import { z } from "zod";
 const environmentSchema = z.enum(["production", "pilot", "development"]);
 const caFingerprintSchema = z
   .string()
+  .regex(
+    /^(?:[0-9A-Fa-f]{64}|(?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2})$/,
+    "Invalid SHA-256 CA fingerprint",
+  )
   .transform((value) => value.replaceAll(":", "").toUpperCase())
-  .pipe(z.string().regex(/^[0-9A-F]{64}$/, "Invalid SHA-256 CA fingerprint"));
+  .pipe(z.string().regex(/^[0-9A-F]{64}$/));
+
+function isExactRootOrigin(value: string, allowTrailingSlash: boolean): boolean {
+  if (value.includes("?") || value.includes("#")) {
+    return false;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      return false;
+    }
+    const { origin } = url;
+    return value === origin || (allowTrailingSlash && value === `${origin}/`);
+  } catch {
+    return false;
+  }
+}
+
+const profileOriginInputSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => isExactRootOrigin(value, true), {
+    message: "Server origin must be an exact root origin",
+  });
+
+const persistedProfileOriginSchema = z
+  .string()
+  .refine((value) => isExactRootOrigin(value, false), {
+    message: "Server origin must be a canonical root origin",
+  });
 
 export const profileInputSchema = z.object({
   id: z.uuid().optional(),
   name: z.string().trim().min(1).max(128),
-  origin: z.string().trim().min(1),
+  origin: profileOriginInputSchema,
   environment: environmentSchema.optional(),
   caFingerprint: caFingerprintSchema.optional(),
 });
@@ -26,7 +61,7 @@ export const serverProfileSchema = z
   .object({
     id: z.uuid(),
     name: z.string().trim().min(1).max(128),
-    origin: z.url(),
+    origin: persistedProfileOriginSchema,
     environment: environmentSchema,
     caFingerprint: z.string().regex(/^[0-9A-F]{64}$/).optional(),
   })

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { parseServerProfile } from "../src/desktop-contract";
+import {
+  parseServerProfile,
+  serverProfileSchema,
+} from "../src/desktop-contract";
 import { createProfileStore } from "../src/profile-store";
 
 function memoryPersistence(initial?: unknown) {
@@ -46,16 +49,61 @@ describe("server profile validation", () => {
     expect(profile.caFingerprint).toBe("AB".repeat(32));
   });
 
+  it("accepts an unseparated SHA-256 CA fingerprint", () => {
+    const profile = parseServerProfile(
+      {
+        name: "Production",
+        origin: "https://occ.example",
+        caFingerprint: "ab".repeat(32),
+      },
+      true,
+    );
+
+    expect(profile.caFingerprint).toBe("AB".repeat(32));
+  });
+
+  it.each([
+    "A:" + "AA".repeat(31) + "A",
+    "AA".repeat(16) + ":" + "AA".repeat(16),
+    "AA::" + "AA:".repeat(30) + "AA",
+  ])("rejects malformed fingerprint separators", (caFingerprint) => {
+    expect(() =>
+      parseServerProfile(
+        { name: "Pilot", origin: "https://occ.test", caFingerprint },
+        true,
+      ),
+    ).toThrow("Invalid SHA-256 CA fingerprint");
+  });
+
   it.each([
     ["credentials", "https://user:password@occ.test"],
     ["path", "https://occ.test/api"],
+    ["normalized path", "https://occ.test/a/.."],
+    ["encoded normalized path", "https://occ.test/%2e"],
     ["query", "https://occ.test/?token=secret"],
+    ["empty query", "https://occ.test?"],
     ["fragment", "https://occ.test/#secret"],
+    ["empty fragment", "https://occ.test#"],
     ["unsupported scheme", "ftp://occ.test"],
   ])("rejects an origin containing %s", (_case, origin) => {
     expect(() =>
       parseServerProfile({ name: "Pilot", origin }, false, true),
     ).toThrow();
+  });
+
+  it.each([
+    "https://occ.test/a/..",
+    "https://occ.test?",
+    "ftp://occ.test",
+  ])("applies strict origin validation to persisted profile %s", (origin) => {
+    expect(
+      serverProfileSchema.safeParse({
+        id: crypto.randomUUID(),
+        name: "Pilot",
+        origin,
+        environment: "pilot",
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects HTTP when packaged", () => {
@@ -182,6 +230,54 @@ describe("profile store", () => {
     await expect(store.list()).resolves.toEqual([
       expect.objectContaining({ name: "Pilot" }),
     ]);
+  });
+
+  it("does not add a profile when persistence rejects save", async () => {
+    const store = await createProfileStore({
+      read: async () => undefined,
+      write: async () => Promise.reject(new Error("disk full")),
+      packaged: true,
+    });
+
+    await expect(
+      store.save({ name: "Pilot", origin: "https://occ.test" }),
+    ).rejects.toThrow("disk full");
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
+  it("does not change selection when persistence rejects select", async () => {
+    const first = parseServerProfile(
+      { name: "First", origin: "https://first.test" },
+      true,
+    );
+    const second = parseServerProfile(
+      { name: "Second", origin: "https://second.test" },
+      true,
+    );
+    const store = await createProfileStore({
+      read: async () => ({ profiles: [first, second], selectedId: first.id }),
+      write: async () => Promise.reject(new Error("disk full")),
+      packaged: true,
+    });
+
+    await expect(store.select(second.id)).rejects.toThrow("disk full");
+    expect(store.selected()).toEqual(first);
+  });
+
+  it("does not remove a profile when persistence rejects remove", async () => {
+    const profile = parseServerProfile(
+      { name: "Pilot", origin: "https://occ.test" },
+      true,
+    );
+    const store = await createProfileStore({
+      read: async () => ({ profiles: [profile], selectedId: profile.id }),
+      write: async () => Promise.reject(new Error("disk full")),
+      packaged: true,
+    });
+
+    await expect(store.remove(profile.id)).rejects.toThrow("disk full");
+    await expect(store.list()).resolves.toEqual([profile]);
+    expect(store.selected()).toEqual(profile);
   });
 
   it.each([

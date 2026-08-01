@@ -20,7 +20,7 @@ function status(
 function mockStatuses(statuses: SystemStatus[]): void {
   Object.defineProperty(window, "occ", {
     configurable: true,
-    value: { getSystemStatuses: vi.fn().mockResolvedValue(statuses) },
+    value: { runtime: { statuses: vi.fn().mockResolvedValue(statuses) } },
   });
 }
 

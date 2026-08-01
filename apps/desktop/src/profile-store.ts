@@ -58,10 +58,13 @@ export async function createProfileStore({
     }
   }
 
-  const persist = () =>
+  const persist = (
+    candidateProfiles: ServerProfile[],
+    candidateSelectedId: string | null,
+  ) =>
     write({
-      profiles: profiles.map(copyProfile),
-      selectedId,
+      profiles: candidateProfiles.map(copyProfile),
+      selectedId: candidateSelectedId,
     });
 
   return {
@@ -78,12 +81,14 @@ export async function createProfileStore({
       if (input.id && existingIndex === -1) {
         throw new Error(`Unknown profile: ${input.id}`);
       }
+      const candidateProfiles = [...profiles];
       if (existingIndex === -1) {
-        profiles.push(profile);
+        candidateProfiles.push(profile);
       } else {
-        profiles[existingIndex] = profile;
+        candidateProfiles[existingIndex] = profile;
       }
-      await persist();
+      await persist(candidateProfiles, selectedId);
+      profiles = candidateProfiles;
       return copyProfile(profile);
     },
 
@@ -91,16 +96,16 @@ export async function createProfileStore({
       if (!profiles.some((profile) => profile.id === id)) {
         throw new Error(`Unknown profile: ${id}`);
       }
+      await persist(profiles, id);
       selectedId = id;
-      await persist();
     },
 
     async remove(id) {
-      profiles = profiles.filter((profile) => profile.id !== id);
-      if (selectedId === id) {
-        selectedId = null;
-      }
-      await persist();
+      const candidateProfiles = profiles.filter((profile) => profile.id !== id);
+      const candidateSelectedId = selectedId === id ? null : selectedId;
+      await persist(candidateProfiles, candidateSelectedId);
+      profiles = candidateProfiles;
+      selectedId = candidateSelectedId;
     },
 
     selected() {

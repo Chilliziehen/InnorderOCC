@@ -20,7 +20,7 @@ function unreachableStatuses(): SystemStatus[] {
 
 export async function getSystemStatuses(): Promise<SystemStatus[]> {
   try {
-    const statuses = await window.occ.getSystemStatuses();
+    const statuses = await window.occ.runtime.statuses();
     return statuses.map((status) => SystemStatusSchema.parse(status));
   } catch {
     return unreachableStatuses();
