@@ -16,7 +16,7 @@ import {
 import type { ProfileStore } from "./profile-store";
 import type { CredentialVault, SessionManager, VaultCredential } from "./session-manager";
 import { serializedSize } from "./serialized-size";
-import { createCommandIntentRegistry, type InternalWorkspaceCommand } from "./command-intents";
+import { createCommandIntentRegistry, type CommandIntentRegistry, type InternalWorkspaceCommand } from "./command-intents";
 import type { CommandReceipt } from "./desktop-contract";
 
 export const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -290,6 +290,7 @@ function createHandler<I, O>(
 
 interface DesktopIpcOptions {
   sizeOf?: (value: unknown) => number;
+  commandIntents?: CommandIntentRegistry;
 }
 
 export function registerDesktopIpc(
@@ -298,7 +299,7 @@ export function registerDesktopIpc(
   options: DesktopIpcOptions = {},
 ): () => void {
   activeRegistration?.();
-  const commandIntents = createCommandIntentRegistry();
+  const commandIntents = options.commandIntents ?? createCommandIntentRegistry();
   const definitions: HandlerDefinition<any, any>[] = [
     { channel: DESKTOP_CHANNELS.profiles.list, input: noInputSchema, output: profileListSchema, invoke: () => api.profiles.list() },
     { channel: DESKTOP_CHANNELS.profiles.current, input: noInputSchema, output: selectedServerProfileSchema, invoke: () => api.profiles.current() },

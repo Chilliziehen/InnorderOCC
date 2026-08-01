@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 import { commandReceiptSchema, type CommandReceipt, type WorkspaceCommand } from "./desktop-contract";
 import { prepareCommandPayload, type JsonObject } from "./command-payload";
@@ -12,13 +13,19 @@ export interface InternalWorkspaceCommand {
 }
 
 interface IntentBinding {
-  readonly operation: string;
+  readonly identityHash: string;
   readonly payloadHash: string;
   readonly idempotencyKey: string;
+  state: "retryable" | "accepted";
+  acceptedAt?: number;
+  inFlight?: Promise<CommandReceipt>;
 }
 
 interface CommandIntentRegistryOptions {
   readonly createIdempotencyKey?: () => string;
+  readonly now?: () => number;
+  readonly acceptedTtlMs?: number;
+  readonly maxEntries?: number;
 }
 
 export interface CommandIntentRegistry {
@@ -26,20 +33,25 @@ export interface CommandIntentRegistry {
     command: WorkspaceCommand,
     invoke: (command: InternalWorkspaceCommand) => Promise<CommandReceipt>,
   ): Promise<CommandReceipt>;
+  settle(intentHandle: string): boolean;
 }
 
-function operationIdentity(command: WorkspaceCommand): string {
-  return `${command.workspace}\u0000${command.operation}\u0000${command.targetId ?? ""}`;
+/** Accepted bindings expire after 15 minutes if no terminal notification settles them. */
+export const COMMAND_INTENT_ACCEPTED_TTL_MS = 15 * 60 * 1_000;
+/** The hard entry cap bounds accepted and retryable bindings during prolonged outages. */
+export const COMMAND_INTENT_MAX_ENTRIES = 1_000;
+const intentHandleSchema = z.uuid();
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function payloadHash(canonical: string): string {
-  return createHash("sha256").update(canonical, "utf8").digest("hex");
-}
-
-function retainsIntent(receipt: CommandReceipt): boolean {
-  return receipt.state === "accepted" || (
-    receipt.state === "problem" && receipt.problem.retryable === true
-  );
+function identityHash(command: WorkspaceCommand): string {
+  return sha256(JSON.stringify([
+    command.workspace,
+    command.operation,
+    command.targetId ?? null,
+  ]));
 }
 
 export function createCommandIntentRegistry(
@@ -47,20 +59,46 @@ export function createCommandIntentRegistry(
 ): CommandIntentRegistry {
   const bindings = new Map<string, IntentBinding>();
   const createIdempotencyKey = options.createIdempotencyKey ?? (() => crypto.randomUUID());
+  const now = options.now ?? Date.now;
+  const acceptedTtlMs = options.acceptedTtlMs ?? COMMAND_INTENT_ACCEPTED_TTL_MS;
+  const maxEntries = options.maxEntries ?? COMMAND_INTENT_MAX_ENTRIES;
+  const cleanupExpired = () => {
+    const currentTime = now();
+    for (const [handle, binding] of bindings) {
+      if (
+        binding.state === "accepted" &&
+        binding.inFlight === undefined &&
+        binding.acceptedAt !== undefined &&
+        currentTime - binding.acceptedAt >= acceptedTtlMs
+      ) {
+        bindings.delete(handle);
+      }
+    }
+  };
   return {
-    async execute(command, invoke) {
+    execute(command, invoke) {
       const prepared = prepareCommandPayload(command.payload ?? {});
-      if (!prepared.success) throw new Error("Command payload must be strict JSON");
-      const operation = operationIdentity(command);
-      const hash = payloadHash(prepared.canonical);
+      if (!prepared.success) return Promise.reject(new Error("Command payload must be strict JSON"));
+      cleanupExpired();
+      const identity = identityHash(command);
+      const hash = sha256(prepared.canonical);
       let binding = bindings.get(command.intentHandle);
-      if (binding && (binding.operation !== operation || binding.payloadHash !== hash)) {
-        throw new Error("Command intent mismatch");
+      if (binding && (binding.identityHash !== identity || binding.payloadHash !== hash)) {
+        return Promise.reject(new Error("Command intent mismatch"));
       }
       if (!binding) {
-        binding = { operation, payloadHash: hash, idempotencyKey: createIdempotencyKey() };
+        if (bindings.size >= maxEntries) {
+          return Promise.reject(new Error("Command intent registry capacity exceeded"));
+        }
+        binding = {
+          identityHash: identity,
+          payloadHash: hash,
+          idempotencyKey: createIdempotencyKey(),
+          state: "retryable",
+        };
         bindings.set(command.intentHandle, binding);
       }
+      if (binding.inFlight) return binding.inFlight;
       const internal: InternalWorkspaceCommand = {
         workspace: command.workspace,
         operation: command.operation,
@@ -68,9 +106,55 @@ export function createCommandIntentRegistry(
         idempotencyKey: binding.idempotencyKey,
         ...(command.targetId ? { targetId: command.targetId } : {}),
       };
-      const receipt = commandReceiptSchema.parse(await invoke(internal));
-      if (!retainsIntent(receipt)) bindings.delete(command.intentHandle);
-      return receipt;
+      let resolveFlight!: (receipt: CommandReceipt) => void;
+      let rejectFlight!: (error: unknown) => void;
+      const inFlight = new Promise<CommandReceipt>((resolve, reject) => {
+        resolveFlight = resolve;
+        rejectFlight = reject;
+      });
+      binding.inFlight = inFlight;
+      const clearInFlight = () => {
+        if (bindings.get(command.intentHandle) === binding && binding.inFlight === inFlight) {
+          delete binding.inFlight;
+        }
+      };
+      const resolveReceipt = (rawReceipt: CommandReceipt) => {
+        try {
+          const receipt = commandReceiptSchema.parse(rawReceipt);
+          if (receipt.state === "accepted") {
+            binding.state = "accepted";
+            binding.acceptedAt = now();
+          } else if (receipt.state === "problem" && receipt.problem.retryable === true) {
+            binding.state = "retryable";
+            delete binding.acceptedAt;
+          } else {
+            bindings.delete(command.intentHandle);
+          }
+          clearInFlight();
+          resolveFlight(receipt);
+        } catch (error) {
+          clearInFlight();
+          rejectFlight(error);
+        }
+      };
+      const rejectTransport = (error: unknown) => {
+        clearInFlight();
+        rejectFlight(error);
+      };
+      try {
+        invoke(internal).then(resolveReceipt, rejectTransport);
+      } catch (error) {
+        rejectTransport(error);
+      }
+      return inFlight;
+    },
+    settle(intentHandle) {
+      const parsed = intentHandleSchema.parse(intentHandle);
+      const binding = bindings.get(parsed);
+      if (!binding || binding.state !== "accepted" || binding.inFlight !== undefined) {
+        return false;
+      }
+      return bindings.delete(parsed);
     },
   };
 }

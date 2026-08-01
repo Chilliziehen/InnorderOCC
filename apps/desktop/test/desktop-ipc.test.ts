@@ -22,6 +22,7 @@ import {
   sendDesktopNotification,
 } from "../src/desktop-ipc";
 import { DESKTOP_CHANNELS } from "../src/ipc-contract";
+import { createCommandIntentRegistry } from "../src/command-intents";
 import { createProfileStore } from "../src/profile-store";
 
 const rendererUrl = "file:///D:/OCC/index.html";
@@ -185,6 +186,19 @@ describe("desktop IPC", () => {
     );
     await expect(handler(event, { ...command, payload: { expectedVersion: 3 } })).rejects.toThrow("IPC request failed");
     expect(deps.commands.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses an injected main-only command registry without exposing settle IPC", async () => {
+    const deps = dependencies();
+    const commandIntents = createCommandIntentRegistry();
+    const execute = vi.spyOn(commandIntents, "execute");
+    registerDesktopIpc(rendererUrl, deps, { commandIntents });
+    const handler = registeredHandler(DESKTOP_CHANNELS.commands.execute);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    const command = { workspace: "risks", operation: "resolve", payload: {}, intentHandle: profileId };
+    await handler(event, command);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(invokeChannels()).not.toContain("commands:settle");
   });
 
   it("sizes all received arguments and rejects arity other than one", async () => {

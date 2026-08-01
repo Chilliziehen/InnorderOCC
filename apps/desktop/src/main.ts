@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, safeStorage, session } from "electron";
 
 import { createCoreClient } from "./core-client";
+import { createCommandIntentRegistry } from "./command-intents";
 import {
   createAtomicJsonPersistence,
   createDesktopApi,
@@ -117,7 +118,8 @@ if (ownsInstance) void app.whenReady().then(async () => {
     clearProfile: async () => undefined,
   });
 
-  disposeDesktopIpc = registerDesktopIpc(rendererDocumentUrl(), api);
+  const commandIntents = createCommandIntentRegistry();
+  disposeDesktopIpc = registerDesktopIpc(rendererDocumentUrl(), api, { commandIntents });
   mainWindow = createWindow();
 
   app.on("activate", () => {

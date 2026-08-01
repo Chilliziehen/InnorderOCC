@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { canonicalizeCommandPayload, prepareCommandPayload } from "../src/command-payload";
-import { createCommandIntentRegistry, type InternalWorkspaceCommand } from "../src/command-intents";
+import {
+  COMMAND_INTENT_ACCEPTED_TTL_MS,
+  COMMAND_INTENT_MAX_ENTRIES,
+  createCommandIntentRegistry,
+  type InternalWorkspaceCommand,
+} from "../src/command-intents";
 import { workspaceCommandSchema, type CommandReceipt, type WorkspaceCommand } from "../src/desktop-contract";
 
 const handle = "11111111-1111-4111-8111-111111111111";
@@ -130,5 +135,94 @@ describe("main command intent registry", () => {
     await expect(intents.execute(command(), execute)).rejects.toThrow();
     await intents.execute(command(), execute);
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyA]);
+  });
+
+  it("shares one in-flight promise and dependency invocation for matching calls", async () => {
+    let resolve!: (receipt: CommandReceipt) => void;
+    const execute = vi.fn(() => new Promise<CommandReceipt>((done) => void (resolve = done)));
+    const intents = registry();
+    const first = intents.execute(command(), execute);
+    const second = intents.execute(command(), execute);
+    expect(second).toBe(first);
+    expect(execute).toHaveBeenCalledOnce();
+    resolve({ state: "completed", commandId: keyA, correlationId });
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    const next = vi.fn().mockResolvedValue({ state: "completed", commandId: keyB, correlationId });
+    await intents.execute(command(), next);
+    expect(next.mock.calls[0]![0].idempotencyKey).toBe(keyB);
+  });
+
+  it("shares a failed in-flight call then reuses its key on retry", async () => {
+    let reject!: (error: Error) => void;
+    const execute = vi.fn(() => new Promise<CommandReceipt>((_resolve, fail) => void (reject = fail)));
+    const intents = registry();
+    const first = intents.execute(command(), execute);
+    const second = intents.execute(command(), execute);
+    reject(new Error("timeout"));
+    await expect(first).rejects.toThrow("timeout");
+    await expect(second).rejects.toThrow("timeout");
+    const retry = vi.fn().mockResolvedValue({ state: "completed", commandId: keyA, correlationId });
+    await intents.execute(command(), retry);
+    expect(retry.mock.calls[0]![0].idempotencyKey).toBe(keyA);
+  });
+
+  it("settles accepted bindings through a validated main-only method", async () => {
+    const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
+    const intents = registry();
+    await intents.execute(command(), execute);
+    expect(intents.settle(handle)).toBe(true);
+    expect(intents.settle(handle)).toBe(false);
+    expect(() => intents.settle("not-a-uuid")).toThrow();
+    await intents.execute(command(), execute);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
+  });
+
+  it("does not settle in-flight or retryable bindings", async () => {
+    let reject!: (error: Error) => void;
+    const execute = vi.fn(() => new Promise<CommandReceipt>((_resolve, fail) => void (reject = fail)));
+    const intents = registry();
+    const pending = intents.execute(command(), execute);
+    expect(intents.settle(handle)).toBe(false);
+    reject(new Error("offline"));
+    await expect(pending).rejects.toThrow("offline");
+    expect(intents.settle(handle)).toBe(false);
+    const retry = vi.fn().mockResolvedValue({ state: "completed", commandId: keyA, correlationId });
+    await intents.execute(command(), retry);
+    expect(retry.mock.calls[0]![0].idempotencyKey).toBe(keyA);
+  });
+
+  it("expires accepted bindings after the documented TTL", async () => {
+    let now = 1_000;
+    const keys = [keyA, keyB];
+    const intents = createCommandIntentRegistry({
+      now: () => now,
+      createIdempotencyKey: () => keys.shift()!,
+    });
+    const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
+    await intents.execute(command(), execute);
+    now += COMMAND_INTENT_ACCEPTED_TTL_MS + 1;
+    await intents.execute(command(), execute);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
+  });
+
+  it("enforces the documented registry entry cap", async () => {
+    const intents = createCommandIntentRegistry({
+      maxEntries: 2,
+      createIdempotencyKey: () => crypto.randomUUID(),
+    });
+    const execute = vi.fn().mockRejectedValue(new Error("offline"));
+    await expect(intents.execute(command({ intentHandle: handle }), execute)).rejects.toThrow("offline");
+    await expect(intents.execute(command({ intentHandle: keyA }), execute)).rejects.toThrow("offline");
+    await expect(intents.execute(command({ intentHandle: keyB }), execute)).rejects.toThrow("Command intent registry capacity exceeded");
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(COMMAND_INTENT_MAX_ENTRIES).toBeGreaterThan(2);
+  });
+
+  it("hashes a canonical identity tuple without NUL delimiter collisions", async () => {
+    const execute = vi.fn().mockRejectedValue(new Error("offline"));
+    const intents = registry();
+    await expect(intents.execute(command({ workspace: "a\u0000b", operation: "c" }), execute)).rejects.toThrow("offline");
+    await expect(intents.execute(command({ workspace: "a", operation: "b\u0000c" }), execute)).rejects.toThrow("Command intent mismatch");
+    expect(execute).toHaveBeenCalledOnce();
   });
 });
