@@ -4,6 +4,7 @@ import type { CoreClient } from "../src/core-client";
 import {
   createSessionManager,
   type CredentialVault,
+  type VaultCredential,
 } from "../src/session-manager";
 
 const user = {
@@ -26,14 +27,22 @@ function harness(
   timers: Pick<typeof globalThis, "setTimeout" | "clearTimeout"> = globalThis,
 ) {
   const stored = new Map<string, string>();
-  if (initial !== null) stored.set("profile-a", `encrypted:${btoa(initial)}`);
+  let removeGate: Promise<void> | null = null;
+  let releaseRemove: (() => void) | null = null;
+  const encode = (credential: VaultCredential) => `encrypted:${btoa(JSON.stringify(credential))}`;
+  const decode = (value: string): VaultCredential => JSON.parse(atob(value.slice("encrypted:".length)));
+  if (initial !== null) stored.set("profile-a", encode({ refreshToken: initial, version: "initial-a" }));
   const vault: CredentialVault = {
     decrypt: vi.fn(async (id) => {
       const value = stored.get(id);
-      return value === undefined ? null : atob(value.slice("encrypted:".length));
+      return value === undefined ? null : decode(value);
     }),
-    encrypt: vi.fn(async (id, value) => { stored.set(id, `encrypted:${btoa(value)}`); }),
-    remove: vi.fn(async (id) => { stored.delete(id); }),
+    encrypt: vi.fn(async (id, credential) => { stored.set(id, encode(credential)); }),
+    remove: vi.fn(async (id, version) => {
+      await removeGate;
+      const value = stored.get(id);
+      if (value !== undefined && decode(value).version === version) stored.delete(id);
+    }),
   };
   let accessToken: string | null = null;
   const core: CoreClient = {
@@ -60,7 +69,17 @@ function harness(
     vault,
     get stored() { return stored.get(profileId) ?? null; },
     storedFor(id: string) { return stored.get(id) ?? null; },
-    seedProfile(id: string, value: string) { stored.set(id, `encrypted:${btoa(value)}`); },
+    seedProfile(id: string, value: string) {
+      stored.set(id, encode({ refreshToken: value, version: `seed-${id}` }));
+    },
+    pauseNextRemove() {
+      removeGate = new Promise((resolve) => { releaseRemove = resolve; });
+      return () => {
+        releaseRemove?.();
+        removeGate = null;
+        releaseRemove = null;
+      };
+    },
     get accessToken() { return accessToken; },
     advance(ms: number) { now += ms; },
     selectProfile(id: string) { profileId = id; },
@@ -83,7 +102,10 @@ describe("Session manager", () => {
     expect(h.stored).not.toContain("access-R");
     expect(h.accessToken).toBe("access-R");
     expect(JSON.stringify(snapshot)).not.toMatch(/access-R|RRRR/);
-    expect(h.vault.encrypt).toHaveBeenCalledWith("profile-a", "R".repeat(43));
+    expect(h.vault.encrypt).toHaveBeenCalledWith("profile-a", {
+      refreshToken: "R".repeat(43),
+      version: expect.any(String),
+    });
   });
 
   it("does not persist or retain anything when login fails", async () => {
@@ -149,7 +171,10 @@ describe("Session manager", () => {
 
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
     expect(h.accessToken).toBeNull();
-    await vi.waitFor(() => expect(h.vault.remove).toHaveBeenCalledWith("profile-a"));
+    await vi.waitFor(() => expect(h.vault.remove).toHaveBeenCalledWith(
+      "profile-a",
+      expect.any(String),
+    ));
   });
 
   it("proactively expires via an injected scheduler", async () => {
@@ -174,7 +199,7 @@ describe("Session manager", () => {
     h.selectProfile("profile-b");
     await h.manager.profileSwitched();
 
-    expect(h.vault.remove).toHaveBeenCalledWith("profile-a");
+    expect(h.vault.remove).toHaveBeenCalledWith("profile-a", expect.any(String));
     expect(h.accessToken).toBeNull();
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
   });
@@ -236,6 +261,67 @@ describe("Session manager", () => {
     expect(h.accessToken).toBe("access-B");
     expect(h.storedFor("profile-a")).toBeNull();
     expect(h.storedFor("profile-b")).not.toBeNull();
+  });
+
+  it("a stale rejecting refresh cannot remove a newer profile A credential", async () => {
+    const h = harness("A".repeat(43));
+    let rejectOldA!: (error: Error) => void;
+    vi.mocked(h.core.refresh).mockReturnValue(new Promise((_resolve, reject) => { rejectOldA = reject; }));
+    const oldRefresh = h.manager.refresh();
+    await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched();
+    h.selectProfile("profile-a");
+    await h.manager.profileSwitched();
+    vi.mocked(h.core.login).mockResolvedValue(token("C"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    rejectOldA(new Error("old A refresh failed"));
+
+    await expect(oldRefresh).rejects.toThrow("old A refresh failed");
+    expect(h.accessToken).toBe("access-C");
+    expect(h.storedFor("profile-a")).not.toBeNull();
+  });
+
+  it("a stale rejecting /me cannot remove a newer profile A credential", async () => {
+    const h = harness("A".repeat(43));
+    let rejectOldMe!: (error: Error) => void;
+    vi.mocked(h.core.refresh).mockResolvedValue(token("N"));
+    vi.mocked(h.core.me).mockReturnValue(new Promise((_resolve, reject) => { rejectOldMe = reject; }));
+    const oldRefresh = h.manager.refresh();
+    await vi.waitFor(() => expect(h.core.me).toHaveBeenCalledOnce());
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched();
+    h.selectProfile("profile-a");
+    await h.manager.profileSwitched();
+    vi.mocked(h.core.login).mockResolvedValue(token("C"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    rejectOldMe(new Error("old A me failed"));
+
+    await expect(oldRefresh).rejects.toThrow("old A me failed");
+    expect(h.accessToken).toBe("access-C");
+    expect(h.storedFor("profile-a")).not.toBeNull();
+  });
+
+  it("serializes expiry removal before a same-profile relogin write", async () => {
+    const h = harness();
+    vi.mocked(h.core.login).mockResolvedValueOnce(token("A", 1)).mockResolvedValueOnce(token("C"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    const releaseRemove = h.pauseNextRemove();
+    h.advance(1_000);
+
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+    await vi.waitFor(() => expect(h.vault.remove).toHaveBeenCalledOnce());
+    const relogin = h.manager.login({ username: "operator", password: "correct horse" });
+    await Promise.resolve();
+    expect(h.vault.encrypt).toHaveBeenCalledOnce();
+    releaseRemove();
+    await relogin;
+
+    expect(h.vault.encrypt).toHaveBeenCalledTimes(2);
+    expect(h.accessToken).toBe("access-C");
+    expect(h.storedFor("profile-a")).not.toBeNull();
   });
 
   it("scopes in-flight refresh by profile and generation", async () => {

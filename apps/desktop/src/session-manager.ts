@@ -8,10 +8,15 @@ import {
 import type { SessionSnapshot } from "./desktop-contract";
 import type { CoreClient } from "./core-client";
 
+export interface VaultCredential {
+  refreshToken: string;
+  version: string;
+}
+
 export interface CredentialVault {
-  decrypt(profileId: string): Promise<string | null>;
-  encrypt(profileId: string, refreshToken: string): Promise<void>;
-  remove(profileId: string): Promise<void>;
+  decrypt(profileId: string): Promise<VaultCredential | null>;
+  encrypt(profileId: string, credential: VaultCredential): Promise<void>;
+  remove(profileId: string, version: string): Promise<void>;
 }
 
 interface SessionManagerOptions {
@@ -50,7 +55,38 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   let refreshInFlight: RefreshFlight | null = null;
   let activeProfileId: string | null = null;
+  let activeCredentialVersion: string | null = null;
   let generation = 0;
+  const vaultTails = new Map<string, Promise<void>>();
+
+  function withVault<T>(profileId: string, operation: () => Promise<T>): Promise<T> {
+    const result = (vaultTails.get(profileId) ?? Promise.resolve()).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    vaultTails.set(profileId, tail);
+    void tail.then(() => {
+      if (vaultTails.get(profileId) === tail) vaultTails.delete(profileId);
+    });
+    return result;
+  }
+
+  function readCredential(profileId: string): Promise<VaultCredential | null> {
+    return withVault(profileId, () => options.vault.decrypt(profileId));
+  }
+
+  function writeCredential(profileId: string, credential: VaultCredential): Promise<void> {
+    return withVault(profileId, () => options.vault.encrypt(profileId, credential));
+  }
+
+  function removeCredential(profileId: string, version: string): Promise<void> {
+    return withVault(profileId, () => options.vault.remove(profileId, version));
+  }
+
+  function removeCurrentCredential(profileId: string): Promise<void> {
+    return withVault(profileId, async () => {
+      const credential = await options.vault.decrypt(profileId);
+      if (credential) await options.vault.remove(profileId, credential.version);
+    });
+  }
 
   function clearMemory(): void {
     if (expiryTimer !== undefined) cancel(expiryTimer);
@@ -58,42 +94,57 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     options.setAccessToken(null);
     current = { state: "anonymous" };
     activeProfileId = null;
+    activeCredentialVersion = null;
     generation += 1;
   }
 
   async function clear(profileId: string): Promise<void> {
+    const version = activeProfileId === profileId ? activeCredentialVersion : null;
     clearMemory();
-    await options.vault.remove(profileId);
+    if (version) await removeCredential(profileId, version);
+    else await removeCurrentCredential(profileId);
   }
 
-  async function clearOwned(profileId: string, expectedGeneration: number): Promise<void> {
+  async function clearOwned(
+    profileId: string,
+    expectedGeneration: number,
+    credentialVersion: string | null,
+  ): Promise<void> {
+    let version = credentialVersion;
     if (
       generation === expectedGeneration &&
       (activeProfileId === null || activeProfileId === profileId)
     ) {
+      version ??= activeCredentialVersion;
       clearMemory();
     }
-    await options.vault.remove(profileId);
+    if (version) await removeCredential(profileId, version);
   }
 
   function armExpiry(
     profileId: string,
     expectedGeneration: number,
+    credentialVersion: string,
     expiresAtMs: number,
   ): void {
     if (generation !== expectedGeneration || activeProfileId !== profileId) return;
     const remaining = expiresAtMs - now();
     if (remaining <= 0) {
-      void clearOwned(profileId, expectedGeneration);
+      void clearOwned(profileId, expectedGeneration, credentialVersion);
       return;
     }
     expiryTimer = schedule(() => {
       expiryTimer = undefined;
-      armExpiry(profileId, expectedGeneration, expiresAtMs);
+      armExpiry(profileId, expectedGeneration, credentialVersion, expiresAtMs);
     }, Math.min(remaining, MAX_TIMEOUT_MS));
   }
 
-  function activate(profileId: string, rawTokens: TokenResponse, rawUser = rawTokens.user): SessionSnapshot {
+  function activate(
+    profileId: string,
+    credentialVersion: string,
+    rawTokens: TokenResponse,
+    rawUser = rawTokens.user,
+  ): SessionSnapshot {
     const tokens = tokenResponseSchema.parse(rawTokens);
     const user = currentUserSchema.parse(rawUser);
     const nowMs = now();
@@ -103,13 +154,14 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
       : nowMs + tokens.expiresIn * 1_000;
     options.setAccessToken(tokens.accessToken);
     activeProfileId = profileId;
+    activeCredentialVersion = credentialVersion;
     current = {
       state: "authenticated",
       user,
       expiresAt: new Date(expiresAtMs).toISOString(),
     };
     if (expiryTimer !== undefined) cancel(expiryTimer);
-    armExpiry(profileId, generation, expiresAtMs);
+    armExpiry(profileId, generation, credentialVersion, expiresAtMs);
     return current;
   }
 
@@ -120,37 +172,47 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     expectedGeneration: number,
   ) {
     const tokens = tokenResponseSchema.parse(rawTokens);
+    const credential: VaultCredential = {
+      refreshToken: tokens.refreshToken,
+      version: crypto.randomUUID(),
+    };
     if (generation !== expectedGeneration) return current;
-    await options.vault.encrypt(profileId, tokens.refreshToken);
-    if (generation !== expectedGeneration) {
-      await options.vault.remove(profileId);
-      return current;
+    try {
+      await writeCredential(profileId, credential);
+      if (generation !== expectedGeneration) {
+        await removeCredential(profileId, credential.version);
+        return current;
+      }
+      options.setAccessToken(tokens.accessToken);
+      const verifiedUser = verifyMe ? await options.core.me() : tokens.user;
+      if (generation !== expectedGeneration) {
+        await removeCredential(profileId, credential.version);
+        return current;
+      }
+      return activate(profileId, credential.version, tokens, verifiedUser);
+    } catch (error) {
+      await clearOwned(profileId, expectedGeneration, credential.version);
+      throw error;
     }
-    options.setAccessToken(tokens.accessToken);
-    const verifiedUser = verifyMe ? await options.core.me() : tokens.user;
-    if (generation !== expectedGeneration) {
-      await options.vault.remove(profileId);
-      return current;
-    }
-    return activate(profileId, tokens, verifiedUser);
   }
 
   async function doRefresh(
     profileId: string,
     expectedGeneration: number,
   ): Promise<SessionSnapshot> {
+    let credential: VaultCredential | null = null;
     try {
-      const refreshToken = await options.vault.decrypt(profileId);
+      credential = await readCredential(profileId);
       if (generation !== expectedGeneration) return current;
-      if (!refreshToken) {
+      if (!credential) {
         clearMemory();
         return current;
       }
-      const tokens = await options.core.refresh(refreshToken);
+      const tokens = await options.core.refresh(credential.refreshToken);
       if (generation !== expectedGeneration) return current;
       return await accept(profileId, tokens, true, expectedGeneration);
     } catch (error) {
-      await clearOwned(profileId, expectedGeneration);
+      await clearOwned(profileId, expectedGeneration, credential?.version ?? null);
       throw error;
     }
   }
@@ -159,19 +221,21 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     snapshot() {
       if (current.state === "authenticated" && Date.parse(current.expiresAt) <= now()) {
         const profileId = activeProfileId ?? options.getProfileId();
+        const credentialVersion = activeCredentialVersion;
         clearMemory();
-        void options.vault.remove(profileId);
+        if (credentialVersion) void removeCredential(profileId, credentialVersion);
       }
       return current;
     },
     async login(input) {
       const profileId = options.getProfileId();
       const expectedGeneration = generation;
+      const credentialVersion = activeCredentialVersion;
       try {
         const tokens = await options.core.login(input);
         return await accept(profileId, tokens, false, expectedGeneration);
       } catch (error) {
-        await clearOwned(profileId, expectedGeneration);
+        await clearOwned(profileId, expectedGeneration, credentialVersion);
         throw error;
       }
     },
@@ -201,16 +265,16 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     async logout() {
       const profileId = activeProfileId ?? options.getProfileId();
       const expectedGeneration = generation;
-      let refreshToken: string | null = null;
+      let credential: VaultCredential | null = null;
       try {
-        refreshToken = await options.vault.decrypt(profileId);
+        credential = await readCredential(profileId);
       } catch {
         // Missing local credentials must not prevent logout.
       }
-      await clearOwned(profileId, expectedGeneration);
-      if (!refreshToken) return;
+      await clearOwned(profileId, expectedGeneration, credential?.version ?? null);
+      if (!credential) return;
       try {
-        await options.core.logout(refreshToken);
+        await options.core.logout(credential.refreshToken);
       } catch {
         // Local logout succeeds even when revocation cannot reach Core.
       }
