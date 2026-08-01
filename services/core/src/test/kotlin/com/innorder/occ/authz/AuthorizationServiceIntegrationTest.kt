@@ -44,6 +44,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import com.innorder.occ.command.AuditRepository
+import com.innorder.occ.command.AggregateLockPlan
+import com.innorder.occ.command.AggregateLockRegistry
+import com.innorder.occ.command.AggregateLockResolver
+import com.innorder.occ.command.AggregateReference
 import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
@@ -1149,8 +1153,21 @@ class AuthorizationServiceIntegrationTest {
     ) = CommandExecutor(
         DataSourceTransactionManager(jdbc.dataSource!!), authorizationService,
         AuthorizationRevisionLockRepository(jdbc),
-        IdempotencyRepository(jdbc), AuditRepository(jdbc), OutboxRepository(jdbc), jdbc,
+        IdempotencyRepository(jdbc), AuditRepository(jdbc), OutboxRepository(jdbc),
+        AggregateLockRegistry(listOf(
+            AggregateLockResolver("kernel-authz-test", 100, kernelLock(jdbc)),
+            AggregateLockResolver("authz.entity", 100, kernelLock(jdbc)),
+        )),
+        jdbc,
     )
+
+    private fun kernelLock(jdbc: JdbcTemplate): (org.springframework.jdbc.core.JdbcOperations, UUID) -> Long? = { _, id ->
+        jdbc.query(
+            "SELECT row_version FROM occ.command_kernel_authz_test WHERE id = ? FOR UPDATE",
+            { result, _ -> result.getLong(1) },
+            id,
+        ).singleOrNull()
+    }
 
     private fun httpAuthorization(
         jdbc: JdbcTemplate,
@@ -1211,12 +1228,7 @@ class AuthorizationServiceIntegrationTest {
         override val aggregateId = KERNEL_AGGREGATE_ID
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
-
-        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
-            "SELECT row_version FROM occ.command_kernel_authz_test WHERE id = ? FOR UPDATE",
-            Long::class.java,
-            aggregateId,
-        )!!
+        override val lockPlan = AggregateLockPlan(existing = listOf(AggregateReference(aggregateType, aggregateId)))
 
         override fun execute(context: CommandContext): CommandMutation {
             context.jdbc.update(
@@ -1249,12 +1261,7 @@ class AuthorizationServiceIntegrationTest {
         override val aggregateId = aggregate
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = true
-
-        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
-            "SELECT row_version FROM occ.command_kernel_authz_test WHERE id = ? FOR UPDATE",
-            Long::class.java,
-            context.descriptor.aggregateId,
-        )!!
+        override val lockPlan = AggregateLockPlan(existing = listOf(AggregateReference(aggregateType, aggregateId)))
 
         override fun execute(context: CommandContext): CommandMutation {
             context.jdbc.update(

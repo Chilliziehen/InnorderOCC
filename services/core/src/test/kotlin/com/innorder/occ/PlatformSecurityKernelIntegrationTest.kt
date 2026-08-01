@@ -6,6 +6,9 @@ import com.innorder.occ.api.CorrelationIdFilter
 import com.innorder.occ.auth.AccessTokenPrincipal
 import com.innorder.occ.authz.AuthorizationRevisionLockRepository
 import com.innorder.occ.command.AuthorizedCommand
+import com.innorder.occ.command.AggregateLockPlan
+import com.innorder.occ.command.AggregateLockResolver
+import com.innorder.occ.command.AggregateReference
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
 import com.innorder.occ.command.CommandExecutor
@@ -255,6 +258,15 @@ class PlatformSecurityKernelIntegrationTest(
         fun kernelTestController(executor: CommandExecutor, mapper: ObjectMapper) = KernelTestController(executor, mapper)
 
         @Bean
+        fun kernelAggregateLockResolver() = AggregateLockResolver("platform-kernel-test", 100) { jdbc, id ->
+            jdbc.query(
+                "SELECT row_version FROM occ.platform_kernel_test WHERE id = ? FOR UPDATE",
+                { result, _ -> result.getLong(1) },
+                id,
+            ).singleOrNull()
+        }
+
+        @Bean
         fun authorizationFactFixture(
             jdbc: JdbcTemplate,
             transactions: TransactionTemplate,
@@ -299,10 +311,7 @@ class PlatformSecurityKernelIntegrationTest(
         override val aggregateType = "platform-kernel-test"
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
-
-        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
-            "SELECT row_version FROM occ.platform_kernel_test WHERE id = ? FOR UPDATE", Long::class.java, aggregateId,
-        )!!
+        override val lockPlan get() = AggregateLockPlan(existing = listOf(AggregateReference(aggregateType, aggregateId)))
 
         override fun execute(context: CommandContext): CommandMutation {
             val before = requireNotNull(context.descriptor.expectedVersion)

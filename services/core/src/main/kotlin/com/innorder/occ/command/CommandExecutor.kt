@@ -23,6 +23,7 @@ class CommandExecutor(
     private val idempotency: IdempotencyRepository,
     private val audit: AuditRepository,
     private val outbox: OutboxRepository,
+    private val aggregateLocks: AggregateLockRegistry,
     private val jdbc: JdbcOperations,
 ) {
     private val mapper = ObjectMapper().findAndRegisterModules()
@@ -32,6 +33,8 @@ class CommandExecutor(
     fun execute(metadata: CommandMetadata, requestBytes: ByteArray, command: AuthorizedCommand): CommandResult {
         val request = CanonicalJsonObject.parse(requestBytes, MAX_REQUEST_BYTES)
         val descriptor = captureDescriptor(metadata, command)
+        val primary = AggregateReference(descriptor.aggregateType, descriptor.aggregateId)
+        aggregateLocks.validate(descriptor.lockPlan, primary)
         val fingerprint = fingerprint(descriptor, request)
         val sensitiveValues = sensitiveValues(request)
         validatePreAcquireDataMinimization(metadata, descriptor, sensitiveValues)
@@ -66,12 +69,14 @@ class CommandExecutor(
             ),
         )
         val transactionId = UUID.randomUUID()
+        val acquired = aggregateLocks.acquire(jdbc, requireNotNull(descriptor.lockPlan))
         val context = CommandContext(
             jdbc,
             metadata, descriptor, authorization, requestDigest, transactionId,
+            acquired.versions, acquired.created,
         )
-        val currentVersion = command.lockCurrentVersion(context)
-        if (currentVersion != null && currentVersion !in 0..MAX_SAFE_INTEGER) throw InvalidCommandRequestException()
+        val primary = AggregateReference(descriptor.aggregateType, descriptor.aggregateId)
+        val currentVersion = acquired.versions[primary]
         if (descriptor.requiresExpectedVersion && currentVersion != descriptor.expectedVersion) {
             throw OptimisticConflictException(currentVersion ?: 0)
         }
@@ -97,6 +102,7 @@ class CommandExecutor(
             command.changesAuthorizationFacts,
             metadata.expectedVersion,
             metadata.principalId,
+            command.lockPlan,
         )
         if (!ACTION.matches(descriptor.action) || !ACTION.matches(descriptor.aggregateType) ||
             listOf(descriptor.principalId, descriptor.entityId, descriptor.resourceId, descriptor.aggregateId)
@@ -144,6 +150,12 @@ class CommandExecutor(
             put("changesAuthorizationFacts", descriptor.changesAuthorizationFacts)
             if (descriptor.expectedVersion == null) putNull("expectedVersion") else put("expectedVersion", descriptor.expectedVersion)
             put("principalId", descriptor.principalId.toString())
+            putArray("existingAggregates").also { array -> descriptor.lockPlan?.existing?.forEach {
+                array.addObject().put("type", it.type).put("id", it.id.toString())
+            } }
+            putArray("createdAggregates").also { array -> descriptor.lockPlan?.created?.forEach {
+                array.addObject().put("type", it.type).put("id", it.id.toString())
+            } }
             set<JsonNode>("request", request.toJsonNode())
         }
         return CanonicalJsonObject.from(envelope, MAX_REQUEST_BYTES + 4096).digest

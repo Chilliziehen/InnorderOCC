@@ -30,12 +30,11 @@ interface AuthorizedCommand {
     val aggregateType: String
     val aggregateId: UUID
     val expectedVersionRequired: Boolean
+    val lockPlan: AggregateLockPlan?
 
     /** IAM, relationship, and policy mutation commands must declare this mode. */
     val changesAuthorizationFacts: Boolean
 
-    /** Called after authorization. Update commands must lock their aggregate row with FOR UPDATE before returning. */
-    fun lockCurrentVersion(context: CommandContext): Long?
     fun execute(context: CommandContext): CommandMutation
 }
 
@@ -50,6 +49,7 @@ data class CommandDescriptor(
     val changesAuthorizationFacts: Boolean,
     val expectedVersion: Long?,
     val principalId: UUID,
+    val lockPlan: AggregateLockPlan?,
 )
 
 class CommandContext internal constructor(
@@ -59,6 +59,8 @@ class CommandContext internal constructor(
     val authorization: AuthorizationDecisionReference,
     val requestDigest: String,
     val transactionId: UUID,
+    val lockedVersions: Map<AggregateReference, Long>,
+    val createdAggregates: Set<AggregateReference>,
 )
 
 data class PendingEventSpec(

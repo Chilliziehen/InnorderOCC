@@ -49,6 +49,7 @@ class CommandExecutorIntegrationTest {
     private lateinit var snapshots: RecordingSnapshots
     private lateinit var executor: CommandExecutor
     private val executions = AtomicInteger()
+    private val lockOrder = mutableListOf<AggregateReference>()
 
     @BeforeEach
     fun reset() {
@@ -59,6 +60,7 @@ class CommandExecutorIntegrationTest {
         jdbc.update("DELETE FROM occ.command_kernel_test")
         jdbc.update("INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'before', 3)", AGGREGATE_ID)
         executions.set(0)
+        lockOrder.clear()
         snapshots = RecordingSnapshots()
         authorization = AuthorizationService(
             snapshots,
@@ -83,6 +85,7 @@ class CommandExecutorIntegrationTest {
             IdempotencyRepository(jdbc),
             AuditRepository(jdbc),
             OutboxRepository(jdbc),
+            lockRegistry(),
             jdbc,
         )
     }
@@ -181,15 +184,11 @@ class CommandExecutorIntegrationTest {
             override val aggregateId get() = once("aggregateId", AGGREGATE_ID, UUID.randomUUID())
             override val expectedVersionRequired get() = once("expected", true, false)
             override val changesAuthorizationFacts get() = once("authFacts", false, true)
-
-            override fun lockCurrentVersion(context: CommandContext): Long {
-                assertThat(context.descriptor.action).isEqualTo("test.update")
-                return context.jdbc.queryForObject(
-                    "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
-                    Long::class.java,
-                    context.descriptor.aggregateId,
-                )!!
-            }
+            override val lockPlan get() = once(
+                "lockPlan",
+                AggregateLockPlan(existing = listOf(AggregateReference("kernel-test", AGGREGATE_ID))),
+                AggregateLockPlan(existing = listOf(AggregateReference("unknown", UUID.randomUUID()))),
+            )
 
             override fun execute(context: CommandContext): CommandMutation {
                 context.jdbc.update(
@@ -220,7 +219,10 @@ class CommandExecutorIntegrationTest {
                 override val resourceId = ENTITY_ID
             }),
             Variant("aggregate", metadata("fingerprint-aggregate"), object : AuthorizedCommand by command() {
-                override val aggregateId = UUID.fromString("81000000-0000-7000-8000-000000000007")
+                override val aggregateId = SECOND_AGGREGATE_ID
+                override val lockPlan = AggregateLockPlan(
+                    existing = listOf(AggregateReference(aggregateType, aggregateId)),
+                )
             }),
             Variant("expected", metadata("fingerprint-expected").copy(expectedVersion = 4), command()),
         )
@@ -240,7 +242,66 @@ class CommandExecutorIntegrationTest {
     fun `command context exposes descriptor and digest but no raw request`() {
         assertThat(CommandContext::class.java.methods.map { it.name })
             .doesNotContain("getRequest")
-            .contains("getDescriptor", "getRequestDigest")
+            .contains("getDescriptor", "getRequestDigest", "getLockedVersions", "getCreatedAggregates")
+    }
+
+    @Test
+    fun `lock plan resolves existing aggregates in deterministic order and exposes immutable context`() {
+        jdbc.update("INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'second', 7)", SECOND_AGGREGATE_ID)
+        lateinit var capturedVersions: Map<AggregateReference, Long>
+        lateinit var capturedCreated: Set<AggregateReference>
+        val primary = AggregateReference("kernel-test", AGGREGATE_ID)
+        val secondary = AggregateReference("kernel-secondary", SECOND_AGGREGATE_ID)
+        val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
+        val multi = object : AuthorizedCommand by command() {
+            override val lockPlan = AggregateLockPlan(
+                existing = listOf(secondary, primary),
+                created = listOf(created),
+            )
+
+            override fun execute(context: CommandContext): CommandMutation {
+                capturedVersions = context.lockedVersions
+                capturedCreated = context.createdAggregates
+                return command().execute(context)
+            }
+        }
+
+        executor.execute(metadata("ordered-locks"), "{}".toByteArray(), multi)
+
+        assertThat(lockOrder).containsExactly(secondary, primary)
+        assertThat(capturedVersions).containsExactlyInAnyOrderEntriesOf(mapOf(primary to 3L, secondary to 7L))
+        assertThat(capturedCreated).containsExactly(created)
+        assertThatThrownBy {
+            @Suppress("UNCHECKED_CAST")
+            (capturedVersions as MutableMap<AggregateReference, Long>).clear()
+        }.isInstanceOf(UnsupportedOperationException::class.java)
+        assertThatThrownBy {
+            @Suppress("UNCHECKED_CAST")
+            (capturedCreated as MutableSet<AggregateReference>).clear()
+        }.isInstanceOf(UnsupportedOperationException::class.java)
+    }
+
+    @Test
+    fun `invalid lock plans fail before command execution`() {
+        val primary = AggregateReference("kernel-test", AGGREGATE_ID)
+        val missing = AggregateReference("kernel-test", UUID.fromString("81000000-0000-7000-8000-000000000009"))
+        val invalidPlans = listOf<AggregateLockPlan?>(
+            null,
+            AggregateLockPlan(existing = listOf(AggregateReference("unknown", AGGREGATE_ID))),
+            AggregateLockPlan(existing = listOf(primary, primary)),
+            AggregateLockPlan(existing = listOf(missing)),
+            AggregateLockPlan(existing = listOf(primary), created = listOf(primary)),
+        )
+
+        invalidPlans.forEachIndexed { index, plan ->
+            val invalid = object : AuthorizedCommand by command() {
+                override val lockPlan: AggregateLockPlan? = plan
+            }
+            assertThatThrownBy { executor.execute(metadata("invalid-plan-$index"), "{}".toByteArray(), invalid) }
+                .describedAs("plan $index")
+                .isInstanceOf(InvalidCommandRequestException::class.java)
+        }
+        assertThat(executions).hasValue(0)
     }
 
     @Test
@@ -312,7 +373,10 @@ class CommandExecutorIntegrationTest {
         }
         listOf(-1L, CommandExecutor.MAX_SAFE_INTEGER + 1).forEachIndexed { index, lockedVersion ->
             val invalidLock = object : AuthorizedCommand by command() {
-                override fun lockCurrentVersion(context: CommandContext): Long = lockedVersion
+                override val aggregateType = "kernel-invalid-$index"
+                override val lockPlan = AggregateLockPlan(
+                    existing = listOf(AggregateReference(aggregateType, AGGREGATE_ID)),
+                )
             }
             assertThatThrownBy {
                 executor.execute(metadata("locked-version-$index"), "{}".toByteArray(), invalidLock)
@@ -792,9 +856,31 @@ class CommandExecutorIntegrationTest {
             DataSourceTransactionManager(jdbc.dataSource!!), authorization,
             AuthorizationRevisionLockRepository(jdbc),
             IdempotencyRepository.forTesting(jdbc, clock), AuditRepository(jdbc),
-            OutboxRepository(jdbc), jdbc,
+            OutboxRepository(jdbc), lockRegistry(), jdbc,
         )
     }
+
+    private fun lockRegistry() = AggregateLockRegistry(listOf(
+        AggregateLockResolver("kernel-secondary", 10) { operations, id ->
+            lockOrder += AggregateReference("kernel-secondary", id)
+            operations.queryForObject(
+                "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
+                Long::class.java,
+                id,
+            )
+        },
+        AggregateLockResolver("kernel-test", 20) { operations, id ->
+            lockOrder += AggregateReference("kernel-test", id)
+            operations.query(
+                "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
+                { result, _ -> result.getLong(1) },
+                id,
+            ).singleOrNull()
+        },
+        AggregateLockResolver("kernel-created", 30) { _, _ -> error("created aggregates are not locked") },
+        AggregateLockResolver("kernel-invalid-0", 40) { _, _ -> -1 },
+        AggregateLockResolver("kernel-invalid-1", 40) { _, _ -> CommandExecutor.MAX_SAFE_INTEGER + 1 },
+    ))
 
     private fun command() = object : AuthorizedCommand {
         override val action = "test.update"
@@ -804,12 +890,7 @@ class CommandExecutorIntegrationTest {
         override val aggregateId = AGGREGATE_ID
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
-
-        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
-            "SELECT row_version FROM occ.command_kernel_test WHERE id = ? FOR UPDATE",
-            Long::class.java,
-            AGGREGATE_ID,
-        )!!
+        override val lockPlan = AggregateLockPlan(existing = listOf(AggregateReference(aggregateType, aggregateId)))
 
         override fun execute(context: CommandContext): CommandMutation {
             executions.incrementAndGet()
@@ -857,6 +938,8 @@ class CommandExecutorIntegrationTest {
         private val ENTITY_ID = UUID.fromString("81000000-0000-7000-8000-000000000002")
         private val RESOURCE_ID = UUID.fromString("81000000-0000-7000-8000-000000000003")
         private val AGGREGATE_ID = UUID.fromString("81000000-0000-7000-8000-000000000004")
+        private val SECOND_AGGREGATE_ID = UUID.fromString("81000000-0000-7000-8000-000000000007")
+        private val CREATED_AGGREGATE_ID = UUID.fromString("81000000-0000-7000-8000-000000000008")
         private val CORRELATION_ID = UUID.fromString("81000000-0000-7000-8000-000000000005")
         private val RELEASE_ID = UUID.fromString("81000000-0000-7000-8000-000000000006")
         private const val POLICY_REFERENCE = "policy:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
