@@ -15,7 +15,7 @@ async function expectOneSuccess(promises, message) {
   return settled;
 }
 
-async function waitForBlockedRelationships(pool, applicationNames) {
+async function waitForBlockedApplications(pool, applicationNames) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const result = await pool.query(`SELECT application_name FROM pg_stat_activity
@@ -23,7 +23,7 @@ async function waitForBlockedRelationships(pool, applicationNames) {
     if (result.rowCount === applicationNames.length) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  assert.fail(`relationship race did not reach lock barrier for ${applicationNames.join(', ')}`);
+  assert.fail(`race did not reach lock barrier for ${applicationNames.join(', ')}`);
 }
 
 test('workflow uniqueness, expected-version, and relationship windows serialize races', { timeout: 180_000 }, async () => {
@@ -69,7 +69,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('68000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000002', '64000000-0000-7000-8000-000000000002', 'cohort:race', 'ACTIVE'),
         ('69000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:one', 'ACTIVE'),
         ('69000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:two', 'ACTIVE'),
-        ('6a000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:race', 'ACTIVE');
+        ('6a000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:race', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:blocker-race', 'ACTIVE');
       INSERT INTO iam.principal (id, principal_kind, display_name, status) VALUES
         ('67000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', 'USER', 'Participant', 'ACTIVE');
@@ -92,11 +93,77 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     await pool.query(`INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
       VALUES ('6a000000-0000-7000-8000-000000000001', $1, 'work', 'Work', 'race-task', 'race-execution', 'AVAILABLE')`, [processId]);
+    await pool.query(`INSERT INTO occ.task_projection
+      (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
+      VALUES ('6a000000-0000-7000-8000-000000000002', $1, 'blocked-work', 'Blocked work', 'blocker-race-task', 'blocker-race-execution', 'AVAILABLE')`, [processId]);
     const claims = await Promise.all([
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000001', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
     ]);
     assert.deepEqual(claims.map((result) => result.rowCount).sort(), [0, 1], 'expected-version claim race admits one update');
+    await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
+      WHERE id='6a000000-0000-7000-8000-000000000002'`);
+    await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
+      VALUES ('6a000000-0000-7000-8000-000000000001', 'process.lifecycle')`);
+    await pool.query(`INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+      VALUES ('6a000000-0000-7000-8000-000000000001', 'process.lifecycle', 'READY', $1, 0)`, [processId]);
+
+    const completeSource = await pool.connect();
+    const changeSource = await pool.connect();
+    try {
+      await completeSource.query('BEGIN');
+      await completeSource.query(`UPDATE occ.task_projection SET state='COMPLETED', completed_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000001'`);
+      await changeSource.query('BEGIN');
+      await changeSource.query(`SET LOCAL application_name='workflow-source-change'`);
+      const sourceChange = changeSource.query(`UPDATE occ.process_instance SET state='SUSPENDED' WHERE id=$1`, [processId]);
+      await waitForBlockedApplications(pool, ['workflow-source-change']);
+      await completeSource.query('COMMIT');
+      await assert.rejects(sourceChange, /terminal|provider|task/i);
+      await changeSource.query('ROLLBACK');
+    } finally {
+      await completeSource.query('ROLLBACK').catch(() => {});
+      await changeSource.query('ROLLBACK').catch(() => {});
+      completeSource.release();
+      changeSource.release();
+    }
+    const sourceRaceState = await pool.query(`SELECT task.state AS task_state, process.state AS process_state, provider.status AS provider_status
+      FROM occ.task_projection task
+      JOIN occ.process_instance process ON process.id=task.process_instance_id
+      JOIN occ.task_gate_provider_state provider ON provider.task_id=task.id
+      WHERE task.id='6a000000-0000-7000-8000-000000000001'`);
+    assert.deepEqual(sourceRaceState.rows, [{ task_state: 'COMPLETED', process_state: 'RUNNING', provider_status: 'READY' }],
+      'completion and source change cannot commit COMPLETED plus STALE');
+
+    const completeBlocked = await pool.connect();
+    const addBlocker = await pool.connect();
+    try {
+      await completeBlocked.query('BEGIN');
+      await completeBlocked.query(`UPDATE occ.task_projection SET state='COMPLETED', completed_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000002'`);
+      await addBlocker.query('BEGIN');
+      await addBlocker.query(`SET LOCAL application_name='workflow-hard-blocker'`);
+      const blockerInsert = addBlocker.query(`INSERT INTO occ.task_blocker
+        (id, task_id, source_entity_id, source_row_version, blocker_code, severity)
+        VALUES ('6d000000-0000-7000-8000-000000000001', '6a000000-0000-7000-8000-000000000002',
+          '6a000000-0000-7000-8000-000000000002', 1, 'POLICY_DENIED', 'HARD')`);
+      await waitForBlockedApplications(pool, ['workflow-hard-blocker']);
+      await completeBlocked.query('COMMIT');
+      await assert.rejects(blockerInsert, /terminal|blocker|task/i);
+      await addBlocker.query('ROLLBACK');
+    } finally {
+      await completeBlocked.query('ROLLBACK').catch(() => {});
+      await addBlocker.query('ROLLBACK').catch(() => {});
+      completeBlocked.release();
+      addBlocker.release();
+    }
+    const blockerRaceState = await pool.query(`SELECT task.state AS task_state,
+      count(blocker.id) FILTER (WHERE blocker.resolved_at IS NULL AND blocker.severity='HARD')::int AS active_hard_blockers
+      FROM occ.task_projection task LEFT JOIN occ.task_blocker blocker ON blocker.task_id=task.id
+      WHERE task.id='6a000000-0000-7000-8000-000000000002' GROUP BY task.state`);
+    assert.deepEqual(blockerRaceState.rows, [{ task_state: 'COMPLETED', active_hard_blockers: 0 }],
+      'completion and blocker insert cannot commit COMPLETED plus active hard blocker');
     const start = new Date(Date.now() - 60_000);
     const middle = new Date(Date.now() + 60_000);
     const end = new Date(middle.getTime() + 60_000);
@@ -126,7 +193,7 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       };
       const raceA = insertReplacement(replacementA, '6c000000-0000-7000-8000-000000000002', 'replacement-a');
       const raceB = insertReplacement(replacementB, '6c000000-0000-7000-8000-000000000003', 'replacement-b');
-      await waitForBlockedRelationships(pool, ['relationship-replacement-a', 'relationship-replacement-b']);
+      await waitForBlockedApplications(pool, ['relationship-replacement-a', 'relationship-replacement-b']);
       await revoker.query('COMMIT');
       const replacements = await Promise.allSettled([raceA, raceB]);
       assert.equal(replacements.filter((result) => result.status === 'fulfilled').length, 1,
@@ -160,7 +227,7 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       ];
       const winner = await Promise.race(naturalPromises);
       const loserName = winner === 0 ? 'natural-reentry-b' : 'natural-reentry-a';
-      await waitForBlockedRelationships(pool, [loserName]);
+      await waitForBlockedApplications(pool, [loserName]);
       await (winner === 0 ? naturalA : naturalB).query('COMMIT');
       const naturalRace = await Promise.allSettled(naturalPromises);
       assert.equal(naturalRace.filter((result) => result.status === 'fulfilled').length, 1,

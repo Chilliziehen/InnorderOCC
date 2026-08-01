@@ -334,7 +334,7 @@ BEGIN
 
     IF TG_OP = 'UPDATE' AND NEW.owner_principal_id IS DISTINCT FROM OLD.owner_principal_id THEN
         UPDATE authz.relationship
-        SET revoked_at = greatest(changed_at, valid_from),
+        SET revoked_at = changed_at,
             revoked_by = NEW.updated_by,
             updated_by = NEW.updated_by
         WHERE relation_definition_id = owner_relation_id
@@ -349,11 +349,11 @@ BEGIN
     IF TG_OP = 'INSERT' OR NEW.owner_principal_id IS DISTINCT FROM OLD.owner_principal_id THEN
         INSERT INTO authz.relationship (
             id, relation_definition_id, subject_entity_id, object_entity_id,
-            source_kind, source_ref, created_by, updated_by
+            valid_from, source_kind, source_ref, created_by, updated_by
         ) VALUES (
             md5(NEW.id::text || NEW.owner_principal_id::text || clock_timestamp()::text)::uuid,
             owner_relation_id, NEW.owner_principal_id, NEW.id,
-            'SYSTEM', 'cohort-owner-projection', NEW.updated_by, NEW.updated_by
+            changed_at, 'SYSTEM', 'cohort-owner-projection', NEW.updated_by, NEW.updated_by
         );
     END IF;
     RETURN NEW;
@@ -482,7 +482,7 @@ BEGIN
               provider.status IS DISTINCT FROM 'READY'
               OR provider.source_entity_id IS NULL
               OR provider.source_row_version IS DISTINCT FROM
-                  occ.task_gate_source_row_version(requirement.provider_key, provider.source_entity_id)
+                  occ.task_gate_source_row_version(requirement.provider_key, provider.source_entity_id, NEW.id)
           )
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider is unavailable';
@@ -505,7 +505,7 @@ CREATE UNIQUE INDEX uq_task_blocker_active
 ON occ.task_blocker (task_id, source_entity_id, blocker_code)
 WHERE resolved_at IS NULL;
 
-CREATE FUNCTION occ.task_gate_source_row_version(p_provider_key text, p_entity_id uuid)
+CREATE FUNCTION occ.task_gate_source_row_version(p_provider_key text, p_entity_id uuid, p_task_id uuid)
 RETURNS bigint
 LANGUAGE plpgsql
 STABLE
@@ -514,11 +514,24 @@ DECLARE
     current_version bigint;
 BEGIN
     IF p_provider_key = 'evidence' OR p_provider_key LIKE 'evidence.%' THEN
-        SELECT row_version INTO current_version FROM occ.evidence WHERE id = p_entity_id;
+        SELECT row_version INTO current_version
+        FROM occ.evidence
+        WHERE id = p_entity_id AND task_id = p_task_id;
     ELSIF p_provider_key = 'resource' OR p_provider_key LIKE 'resource.%' THEN
-        SELECT row_version INTO current_version FROM occ.managed_resource WHERE id = p_entity_id;
+        SELECT resource.row_version INTO current_version
+        FROM occ.managed_resource resource
+        WHERE resource.id = p_entity_id
+          AND EXISTS (
+              SELECT 1 FROM occ.resource_reservation reservation
+              WHERE reservation.resource_id = resource.id
+                AND reservation.task_id = p_task_id
+                AND reservation.state IN ('PENDING', 'CONFIRMED')
+          );
     ELSIF p_provider_key = 'process' OR p_provider_key LIKE 'process.%' THEN
-        SELECT row_version INTO current_version FROM occ.process_instance WHERE id = p_entity_id;
+        SELECT process.row_version INTO current_version
+        FROM occ.process_instance process
+        JOIN occ.task_projection task ON task.process_instance_id = process.id
+        WHERE process.id = p_entity_id AND task.id = p_task_id;
     ELSE
         RETURN NULL;
     END IF;
@@ -548,9 +561,18 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     authoritative_version bigint;
+    task_state text;
+    affected_task_id uuid := CASE WHEN TG_OP = 'DELETE' THEN OLD.task_id ELSE NEW.task_id END;
 BEGIN
+    SELECT state INTO STRICT task_state
+    FROM occ.task_projection
+    WHERE id = affected_task_id
+    FOR UPDATE;
     IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider state cannot be deleted';
+    END IF;
+    IF task_state IN ('COMPLETED', 'CANCELLED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal task gate provider state is immutable';
     END IF;
     IF TG_OP = 'UPDATE' THEN
         IF NEW.task_id IS DISTINCT FROM OLD.task_id OR NEW.provider_key IS DISTINCT FROM OLD.provider_key THEN
@@ -568,7 +590,7 @@ BEGIN
         IF NEW.source_entity_id IS NULL OR NEW.source_row_version IS NULL THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'READY gate provider requires a source entity and version';
         END IF;
-        authoritative_version := occ.task_gate_source_row_version(NEW.provider_key, NEW.source_entity_id);
+        authoritative_version := occ.task_gate_source_row_version(NEW.provider_key, NEW.source_entity_id, NEW.task_id);
         IF authoritative_version IS NULL OR authoritative_version IS DISTINCT FROM NEW.source_row_version THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'READY gate provider source version is not authoritative';
         END IF;
@@ -616,9 +638,22 @@ CREATE FUNCTION occ.enforce_task_blocker_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    task_state text;
+    affected_task_id uuid := CASE WHEN TG_OP = 'DELETE' THEN OLD.task_id ELSE NEW.task_id END;
 BEGIN
+    SELECT state INTO STRICT task_state
+    FROM occ.task_projection
+    WHERE id = affected_task_id
+    FOR UPDATE;
     IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task blocker cannot be deleted';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF task_state IN ('COMPLETED', 'CANCELLED', 'FAILED') THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal task cannot acquire a blocker';
+        END IF;
+        RETURN NEW;
     END IF;
     IF (to_jsonb(NEW) - 'resolved_at') IS DISTINCT FROM (to_jsonb(OLD) - 'resolved_at') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task blocker facts are immutable';
@@ -631,7 +666,7 @@ END;
 $$;
 
 CREATE TRIGGER trg_task_blocker_lifecycle
-BEFORE UPDATE OR DELETE ON occ.task_blocker
+BEFORE INSERT OR UPDATE OR DELETE ON occ.task_blocker
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_blocker_lifecycle();
 CREATE TRIGGER trg_task_blocker_no_truncate
 BEFORE TRUNCATE ON occ.task_blocker
@@ -726,6 +761,40 @@ CREATE TRIGGER trg_notification_lifecycle
 BEFORE INSERT OR UPDATE ON occ.notification
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_notification_lifecycle();
 
+CREATE FUNCTION occ.reject_workflow_fact_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = format('%I.%I facts cannot be physically deleted', TG_TABLE_SCHEMA, TG_TABLE_NAME);
+END;
+$$;
+
+CREATE TRIGGER trg_cohort_no_delete
+BEFORE DELETE ON occ.cohort
+FOR EACH ROW EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_cohort_no_truncate
+BEFORE TRUNCATE ON occ.cohort
+FOR EACH STATEMENT EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_process_instance_no_delete
+BEFORE DELETE ON occ.process_instance
+FOR EACH ROW EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_process_instance_no_truncate
+BEFORE TRUNCATE ON occ.process_instance
+FOR EACH STATEMENT EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_task_projection_no_delete
+BEFORE DELETE ON occ.task_projection
+FOR EACH ROW EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_task_projection_no_truncate
+BEFORE TRUNCATE ON occ.task_projection
+FOR EACH STATEMENT EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_notification_no_delete
+BEFORE DELETE ON occ.notification
+FOR EACH ROW EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+CREATE TRIGGER trg_notification_no_truncate
+BEFORE TRUNCATE ON occ.notification
+FOR EACH STATEMENT EXECUTE FUNCTION occ.reject_workflow_fact_delete();
+
 CREATE TABLE audit.dependency_failure_attempt (
     id uuid PRIMARY KEY,
     command_key text NOT NULL CHECK (
@@ -775,7 +844,7 @@ WHERE read_at IS NULL;
 CREATE INDEX ix_dependency_failure_correlation
 ON audit.dependency_failure_attempt (correlation_id, attempted_at);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON
+GRANT SELECT, INSERT, UPDATE ON
     occ.cohort,
     occ.task_timeline,
     occ.task_review_projection_fact,
@@ -785,6 +854,14 @@ REVOKE UPDATE, DELETE, TRUNCATE ON occ.task_gate_requirement FROM innorder_runti
 REVOKE DELETE, TRUNCATE ON occ.task_gate_provider_state, occ.task_blocker FROM innorder_runtime;
 GRANT SELECT, INSERT ON occ.task_gate_requirement TO innorder_runtime;
 GRANT SELECT, INSERT, UPDATE ON occ.task_gate_provider_state, occ.task_blocker TO innorder_runtime;
+REVOKE DELETE, TRUNCATE ON
+    occ.cohort,
+    occ.process_instance,
+    occ.task_projection,
+    occ.task_timeline,
+    occ.task_review_projection_fact,
+    occ.notification
+FROM innorder_runtime;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA occ TO innorder_runtime;
 GRANT SELECT, INSERT ON audit.dependency_failure_attempt TO innorder_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON audit.dependency_failure_attempt FROM innorder_runtime;

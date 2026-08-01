@@ -56,7 +56,9 @@ VALUES
   ('59000000-0000-7000-8000-000000000002', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'task:two', 'ACTIVE', '{}', 1),
   ('59000000-0000-7000-8000-000000000003', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'task:terminal-insert', 'ACTIVE', '{}', 1),
   ('5a000000-0000-7000-8000-000000000010', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'evidence:gate', 'ACTIVE', '{}', 1),
-  ('5a000000-0000-7000-8000-000000000011', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'resource:gate', 'ACTIVE', '{}', 1);
+  ('5a000000-0000-7000-8000-000000000011', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'resource:gate', 'ACTIVE', '{}', 1),
+  ('5a000000-0000-7000-8000-000000000012', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'evidence:other-task', 'ACTIVE', '{}', 1),
+  ('5a000000-0000-7000-8000-000000000013', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'resource:other-task', 'ACTIVE', '{}', 1);
 INSERT INTO iam.principal (id, principal_kind, display_name, status, profile, row_version)
 VALUES
   ('56000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE', '{}', 1),
@@ -87,6 +89,12 @@ SELECT pg_temp.assert_true(
      AND subject_entity_id = '56000000-0000-7000-8000-000000000001'
      AND object_entity_id = '57000000-0000-7000-8000-000000000001' AND revoked_at IS NULL),
   'cohort owner is projected exactly once');
+SELECT pg_temp.assert_true(
+  (SELECT count(*) = 1 FROM authz.active_relationships_at(transaction_timestamp())
+   WHERE relation_definition_id = '55000000-0000-7000-8000-000000000001'
+     AND subject_entity_id = '56000000-0000-7000-8000-000000000001'
+     AND object_entity_id = '57000000-0000-7000-8000-000000000001'),
+  'cohort owner projection is visible at the transaction snapshot');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.cohort
       (id, customer_instance_id, code, name, package_version_id, owner_principal_id, start_date, status, created_by, updated_by)
@@ -127,6 +135,22 @@ SELECT pg_temp.assert_true(
      AND subject_entity_id = '56000000-0000-7000-8000-000000000003'
      AND object_entity_id = '57000000-0000-7000-8000-000000000001' AND revoked_at IS NULL),
   'cohort ownership transfer updates projection');
+SELECT pg_temp.assert_true(
+  (SELECT count(*) = 1 FROM authz.active_relationships_at(transaction_timestamp())
+   WHERE relation_definition_id = '55000000-0000-7000-8000-000000000001'
+     AND subject_entity_id = '56000000-0000-7000-8000-000000000003'
+     AND object_entity_id = '57000000-0000-7000-8000-000000000001')
+  AND (SELECT count(*) = 0 FROM authz.active_relationships_at(transaction_timestamp())
+       WHERE relation_definition_id = '55000000-0000-7000-8000-000000000001'
+         AND subject_entity_id = '56000000-0000-7000-8000-000000000001'
+         AND object_entity_id = '57000000-0000-7000-8000-000000000001')
+  AND (SELECT bool_and(valid_from = transaction_timestamp()) FROM authz.relationship
+       WHERE relation_definition_id = '55000000-0000-7000-8000-000000000001'
+         AND object_entity_id = '57000000-0000-7000-8000-000000000001')
+  AND (SELECT bool_and(revoked_at = transaction_timestamp()) FROM authz.relationship
+       WHERE relation_definition_id = '55000000-0000-7000-8000-000000000001'
+         AND object_entity_id = '57000000-0000-7000-8000-000000000001' AND revoked_at IS NOT NULL),
+  'cohort owner transfer has one snapshot-visible owner and no validity gap');
 SELECT pg_temp.assert_raises(
   $$UPDATE authz.relationship SET revoked_at = transaction_timestamp(),
       revoked_by = '56000000-0000-7000-8000-000000000003'
@@ -164,6 +188,13 @@ SELECT pg_temp.assert_raises(
       transaction_timestamp(), '57000000-0000-7000-8000-000000000001',
       '56000000-0000-7000-8000-000000000003', '56000000-0000-7000-8000-000000000003', 'route', 1)$$,
   '55000', 'process must be created RUNNING');
+INSERT INTO occ.process_instance
+  (id, definition_binding_id, package_version_id, flowable_instance_id, business_key, state,
+   row_version, started_by, cohort_id, started_for_participant_id, participant_id, route_key, route_version)
+VALUES ('58000000-0000-7000-8000-000000000002', '5a000000-0000-7000-8000-000000000001',
+  '51000000-0000-7000-8000-000000000001', 'instance-2', 'business-2', 'RUNNING', 1,
+  '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000001',
+  '56000000-0000-7000-8000-000000000003', '56000000-0000-7000-8000-000000000003', 'route', 1);
 SELECT pg_temp.assert_raises(
   $$UPDATE occ.process_instance SET definition_binding_id = definition_binding_id
     WHERE id = '58000000-0000-7000-8000-000000000001' RETURNING package_version_id + interval '0 seconds'$$,
@@ -206,9 +237,25 @@ INSERT INTO occ.evidence
   (id, task_id, requirement_id, state, row_version, created_by)
 VALUES ('5a000000-0000-7000-8000-000000000010', '59000000-0000-7000-8000-000000000001',
   '55000000-0000-7000-8000-000000000010', 'PENDING', 1, '56000000-0000-7000-8000-000000000002');
+INSERT INTO occ.evidence
+  (id, task_id, requirement_id, state, row_version, created_by)
+VALUES ('5a000000-0000-7000-8000-000000000012', '59000000-0000-7000-8000-000000000002',
+  '55000000-0000-7000-8000-000000000010', 'PENDING', 1, '56000000-0000-7000-8000-000000000002');
 INSERT INTO occ.managed_resource
   (id, resource_type, capacity, state, data, row_version)
 VALUES ('5a000000-0000-7000-8000-000000000011', 'test-resource', 1, 'AVAILABLE', '{}', 1);
+INSERT INTO occ.managed_resource
+  (id, resource_type, capacity, state, data, row_version)
+VALUES ('5a000000-0000-7000-8000-000000000013', 'other-resource', 1, 'AVAILABLE', '{}', 1);
+INSERT INTO occ.resource_reservation
+  (id, resource_id, requester_entity_id, process_instance_id, task_id, time_range, capacity, state)
+VALUES
+  ('5a000000-0000-7000-8000-000000000020', '5a000000-0000-7000-8000-000000000011',
+   '56000000-0000-7000-8000-000000000002', '58000000-0000-7000-8000-000000000001',
+   '59000000-0000-7000-8000-000000000001', tstzrange(transaction_timestamp(), transaction_timestamp() + interval '1 hour', '[)'), 1, 'CONFIRMED'),
+  ('5a000000-0000-7000-8000-000000000021', '5a000000-0000-7000-8000-000000000013',
+   '56000000-0000-7000-8000-000000000002', '58000000-0000-7000-8000-000000000001',
+   '59000000-0000-7000-8000-000000000002', tstzrange(transaction_timestamp(), transaction_timestamp() + interval '1 hour', '[)'), 1, 'CONFIRMED');
 INSERT INTO occ.task_gate_requirement (task_id, provider_key)
 VALUES
   ('59000000-0000-7000-8000-000000000001', 'evidence.required'),
@@ -231,6 +278,24 @@ SELECT pg_temp.assert_raises(
     VALUES ('59000000-0000-7000-8000-000000000001', 'resource.capacity', 'READY',
       '5a000000-0000-7000-8000-000000000010', 1)$$,
   '23514', 'resource provider rejects a non-resource source');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+    VALUES ('59000000-0000-7000-8000-000000000001', 'evidence.required', 'READY',
+      '5a000000-0000-7000-8000-000000000012', 1)$$,
+  '23514', 'evidence provider rejects evidence owned by another task');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+    VALUES ('59000000-0000-7000-8000-000000000001', 'process.lifecycle', 'READY',
+      '58000000-0000-7000-8000-000000000002', 1)$$,
+  '23514', 'process provider rejects another process');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_gate_provider_state
+      (task_id, provider_key, status, source_entity_id, source_row_version)
+    VALUES ('59000000-0000-7000-8000-000000000001', 'resource.capacity', 'READY',
+      '5a000000-0000-7000-8000-000000000013', 1)$$,
+  '23514', 'resource provider rejects a reservation owned by another task');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.task_gate_provider_state
       (task_id, provider_key, status, source_entity_id, source_row_version)
@@ -410,6 +475,37 @@ SELECT pg_temp.assert_raises(
   $$UPDATE occ.notification SET read_at = NULL WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
   '55000', 'notification read state is one way');
 
+UPDATE occ.process_instance SET state = 'COMPLETED', ended_at = transaction_timestamp()
+WHERE id = '58000000-0000-7000-8000-000000000002';
+INSERT INTO occ.cohort
+  (id, customer_instance_id, code, name, package_version_id, owner_principal_id, start_date, status, created_by, updated_by)
+VALUES ('57000000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000001',
+  'archive-guard', 'Archive guard', '51000000-0000-7000-8000-000000000001',
+  '56000000-0000-7000-8000-000000000001', current_date, 'DRAFT',
+  '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001');
+UPDATE occ.cohort SET status = 'ACTIVE'
+WHERE id = '57000000-0000-7000-8000-000000000002';
+UPDATE occ.cohort SET status = 'ARCHIVED', archived_at = transaction_timestamp()
+WHERE id = '57000000-0000-7000-8000-000000000002';
+INSERT INTO occ.task_projection
+  (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
+VALUES ('59000000-0000-7000-8000-000000000003', '58000000-0000-7000-8000-000000000002',
+  'delete-guard', 'Delete guard', 'flowable-delete-guard', 'execution-delete-guard', 'AVAILABLE');
+UPDATE occ.task_projection SET state = 'CANCELLED', cancelled_at = transaction_timestamp()
+WHERE id = '59000000-0000-7000-8000-000000000003';
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.cohort WHERE id = '57000000-0000-7000-8000-000000000002'$$,
+  '55000', 'archived cohort cannot be physically deleted');
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.process_instance WHERE id = '58000000-0000-7000-8000-000000000002'$$,
+  '55000', 'terminal process cannot be physically deleted');
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.task_projection WHERE id = '59000000-0000-7000-8000-000000000003'$$,
+  '55000', 'terminal task cannot be physically deleted');
+SELECT pg_temp.assert_raises(
+  $$DELETE FROM occ.notification WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
+  '55000', 'notification history cannot be physically deleted');
+
 SELECT pg_temp.assert_true(
   EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ex_relationship_effective_window'),
   'relationship effective window uses an exclusion constraint');
@@ -430,8 +526,12 @@ SELECT pg_temp.assert_raises(
     WHERE id = '5f000000-0000-7000-8000-000000000010'$$,
   '55000', 'dependency failure attempts are append only');
 SELECT pg_temp.assert_true(
-  has_table_privilege('innorder_runtime', 'occ.cohort', 'SELECT,INSERT,UPDATE,DELETE')
-  AND has_table_privilege('innorder_runtime', 'occ.task_projection', 'SELECT,INSERT,UPDATE,DELETE')
+  has_table_privilege('innorder_runtime', 'occ.cohort', 'SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege('innorder_runtime', 'occ.cohort', 'DELETE')
+  AND has_table_privilege('innorder_runtime', 'occ.process_instance', 'SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege('innorder_runtime', 'occ.process_instance', 'DELETE')
+  AND has_table_privilege('innorder_runtime', 'occ.task_projection', 'SELECT,INSERT,UPDATE')
+  AND NOT has_table_privilege('innorder_runtime', 'occ.task_projection', 'DELETE')
   AND has_table_privilege('innorder_runtime', 'occ.task_gate_requirement', 'SELECT,INSERT')
   AND NOT has_table_privilege('innorder_runtime', 'occ.task_gate_requirement', 'UPDATE,DELETE')
   AND has_table_privilege('innorder_runtime', 'occ.task_gate_provider_state', 'SELECT,INSERT,UPDATE')
