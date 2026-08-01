@@ -48,14 +48,14 @@ class ProcessParserSandboxDockerIntegrationTest {
     @Test
     fun `real Docker timeout removes daemon container before returning`() {
             val commands = mutableListOf<List<String>>()
-            val sandbox = ProcessParserSandbox(
+            ProcessParserSandbox(
                 configuration(docker, image),
                 Clock.systemUTC(),
                 ProcessStarter { command ->
                     commands += command
                     ProcessBuilder(command).redirectErrorStream(true).start()
                 },
-            )
+            ).use { sandbox ->
             val evidence = Files.writeString(tempDirectory.resolve("claim.pdf"), "fixture")
 
             val startedAt = System.nanoTime()
@@ -79,6 +79,7 @@ class ProcessParserSandboxDockerIntegrationTest {
             assertThat(verification.exitCode).isZero()
             assertThat(verification.output).isBlank()
             assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
+            }
     }
 
     @Test

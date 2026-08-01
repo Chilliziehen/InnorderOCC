@@ -68,3 +68,28 @@
 - [ ] Run forced real Docker tests with `-PfullEvidenceIntegration=true` and confirm zero skips.
 - [ ] Run `git diff --check`, inspect the full diff, and verify no residual evidence containers.
 - [ ] Commit all intended files with `git commit -m "fix(core): harden evidence content isolation"` without amending prior commits.
+
+### Task 6: Structural Nested ZIP Probe
+
+**Files:**
+- Modify: `services/core/src/main/kotlin/com/innorder/occ/evidence/ArchiveContentValidator.kt`
+- Test: `services/core/src/test/kotlin/com/innorder/occ/evidence/EvidenceContentInspectorTest.kt`
+
+- [ ] Generate neutral-name nested ZIP fixtures whose local and central flags mark encryption and whose method is unsupported, plus malformed PK controls.
+- [ ] Run the inspector test and confirm encrypted and unsupported nested ZIPs are not rejected as `NESTED_ARCHIVE`.
+- [ ] Replace decompression-based ZIP probing with bounded EOCD, central-record, and local-record validation that accounts for self-extracting prefixes.
+- [ ] Rerun the inspector test and confirm structural ZIP cases pass.
+
+### Task 7: Bounded Parser Runner
+
+**Files:**
+- Modify: `services/core/src/main/kotlin/com/innorder/occ/evidence/ProcessParserSandbox.kt`
+- Test: `services/core/src/test/kotlin/com/innorder/occ/evidence/ProcessParserSandboxTest.kt`
+- Test: `services/core/src/test/kotlin/com/innorder/occ/evidence/ProcessParserSandboxDockerIntegrationTest.kt`
+
+- [ ] Add parser saturation, admitted-launch count, shared-reader thread count, deadline, and close lifecycle tests.
+- [ ] Run the parser sandbox test and confirm the new bounded-concurrency API and assertions fail.
+- [ ] Add fair bounded admission/active semaphores, one fixed bounded output executor, saturation rejection, and `AutoCloseable` lifecycle management; remove per-command executors.
+- [ ] Run forced parser and complete evidence unit tests with zero skips.
+- [ ] Run forced full-integration Docker parser/scanner lifecycle tests with zero skips.
+- [ ] Commit with `git commit -m "fix(core): bound parser execution and nested ZIP probes"` without amending.

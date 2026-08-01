@@ -198,6 +198,34 @@ class EvidenceContentInspectorTest {
         }
     }
 
+    @ParameterizedTest(name = "rejects structurally valid nested ZIP with {0}")
+    @MethodSource("nestedZipStructuralVariants")
+    fun `nested ZIP detection does not require supported decompression`(type: String, nestedBytes: ByteArray) {
+        val bytes = zip("neutral/payload.bin" to nestedBytes)
+        val path = write("nested-structural-$type.zip", bytes)
+
+        assertRejected(EvidenceRejectionCode.NESTED_ARCHIVE) {
+            inspector().inspect(
+                request(path, "nested-structural-$type.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))),
+            )
+        }
+    }
+
+    @Test
+    fun `inconsistent ZIP local record is ordinary binary rather than a nested archive`() {
+        val malformed = zip("inside.bin" to "payload".toByteArray()).copyOf().also {
+            it[18] = (it[18].toInt() + 1).toByte()
+        }
+        val bytes = zip("neutral/payload.bin" to malformed)
+        val path = write("malformed-nested-record.zip", bytes)
+
+        val result = inspector().inspect(
+            request(path, "malformed-nested-record.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))),
+        )
+
+        assertThat(result.detectedMediaType).isEqualTo("application/zip")
+    }
+
     @Test
     fun `ordinary binary entries containing short archive magic are accepted`() {
         val incidental = byteArrayOf(0x01, 0x02, 0x1f, 0x8b.toByte(), 0x08, 0x00, 0x03, 0x04) +
@@ -425,6 +453,15 @@ class EvidenceContentInspectorTest {
             Arguments.of("xz", xzHeader()),
             Arguments.of("bzip2", bzipHeader()),
         )
+
+        @JvmStatic
+        fun nestedZipStructuralVariants(): Stream<Arguments> {
+            val ordinary = zip("inside.bin" to "payload".toByteArray())
+            return Stream.of(
+                Arguments.of("encrypted flag", patchZipHeaders(ordinary, flags = 1, method = null)),
+                Arguments.of("unsupported method", patchZipHeaders(ordinary, flags = null, method = 99)),
+            )
+        }
 
         @JvmStatic
         fun prefixedArchiveMagic(): Stream<Arguments> {
@@ -727,6 +764,30 @@ class EvidenceContentInspectorTest {
             }
             return output.toByteArray()
         }
+
+        private fun patchZipHeaders(bytes: ByteArray, flags: Int?, method: Int?): ByteArray = bytes.copyOf().also { patched ->
+            val central = patched.indexOfSignature(byteArrayOf(0x50, 0x4b, 0x01, 0x02))
+            require(central >= 0)
+            flags?.let {
+                patched.writeLittleEndianShort(6, patched.readLittleEndianShort(6) or it)
+                patched.writeLittleEndianShort(central + 8, patched.readLittleEndianShort(central + 8) or it)
+            }
+            method?.let {
+                patched.writeLittleEndianShort(8, it)
+                patched.writeLittleEndianShort(central + 10, it)
+            }
+        }
+
+        private fun ByteArray.indexOfSignature(signature: ByteArray): Int =
+            (0..size - signature.size).firstOrNull { offset -> signature.indices.all { this[offset + it] == signature[it] } } ?: -1
+
+        private fun ByteArray.writeLittleEndianShort(offset: Int, value: Int) {
+            this[offset] = value.toByte()
+            this[offset + 1] = (value ushr 8).toByte()
+        }
+
+        private fun ByteArray.readLittleEndianShort(offset: Int): Int =
+            (this[offset].toInt() and 0xff) or ((this[offset + 1].toInt() and 0xff) shl 8)
 
         private fun encryptedEmptyZip(): ByteArray = byteArrayOf(
             0x50, 0x4b, 0x03, 0x04, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,

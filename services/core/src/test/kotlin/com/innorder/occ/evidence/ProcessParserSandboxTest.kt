@@ -3,6 +3,7 @@ package com.innorder.occ.evidence
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
@@ -16,6 +17,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.Executors
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 import java.util.stream.Stream
@@ -23,6 +25,14 @@ import java.util.stream.Stream
 class ProcessParserSandboxTest {
     @TempDir
     lateinit var tempDirectory: Path
+
+    private val sandboxes = mutableListOf<ProcessParserSandbox>()
+
+    @AfterEach
+    fun closeSandboxes() {
+        sandboxes.forEach(ProcessParserSandbox::close)
+        sandboxes.clear()
+    }
 
     @Test
     fun `ordinary process executable is rejected`() {
@@ -232,6 +242,55 @@ class ProcessParserSandboxTest {
         assertThat(commands).isEmpty()
     }
 
+    @Test
+    fun `parser saturation bounds admitted launches and shared reader threads`() {
+        val commands = java.util.Collections.synchronizedList(mutableListOf<List<String>>())
+        val sandbox = sandbox(
+            "timeout",
+            maximumRuntime = Duration.ofMillis(200),
+            commands = commands,
+            maximumConcurrentParsers = 1,
+            maximumQueuedParsers = 1,
+        )
+        val callers = Executors.newFixedThreadPool(12)
+        val ready = CountDownLatch(12)
+        val begin = CountDownLatch(1)
+        try {
+            val results = List(12) { index ->
+                val path = Files.writeString(tempDirectory.resolve("saturation-$index.pdf"), "fixture")
+                callers.submit<ParserSandboxResult> {
+                    ready.countDown()
+                    begin.await()
+                    sandbox.inspect(parserRequest(path).copy(deadline = Instant.now().plusMillis(400)))
+                }
+            }
+            assertThat(ready.await(2, TimeUnit.SECONDS)).isTrue()
+            begin.countDown()
+            results.forEach {
+                assertThat(it.get(10, TimeUnit.SECONDS))
+                    .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+            }
+            assertThat(commands.count { it.getOrNull(1) == "run" }).isLessThanOrEqualTo(2)
+            assertThat(parserReaderThreadCount()).isLessThanOrEqualTo(2)
+        } finally {
+            callers.shutdownNow()
+            sandbox.close()
+        }
+        awaitParserReaderThreads(0)
+    }
+
+    private fun parserReaderThreadCount(): Int = Thread.getAllStackTraces().keys.count {
+        it.isAlive && it.name.startsWith("evidence-parser-shared-output")
+    }
+
+    private fun awaitParserReaderThreads(expected: Int) {
+        repeat(100) {
+            if (parserReaderThreadCount() == expected) return
+            Thread.sleep(10)
+        }
+        assertThat(parserReaderThreadCount()).isEqualTo(expected)
+    }
+
     private fun sandbox(
         mode: String,
         pidFile: Path = tempDirectory.resolve("unused.pid"),
@@ -241,6 +300,8 @@ class ProcessParserSandboxTest {
         verificationExitCode: Int = 0,
         verificationOutput: String = "",
         verificationDelayMillis: Long = 0,
+        maximumConcurrentParsers: Int = 2,
+        maximumQueuedParsers: Int = 2,
     ): ProcessParserSandbox {
         val javaExecutable = Path.of(
             System.getProperty("java.home"),
@@ -253,7 +314,12 @@ class ProcessParserSandboxTest {
             "-cp\n${System.getProperty("java.class.path")}\n${ParserWorkerFixture::class.java.name}\n$mode\n$pidFile\n",
         )
         return ProcessParserSandbox(
-            configuration(maximumRuntime = maximumRuntime, maximumRequestBytes = maximumRequestBytes),
+            configuration(
+                maximumRuntime = maximumRuntime,
+                maximumRequestBytes = maximumRequestBytes,
+                maximumConcurrentParsers = maximumConcurrentParsers,
+                maximumQueuedParsers = maximumQueuedParsers,
+            ),
             Clock.systemUTC(),
             ProcessStarter { command ->
                 commands += command
@@ -271,7 +337,7 @@ class ProcessParserSandboxTest {
                     .redirectErrorStream(true)
                     .start()
             },
-        )
+        ).also(sandboxes::add)
     }
 
     private fun configuration(
@@ -279,6 +345,8 @@ class ProcessParserSandboxTest {
         arguments: List<String> = secureDockerArguments(),
         maximumRuntime: Duration = Duration.ofSeconds(8),
         maximumRequestBytes: Int = 4096,
+        maximumConcurrentParsers: Int = 2,
+        maximumQueuedParsers: Int = 2,
     ) = ProcessParserSandboxConfiguration(
         executable = executable,
         arguments = arguments,
@@ -288,6 +356,8 @@ class ProcessParserSandboxTest {
         maximumContainerMemoryBytes = 128L * 1024 * 1024,
         maximumContainerPids = 64,
         maximumTmpfsBytes = 32L * 1024 * 1024,
+        maximumConcurrentParsers = maximumConcurrentParsers,
+        maximumQueuedParsers = maximumQueuedParsers,
     )
 
     private fun fakeDockerExecutable(): Path {
