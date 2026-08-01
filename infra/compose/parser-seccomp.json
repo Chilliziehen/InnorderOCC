@@ -1,0 +1,16 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_AARCH64"],
+  "syscalls": [
+    {
+      "names": [
+        "socket", "socketpair", "connect", "bind", "listen", "accept", "accept4",
+        "sendto", "sendmsg", "sendmmsg", "recvfrom", "recvmsg", "recvmmsg",
+        "execve", "execveat", "ptrace", "mount", "umount", "umount2", "pivot_root",
+        "setns", "unshare", "bpf", "kexec_load", "open_by_handle_at", "process_vm_readv",
+        "process_vm_writev"
+      ],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}
