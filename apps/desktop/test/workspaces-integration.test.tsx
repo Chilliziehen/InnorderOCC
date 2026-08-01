@@ -547,6 +547,35 @@ describe("authenticated workspace integration", () => {
     expect(api.commands.execute).not.toHaveBeenCalled();
   });
 
+  it("retains a valid stale result when connectivity goes offline", async () => {
+    const staleResult: WorkspaceResult = {
+      state: "stale",
+      items: [{
+        id: "resource-stale",
+        name: "Stale GPU pool",
+        type: "compute",
+        state: "available",
+        capacity: 8,
+        availableCapacity: 2,
+        reservations: [],
+        conflicts: [],
+      }],
+      count: 1,
+      fetchedAt: "2026-08-01T10:00:00.000Z",
+    };
+    const api = installOcc(vi.fn().mockResolvedValue(staleResult));
+    const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
+
+    expect(await screen.findByText("过期数据，只读")).toBeInTheDocument();
+    expect(screen.getByText("Stale GPU pool")).toBeInTheDocument();
+    rerender(<AppShell state={offlineState("/resources")} {...props} />);
+
+    expect(await screen.findByText("离线数据，只读")).toBeInTheDocument();
+    expect(screen.getByText("Stale GPU pool")).toBeInTheDocument();
+    expect(api.workspaces.query).toHaveBeenCalledOnce();
+  });
+
   it("preserves retained success across an online refresh error for later offline display", async () => {
     const readyResult: WorkspaceResult = {
       state: "ready",

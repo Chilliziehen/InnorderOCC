@@ -193,7 +193,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     void queryApi(workspaceQueryInput(definition, query, activeTab)).then(
       (value) => {
         if (active && requestSequence.current === sequence) {
-          if (value.state === "ready" || value.state === "empty") retainedResult.current = { key: scopeKey, value };
+          if (value.state === "ready" || value.state === "empty" || value.state === "stale") retainedResult.current = { key: scopeKey, value };
           setResultState({ key: requestKey, value });
         }
       },
