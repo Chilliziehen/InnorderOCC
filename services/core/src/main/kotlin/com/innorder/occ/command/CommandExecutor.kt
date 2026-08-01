@@ -73,7 +73,7 @@ class CommandExecutor(
         }
         val mutation = command.execute(context)
         validateMutation(descriptor, mutation, acquired)
-        aggregateLocks.verifyCreatedVersions(jdbc, mutation.changes, acquired.created)
+        aggregateLocks.verifyVersions(jdbc, mutation.changes)
         val auditDetail = audit.detail(mutation)
         validateDataMinimization(mutation, auditDetail, sensitiveValues)
         audit.insert(transactionId, metadata.correlationId, descriptor, mutation, auditDetail)
@@ -151,6 +151,8 @@ class CommandExecutor(
             mutation.auditReason?.let { it.length !in 1..1024 || it.any(Char::isISOControl) } == true ||
             mutation.body.size() > MAX_RESPONSE_BYTES ||
             mutation.events.isEmpty() || mutation.events.size > 128 ||
+            mutation.events.size != changesByRef.size ||
+            mutation.events.map { it.aggregate }.toSet() != changesByRef.keys ||
             mutation.events.groupBy { it.aggregate }.any { (_, events) ->
                 events.map { it.aggregateVersion }.let { versions -> versions.distinct().size != versions.size || versions != versions.sorted() }
             } ||

@@ -78,12 +78,11 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
         )
     }
 
-    internal fun verifyCreatedVersions(
+    internal fun verifyVersions(
         jdbc: JdbcOperations,
         changes: List<AggregateChange>,
-        created: Set<AggregateReference>,
     ) {
-        changes.filter { it.ref in created }.sortedWith(
+        changes.sortedWith(
             compareBy<AggregateChange>({ resolversByType.getValue(it.ref.type).order }, { it.ref.id.toString() }, { it.ref.type }),
         ).forEach { change ->
             if (resolversByType.getValue(change.ref.type).lock(jdbc, change.ref.id) != change.afterVersion) {

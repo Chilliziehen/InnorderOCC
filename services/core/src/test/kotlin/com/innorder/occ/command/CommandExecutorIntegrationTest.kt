@@ -256,6 +256,7 @@ class CommandExecutorIntegrationTest {
         jdbc.update("INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'second', 7)", SECOND_AGGREGATE_ID)
         lateinit var capturedVersions: Map<AggregateReference, Long>
         lateinit var capturedCreated: Set<AggregateReference>
+        lateinit var locksBeforeHandler: List<AggregateReference>
         val primary = AggregateReference("kernel-test", AGGREGATE_ID)
         val secondary = AggregateReference("kernel-secondary", SECOND_AGGREGATE_ID)
         val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
@@ -266,6 +267,7 @@ class CommandExecutorIntegrationTest {
             )
 
             override fun execute(context: CommandContext): CommandMutation {
+                locksBeforeHandler = lockOrder.toList()
                 capturedVersions = context.lockedVersions
                 capturedCreated = context.createdAggregates
                 return command().execute(context)
@@ -274,7 +276,8 @@ class CommandExecutorIntegrationTest {
 
         executor.execute(metadata("ordered-locks"), "{}".toByteArray(), multi)
 
-        assertThat(lockOrder).containsExactly(secondary, primary)
+        assertThat(locksBeforeHandler).containsExactly(secondary, primary)
+        assertThat(lockOrder).containsExactly(secondary, primary, primary)
         assertThat(capturedVersions).containsExactlyInAnyOrderEntriesOf(mapOf(primary to 3L, secondary to 7L))
         assertThat(capturedCreated).containsExactly(created)
         assertThatThrownBy {
@@ -795,6 +798,51 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
+    fun `existing aggregate must reach declared after version before persistence`() {
+        val unchanged = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation = successMutation()
+        }
+
+        assertThatThrownBy {
+            executor.execute(metadata("existing-not-updated"), "{}".toByteArray(), unchanged)
+        }.isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
+    }
+
+    @Test
+    fun `existing aggregate updated beyond declared after version rolls back`() {
+        val overUpdated = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'over-updated', row_version = 5 WHERE id = ?",
+                    AGGREGATE_ID,
+                )
+                return successMutation()
+            }
+        }
+
+        assertThatThrownBy {
+            executor.execute(metadata("existing-over-updated"), "{}".toByteArray(), overUpdated)
+        }.isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
+    }
+
+    @Test
+    fun `deleted existing aggregate fails outcome verification and rolls back`() {
+        val deleted = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update("DELETE FROM occ.command_kernel_test WHERE id = ?", AGGREGATE_ID)
+                return successMutation()
+            }
+        }
+
+        assertThatThrownBy {
+            executor.execute(metadata("existing-deleted"), "{}".toByteArray(), deleted)
+        }.isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
+    }
+
+    @Test
     fun `multi aggregate mutation persists event identities and sorted affected aggregate audit detail`() {
         val primary = AggregateReference("kernel-test", AGGREGATE_ID)
         val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
@@ -967,6 +1015,45 @@ class CommandExecutorIntegrationTest {
                 .isInstanceOf(InvalidCommandRequestException::class.java)
         }
         assertThat(executions).hasValue(0)
+    }
+
+    @Test
+    fun `every changed aggregate requires exactly one matching event`() {
+        val primary = primaryRef()
+        val created = AggregateReference("kernel-created", CREATED_AGGREGATE_ID)
+        val missingSecondaryEvent = object : AuthorizedCommand by command() {
+            override val lockPlan = AggregateLockPlan(existing = listOf(primary), created = listOf(created))
+
+            override fun execute(context: CommandContext): CommandMutation {
+                context.jdbc.update(
+                    "UPDATE occ.command_kernel_test SET value = 'after', row_version = 4 WHERE id = ?",
+                    AGGREGATE_ID,
+                )
+                context.jdbc.update(
+                    "INSERT INTO occ.command_kernel_test(id, value, row_version) VALUES (?, 'created', 1)",
+                    CREATED_AGGREGATE_ID,
+                )
+                return CommandMutation(
+                    200,
+                    json("{}"),
+                    RESOURCE_ID,
+                    listOf(AggregateChange(primary, 3, 4), AggregateChange(created, 0, 1)),
+                    "missing event",
+                    json("{}"),
+                    listOf(PendingEventSpec("kernel-test.updated", 1, json("{}"), primary, 4)),
+                )
+            }
+        }
+
+        assertThatThrownBy {
+            executor.execute(metadata("missing-secondary-event"), "{}".toByteArray(), missingSecondaryEvent)
+        }.isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.command_kernel_test WHERE id = ?",
+            Long::class.java,
+            CREATED_AGGREGATE_ID,
+        )).isZero()
     }
 
     @Test
