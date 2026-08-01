@@ -41,6 +41,7 @@ dependencies {
     implementation("org.flywaydb:flyway-database-postgresql")
     implementation("org.postgresql:postgresql")
     implementation("org.flowable:flowable-spring-boot-starter-process:7.1.0")
+    implementation("io.minio:minio:8.5.17")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation(kotlin("reflect"))
 
