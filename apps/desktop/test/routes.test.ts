@@ -1,4 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  Boxes,
+  CircleGauge,
+  FileCheck2,
+  GitBranch,
+  ListTodo,
+  PackageOpen,
+  Settings,
+  ShieldAlert,
+  SlidersHorizontal,
+  UsersRound,
+} from "lucide-react";
 
 import {
   DEFAULT_ROUTE_PATH,
@@ -30,6 +42,9 @@ const EXACT_MANIFEST = [
     path: "/overview",
     label: "总览",
     title: "运行总览",
+    description: "关注事项、时限、风险与服务健康摘要",
+    icon: CircleGauge,
+    iconName: "CircleGauge",
     accessCapability: "occ.read",
     queryCapability: "overview.query",
     commandCapabilities: {},
@@ -39,6 +54,9 @@ const EXACT_MANIFEST = [
     path: "/my-work",
     label: "我的工作",
     title: "我的工作",
+    description: "查看并处理分配、领取和退回的任务",
+    icon: ListTodo,
+    iconName: "ListTodo",
     accessCapability: "occ.read",
     queryCapability: "tasks.query",
     commandCapabilities: {
@@ -53,6 +71,9 @@ const EXACT_MANIFEST = [
     path: "/processes",
     label: "流程",
     title: "流程",
+    description: "检查流程进度、参与者、任务与时间线",
+    icon: GitBranch,
+    iconName: "GitBranch",
     accessCapability: "occ.read",
     queryCapability: "processes.query",
     commandCapabilities: {
@@ -66,6 +87,9 @@ const EXACT_MANIFEST = [
     path: "/interventions",
     label: "介入中心",
     title: "人工介入中心",
+    description: "处理审核、异常、策略阻断和建议",
+    icon: FileCheck2,
+    iconName: "FileCheckCorner",
     accessCapability: "occ.read",
     queryCapability: "interventions.query",
     commandCapabilities: {
@@ -79,6 +103,9 @@ const EXACT_MANIFEST = [
     path: "/risks",
     label: "风险",
     title: "风险",
+    description: "跟踪风险分派、缓解、升级与解决",
+    icon: ShieldAlert,
+    iconName: "ShieldAlert",
     accessCapability: "occ.read",
     queryCapability: "risks.query",
     commandCapabilities: {
@@ -94,6 +121,9 @@ const EXACT_MANIFEST = [
     path: "/resources",
     label: "资源",
     title: "资源",
+    description: "查看库存与可用性并管理预留",
+    icon: Boxes,
+    iconName: "Boxes",
     accessCapability: "occ.read",
     queryCapability: "resources.query",
     commandCapabilities: {
@@ -107,6 +137,9 @@ const EXACT_MANIFEST = [
     path: "/domain-design",
     label: "领域设计",
     title: "领域设计",
+    description: "设计、校验、审批并发布领域包",
+    icon: PackageOpen,
+    iconName: "PackageOpen",
     accessCapability: "occ.admin",
     queryCapability: "packages.query",
     commandCapabilities: {
@@ -121,6 +154,9 @@ const EXACT_MANIFEST = [
     path: "/administration",
     label: "管理",
     title: "管理",
+    description: "管理人员、角色、策略与智能服务配置",
+    icon: UsersRound,
+    iconName: "UsersRound",
     accessCapability: "occ.admin",
     queryCapability: "administration.query",
     commandCapabilities: {
@@ -143,6 +179,9 @@ const EXACT_MANIFEST = [
     path: "/system",
     label: "系统",
     title: "系统运行",
+    description: "查看服务、依赖与运行状态",
+    icon: Settings,
+    iconName: "Settings",
     accessCapability: "occ.read",
     queryCapability: "system.query",
     commandCapabilities: {},
@@ -152,6 +191,9 @@ const EXACT_MANIFEST = [
     path: "/settings",
     label: "设置",
     title: "设置",
+    description: "管理个人偏好与当前环境信息",
+    icon: SlidersHorizontal,
+    iconName: "SlidersHorizontal",
     accessCapability: null,
     queryCapability: "preferences.query",
     commandCapabilities: { updatePreferences: "preferences.update" },
@@ -173,9 +215,12 @@ describe("route manifest", () => {
     }
   });
 
-  it("pins the complete capability and unavailable-resource manifest", () => {
+  it("pins the complete display, icon, capability, and unavailable-resource manifest", () => {
     expect(
-      ROUTES.map(({ icon: _icon, description: _description, ...metadata }) => metadata),
+      ROUTES.map((route) => ({
+        ...route,
+        iconName: route.icon.displayName,
+      })),
     ).toEqual(EXACT_MANIFEST);
   });
 

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import type { ServerProfile } from "../src/desktop-contract";
 import {
+  type AppEvent,
+  type AppState,
   canMutate,
   connectivity,
   freshnessAgeMs,
@@ -49,6 +51,22 @@ function onlineState() {
     session: { state: "authenticated", user: identity, expiresAt },
     at: 1_000,
   });
+}
+
+function bootstrapState() {
+  return reduceAppState(initialAppState, {
+    type: "PROFILES_LOADED",
+    profiles: [profileA, profileB],
+    selectedProfileId: null,
+  });
+}
+
+function offlineState() {
+  return reduceAppState(onlineState(), { type: "OFFLINE", at: 4_000 });
+}
+
+function reconnectingState() {
+  return reduceAppState(offlineState(), { type: "ONLINE", at: 9_000 });
 }
 
 describe("application state", () => {
@@ -225,5 +243,208 @@ describe("application state", () => {
     expect(reduceAppState(bootstrap, { type: "OFFLINE", at: 1_000 })).toBe(bootstrap);
     expect(connectivity(bootstrap)).toBe("checking");
     expect(freshnessAgeMs(bootstrap, 2_000)).toBeNull();
+  });
+
+  describe("state and event matrix", () => {
+    const states: Record<AppState["mode"], () => AppState> = {
+      bootstrap: bootstrapState,
+      login: loginState,
+      authenticated: onlineState,
+      offline: offlineState,
+      reconnecting: reconnectingState,
+    };
+    type Expected = AppState["mode"] | "same";
+    type MatrixCase = {
+      name: string;
+      event: AppEvent;
+      expected: Record<AppState["mode"], Expected>;
+      verify?: (result: AppState, sourceMode: AppState["mode"], expected: Expected) => void;
+    };
+    const unchanged = {
+      bootstrap: "same",
+      login: "same",
+      authenticated: "same",
+      offline: "same",
+      reconnecting: "same",
+    } as const;
+    const matrix: MatrixCase[] = [
+      {
+        name: "profiles loaded",
+        event: {
+          type: "PROFILES_LOADED",
+          profiles: [profileA, profileB],
+          selectedProfileId: profileB.id,
+        },
+        expected: {
+          bootstrap: "login",
+          login: "login",
+          authenticated: "login",
+          offline: "login",
+          reconnecting: "login",
+        },
+        verify(result) {
+          expect(result).toMatchObject({ mode: "login", profile: profileB });
+          expect(result).not.toHaveProperty("identity");
+          expect(result).not.toHaveProperty("cachedIdentity");
+        },
+      },
+      {
+        name: "profile selected",
+        event: { type: "PROFILE_SELECTED", profile: profileB },
+        expected: {
+          bootstrap: "login",
+          login: "login",
+          authenticated: "login",
+          offline: "login",
+          reconnecting: "login",
+        },
+        verify(result) {
+          expect(result).toMatchObject({ mode: "login", profile: profileB });
+          expect(result).not.toHaveProperty("identity");
+          expect(result).not.toHaveProperty("cachedIdentity");
+        },
+      },
+      {
+        name: "active profile removed",
+        event: { type: "PROFILE_REMOVED", profileId: profileA.id },
+        expected: {
+          bootstrap: "bootstrap",
+          login: "bootstrap",
+          authenticated: "bootstrap",
+          offline: "bootstrap",
+          reconnecting: "bootstrap",
+        },
+        verify(result) {
+          expect(result.profiles).toEqual([profileB]);
+          expect(result).not.toHaveProperty("identity");
+          expect(result).not.toHaveProperty("cachedIdentity");
+        },
+      },
+      {
+        name: "anonymous session restored",
+        event: { type: "SESSION_RESTORED", session: { state: "anonymous" }, at: 10_000 },
+        expected: {
+          ...unchanged,
+          login: "login",
+          reconnecting: "login",
+        },
+        verify(result) {
+          if (result.mode === "login") {
+            expect(result.notice).toBeUndefined();
+            expect(result).not.toHaveProperty("cachedIdentity");
+          }
+        },
+      },
+      {
+        name: "authenticated session restored",
+        event: {
+          type: "SESSION_RESTORED",
+          session: { state: "authenticated", user: changedIdentity, expiresAt },
+          at: 10_000,
+        },
+        expected: {
+          ...unchanged,
+          login: "authenticated",
+          reconnecting: "authenticated",
+        },
+        verify(result) {
+          if (result.mode === "authenticated" && result.lastFreshAt === 10_000) {
+            expect(result.identity).toBe(changedIdentity);
+          }
+        },
+      },
+      {
+        name: "login succeeded",
+        event: {
+          type: "LOGIN_SUCCEEDED",
+          session: { state: "authenticated", user: changedIdentity, expiresAt },
+          at: 10_000,
+        },
+        expected: {
+          ...unchanged,
+          login: "authenticated",
+          reconnecting: "authenticated",
+        },
+        verify(result) {
+          if (result.mode === "authenticated" && result.lastFreshAt === 10_000) {
+            expect(result.identity).toBe(changedIdentity);
+          }
+        },
+      },
+      {
+        name: "logout",
+        event: { type: "LOGOUT" },
+        expected: {
+          ...unchanged,
+          authenticated: "login",
+          offline: "login",
+          reconnecting: "login",
+        },
+        verify(result) {
+          if (result.mode === "login") expect(result.notice).toBeUndefined();
+        },
+      },
+      {
+        name: "session expired",
+        event: { type: "SESSION_EXPIRED" },
+        expected: {
+          ...unchanged,
+          authenticated: "login",
+          offline: "login",
+          reconnecting: "login",
+        },
+        verify(result, _sourceMode, expected) {
+          if (result.mode === "login" && expected !== "same") {
+            expect(result.notice).toBe("expired");
+          }
+        },
+      },
+      {
+        name: "transport online",
+        event: { type: "ONLINE", at: 10_000 },
+        expected: {
+          ...unchanged,
+          offline: "reconnecting",
+        },
+      },
+      {
+        name: "transport offline",
+        event: { type: "OFFLINE", at: 10_000 },
+        expected: {
+          ...unchanged,
+          authenticated: "offline",
+          reconnecting: "offline",
+        },
+      },
+      {
+        name: "route changed",
+        event: { type: "ROUTE_CHANGED", route: { path: "/system", focusToken: 8 } },
+        expected: {
+          bootstrap: "bootstrap",
+          login: "login",
+          authenticated: "authenticated",
+          offline: "offline",
+          reconnecting: "reconnecting",
+        },
+        verify(result) {
+          expect(result.route).toEqual({ path: "/system", focusToken: 8 });
+        },
+      },
+    ];
+
+    for (const testCase of matrix) {
+      for (const [mode, createState] of Object.entries(states) as Array<
+        [AppState["mode"], () => AppState]
+      >) {
+        it(`${testCase.name} from ${mode}`, () => {
+          const state = createState();
+          const result = reduceAppState(state, testCase.event);
+          const expected = testCase.expected[mode];
+          if (expected === "same") expect(result).toBe(state);
+          else expect(result.mode).toBe(expected);
+          testCase.verify?.(result, mode, expected);
+        });
+      }
+    }
   });
 });
