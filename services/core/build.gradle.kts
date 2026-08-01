@@ -31,6 +31,9 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("org.springframework.boot:spring-boot-starter-oauth2-resource-server")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.apache.pdfbox:pdfbox:3.0.8") {
+        exclude(group = "commons-logging", module = "commons-logging")
+    }
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
     implementation("org.springframework.kafka:spring-kafka")
