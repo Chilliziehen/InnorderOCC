@@ -20,6 +20,7 @@ interface WorkspaceStateProps<Item> {
   readonly onRetry?: () => void;
   readonly onRefresh?: () => void;
   readonly renderItem?: (item: Item) => ReactNode;
+  readonly renderRowAction?: (item: Item) => ReactNode;
 }
 
 function announcementText(result: WorkspaceResult): string {
@@ -53,12 +54,14 @@ function ValidatedData<Item>({
   columns = [],
   now,
   renderItem,
+  renderRowAction,
 }: {
   result: DataResult;
   itemSchema: z.ZodType<Item>;
   columns?: readonly WorkspaceColumn[];
   now?: number;
   renderItem?: (item: Item) => ReactNode;
+  renderRowAction?: (item: Item) => ReactNode;
 }) {
   const parsed = result.items.map((item) => itemSchema.safeParse(item));
   if (parsed.some(({ success }) => !success)) {
@@ -76,12 +79,12 @@ function ValidatedData<Item>({
       {renderItem ? items.map((item, index) => <div key={index}>{renderItem(item)}</div>) : (
         <div role="table" aria-label="工作区数据">
           {columns.length > 0 ? (
-            <div role="row">{columns.map((column) => <span role="columnheader" key={column.key}>{column.label}</span>)}</div>
+            <div role="row">{renderRowAction ? <span role="columnheader">选择</span> : null}{columns.map((column) => <span role="columnheader" key={column.key}>{column.label}</span>)}</div>
           ) : null}
           {items.map((item, index) => {
             const record = item as Record<string, unknown>;
             const values = columns.length > 0 ? columns.map(({ key }) => record[key]) : Object.values(record);
-            return <div role="row" key={index}>{values.map((value, cell) => <span role="cell" key={cell}>{displayValue(value)}</span>)}</div>;
+            return <div role="row" key={index}>{renderRowAction ? <span role="cell">{renderRowAction(item)}</span> : null}{values.map((value, cell) => <span role="cell" key={cell}>{displayValue(value)}</span>)}</div>;
           })}
         </div>
       )}
@@ -89,7 +92,7 @@ function ValidatedData<Item>({
   );
 }
 
-export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableControls = [], now = Date.now(), onNextCommand, onRetry, onRefresh, renderItem }: WorkspaceStateProps<Item>) {
+export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableControls = [], now = Date.now(), onNextCommand, onRetry, onRefresh, renderItem, renderRowAction }: WorkspaceStateProps<Item>) {
   const [announcement, setAnnouncement] = useState({ text: "", sequence: 0 });
   let content: ReactNode;
 
@@ -109,7 +112,7 @@ export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableC
       content = <section role="region" aria-label={result.label} aria-busy="true"><progress aria-label={result.label} /> <span>{result.label}</span></section>;
       break;
     case "ready":
-      content = <ValidatedData result={result} itemSchema={itemSchema} {...(columns ? { columns } : {})} {...(renderItem ? { renderItem } : {})} />;
+      content = <ValidatedData result={result} itemSchema={itemSchema} {...(columns ? { columns } : {})} {...(renderItem ? { renderItem } : {})} {...(renderRowAction ? { renderRowAction } : {})} />;
       break;
     case "empty":
       content = <section><strong>没有结果</strong>{result.nextCommand?.permitted && onNextCommand ? <button type="button" onClick={onNextCommand}>{result.nextCommand.label}</button> : null}</section>;
@@ -130,7 +133,7 @@ export function WorkspaceState<Item>({ result, itemSchema, columns, unavailableC
       content = (
         <section>
           <strong>{result.state === "offline" ? "离线数据，只读" : "过期数据，只读"}</strong>
-          <ValidatedData result={result} itemSchema={itemSchema} {...(columns ? { columns } : {})} now={now} {...(renderItem ? { renderItem } : {})} />
+          <ValidatedData result={result} itemSchema={itemSchema} {...(columns ? { columns } : {})} now={now} {...(renderItem ? { renderItem } : {})} {...(renderRowAction ? { renderRowAction } : {})} />
         </section>
       );
       break;

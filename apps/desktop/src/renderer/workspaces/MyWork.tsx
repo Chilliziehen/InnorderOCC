@@ -53,6 +53,8 @@ export interface MyWorkProps {
   readonly capabilities: readonly string[];
   readonly online: boolean;
   readonly authenticated: boolean;
+  readonly selectedId?: string;
+  readonly onSelect: (id: string) => void;
   readonly selectedTask?: MyWorkTaskDetails;
   readonly upload?: EvidenceUploadState;
   readonly uploadProgressAvailable?: boolean;
@@ -167,6 +169,8 @@ export function MyWork({
   capabilities,
   online,
   authenticated,
+  selectedId,
+  onSelect,
   selectedTask,
   upload = { state: "idle" },
   uploadProgressAvailable = true,
@@ -216,6 +220,7 @@ export function MyWork({
       : "智能建议不可用",
   };
   const guidanceStatus: GuidanceState = guidance ?? defaultGuidance;
+  const renderWorkSelection = (item: z.infer<typeof workItemSchema>) => <button type="button" aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>选择任务：{item.task}</button>;
 
   return (
     <main aria-labelledby="my-work-title">
@@ -242,7 +247,7 @@ export function MyWork({
 
       <QueryToolbar definition={definition} value={query} onChange={onQueryChange} onRefresh={onRefresh} />
       <section role="tabpanel" id={`my-work-panel-${activeTab}`} aria-labelledby={`my-work-tab-${activeTab}`} tabIndex={0}>
-      <WorkspaceState result={result} itemSchema={workItemSchema} columns={definition.columns} onRetry={onRefresh} onRefresh={onRefresh} />
+      <WorkspaceState result={result} itemSchema={workItemSchema} columns={definition.columns} onRetry={onRefresh} onRefresh={onRefresh} renderRowAction={renderWorkSelection} />
 
       <section aria-label="任务操作">
         <h2>任务操作</h2>

@@ -14,12 +14,12 @@ import { failedWorkspaceResult, unavailableWorkspaceResult, workspaceQueryInput 
 import { WORKSPACE_DEFINITIONS, type WorkspaceId } from "../workspaces/workspace-definitions";
 import { Administration } from "../workspaces/Administration";
 import { DomainDesign, type ArchiveUploadReference } from "../workspaces/DomainDesign";
-import { Interventions, type InterventionTab } from "../workspaces/Interventions";
+import { Interventions, interventionItemSchema, type InterventionTab } from "../workspaces/Interventions";
 import { MyWork, type EvidenceUploadState, type MyWorkTab, type MyWorkTaskDetails } from "../workspaces/MyWork";
 import { Overview } from "../workspaces/Overview";
 import { Processes, type ProcessesTab, type SelectedProcess } from "../workspaces/Processes";
 import { Resources } from "../workspaces/Resources";
-import { Risks, type RiskTab } from "../workspaces/Risks";
+import { Risks, riskItemSchema, type RiskTab } from "../workspaces/Risks";
 import { Settings } from "../workspaces/Settings";
 import { SystemOperations } from "../workspaces/SystemOperations";
 
@@ -130,11 +130,17 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
   const requestSequence = useRef(0);
   const cursorHistory = useRef(new Map<string, Array<string | undefined>>());
   const retainedResult = useRef<{ key: string; value: WorkspaceResult } | undefined>(undefined);
+  const [selectedTaskId, setSelectedTaskId] = useState<string>();
+  const [selectedProcessId, setSelectedProcessId] = useState<string>();
   const [selectedIntervention, setSelectedIntervention] = useState<string>();
   const [selectedRisk, setSelectedRisk] = useState<string>();
   const [upload, setUpload] = useState<EvidenceUploadState>({ state: "idle" });
   const [uploadReference, setUploadReference] = useState<string>();
   const uploadRetry = useRef<{ file: File; targetId: string } | undefined>(undefined);
+  const uploadSequence = useRef(0);
+  const uploadScopeKey = `${scopeKey}:${selectedTaskId ?? ""}`;
+  const currentUploadScope = useRef(uploadScopeKey);
+  currentUploadScope.current = uploadScopeKey;
   const result = resultState.key === requestKey
     ? resultState.value
     : loadingResult(definition.query.label);
@@ -146,6 +152,9 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     ...("nextCursor" in result && result.nextCursor ? { nextCursor: result.nextCursor } : {}),
   };
   useEffect(() => {
+    uploadSequence.current += 1;
+    setSelectedTaskId(undefined);
+    setSelectedProcessId(undefined);
     setSelectedIntervention(undefined);
     setSelectedRisk(undefined);
     setUpload({ state: "idle" });
@@ -184,7 +193,7 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     void queryApi(workspaceQueryInput(definition, query, activeTab)).then(
       (value) => {
         if (active && requestSequence.current === sequence) {
-          retainedResult.current = { key: scopeKey, value };
+          if (value.state === "ready" || value.state === "empty") retainedResult.current = { key: scopeKey, value };
           setResultState({ key: requestKey, value });
         }
       },
@@ -238,6 +247,8 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
       : { state: "problem", problem: { title: "命令接口不可用", code: "COMMAND_API_UNAVAILABLE", status: 503 } };
   };
   const startEvidenceUpload = async (file: File, targetId: string) => {
+    const sequence = ++uploadSequence.current;
+    const initiationScope = uploadScopeKey;
     uploadRetry.current = { file, targetId };
     const start = window.occ?.uploads?.start;
     if (!callable(start)) {
@@ -245,7 +256,10 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
       return;
     }
     try {
-      const receipt = await start({ workspace: "my-work", targetId, fileName: file.name, contentType: file.type, size: file.size, data: new Uint8Array(await file.arrayBuffer()) });
+      const data = new Uint8Array(await file.arrayBuffer());
+      if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
+      const receipt = await start({ workspace: "my-work", targetId, fileName: file.name, contentType: file.type, size: file.size, data });
+      if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
       if (receipt.state === "completed") {
         setUpload({ state: "accepted", fileName: file.name, evidenceId: receipt.evidenceId });
         setUploadReference(receipt.uploadId);
@@ -255,7 +269,9 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
         setUpload({ state: "failed", fileName: file.name, message: "证据上传失败，请重试。", retryable: receipt.problem.retryable === true });
       }
     } catch {
-      setUpload({ state: "failed", fileName: file.name, message: "证据上传失败，请重试。", retryable: true });
+      if (uploadSequence.current === sequence && currentUploadScope.current === initiationScope) {
+        setUpload({ state: "failed", fileName: file.name, message: "证据上传失败，请重试。", retryable: true });
+      }
     }
   };
   const archiveUpload = async (file: File): Promise<ArchiveUploadReference> => {
@@ -267,8 +283,32 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
   };
   const taskRows = hasWorkspaceItems(result) ? result.items.map((item) => taskRowSchema.safeParse(item)) : [];
   const processRows = hasWorkspaceItems(result) ? result.items.map((item) => processRowSchema.safeParse(item)) : [];
-  const selectedTask = taskRows.find((entry) => entry.success)?.data.details;
-  const selectedProcess = processRows.find((entry) => entry.success)?.data.details;
+  const selectedTaskEntry = taskRows.find((entry) => entry.success && entry.data.details.id === selectedTaskId);
+  const selectedProcessEntry = processRows.find((entry) => entry.success && entry.data.details.id === selectedProcessId);
+  const selectedTask = selectedTaskEntry?.success ? selectedTaskEntry.data.details : undefined;
+  const selectedProcess = selectedProcessEntry?.success ? selectedProcessEntry.data.details : undefined;
+  const selectedInterventionIsCurrent = hasWorkspaceItems(result) && result.items.some((item) => {
+    const parsed = interventionItemSchema.safeParse(item);
+    return parsed.success && parsed.data.id === selectedIntervention;
+  });
+  const selectedRiskIsCurrent = hasWorkspaceItems(result) && result.items.some((item) => {
+    const parsed = riskItemSchema.safeParse(item);
+    return parsed.success && parsed.data.id === selectedRisk;
+  });
+  const selectionResultIsCurrent = hasWorkspaceItems(result) || result.state === "empty";
+  useEffect(() => {
+    if (!selectionResultIsCurrent) return;
+    if (workspaceId === "my-work" && selectedTaskId && !selectedTask) {
+      uploadSequence.current += 1;
+      setSelectedTaskId(undefined);
+      setUpload({ state: "idle" });
+      setUploadReference(undefined);
+      uploadRetry.current = undefined;
+    }
+    if (workspaceId === "processes" && selectedProcessId && !selectedProcess) setSelectedProcessId(undefined);
+    if (workspaceId === "interventions" && selectedIntervention && !selectedInterventionIsCurrent) setSelectedIntervention(undefined);
+    if (workspaceId === "risks" && selectedRisk && !selectedRiskIsCurrent) setSelectedRisk(undefined);
+  }, [selectedIntervention, selectedInterventionIsCurrent, selectedProcess, selectedProcessId, selectedRisk, selectedRiskIsCurrent, selectedTask, selectedTaskId, selectionResultIsCurrent, workspaceId]);
   const routedResult = hasWorkspaceItems(result) && (workspaceId === "my-work" || workspaceId === "processes")
     ? {
         ...result,
@@ -284,13 +324,13 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     case "overview":
       return <Overview definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />;
     case "my-work":
-      return <MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={false} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
+      return <MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTaskId ? { selectedId: selectedTaskId } : {})} onSelect={(id) => { if (id !== selectedTaskId) { uploadSequence.current += 1; setUpload({ state: "idle" }); setUploadReference(undefined); uploadRetry.current = undefined; } setSelectedTaskId(id); }} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={false} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
     case "processes":
-      return <Processes {...common} activeTab={activeTab as ProcessesTab} {...(selectedProcess ? { selectedProcess } : {})} onTabChange={(tab) => changeTab(tab)} />;
+      return <Processes {...common} activeTab={activeTab as ProcessesTab} {...(selectedProcessId ? { selectedId: selectedProcessId } : {})} onSelect={setSelectedProcessId} {...(selectedProcess ? { selectedProcess } : {})} onTabChange={(tab) => changeTab(tab)} />;
     case "interventions":
-      return <Interventions {...common} activeTab={activeTab as InterventionTab} {...(selectedIntervention ? { selectedItemId: selectedIntervention } : {})} onTabChange={(tab) => changeTab(tab)} onSelectItem={setSelectedIntervention} />;
+      return <Interventions {...common} activeTab={activeTab as InterventionTab} {...(selectedInterventionIsCurrent && selectedIntervention ? { selectedItemId: selectedIntervention } : {})} onTabChange={(tab) => changeTab(tab)} onSelectItem={setSelectedIntervention} />;
     case "risks":
-      return <Risks {...common} activeTab={activeTab as RiskTab} {...(selectedRisk ? { selectedRiskId: selectedRisk } : {})} onTabChange={(tab) => changeTab(tab)} onSelectRisk={setSelectedRisk} />;
+      return <Risks {...common} activeTab={activeTab as RiskTab} {...(selectedRiskIsCurrent && selectedRisk ? { selectedRiskId: selectedRisk } : {})} onTabChange={(tab) => changeTab(tab)} onSelectRisk={setSelectedRisk} />;
     case "resources":
       return <Resources {...common} activeTab={activeTab} onConflictRefresh={refresh} onTabChange={changeTab} />;
     case "domain-design":

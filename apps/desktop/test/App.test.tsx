@@ -96,7 +96,7 @@ describe("OCC operations workspace", () => {
 
     expect(screen.getByRole("tablist", { name: "运行总览视图" })).toBeInTheDocument();
     expect(screen.getByRole("form", { name: "查询工具" })).toBeInTheDocument();
-    expect(await screen.findByText("总览业务 API 合同尚未集成")).toBeInTheDocument();
+    expect(await screen.findByText("离线且没有可用缓存。")).toBeInTheDocument();
   });
 
   it("passes profile-scoped statuses to the integrated overview", async () => {
@@ -130,6 +130,6 @@ describe("OCC operations workspace", () => {
       expect(within(metric as HTMLElement).getByText("--")).toBeInTheDocument();
       expect(within(metric as HTMLElement).getByText("不可用")).toBeInTheDocument();
     }
-    expect(await screen.findByText("总览业务 API 合同尚未集成")).toBeInTheDocument();
+    expect(await screen.findByText("离线且没有可用缓存。")).toBeInTheDocument();
   });
 });

@@ -43,6 +43,8 @@ export interface ProcessesProps {
   readonly capabilities: readonly string[];
   readonly online: boolean;
   readonly authenticated: boolean;
+  readonly selectedId?: string;
+  readonly onSelect: (id: string) => void;
   readonly selectedProcess?: SelectedProcess;
   readonly onTabChange: (tab: ProcessesTab) => void;
   readonly onQueryChange: (query: WorkspaceQueryValue) => void;
@@ -142,6 +144,8 @@ export function Processes({
   capabilities,
   online,
   authenticated,
+  selectedId,
+  onSelect,
   selectedProcess,
   onTabChange,
   onQueryChange,
@@ -184,6 +188,7 @@ export function Processes({
         : !versionValid ? "缺少有效的流程版本"
           : undefined,
   );
+  const renderProcessSelection = (item: z.infer<typeof processItemSchema>) => <button type="button" aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>选择流程：{item.process}</button>;
 
   return (
     <main aria-labelledby="processes-title">
@@ -212,7 +217,7 @@ export function Processes({
       </section>
       <QueryToolbar definition={definition} value={query} onChange={onQueryChange} onRefresh={onRefresh} />
       <section role="tabpanel" id={`processes-panel-${activeTab}`} aria-labelledby={`processes-tab-${activeTab}`} tabIndex={0}>
-      <WorkspaceState result={result} itemSchema={processItemSchema} columns={definition.columns} onRetry={onRefresh} onRefresh={onRefresh} />
+      <WorkspaceState result={result} itemSchema={processItemSchema} columns={definition.columns} onRetry={onRefresh} onRefresh={onRefresh} renderRowAction={renderProcessSelection} />
 
       <section aria-label="流程命令">
         <h2>流程命令</h2>
