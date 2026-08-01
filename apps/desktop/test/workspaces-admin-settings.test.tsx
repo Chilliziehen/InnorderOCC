@@ -360,6 +360,27 @@ describe("Settings", () => {
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
+  it("waits for shell isolation to clear before restoring modal trigger focus", async () => {
+    const handlers = callbacks();
+    const onModalOpenChange = vi.fn();
+    const { rerender } = render(
+      <Settings profiles={[current]} current={current} connectivity="online" modalIsolationActive={false} onModalOpenChange={onModalOpenChange} {...handlers} />,
+    );
+    const trigger = screen.getByRole("button", { name: "移除 Pilot" });
+    fireEvent.click(trigger);
+    rerender(<Settings profiles={[current]} current={current} connectivity="online" modalIsolationActive onModalOpenChange={onModalOpenChange} {...handlers} />);
+    const dialog = screen.getByRole("dialog", { name: "确认移除配置" });
+    expect(within(dialog).getByRole("button", { name: "确认移除" })).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onModalOpenChange).toHaveBeenLastCalledWith(false);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(trigger).not.toHaveFocus();
+
+    rerender(<Settings profiles={[current]} current={current} connectivity="online" modalIsolationActive={false} onModalOpenChange={onModalOpenChange} {...handlers} />);
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
   it("supports wrapping Arrow keys plus Home and End in settings tabs", () => {
     const handlers = callbacks();
     render(<Settings profiles={[current]} current={current} connectivity="online" {...handlers} />);

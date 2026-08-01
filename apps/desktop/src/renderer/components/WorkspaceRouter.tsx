@@ -33,6 +33,7 @@ interface WorkspaceRouterProps {
   readonly onProfileSave: (input: ProfileInput) => Promise<unknown>;
   readonly onProfileRemove?: (profileId: string) => void | Promise<void>;
   readonly onModalOpenChange?: (open: boolean) => void;
+  readonly modalIsolationActive: boolean;
 }
 
 const initialQueries = Object.fromEntries(Object.values(WORKSPACE_DEFINITIONS).map((definition) => [
@@ -108,7 +109,7 @@ function hasWorkspaceItems(result: WorkspaceResult): result is Extract<Workspace
   return result.state === "ready" || result.state === "stale" || result.state === "offline";
 }
 
-export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, onLogout, onProfileSelect, onProfileSave, onProfileRemove, onModalOpenChange }: WorkspaceRouterProps) {
+export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, onLogout, onProfileSelect, onProfileSave, onProfileRemove, onModalOpenChange, modalIsolationActive }: WorkspaceRouterProps) {
   const definition = WORKSPACE_DEFINITIONS[workspaceId];
   const identity = state.mode === "authenticated" ? state.identity : state.cachedIdentity;
   const [queries, setQueries] = useState(initialQueries);
@@ -341,6 +342,6 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     case "system":
       return <SystemOperations definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} configurationFreshness={new Date(state.lastFreshAt).toISOString()} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />;
     case "settings":
-      return <Settings profiles={state.profiles} current={state.profile} activeTab={activeTab} connectivity={connectivity} onSelect={(profileId) => { const profile = state.profiles.find(({ id }) => id === profileId); if (profile) return onProfileSelect(profile); }} onSave={async (input) => { await onProfileSave(input); }} onRemove={(profileId) => onProfileRemove?.(profileId)} onPreferencesChange={() => undefined} onLogout={onLogout} onTabChange={changeTab} {...(onModalOpenChange ? { onModalOpenChange } : {})} />;
+      return <Settings profiles={state.profiles} current={state.profile} activeTab={activeTab} connectivity={connectivity} onSelect={(profileId) => { const profile = state.profiles.find(({ id }) => id === profileId); if (profile) return onProfileSelect(profile); }} onSave={async (input) => { await onProfileSave(input); }} onRemove={(profileId) => onProfileRemove?.(profileId)} onPreferencesChange={() => undefined} onLogout={onLogout} onTabChange={changeTab} modalIsolationActive={modalIsolationActive} {...(onModalOpenChange ? { onModalOpenChange } : {})} />;
   }
 }

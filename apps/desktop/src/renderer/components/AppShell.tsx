@@ -85,6 +85,7 @@ export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfile
               onProfileSelect={onProfileSelect}
               onProfileSave={onProfileSave}
               onModalOpenChange={setModalOpen}
+              modalIsolationActive={modalOpen}
               {...(onProfileRemove ? { onProfileRemove } : {})}
             />
           )}

@@ -22,6 +22,7 @@ export interface SettingsProps {
   readonly onTabChange?: (tabId: string) => void;
   readonly activeTab?: string;
   readonly onModalOpenChange?: (open: boolean) => void;
+  readonly modalIsolationActive?: boolean;
 }
 
 const definition = WORKSPACE_DEFINITIONS.settings;
@@ -41,7 +42,7 @@ function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number, select:
   event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
 }
 
-export function Settings({ profiles, current, connectivity, onSelect, onSave, onRemove, onPreferencesChange, onLogout, onTabChange, activeTab: controlledActiveTab, onModalOpenChange }: SettingsProps) {
+export function Settings({ profiles, current, connectivity, onSelect, onSave, onRemove, onPreferencesChange, onLogout, onTabChange, activeTab: controlledActiveTab, onModalOpenChange, modalIsolationActive = false }: SettingsProps) {
   const [localActiveTab, setActiveTab] = useState(definition.tabs[0]!.id);
   const activeTab = definition.tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const [name, setName] = useState(current?.name ?? "");
@@ -69,20 +70,26 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
   }, [current]);
 
   useEffect(() => {
-    if (pendingRemoval) {
-      confirmRemovalRef.current?.focus();
-      return;
-    }
-    removalTriggerRef.current?.focus();
-    removalTriggerRef.current = undefined;
-  }, [pendingRemoval]);
-
-  useEffect(() => {
     onModalOpenChange?.(Boolean(pendingRemoval));
     return () => {
       if (pendingRemoval) onModalOpenChange?.(false);
     };
   }, [onModalOpenChange, pendingRemoval]);
+
+  useEffect(() => {
+    if (pendingRemoval) {
+      confirmRemovalRef.current?.focus();
+      return;
+    }
+    const trigger = removalTriggerRef.current;
+    if (!trigger || modalIsolationActive) return;
+    const frame = requestAnimationFrame(() => {
+      if (!trigger.isConnected || trigger.closest("[inert]")) return;
+      trigger.focus();
+      if (document.activeElement === trigger) removalTriggerRef.current = undefined;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [modalIsolationActive, pendingRemoval]);
 
   const runAction = async (action: PendingAction, message: string, callback: () => void | Promise<void>, onSuccess?: () => void) => {
     if (pendingActionRef.current) return;

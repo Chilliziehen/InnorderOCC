@@ -294,9 +294,9 @@ describe("authenticated console accessibility", () => {
     fireEvent.keyDown(confirm, { key: "Tab" });
     expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
     fireEvent.keyDown(dialog, { key: "Escape" });
-    expect(remove).toHaveFocus();
     expect(shell).not.toHaveAttribute("inert");
     expect(shell).not.toHaveAttribute("aria-hidden");
+    await waitFor(() => expect(remove).toHaveFocus());
     await expectAccessible(document.body);
   });
 });
