@@ -3,6 +3,7 @@ package com.innorder.occ.api
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ArrayNode
+import com.fasterxml.jackson.databind.node.DecimalNode
 import com.innorder.occ.command.CanonicalJsonObject
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -14,6 +15,8 @@ import org.springframework.boot.convert.ApplicationConversionService
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.math.BigDecimal
+import java.math.BigInteger
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -75,6 +78,45 @@ class CursorCodecTest {
 
         assertThat(codec.encode(reordered, tuple)).isEqualTo(codec.encode(context, tuple))
         assertThat(codec.decode(codec.encode(context, tuple), reordered)).isEqualTo(tuple)
+    }
+
+    @Test
+    fun `round trips numbers at decoder token limit and rejects one extra character`() {
+        val accepted = listOf(
+            BigInteger("9".repeat(64)),
+            BigInteger("-" + "9".repeat(63)),
+            BigDecimal("1." + "2".repeat(62)),
+        )
+
+        accepted.forEach { number ->
+            val value = array(number)
+            val token = runCatching { codec.encode(context, value) }
+            assertThat(token.exceptionOrNull()).describedAs("encode %s", number).isNull()
+            val decoded = runCatching { codec.decode(token.getOrThrow(), context) }
+            assertThat(decoded.exceptionOrNull()).describedAs("decode %s", number).isNull()
+            assertThat(decoded.getOrThrow()).describedAs("round trip %s", number).isEqualTo(value)
+        }
+        val exactDecimal = mapper.createArrayNode().add(DecimalNode(BigDecimal("1.0")))
+        assertThat(codec.decode(codec.encode(context, exactDecimal), context)).isEqualTo(exactDecimal)
+        listOf(
+            array(BigInteger("9".repeat(65))),
+            array(BigDecimal("1." + "2".repeat(63))),
+        ).forEach { rejected -> assertInvalid { codec.encode(context, rejected) } }
+    }
+
+    @Test
+    fun `signed lifetime survives configured TTL reduction and rejects invalid issued times`() {
+        val token = codec.encode(context, tuple)
+        val reducedTtl = CursorCodec(SECRET, clock, Duration.ofMinutes(1))
+        val futureIssued = payloadNode().also {
+            it.put("issuedAt", now.plusSeconds(31).epochSecond)
+            it.put("expiresAt", now.plusSeconds(60).epochSecond)
+        }
+        val excessiveLifetime = payloadNode().also { it.put("expiresAt", now.plus(Duration.ofHours(1)).plusSeconds(1).epochSecond) }
+
+        assertThat(reducedTtl.decode(token, context)).isEqualTo(tuple)
+        assertInvalid { codec.decode(signedCanonical(futureIssued), context) }
+        assertInvalid { codec.decode(signedCanonical(excessiveLifetime), context) }
     }
 
     @Test
@@ -192,13 +234,14 @@ class CursorCodecTest {
     }
 
     private fun payloadNode() = mapper.createObjectNode().apply {
-        put("version", 1)
+        put("version", 2)
         put("endpoint", context.endpoint)
         put("customerId", context.customerId.toString())
         set<JsonNode>("filters", context.filters.toJsonNode())
         put("sortName", context.sortName)
         put("sortVersion", context.sortVersion)
         put("direction", context.direction.name)
+        put("issuedAt", now.epochSecond)
         put("expiresAt", now.plus(Duration.ofMinutes(10)).epochSecond)
         set<ArrayNode>("tuple", tuple)
     }

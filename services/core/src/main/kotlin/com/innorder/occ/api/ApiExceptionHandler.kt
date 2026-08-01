@@ -161,6 +161,12 @@ class ApiExceptionHandler(
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.requestError(request, HttpStatus.BAD_REQUEST)
 
+    @ExceptionHandler(InvalidCursorException::class)
+    fun invalidCursor(
+        exception: InvalidCursorException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.requestError(request, HttpStatus.BAD_REQUEST)
+
     @ExceptionHandler(Exception::class)
     fun fallback(exception: Exception, request: HttpServletRequest): ResponseEntity<OccProblem> {
         rethrowJvmError(exception)

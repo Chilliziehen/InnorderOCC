@@ -27,7 +27,7 @@ Windows 检查发布监听与进程，任何非回环结果都失败：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$allowedKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 $config = @{}
 Get-Content -LiteralPath 'infra/compose/.env' | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -57,8 +57,8 @@ Linux 从只含密钥路径和非敏感覆盖的 `.env` 派生八个有效端口
 ```bash
 set -euo pipefail
 declare -A config=() allowed=() seen=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
-required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}; [ -z "$key" ] && continue; case "$key" in \#*) continue;; esac
   [[ $key =~ (PASSWORD|SECRET|ACCESS_KEY|TOKEN)$ ]] && exit 1
@@ -146,9 +146,9 @@ find "$OCC_SECRET_ROOT" -maxdepth 1 -type f -exec stat -c '%U:%G %a %n' {} +
 ```powershell
 $ErrorActionPreference = 'Stop'
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
-$expectedNames = @('postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password')
+$expectedNames = @('cursor-hmac-key','postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password')
 $entries = @(Get-ChildItem -LiteralPath $secretRoot -Force)
-if ($entries.Count -ne 8 -or (Compare-Object @($expectedNames | Sort-Object) @($entries.Name | Sort-Object))) { throw '密钥目录必须精确包含八个预期文件' }
+if ($entries.Count -ne 9 -or (Compare-Object @($expectedNames | Sort-Object) @($entries.Name | Sort-Object))) { throw '密钥目录必须精确包含九个预期文件' }
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $systemSid = 'S-1-5-18'; $administratorsSid = 'S-1-5-32-544'
 $allowedSids = @($currentSid,$systemSid,$administratorsSid)
@@ -178,10 +178,10 @@ set -euo pipefail
 set +x
 umask 077
 secret_root=$(realpath "$OCC_SECRET_ROOT")
-expected=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+expected=(cursor-hmac-key postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
 mapfile -t entries < <(find "$secret_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
-[ "${#entries[@]}" -eq 8 ] && [ "$(printf '%s\n' "${entries[@]}")" = "$(printf '%s\n' "${wanted[@]}")" ]
+[ "${#entries[@]}" -eq 9 ] && [ "$(printf '%s\n' "${entries[@]}")" = "$(printf '%s\n' "${wanted[@]}")" ]
 test "$(stat -c '%a' "$secret_root")" = 700
 test "$(stat -c '%u' "$secret_root")" -eq "$(id -u)"
 for name in "${expected[@]}"; do
@@ -196,7 +196,7 @@ SELinux/AppArmor 拒绝时修复经批准 label/profile；不得 `chmod 644`、�
 
 ## 凭据唯一性、保管与协调轮换
 
-八个文件型值必须部署专用、全部互异；三个 PostgreSQL 密码两两不同，MinIO root/app 用户名和密码分别不同。Core 只持有 runtime/Flyway、Redis 和 MinIO 桶级应用凭据；不得获得 PostgreSQL admin 或 MinIO root。网关、AI、OPA、Kafka 不消费这些密钥。
+九个文件型值必须部署专用、全部互异；cursor key 仅供 Core，三个 PostgreSQL 密码两两不同，MinIO root/app 用户名和密码分别不同。Core 只持有 cursor、runtime/Flyway、Redis 和 MinIO 桶级应用凭据；不得获得 PostgreSQL admin 或 MinIO root。网关、AI、OPA、Kafka 不消费这些密钥。
 
 禁止以下做法：
 
@@ -388,7 +388,7 @@ DNS 使用组织批准解析器并监控变更；TLS必须验证链、主体、�
 - [ ] 主机防火墙默认拒绝；无端口转发、远程隧道、未批准出站或直达后端。
 - [ ] 管理员、Docker、发布、DBA、备份、审计身份分离；成员、MFA和离职撤销已复核。
 - [ ] Windows ACL/Linux owner/mode、SELinux/AppArmor和仓库只读边界通过精确检查。
-- [ ] 八密钥互异、消费者最小、外部 escrow有效；轮换/部分失败回退已演练。
+- [ ] 九密钥互异、消费者最小、外部 escrow有效；轮换/部分失败回退已演练。
 - [ ] `.env`、环境、日志、支持包、监控和工单无密钥值，支持包无进程命令行；已识别 Redis长运行 argv例外并完成生产风险接受/整改决策。
 - [ ] `install:verified`、npm漏洞评审、Electron官方来源守卫、Gradle strict/keyring、真实 OPA strict/test和 `verify:full` 全通过。
 - [ ] 外部镜像 tag+digest、本地 image ID+release revision以及组织镜像签名/attestation证据一致。

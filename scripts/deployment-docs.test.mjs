@@ -555,6 +555,7 @@ test("manual records the required Compose and operational facts", () => {
     "POSTGRES_RUNTIME_PASSWORD_FILE", "REDIS_PASSWORD_FILE",
     "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE",
     "MINIO_APP_USER_FILE", "MINIO_APP_PASSWORD_FILE",
+    "CURSOR_HMAC_KEY_FILE", "cursor_hmac_key",
     "postgres-data", "kafka-data", "redis-data", "minio-data",
     "innorder_admin", "innorder_flyway", "innorder_runtime",
     "http://127.0.0.1:8080/actuator/health/readiness",
@@ -702,6 +703,31 @@ test("restore and MinIO rotation retain the reviewed safety gates", () => {
   assert.match(configuration, /mc pipe[\s\S]*mc cat[\s\S]*mc rm/u);
   assert.match(security, /MinIO 短时 argv 风险/u);
   assert.match(recovery, /source-object-manifest[.]jsonl/u);
+});
+
+test("cursor HMAC key has complete dual-platform lifecycle coverage", () => {
+  const configuration = documents.get("03-secrets-and-configuration.md");
+  const recovery = documents.get("07-backup-restore-and-dr.md");
+  for (const chapter of [
+    "03-secrets-and-configuration.md",
+    "04-deploy-windows.md",
+    "05-deploy-linux.md",
+    "06-daily-operations-and-monitoring.md",
+    "10-security-hardening.md",
+    "11-command-reference-and-checklists.md",
+  ]) {
+    assert.match(documents.get(chapter), /CURSOR_HMAC_KEY_FILE/u, `${chapter} must allowlist the cursor key path`);
+  }
+  assert.match(configuration, /cursor-hmac-key/u);
+  assert.match(configuration, /openssl rand -hex 32/u);
+  assert.match(configuration, /\^\[0-9a-f\]\{64\}\$/u);
+  assert.match(configuration, /OCC_CURSOR_HMAC_STAGED/u);
+  assert.match(configuration, /Enter-LifecycleLock[\s\S]*OCC_CURSOR_HMAC_STAGED/u);
+  assert.match(configuration, /acquire_lifecycle_lock[\s\S]*OCC_CURSOR_HMAC_STAGED/u);
+  assert.match(configuration, /--force-recreate core/u);
+  assert.match(recovery, /CURSOR_HMAC_KEY_FILE/u);
+  assert.match(recovery, /cursor-hmac-key/u);
+  assert.match(recovery, /九个 secret 路径/u);
 });
 
 test("incident and Linux lifecycle writes use the shared lock ownership paths", () => {

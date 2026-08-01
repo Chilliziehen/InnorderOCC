@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ArrayNode
+import com.fasterxml.jackson.databind.node.JsonNodeFactory
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.innorder.occ.command.CanonicalJsonObject
 import org.springframework.beans.factory.annotation.Value
@@ -41,6 +42,7 @@ class CursorCodec(
     @Value("\${occ.cursor.secret}") secret: String,
     private val clock: Clock,
     @Value("\${occ.cursor.ttl:PT15M}") private val ttl: Duration = DEFAULT_TTL,
+    @Value("\${occ.cursor.clock-skew:PT30S}") private val clockSkew: Duration = DEFAULT_CLOCK_SKEW,
 ) {
     private val signingKey: SecretKeySpec
 
@@ -53,12 +55,16 @@ class CursorCodec(
             secretBytes.fill(0)
         }
         require(!ttl.isZero && !ttl.isNegative && ttl <= MAX_TTL && ttl.nano == 0) { "Cursor TTL is invalid" }
+        require(!clockSkew.isNegative && clockSkew <= MAX_CLOCK_SKEW && clockSkew.nano == 0) {
+            "Cursor clock skew is invalid"
+        }
     }
 
     fun encode(context: CursorContext, tuple: ArrayNode): String = invalidOnFailure {
         validateContext(context)
         validateTuple(tuple)
-        val expiresAt = Math.addExact(clock.instant().epochSecond, ttl.seconds)
+        val issuedAt = clock.instant().epochSecond
+        val expiresAt = Math.addExact(issuedAt, ttl.seconds)
         val payload = MAPPER.createObjectNode().apply {
             put("version", VERSION)
             put("endpoint", context.endpoint)
@@ -67,6 +73,7 @@ class CursorCodec(
             put("sortName", context.sortName)
             put("sortVersion", context.sortVersion)
             put("direction", context.direction.name)
+            put("issuedAt", issuedAt)
             put("expiresAt", expiresAt)
             set<ArrayNode>("tuple", tuple.deepCopy())
         }
@@ -101,8 +108,12 @@ class CursorCodec(
         require(payload.requiredInt("sortVersion") == expected.sortVersion)
         require(payload.requiredText("direction") == expected.direction.name)
         val now = clock.instant().epochSecond
+        val issuedAt = payload.requiredLong("issuedAt")
         val expiresAt = payload.requiredLong("expiresAt")
-        require(expiresAt > now && expiresAt <= Math.addExact(now, ttl.seconds))
+        val lifetime = Math.subtractExact(expiresAt, issuedAt)
+        require(issuedAt <= Math.addExact(now, clockSkew.seconds))
+        require(lifetime in 1..MAX_TTL.seconds)
+        require(expiresAt > now)
         val tuple = payload.required("tuple")
         require(tuple is ArrayNode)
         validateTuple(tuple)
@@ -127,9 +138,13 @@ class CursorCodec(
         require(tuple.size() <= MAX_TUPLE_ITEMS && withinJsonDepth(tuple))
         require(tuple.all { value ->
             value.isNull || value.isBoolean || value.isTextual && value.textValue().length <= MAX_TUPLE_TEXT_CHARS ||
-                value.isIntegralNumber || value.isFloatingPointNumber && value.doubleValue().isFinite()
+                value.isNumber && validNumber(value)
         })
     }
+
+    private fun validNumber(value: JsonNode): Boolean =
+        (value.isIntegralNumber || value.isFloatingPointNumber && value.doubleValue().isFinite()) &&
+            MAPPER.writeValueAsString(value).length <= MAX_NUMBER_CHARS
 
     private fun validName(value: String, maxChars: Int): Boolean =
         value.isNotBlank() && value.length <= maxChars && Normalizer.isNormalized(value, Normalizer.Form.NFC) &&
@@ -162,8 +177,9 @@ class CursorCodec(
         const val MAX_JSON_DEPTH = 8
         const val MAX_TUPLE_ITEMS = 8
         const val MAX_SECRET_BYTES = 1024
+        const val MAX_NUMBER_CHARS = 64
 
-        private const val VERSION = 1
+        private const val VERSION = 2
         private const val MIN_SECRET_BYTES = 32
         private const val SIGNATURE_BYTES = 32
         private const val MAX_ENDPOINT_CHARS = 128
@@ -171,21 +187,25 @@ class CursorCodec(
         private const val MAX_TUPLE_TEXT_CHARS = 512
         private const val HMAC_ALGORITHM = "HmacSHA256"
         private val DEFAULT_TTL = Duration.ofMinutes(15)
+        private val DEFAULT_CLOCK_SKEW = Duration.ofSeconds(30)
         private val MAX_TTL = Duration.ofHours(1)
+        private val MAX_CLOCK_SKEW = Duration.ofSeconds(30)
         private val ENCODER = Base64.getUrlEncoder().withoutPadding()
         private val DECODER = Base64.getUrlDecoder()
         private val TOKEN_PATTERN = Regex("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+")
         private val PAYLOAD_FIELDS = setOf(
-            "version", "endpoint", "customerId", "filters", "sortName", "sortVersion", "direction", "expiresAt", "tuple",
+            "version", "endpoint", "customerId", "filters", "sortName", "sortVersion", "direction", "issuedAt", "expiresAt", "tuple",
         )
         private val MAPPER = ObjectMapper().findAndRegisterModules().apply {
+            nodeFactory = JsonNodeFactory(true)
             enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
             factory.setStreamReadConstraints(
                 StreamReadConstraints.builder()
                     .maxNestingDepth(MAX_JSON_DEPTH)
                     .maxStringLength(MAX_PAYLOAD_BYTES)
-                    .maxNumberLength(64)
+                    .maxNumberLength(MAX_NUMBER_CHARS)
                     .build(),
             )
         }
