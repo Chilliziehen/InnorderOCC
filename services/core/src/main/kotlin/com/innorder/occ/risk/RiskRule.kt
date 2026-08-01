@@ -9,11 +9,22 @@ import java.time.Duration
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.Collections
+import java.util.UUID
 
 enum class RiskSeverity { INFO, YELLOW, RED }
 enum class ThresholdKind { ELAPSED, BUSINESS }
 
-data class EscalationStep(val after: Duration, val ownerRelationship: String)
+data class EscalationStep(
+    val after: Duration,
+    val ownerRelationship: String? = null,
+    val severity: RiskSeverity? = null,
+) {
+    init {
+        require(!after.isNegative && !after.isZero) { "escalation delay must be positive" }
+        require(ownerRelationship != null || severity != null) { "escalation step requires an effect" }
+        ownerRelationship?.requireValue("escalation owner relationship")
+    }
+}
 
 sealed interface RiskTrigger {
     data object OverdueCriticalWork : RiskTrigger
@@ -28,6 +39,7 @@ sealed interface RiskTrigger {
 class RiskRule private constructor(
     val packageId: String,
     val packageVersion: String,
+    val ruleDefinitionId: UUID,
     val ruleId: String,
     val severity: RiskSeverity,
     val sla: Duration,
@@ -45,7 +57,7 @@ class RiskRule private constructor(
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
         private val TOP_LEVEL_FIELDS = setOf(
-            "packageId", "packageVersion", "ruleId", "severity", "sla", "ownerRelationship",
+            "packageId", "packageVersion", "ruleDefinitionId", "ruleId", "severity", "sla", "ownerRelationship",
             "escalationSteps", "thresholdKind", "zone", "calendar", "trigger",
         )
 
@@ -60,24 +72,33 @@ class RiskRule private constructor(
             }
             val sla = Duration.parse(root.requiredText("sla")).also { require(!it.isNegative && !it.isZero) }
             val steps = root.requiredArray("escalationSteps").map { node ->
-                val step = node.objectWithExactly(setOf("after", "ownerRelationship"))
+                val step = (node as? ObjectNode)?.objectWithOnly(setOf("after", "ownerRelationship", "severity"))
+                    ?: throw IllegalArgumentException("escalation step must be an object")
+                require(step.has("after"))
                 EscalationStep(
-                    Duration.parse(step.requiredText("after")).also { require(!it.isNegative && !it.isZero) },
-                    step.requiredText("ownerRelationship").requireValue("escalation owner relationship"),
+                    after = Duration.parse(step.requiredText("after")),
+                    ownerRelationship = step.optionalText("ownerRelationship"),
+                    severity = step.optionalText("severity")?.let { enumValueOf<RiskSeverity>(it) },
                 )
             }
             require(steps.zipWithNext().all { (left, right) -> left.after < right.after }) {
                 "escalation steps must be ordered"
             }
             val calendarNode = root.requiredObject("calendar").objectWithExactly(setOf("version", "holidays"))
-            val holidays = calendarNode.requiredArray("holidays").map {
+            val holidayList = calendarNode.requiredArray("holidays").map {
                 require(it.isTextual)
                 LocalDate.parse(it.textValue())
-            }.toSet()
+            }
+            require(holidayList.distinct().size == holidayList.size) { "calendar holidays must be distinct" }
 
             RiskRule(
                 packageId = root.requiredText("packageId").requireValue("package id"),
-                packageVersion = root.requiredText("packageVersion").requireValue("package version"),
+                packageVersion = root.requiredText("packageVersion").also {
+                    require(it.matches(Regex("^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"))) {
+                        "package version must be semantic"
+                    }
+                },
+                ruleDefinitionId = UUID.fromString(root.requiredText("ruleDefinitionId")),
                 ruleId = root.requiredText("ruleId").requireValue("rule id"),
                 severity = enumValueOf(root.requiredText("severity")),
                 sla = sla,
@@ -85,7 +106,7 @@ class RiskRule private constructor(
                 escalationSteps = steps,
                 thresholdKind = thresholdKind,
                 zone = ZoneId.of(zoneText),
-                calendar = BusinessCalendar(calendarNode.requiredText("version"), holidays),
+                calendar = BusinessCalendar(calendarNode.requiredText("version"), holidayList.toSet()),
                 trigger = trigger,
             )
         }
@@ -148,6 +169,11 @@ private fun ObjectNode.objectWithOnly(fields: Set<String>): ObjectNode = also {
 
 private fun ObjectNode.requiredText(name: String): String = get(name)?.takeIf(JsonNode::isTextual)?.textValue()
     ?: throw IllegalArgumentException("$name must be text")
+
+private fun ObjectNode.optionalText(name: String): String? = get(name)?.let {
+    require(it.isTextual) { "$name must be text" }
+    it.textValue()
+}
 
 private fun ObjectNode.requiredObject(name: String): ObjectNode = get(name) as? ObjectNode
     ?: throw IllegalArgumentException("$name must be an object")
