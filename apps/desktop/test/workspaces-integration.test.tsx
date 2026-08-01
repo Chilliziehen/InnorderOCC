@@ -102,7 +102,7 @@ function installOcc(query = vi.fn().mockResolvedValue(unavailable())): OccApi {
     runtime: { statuses: vi.fn().mockResolvedValue([]) },
     workspaces: { query },
     commands: { execute: vi.fn() },
-    uploads: { start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
+    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
     notifications: { list: vi.fn().mockResolvedValue({ items: [] }), subscribe: vi.fn(() => vi.fn()) },
   };
   Object.defineProperty(window, "occ", { configurable: true, value: api });
@@ -322,7 +322,7 @@ describe("authenticated workspace integration", () => {
     };
     const api = installOcc(vi.fn().mockResolvedValue(result));
     const uploadId = "00000000-0000-4000-8000-000000000077";
-    vi.mocked(api.uploads.start).mockResolvedValue({ state: "completed", uploadId, evidenceId: "evidence-17", uploadReference: uploadId, quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
+    vi.mocked(api.uploads.start).mockResolvedValue({ state: "completed", kind: "evidence", uploadId, evidenceId: "evidence-17", uploadReference: uploadId, quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
     vi.mocked(api.commands.execute).mockResolvedValue({
       state: "completed",
       commandId: "00000000-0000-4000-8000-000000000088",
@@ -350,6 +350,24 @@ describe("authenticated workspace integration", () => {
     expect(screen.queryByRole("status", { name: "证据上传完成" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交证据" })).toBeDisabled();
     expect(screen.getByText("请选择任务后再领取")).toBeInTheDocument();
+  });
+
+  it("does not read file bytes when named upload preflight is unavailable", async () => {
+    metadataMode.available = true;
+    const result: WorkspaceResult = { state: "ready", count: 1, fetchedAt: "2026-08-01T12:00:00.000Z", items: [{ id: "task-17", task: "校准电源", process: "电子模块", state: "CLAIMED", dueAt: "2026-08-03T08:00:00Z", evidenceRequirements: [], acceptedMediaTypes: ["application/pdf"], reviewHistory: [] }] };
+    const api = installOcc(vi.fn().mockResolvedValue(result));
+    vi.mocked(api.uploads.preflight).mockResolvedValue({ state: "unavailable", reason: "UNAVAILABLE_CONTRACT", resourceGroups: ["/evidence"], message: "证据提交 API 合同尚未集成" });
+    render(<AppShell state={state("/my-work")} statuses={[]} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "选择任务：校准电源" }));
+    const file = new File(["pdf"], "record.pdf", { type: "application/pdf" });
+    const read = vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer);
+    Object.defineProperty(file, "arrayBuffer", { value: read });
+    fireEvent.change(screen.getByLabelText("选择证据文件"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
+    await screen.findByText("证据提交 API 合同尚未集成");
+    expect(api.uploads.preflight).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-17", fileName: "record.pdf" }));
+    expect(read).not.toHaveBeenCalled();
+    expect(api.uploads.start).not.toHaveBeenCalled();
   });
 
   it("ignores upload completion after the selected task changes", async () => {
@@ -382,7 +400,7 @@ describe("authenticated workspace integration", () => {
     await waitFor(() => expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-a" })));
     fireEvent.click(screen.getByRole("button", { name: "选择任务：任务 B" }));
 
-    completeUpload({ state: "completed", uploadId: "00000000-0000-4000-8000-000000000077", evidenceId: "evidence-a", uploadReference: "upload-ref-a", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
+    completeUpload({ state: "completed", kind: "evidence", uploadId: "00000000-0000-4000-8000-000000000077", evidenceId: "evidence-a", uploadReference: "upload-ref-a", quarantineStatus: "released", processingStatus: "ready", reviewStatus: "pending" });
     await new Promise((resolve) => window.setTimeout(resolve, 0));
 
     expect(screen.queryByRole("status", { name: "证据上传完成" })).not.toBeInTheDocument();

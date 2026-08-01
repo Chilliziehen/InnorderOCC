@@ -69,6 +69,7 @@ describe("preload bridge", () => {
     await api.runtime.statuses();
     await api.workspaces.query(input);
     await api.commands.execute(input);
+    await api.uploads.preflight(input);
     await api.uploads.start(input);
     await api.uploads.cancel("upload-id");
     await api.notifications.list("cursor");
@@ -85,6 +86,7 @@ describe("preload bridge", () => {
       [DESKTOP_CHANNELS.runtime.statuses, undefined],
       [DESKTOP_CHANNELS.workspaces.query, input],
       [DESKTOP_CHANNELS.commands.execute, input],
+      [DESKTOP_CHANNELS.uploads.preflight, input],
       [DESKTOP_CHANNELS.uploads.start, input],
       [DESKTOP_CHANNELS.uploads.cancel, "upload-id"],
       [DESKTOP_CHANNELS.notifications.list, "cursor"],

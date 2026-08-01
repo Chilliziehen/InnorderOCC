@@ -263,25 +263,35 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     const initiationScope = uploadScopeKey;
     const intentHandle = retainedIntentHandle ?? crypto.randomUUID();
     uploadRetry.current = { file, targetId, intentHandle };
+    const metadata = { workspace: "my-work", taskId: targetId, fileName: file.name, mediaType: file.type, size: file.size, intentHandle };
+    const preflight = window.occ?.uploads?.preflight;
     const start = window.occ?.uploads?.start;
-    if (!callable(start)) {
+    if (!callable(preflight) || !callable(start)) {
       setUpload({ state: "failed", fileName: file.name, message: "证据上传接口不可用。", retryable: false });
       return;
     }
     try {
+      const availability = await preflight(metadata);
+      if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
+      if (availability.state === "unavailable") {
+        setUpload({ state: "failed", fileName: file.name, message: availability.message, retryable: false });
+        return;
+      }
       const data = new Uint8Array(await file.arrayBuffer());
       if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
-      const receipt = await start({ workspace: "my-work", taskId: targetId, fileName: file.name, mediaType: file.type, size: file.size, data, intentHandle });
+      const receipt = await start({ ...metadata, data });
       if (uploadSequence.current !== sequence || currentUploadScope.current !== initiationScope) return;
-      if (receipt.state === "completed") {
+      if (receipt.state === "completed" && receipt.kind === "evidence") {
         setUpload({ state: "accepted", fileName: file.name, evidenceId: receipt.evidenceId });
         setUploadReference(receipt.uploadReference);
       } else if (receipt.state === "started") {
         setUpload({ state: "uploading", fileName: file.name, progress: 0, uploadId: receipt.uploadId });
       } else if (receipt.state === "problem") {
         setUpload({ state: "failed", fileName: file.name, message: "证据上传失败，请重试。", retryable: receipt.problem.retryable === true });
-      } else {
+      } else if (receipt.state === "unavailable") {
         setUpload({ state: "failed", fileName: file.name, message: receipt.message, retryable: false });
+      } else {
+        setUpload({ state: "failed", fileName: file.name, message: "证据上传响应无效。", retryable: false });
       }
     } catch {
       if (uploadSequence.current === sequence && currentUploadScope.current === initiationScope) {
@@ -290,11 +300,15 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
     }
   };
   const archiveUpload = async (file: File): Promise<ArchiveUploadReference> => {
+    const preflight = window.occ?.uploads?.preflight;
     const start = window.occ?.uploads?.start;
-    if (!callable(start)) throw new Error("archive-upload-unavailable");
-    const receipt = await start({ workspace: "domain-design", taskId: "package-import", fileName: file.name, mediaType: file.type, size: file.size, data: new Uint8Array(await file.arrayBuffer()), intentHandle: crypto.randomUUID() });
-    if (receipt.state !== "completed" || !/^[0-9a-f]{64}$/i.test(receipt.evidenceId)) throw new Error("archive-upload-incomplete");
-    return { uploadId: receipt.uploadId, sha256: receipt.evidenceId };
+    if (!callable(preflight) || !callable(start)) throw new Error("archive-upload-unavailable");
+    const metadata = { workspace: "domain-design", taskId: "package-import", fileName: file.name, mediaType: file.type, size: file.size, intentHandle: crypto.randomUUID() };
+    const availability = await preflight(metadata);
+    if (availability.state === "unavailable") throw new Error("archive-upload-unavailable");
+    const receipt = await start({ ...metadata, data: new Uint8Array(await file.arrayBuffer()) });
+    if (receipt.state !== "completed" || receipt.kind !== "archive") throw new Error("archive-upload-incomplete");
+    return { uploadId: receipt.uploadId, sha256: receipt.sha256 };
   };
   const taskRows = hasWorkspaceItems(result) ? result.items.map((item) => taskRowSchema.safeParse(item)) : [];
   const processRows = hasWorkspaceItems(result) ? result.items.map((item) => processRowSchema.safeParse(item)) : [];

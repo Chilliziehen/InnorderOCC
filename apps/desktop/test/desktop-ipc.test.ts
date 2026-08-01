@@ -16,6 +16,8 @@ vi.mock("electron", () => ({
 
 import {
   createAtomicJsonPersistence,
+  createAtomicTextPersistence,
+  createDesktopUploadProgressSender,
   createDesktopApi,
   createSafeStorageVault,
   registerDesktopIpc,
@@ -25,6 +27,7 @@ import {
 import { DESKTOP_CHANNELS } from "../src/ipc-contract";
 import { createCommandIntentRegistry } from "../src/command-intents";
 import { createProfileStore } from "../src/profile-store";
+import { createMainReliabilityApi } from "../src/main-reliability-composition";
 
 const rendererUrl = "file:///D:/OCC/index.html";
 const profileId = "11111111-1111-4111-8111-111111111111";
@@ -67,6 +70,7 @@ function dependencies() {
       }),
     },
     uploads: {
+      preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }),
       start: vi.fn().mockResolvedValue({
         state: "started",
         uploadId: "22222222-2222-4222-8222-222222222222",
@@ -99,7 +103,7 @@ describe("desktop IPC", () => {
     expect(electronMocks.handle.mock.calls.map(([channel]) => channel).sort()).toEqual(
       [...channels].sort(),
     );
-    expect(channels).toHaveLength(14);
+    expect(channels).toHaveLength(15);
     expect(channels.join(" ")).not.toMatch(/request|path|url|filesystem|shell/i);
   });
 
@@ -304,6 +308,18 @@ describe("desktop IPC", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("preflights strict upload metadata without accepting file bytes", async () => {
+    const deps = dependencies();
+    deps.uploads.preflight.mockResolvedValue({ state: "unavailable", reason: "UNAVAILABLE_CONTRACT", resourceGroups: ["/evidence"], message: "证据提交 API 合同尚未集成" });
+    registerDesktopIpc(rendererUrl, deps);
+    const handler = registeredHandler(DESKTOP_CHANNELS.uploads.preflight);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    const metadata = { workspace: "my-work", taskId: "task-1", fileName: "evidence.pdf", mediaType: "application/pdf", size: 4, intentHandle: profileId };
+    await expect(handler(event, metadata)).resolves.toMatchObject({ state: "unavailable" });
+    await expect(handler(event, { ...metadata, data: new Uint8Array(4) })).rejects.toThrow("IPC request rejected");
+    expect(deps.uploads.preflight).toHaveBeenCalledOnce();
+  });
+
   it("sends only validated monotonic upload progress on the named channel", () => {
     const send = vi.fn();
     const target = { send };
@@ -314,9 +330,65 @@ describe("desktop IPC", () => {
     expect(send).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledWith(DESKTOP_CHANNELS.uploads.progress, first);
   });
+
+  it("bounds progress tracking by capacity and TTL and removes terminal entries", () => {
+    let now = 0;
+    const sendProgress = createDesktopUploadProgressSender({ now: () => now, maxEntries: 1, ttlMs: 1_000 });
+    const target = { send: vi.fn() };
+    const first = { uploadId: profileId, intentHandle: profileId, percent: 10 };
+    const second = { uploadId: "22222222-2222-4222-8222-222222222222", intentHandle: profileId, percent: 10 };
+    expect(sendProgress(target, first)).toBe(true);
+    expect(sendProgress(target, second)).toBe(false);
+    now = 1_001;
+    expect(sendProgress(target, second)).toBe(true);
+    expect(sendProgress(target, { ...second, percent: 100 })).toBe(true);
+    expect(sendProgress(target, first)).toBe(true);
+    const throwing = createDesktopUploadProgressSender();
+    expect(throwing({ send: () => { throw new Error("closed"); } }, first)).toBe(false);
+  });
 });
 
 describe("desktop main composition", () => {
+  it("integrates authenticated reliability dependencies while business contracts remain unavailable", async () => {
+    const deps = dependencies();
+    const customerInstanceId = "22222222-2222-4222-8222-222222222222";
+    const principalId = "33333333-3333-4333-8333-333333333333";
+    const authenticated = { state: "authenticated" as const, user: { id: principalId, username: "user", displayName: "User", status: "ACTIVE" as const, capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" };
+    deps.session.restore.mockResolvedValue(authenticated);
+    deps.session.login.mockResolvedValue(authenticated);
+    let releaseLogout!: () => void;
+    deps.session.logout.mockImplementation(() => new Promise<void>((resolve) => void (releaseLogout = resolve)));
+    const notificationStream = { setSession: vi.fn().mockResolvedValue(undefined) };
+    const readCache = {
+      query: vi.fn(async (_scope, _input, _authenticated, remote) => remote()),
+      purgeAccount: vi.fn().mockResolvedValue(undefined),
+    };
+    const uploads = { preflight: vi.fn().mockResolvedValue({ state: "unavailable", reason: "UNAVAILABLE_CONTRACT", resourceGroups: ["/evidence"], message: "证据提交 API 合同尚未集成" }), start: vi.fn(), cancel: vi.fn() };
+    const profiles = { ...deps.profiles, selected: () => profile, validate: (input: unknown) => input };
+    const api = createMainReliabilityApi({
+      profiles: profiles as never,
+      session: { ...deps.session, profileSwitched: vi.fn() },
+      statuses: deps.runtime.statuses,
+      clearProfile: vi.fn(), readCache: readCache as never, notificationStream,
+      uploads, getCustomerInstanceId: () => customerInstanceId, isOnline: () => true,
+    });
+    await api.session.restore();
+    expect(notificationStream.setSession).toHaveBeenLastCalledWith({ scope: { profileId, customerInstanceId, principalId }, origin: profile.origin, endpointAvailable: false });
+    await api.session.login({ username: "user", password: "long-password" });
+    expect(notificationStream.setSession).toHaveBeenLastCalledWith({ scope: { profileId, customerInstanceId, principalId }, origin: profile.origin, endpointAvailable: false });
+    await expect(api.workspaces.query({ workspace: "risks", operation: "risks.query" })).resolves.toMatchObject({ state: "unavailable", reason: "UNAVAILABLE_CONTRACT" });
+    expect(readCache.query).toHaveBeenCalledOnce();
+    await expect(api.commands.execute({ workspace: "risks", operation: "acknowledge", targetId: "risk-1", payload: { expectedVersion: 1 }, idempotencyKey: profileId })).resolves.toMatchObject({ state: "unavailable" });
+    await expect(api.uploads.preflight({ workspace: "my-work", taskId: "task-1", fileName: "evidence.pdf", mediaType: "application/pdf", size: 4, intentHandle: profileId })).resolves.toMatchObject({ state: "unavailable" });
+
+    const logout = api.session.logout();
+    expect(notificationStream.setSession).toHaveBeenLastCalledWith(null);
+    await vi.waitFor(() => expect(deps.session.logout).toHaveBeenCalled());
+    releaseLogout();
+    await logout;
+    expect(readCache.purgeAccount).toHaveBeenCalledWith({ profileId, customerInstanceId, principalId });
+  });
+
   it("uses authenticated scoped cache fallback, purges logout scope, and rejects offline commands first", async () => {
     const deps = dependencies();
     const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
@@ -342,7 +414,7 @@ describe("desktop main composition", () => {
 
     await api.session.login({ username: "user", password: "long-password" });
     await expect(api.workspaces.query({ workspace: "risks", operation: "risks.query" })).resolves.toEqual(queryResult);
-    expect(readCache.query).toHaveBeenCalledWith(cacheScope, expect.anything(), cacheScope, expect.any(Function));
+    expect(readCache.query).toHaveBeenCalledWith(cacheScope, expect.anything(), cacheScope, expect.any(Function), expect.any(Function));
     await expect(api.commands.execute({ workspace: "risks", operation: "resolve", payload: {}, idempotencyKey: profileId })).rejects.toThrow("offline");
     expect(executeCommand).not.toHaveBeenCalled();
     await api.session.logout();
@@ -351,29 +423,76 @@ describe("desktop main composition", () => {
 
   it("closes the authenticated cache gate before profile cleanup completes", async () => {
     let selected = profile;
-    let releaseCleanup!: () => void;
-    const cleanupBlocked = new Promise<void>((resolve) => void (releaseCleanup = resolve));
+    let releaseSelect!: () => void;
+    const selectBlocked = new Promise<void>((resolve) => void (releaseSelect = resolve));
     const profiles = {
       list: vi.fn().mockResolvedValue([profile]), validate: vi.fn(), save: vi.fn(), remove: vi.fn(),
       selected: vi.fn(() => selected),
-      select: vi.fn(async () => { selected = { ...profile, id: "22222222-2222-4222-8222-222222222222" }; }),
+      select: vi.fn(async () => { await selectBlocked; selected = { ...profile, id: "22222222-2222-4222-8222-222222222222" }; }),
     };
     const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
     const session = {
       restore: vi.fn(), logout: vi.fn(),
       login: vi.fn().mockResolvedValue({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" }),
-      profileSwitched: vi.fn(async () => cleanupBlocked),
+      profileSwitched: vi.fn().mockResolvedValue(undefined),
     };
     const readCache = { query: vi.fn((_scope, _input, _auth, remote) => remote()), purgeAccount: vi.fn() };
     const workspaceQuery = vi.fn().mockResolvedValue({ state: "empty", fetchedAt: "2026-08-02T00:00:00.000Z" });
     const api = createDesktopApi({ profiles: profiles as never, session, statuses: vi.fn(), clearProfile: vi.fn(), readCache, getCacheScope: () => cacheScope, workspaceQuery });
     await api.session.login({ username: "user", password: "long-password" });
     const switching = api.profiles.select("22222222-2222-4222-8222-222222222222");
-    await vi.waitFor(() => expect(session.profileSwitched).toHaveBeenCalled());
+    await vi.waitFor(() => expect(profiles.select).toHaveBeenCalled());
     await api.workspaces.query({ workspace: "risks", operation: "risks.query" });
     expect(readCache.query).not.toHaveBeenCalled();
-    releaseCleanup();
+    releaseSelect();
     await switching;
+  });
+
+  it("invalidates session scope synchronously before logout and publishes generations", async () => {
+    let releaseLogout!: () => void;
+    const logoutBlocked = new Promise<void>((resolve) => void (releaseLogout = resolve));
+    const deps = dependencies();
+    const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    deps.session.login.mockResolvedValue({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    deps.session.logout.mockImplementation(async () => logoutBlocked);
+    const readCache = { query: vi.fn((_scope, _input, _auth, remote) => remote()), purgeAccount: vi.fn().mockResolvedValue(undefined) };
+    const onSessionScopeChanged = vi.fn();
+    const api = createDesktopApi({
+      profiles: deps.profiles as never,
+      session: { ...deps.session, profileSwitched: vi.fn() },
+      statuses: deps.runtime.statuses,
+      clearProfile: vi.fn(), readCache, getCacheScope: () => cacheScope,
+      workspaceQuery: vi.fn().mockResolvedValue({ state: "empty", fetchedAt: "2026-08-02T00:00:00.000Z" }),
+      onSessionScopeChanged,
+    });
+    await api.session.login({ username: "user", password: "long-password" });
+    const logout = api.session.logout();
+
+    expect(onSessionScopeChanged).toHaveBeenLastCalledWith(null, 2);
+    await api.workspaces.query({ workspace: "risks", operation: "risks.query" });
+    expect(readCache.query).not.toHaveBeenCalled();
+    releaseLogout();
+    await logout;
+    expect(readCache.purgeAccount).toHaveBeenCalledWith(cacheScope);
+  });
+
+  it("invalidates a session installed by an earlier queued login before logout executes", async () => {
+    let resolveLogin!: (snapshot: any) => void;
+    const loginPending = new Promise<any>((resolve) => void (resolveLogin = resolve));
+    const deps = dependencies();
+    const cacheScope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    deps.session.login.mockImplementation(() => loginPending);
+    const readCache = { query: vi.fn(), purgeAccount: vi.fn().mockResolvedValue(undefined) };
+    const onSessionScopeChanged = vi.fn();
+    const api = createDesktopApi({ profiles: deps.profiles as never, session: { ...deps.session, profileSwitched: vi.fn() }, statuses: deps.runtime.statuses, clearProfile: vi.fn(), readCache, getCacheScope: () => cacheScope, onSessionScopeChanged });
+    const login = api.session.login({ username: "user", password: "long-password" });
+    const logout = api.session.logout();
+    resolveLogin({ state: "authenticated", user: { id: cacheScope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    await login;
+    await logout;
+
+    expect(onSessionScopeChanged).toHaveBeenLastCalledWith(null, 3);
+    expect(readCache.purgeAccount).toHaveBeenCalledWith(cacheScope);
   });
   it("returns exact main-safe unavailable metadata for each workspace operation", async () => {
     const deps = dependencies();
@@ -437,6 +556,26 @@ describe("desktop main composition", () => {
       "D:\\user-data\\profiles.json",
     );
     await expect(persistence.read()).resolves.toEqual({ profiles: [], selectedId: null });
+  });
+
+  it("reads cache persistence as raw UTF-8 text and writes atomically", async () => {
+    const file = "D:\\user-data\\cache.json";
+    const files = new Map<string, string>([[file, "{not-json"]]);
+    const fs = {
+      mkdir: vi.fn().mockResolvedValue(undefined),
+      readFile: vi.fn(async (name: string) => {
+        if (!files.has(name)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        return files.get(name)!;
+      }),
+      writeFile: vi.fn(async (name: string, value: string) => void files.set(name, value)),
+      rename: vi.fn(async (from: string, to: string) => { files.set(to, files.get(from)!); files.delete(from); }),
+      unlink: vi.fn().mockResolvedValue(undefined),
+    };
+    const persistence = createAtomicTextPersistence(file, fs);
+    await expect(persistence.read()).resolves.toEqual({ text: "{not-json", byteLength: 9 });
+    await persistence.write({ version: 1, entries: [] });
+    const text = JSON.stringify({ version: 1, entries: [] });
+    await expect(persistence.read()).resolves.toEqual({ text, byteLength: Buffer.byteLength(text) });
   });
 
   it.each(["write", "rename"] as const)(

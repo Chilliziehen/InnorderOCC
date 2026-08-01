@@ -31,15 +31,20 @@ const query = (overrides: Partial<WorkspaceQuery> = {}): WorkspaceQuery => ({
 });
 const ready = (id = "risk-1"): WorkspaceResult => ({
   state: "ready",
-  items: [{ id, title: "Capacity risk" }],
+  items: [{ id, risk: `Capacity risk ${id}`, severity: "high", owner: null, status: "open", deadline: "2026-08-03T00:00:00.000Z", sla: "due-soon", version: 1 }],
   count: 1,
   fetchedAt,
 });
 
-function memoryPersistence(initial?: unknown): ReadCachePersistence & { value: unknown } {
+function memoryPersistence(initial?: unknown): ReadCachePersistence & { value: unknown; raw?: { text: string; byteLength: number } } {
   return {
     value: initial,
-    async read() { return structuredClone(this.value); },
+    async read() {
+      if (this.raw) return this.raw;
+      if (this.value === undefined) return undefined;
+      const text = JSON.stringify(this.value);
+      return { text, byteLength: Buffer.byteLength(text, "utf8") };
+    },
     async write(value) { this.value = structuredClone(value); },
   };
 }
@@ -91,6 +96,51 @@ describe("validated workspace read cache", () => {
     await expect(cache.get(scope(), query(), scope())).resolves.toBeUndefined();
     await expect(cache.put(scope(), query(), { ...ready(), count: -1 } as never)).rejects.toThrow();
     expect(JSON.stringify(persistence.value)).not.toContain("Capacity risk");
+  });
+
+  it("rejects oversized persisted bytes before reading or parsing their text", async () => {
+    const persistence: ReadCachePersistence = {
+      read: async () => ({
+        byteLength: 1_001,
+        get text(): string { throw new Error("text must not be read"); },
+      }),
+      write: vi.fn(),
+    };
+    const cache = createReadCache({ persistence, now: () => Date.parse(fetchedAt), maxBytes: 1_000 });
+    await expect(cache.get(scope(), query(), scope())).resolves.toBeUndefined();
+  });
+
+  it("rejects unknown cache row fields and bounded scalar or array violations", async () => {
+    const cache = createReadCache({ persistence: memoryPersistence(), now: () => Date.parse(fetchedAt) });
+    const base = ready() as Extract<WorkspaceResult, { state: "ready" }>;
+    const invalid: WorkspaceResult[] = [
+      { ...base, items: [{ ...base.items[0]!, authorization: "Bearer secret" }] },
+      { ...base, items: [{ ...base.items[0]!, cookie: "session=secret" }] },
+      { ...base, items: [{ ...base.items[0]!, privateKey: "secret" }] },
+      { ...base, items: [{ ...base.items[0]!, accessKey: "secret" }] },
+      { ...base, items: [{ ...base.items[0]!, risk: "x".repeat(2_049) }] },
+      { ...base, items: Array.from({ length: 201 }, (_, index) => ({ ...base.items[0]!, id: `risk-${index}` })) },
+    ];
+    for (const result of invalid) await expect(cache.put(scope(), query(), result)).rejects.toThrow("not cacheable");
+  });
+
+  it("accepts only the explicit current UI row projection for every allowlisted workspace", async () => {
+    const cache = createReadCache({ persistence: memoryPersistence(), now: () => Date.parse(fetchedAt) });
+    const riskReady = ready() as Extract<WorkspaceResult, { state: "ready" }>;
+    const rows = {
+      overview: { item: "", type: "attention", status: "" },
+      "my-work": { id: "task-1", task: "Task", process: "Process", state: "CLAIMED", dueAt: fetchedAt, evidenceRequirements: [], acceptedMediaTypes: ["application/pdf"], reviewHistory: [] },
+      processes: { id: "process-1", process: "Process", cohort: "Cohort", owner: "Owner", status: "ACTIVE", expectedVersion: 1, progress: 50, participants: [], tasks: [], evidence: [], risks: [], timeline: [] },
+      risks: riskReady.items[0],
+      resources: { id: "resource-1", name: "Room", type: "room", state: "available", capacity: 2, availableCapacity: 1, reservations: [], conflicts: [] },
+      "domain-design": { id: "package-1", name: "domain-package", version: "1.0.0", status: "draft", assets: [] },
+    } as const;
+    for (const [workspace, row] of Object.entries(rows)) {
+      const candidateQuery: WorkspaceQuery = { workspace, operation: `${workspace}.query` };
+      const result: WorkspaceResult = { state: "ready", items: [row!], count: 1, fetchedAt };
+      await cache.put(scope(), candidateQuery, result);
+      await expect(cache.get(scope(), candidateQuery, scope())).resolves.toEqual(result);
+    }
   });
 
   it("fails closed when a persisted entry is structurally valid but contains sensitive data", async () => {
@@ -161,6 +211,32 @@ describe("validated workspace read cache", () => {
     await expect(cache.query(scope(), query(), scope(), async () => ready("live"))).resolves.toEqual(ready("live"));
   });
 
+  it("does not persist or return a read after its captured session generation is invalidated", async () => {
+    const persistence = memoryPersistence();
+    const cache = createReadCache({ persistence, now: () => Date.parse(fetchedAt) });
+    let current = true;
+    let resolveRemote!: (result: WorkspaceResult) => void;
+    const remote = new Promise<WorkspaceResult>((resolve) => void (resolveRemote = resolve));
+    const pending = cache.query(scope(), query(), scope(), () => remote, () => current);
+    current = false;
+    resolveRemote(ready("late"));
+
+    await expect(pending).rejects.toThrow("Session scope changed");
+    expect(persistence.value).toBeUndefined();
+  });
+
+  it("does not disclose stale fallback after its captured session generation is invalidated", async () => {
+    const persistence = memoryPersistence();
+    const cache = createReadCache({ persistence, now: () => Date.parse(fetchedAt), isNetworkFailure: () => true });
+    await cache.put(scope(), query(), ready());
+    let current = true;
+    const pending = cache.query(scope(), query(), scope(), async () => {
+      current = false;
+      throw new TypeError("offline");
+    }, () => current);
+    await expect(pending).rejects.toThrow("Session scope changed");
+  });
+
   it("purges profile and account scopes without affecting unrelated entries", async () => {
     const cache = createReadCache({ persistence: memoryPersistence(), now: () => Date.parse(fetchedAt) });
     await cache.put(scope(), query(), ready("a"));
@@ -201,6 +277,7 @@ describe("validated workspace read cache", () => {
 
     await expect(cache.get(scope(), query({ cursor: "a" }), scope())).resolves.toBeUndefined();
     await expect(cache.get(scope(), query({ cursor: "b" }), scope())).resolves.toEqual(ready("b"));
-    await expect(cache.put(scope(), query({ cursor: "large" }), { state: "ready", count: 1, fetchedAt, items: [{ value: "x".repeat(2_000) }] })).rejects.toThrow("byte limit");
+    const tiny = createReadCache({ persistence: memoryPersistence(), now: () => Date.parse(fetchedAt), maxBytes: 300 });
+    await expect(tiny.put(scope(), query({ cursor: "large" }), ready("large"))).rejects.toThrow("byte limit");
   });
 });

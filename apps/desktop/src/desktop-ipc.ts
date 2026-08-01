@@ -5,11 +5,11 @@ import type { z } from "zod";
 import { z as schema } from "zod";
 
 import {
-  commandReceiptSchema, DESKTOP_CHANNELS, evidenceUploadInputSchema,
+  commandReceiptSchema, DESKTOP_CHANNELS, evidenceUploadInputSchema, evidenceUploadMetadataSchema,
   idInputSchema, loginInputSchema, noInputSchema, notificationListResultSchema,
   notificationEventSchema,
   optionalCursorSchema, profileInputSchema, selectedServerProfileSchema, serverProfileSchema,
-  sessionSnapshotSchema, systemStatusesSchema, uploadReceiptSchema,
+  sessionSnapshotSchema, systemStatusesSchema, uploadAvailabilitySchema, uploadReceiptSchema,
   uploadProgressSchema,
   voidOutputSchema, workspaceCommandSchema, workspaceQuerySchema,
   workspaceResultSchema, type OccApi,
@@ -28,7 +28,7 @@ const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const profileListSchema = serverProfileSchema.array();
 type InvokeApi = Omit<OccApi, "notifications" | "commands" | "uploads"> & {
   commands: { execute(input: InternalWorkspaceCommand): Promise<CommandReceipt> };
-  uploads: Pick<OccApi["uploads"], "start" | "cancel">;
+  uploads: Pick<OccApi["uploads"], "preflight" | "start" | "cancel">;
   notifications: Pick<OccApi["notifications"], "list">;
 };
 
@@ -61,21 +61,45 @@ export function sendDesktopNotification(
   }
 }
 
-const progressByTarget = new WeakMap<NotificationTarget, Map<string, number>>();
+interface UploadProgressSenderOptions {
+  readonly now?: () => number;
+  readonly maxEntries?: number;
+  readonly ttlMs?: number;
+}
+
+export function createDesktopUploadProgressSender(options: UploadProgressSenderOptions = {}) {
+  const progressByTarget = new WeakMap<NotificationTarget, Map<string, { percent: number; touchedAt: number }>>();
+  const now = options.now ?? Date.now;
+  const maxEntries = options.maxEntries ?? 1_000;
+  const ttlMs = options.ttlMs ?? 15 * 60_000;
+  return (target: NotificationTarget, input: unknown): boolean => {
+    const parsed = uploadProgressSchema.safeParse(input);
+    if (!parsed.success || serializedSize(parsed.data) > MAX_OUTPUT_BYTES) return false;
+    const progress = progressByTarget.get(target) ?? new Map<string, { percent: number; touchedAt: number }>();
+    const time = now();
+    for (const [id, entry] of progress) if (time - entry.touchedAt > ttlMs) progress.delete(id);
+    const previous = progress.get(parsed.data.uploadId);
+    if (previous && parsed.data.percent < previous.percent) return false;
+    if (!previous && progress.size >= maxEntries) return false;
+    try {
+      target.send(DESKTOP_CHANNELS.uploads.progress, parsed.data);
+    } catch {
+      return false;
+    }
+    if (parsed.data.percent === 100) progress.delete(parsed.data.uploadId);
+    else progress.set(parsed.data.uploadId, { percent: parsed.data.percent, touchedAt: time });
+    progressByTarget.set(target, progress);
+    return true;
+  };
+}
+
+const defaultUploadProgressSender = createDesktopUploadProgressSender();
 
 export function sendDesktopUploadProgress(
   target: NotificationTarget,
   input: unknown,
 ): boolean {
-  const parsed = uploadProgressSchema.safeParse(input);
-  if (!parsed.success || serializedSize(parsed.data) > MAX_OUTPUT_BYTES) return false;
-  const progress = progressByTarget.get(target) ?? new Map<string, number>();
-  const previous = progress.get(parsed.data.uploadId);
-  if (previous !== undefined && parsed.data.percent < previous) return false;
-  progress.set(parsed.data.uploadId, parsed.data.percent);
-  progressByTarget.set(target, progress);
-  target.send(DESKTOP_CHANNELS.uploads.progress, parsed.data);
-  return true;
+  return defaultUploadProgressSender(target, input);
 }
 
 interface JsonPersistence {
@@ -198,21 +222,41 @@ export function createSafeStorageVault(
   };
 }
 
-interface DesktopApiDependencies {
+export interface DesktopApiDependencies {
   profiles: ProfileStore;
   session: Pick<SessionManager, "restore" | "login" | "logout" | "profileSwitched">;
   statuses: OccApi["runtime"]["statuses"];
   clearProfile(profileId: string): Promise<void>;
   readCache?: {
-    query(scope: ReadCacheScope, input: Parameters<OccApi["workspaces"]["query"]>[0], authenticatedScope: ReadCacheScope | null, remote: () => ReturnType<OccApi["workspaces"]["query"]>): ReturnType<OccApi["workspaces"]["query"]>;
+    query(scope: ReadCacheScope, input: Parameters<OccApi["workspaces"]["query"]>[0], authenticatedScope: ReadCacheScope | null, remote: () => ReturnType<OccApi["workspaces"]["query"]>, isCurrent?: () => boolean): ReturnType<OccApi["workspaces"]["query"]>;
     purgeAccount(scope: ReadCacheScope): Promise<void>;
   };
-  getCacheScope?: () => ReadCacheScope | null;
+  getCacheScope?: (principalId: string) => ReadCacheScope | null;
   workspaceQuery?: OccApi["workspaces"]["query"];
   executeCommand?: (input: InternalWorkspaceCommand) => Promise<CommandReceipt>;
   isOnline?: () => boolean;
-  uploads?: Pick<OccApi["uploads"], "start" | "cancel">;
+  uploads?: Pick<OccApi["uploads"], "preflight" | "start" | "cancel">;
   notifications?: Pick<OccApi["notifications"], "list">;
+  onSessionScopeChanged?: (scope: ReadCacheScope | null, generation: number) => void;
+}
+
+export function createAtomicTextPersistence(
+  file: string,
+  fs: JsonFileSystem,
+) {
+  const writer = createAtomicJsonPersistence(file, fs);
+  return {
+    async read(): Promise<{ text: string; byteLength: number } | undefined> {
+      try {
+        const text = await fs.readFile(file, "utf8");
+        return { text, byteLength: Buffer.byteLength(text, "utf8") };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    },
+    write: writer.write,
+  };
 }
 
 export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeApi {
@@ -222,19 +266,28 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     transitionTail = result.then(() => undefined, () => undefined);
     return result;
   };
-  const cleanup = async (profileId: string) => {
+  let authenticatedCacheScope: ReadCacheScope | null = null;
+  let sessionGeneration = 0;
+  const invalidateSessionScope = () => {
+    const previous = authenticatedCacheScope;
     authenticatedCacheScope = null;
+    sessionGeneration += 1;
+    dependencies.onSessionScopeChanged?.(null, sessionGeneration);
+    return previous;
+  };
+  const cleanup = async (profileId: string) => {
     await Promise.all([
       dependencies.session.profileSwitched(profileId),
       dependencies.clearProfile(profileId),
     ]);
   };
-  let authenticatedCacheScope: ReadCacheScope | null = null;
   const acceptSession = (snapshot: Awaited<ReturnType<SessionManager["login"]>>) => {
-    const candidate = snapshot.state === "authenticated" ? dependencies.getCacheScope?.() : null;
+    const candidate = snapshot.state === "authenticated" ? dependencies.getCacheScope?.(snapshot.user.id) : null;
     authenticatedCacheScope = candidate && snapshot.state === "authenticated" && candidate.principalId === snapshot.user.id
       ? candidate
       : null;
+    sessionGeneration += 1;
+    dependencies.onSessionScopeChanged?.(authenticatedCacheScope, sessionGeneration);
     return snapshot;
   };
   return {
@@ -249,42 +302,63 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
           ? undefined
           : (await dependencies.profiles.list()).find(({ id }) => id === input.id);
         if (previous && candidate && previous.origin !== candidate.origin) {
+          if (dependencies.profiles.selected()?.id === previous.id) invalidateSessionScope();
           await cleanup(previous.id);
         }
         return dependencies.profiles.save(input);
       }),
-      select: (id) => transition(async () => {
+      select: (id) => {
         const previous = dependencies.profiles.selected();
-        await dependencies.profiles.select(id);
-        if (previous && previous.id !== id) await cleanup(previous.id);
-      }),
-      remove: (id) => transition(async () => {
-        await cleanup(id);
-        await dependencies.profiles.remove(id);
-      }),
+        const changing = previous !== undefined && previous.id !== id;
+        if (changing) invalidateSessionScope();
+        return transition(async () => {
+          if (changing && authenticatedCacheScope) invalidateSessionScope();
+          await dependencies.profiles.select(id);
+          if (changing) await cleanup(previous.id);
+        });
+      },
+      remove: (id) => {
+        const selected = dependencies.profiles.selected()?.id === id;
+        if (selected) invalidateSessionScope();
+        return transition(async () => {
+          if (selected && authenticatedCacheScope) invalidateSessionScope();
+          await cleanup(id);
+          await dependencies.profiles.remove(id);
+        });
+      },
     },
     session: {
       restore: () => transition(async () => acceptSession(await dependencies.session.restore())),
       login: (input) => transition(async () => acceptSession(await dependencies.session.login(input))),
-      logout: () => transition(async () => {
-        const scope = authenticatedCacheScope;
-        try {
-          await dependencies.session.logout();
-        } finally {
-          authenticatedCacheScope = null;
-          if (scope) await dependencies.readCache?.purgeAccount(scope);
-        }
-      }),
+      logout: () => {
+        const scopes = [invalidateSessionScope()].filter((scope): scope is ReadCacheScope => scope !== null);
+        return transition(async () => {
+          const lateScope = authenticatedCacheScope;
+          if (lateScope) {
+            invalidateSessionScope();
+            if (!scopes.some((scope) => scope.profileId === lateScope.profileId && scope.customerInstanceId === lateScope.customerInstanceId && scope.principalId === lateScope.principalId)) scopes.push(lateScope);
+          }
+          try {
+            await dependencies.session.logout();
+          } finally {
+            for (const scope of scopes) await dependencies.readCache?.purgeAccount(scope);
+          }
+        });
+      },
     },
     runtime: { statuses: dependencies.statuses },
     workspaces: {
       query: async (input) => {
         if (!dependencies.workspaceQuery) return mainUnavailableOperation(input.workspace, input.operation, "/workspaces");
         const scope = authenticatedCacheScope;
+        const generation = sessionGeneration;
+        const isCurrent = () => generation === sessionGeneration && authenticatedCacheScope === scope;
         if (dependencies.readCache && scope) {
-          return dependencies.readCache.query(scope, input, scope, () => dependencies.workspaceQuery!(input));
+          return dependencies.readCache.query(scope, input, scope, () => dependencies.workspaceQuery!(input), isCurrent);
         }
-        return dependencies.workspaceQuery(input);
+        const result = await dependencies.workspaceQuery(input);
+        if (!isCurrent()) throw new Error("Session scope changed");
+        return result;
       },
     },
     commands: {
@@ -296,6 +370,7 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
       },
     },
     uploads: dependencies.uploads ?? {
+      preflight: async () => mainUnavailableOperation("my-work", "submitEvidence", "/commands"),
       start: async () => ({
         state: "problem",
         problem: { title: "Upload unavailable", status: 501 },
@@ -362,6 +437,7 @@ export function registerDesktopIpc(
     { channel: DESKTOP_CHANNELS.runtime.statuses, input: noInputSchema, output: systemStatusesSchema, invoke: () => api.runtime.statuses() },
     { channel: DESKTOP_CHANNELS.workspaces.query, input: workspaceQuerySchema, output: workspaceResultSchema, invoke: (input) => api.workspaces.query(input) },
     { channel: DESKTOP_CHANNELS.commands.execute, input: workspaceCommandSchema, output: commandReceiptSchema, invoke: (input) => commandIntents.execute(input, (command) => api.commands.execute(command)) },
+    { channel: DESKTOP_CHANNELS.uploads.preflight, input: evidenceUploadMetadataSchema, output: uploadAvailabilitySchema, invoke: (input) => api.uploads.preflight(input) },
     { channel: DESKTOP_CHANNELS.uploads.start, input: evidenceUploadInputSchema, output: uploadReceiptSchema, invoke: (input) => api.uploads.start(input), maxRequestBytes: MAX_UPLOAD_REQUEST_BYTES },
     { channel: DESKTOP_CHANNELS.uploads.cancel, input: idInputSchema, output: voidOutputSchema, invoke: (id) => api.uploads.cancel(id) },
     { channel: DESKTOP_CHANNELS.notifications.list, input: optionalCursorSchema, output: notificationListResultSchema, invoke: (cursor) => api.notifications.list(cursor) },

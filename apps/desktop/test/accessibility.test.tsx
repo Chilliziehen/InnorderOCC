@@ -143,7 +143,7 @@ function installOcc(result: WorkspaceResult = unavailableResult()): OccApi {
     runtime: { statuses: vi.fn().mockResolvedValue([]) },
     workspaces: { query: vi.fn().mockResolvedValue(result) },
     commands: { execute: vi.fn() },
-    uploads: { start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
+    uploads: { preflight: vi.fn().mockResolvedValue({ state: "available", maxBytes: 100 * 1024 * 1024 }), start: vi.fn(), cancel: vi.fn(), subscribeProgress: vi.fn(() => () => undefined) },
     notifications: {
       list: vi.fn().mockResolvedValue({ items: [] }),
       subscribe: vi.fn(() => vi.fn()),

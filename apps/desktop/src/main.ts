@@ -8,7 +8,7 @@ import { createCoreClient } from "./core-client";
 import { createCommandIntentRegistry } from "./command-intents";
 import {
   createAtomicJsonPersistence,
-  createDesktopApi,
+  createAtomicTextPersistence,
   createSafeStorageVault,
   registerDesktopIpc,
   sendDesktopNotification,
@@ -26,8 +26,8 @@ import {
 import { createProfileStore } from "./profile-store";
 import { createReadCache } from "./read-cache";
 import { createNotificationStream } from "./notification-stream";
-import { mainUnavailableNotificationList } from "./main-operation-registry";
-import { createSessionManager } from "./session-manager";
+import { createSessionManager, customerInstanceIdFromAccessToken } from "./session-manager";
+import { createMainReliabilityApi } from "./main-reliability-composition";
 import { fetchSystemStatuses } from "./system-status-ipc";
 
 const CORE_BASE_URL = process.env.CORE_BASE_URL ?? "http://127.0.0.1:8080";
@@ -87,7 +87,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
     path.join(userData, "credentials.json"),
     fs,
   );
-  const readCachePersistence = createAtomicJsonPersistence(
+  const readCachePersistence = createAtomicTextPersistence(
     path.join(userData, "workspace-read-cache.json"),
     fs,
   );
@@ -104,6 +104,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
     ),
   });
   let accessToken: string | null = null;
+  let customerInstanceId: string | null = null;
   const selectedProfile = () => {
     const selected = profiles.selected();
     if (!selected) throw new Error("No server profile selected");
@@ -119,7 +120,10 @@ if (ownsInstance) void app.whenReady().then(async () => {
     core,
     vault: createSafeStorageVault(safeStorage, credentialPersistence),
     getProfileId: () => selectedProfile().id,
-    setAccessToken: (value) => void (accessToken = value),
+    setAccessToken: (value) => {
+      accessToken = value;
+      customerInstanceId = customerInstanceIdFromAccessToken(value);
+    },
   });
   const readCache = createReadCache({ persistence: readCachePersistence });
   const commandIntents = createCommandIntentRegistry();
@@ -145,7 +149,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
     disposeNotificationForwarder();
     notificationStream.dispose();
   };
-  const api = createDesktopApi({
+  const api = createMainReliabilityApi({
     profiles,
     session: sessionManager,
     statuses: () => fetchSystemStatuses({
@@ -154,11 +158,13 @@ if (ownsInstance) void app.whenReady().then(async () => {
       timeoutMs: STATUS_TIMEOUT_MS,
     }),
     clearProfile: async (profileId) => {
-      await notificationStream.setSession(null);
       await readCache.purgeProfile(profileId);
     },
+    readCache,
+    notificationStream,
+    getCustomerInstanceId: () => customerInstanceId,
+    isOnline: () => accessToken !== null,
     uploads,
-    notifications: { list: async () => mainUnavailableNotificationList() },
   });
 
   disposeDesktopIpc = registerDesktopIpc(rendererDocumentUrl(), api, { commandIntents });

@@ -4,6 +4,7 @@ import {
   type LoginRequest,
   type TokenResponse,
 } from "@innorder/contracts";
+import { z } from "zod";
 
 import type { SessionSnapshot } from "./desktop-contract";
 import type { CoreClient } from "./core-client";
@@ -38,6 +39,22 @@ export interface SessionManager {
   profileSwitched(previousProfileId: string): Promise<void>;
   logout(): Promise<void>;
   dispose(): void;
+}
+
+const accessTokenScopeSchema = z.object({ instance_id: z.uuid() }).passthrough();
+
+export function customerInstanceIdFromAccessToken(accessToken: string | null): string | null {
+  if (!accessToken) return null;
+  const parts = accessToken.split(".");
+  const payload = parts.length === 3 ? parts[1] : undefined;
+  if (!payload || payload.length > 16_384 || !/^[A-Za-z0-9_-]+$/.test(payload)) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const parsed = accessTokenScopeSchema.safeParse(decoded);
+    return parsed.success ? parsed.data.instance_id : null;
+  } catch {
+    return null;
+  }
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;

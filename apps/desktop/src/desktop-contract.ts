@@ -263,17 +263,23 @@ export const commandReceiptSchema = z.discriminatedUnion("state", [
 ]);
 export type CommandReceipt = z.infer<typeof commandReceiptSchema>;
 
-export const evidenceUploadInputSchema = z
+export const evidenceUploadMetadataSchema = z
   .object({
     workspace: z.string().trim().min(1).max(128),
     taskId: z.string().trim().min(1).max(256),
     fileName: z.string().trim().min(1).max(255),
     mediaType: z.string().trim().min(1).max(255),
     size: z.number().int().min(1).max(100 * 1024 * 1024),
+    intentHandle: z.uuid(),
+  })
+  .strict();
+export type EvidenceUploadMetadata = z.infer<typeof evidenceUploadMetadataSchema>;
+
+export const evidenceUploadInputSchema = evidenceUploadMetadataSchema
+  .extend({
     data: z.union([z.instanceof(Uint8Array), z.instanceof(ArrayBuffer)]).transform((value) =>
       value instanceof Uint8Array ? value : new Uint8Array(value),
     ),
-    intentHandle: z.uuid(),
   })
   .strict()
   .refine(({ data, size }) => data.byteLength === size, {
@@ -288,24 +294,32 @@ export const uploadProgressSchema = z.object({
 }).strict();
 export type UploadProgress = z.infer<typeof uploadProgressSchema>;
 
-export const uploadTransportResponseSchema = z.object({
-  evidenceId: z.string().trim().min(1).max(256),
-  uploadReference: z.string().trim().min(1).max(512),
-  quarantineStatus: z.enum(["quarantined", "released", "rejected"]),
-  processingStatus: z.enum(["scanning", "ready", "failed"]),
-  reviewStatus: z.enum(["pending", "accepted", "returned", "rejected"]),
-}).strict();
+const uploadReferenceSchema = z.string().trim().min(1).max(512);
+export const uploadTransportResponseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("evidence"), evidenceId: z.string().trim().min(1).max(256),
+    uploadReference: uploadReferenceSchema,
+    quarantineStatus: z.enum(["quarantined", "released", "rejected"]),
+    processingStatus: z.enum(["scanning", "ready", "failed"]),
+    reviewStatus: z.enum(["pending", "accepted", "returned", "rejected"]),
+  }).strict(),
+  z.object({
+    kind: z.literal("archive"), uploadReference: uploadReferenceSchema,
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  }).strict(),
+]);
 export type UploadTransportResponse = z.infer<typeof uploadTransportResponseSchema>;
 
-export const uploadReceiptSchema = z.discriminatedUnion("state", [
+export const uploadAvailabilitySchema = z.union([
+  z.object({ state: z.literal("available"), maxBytes: z.literal(100 * 1024 * 1024) }).strict(),
+  z.object({ state: z.literal("unavailable"), reason: z.literal("UNAVAILABLE_CONTRACT"), resourceGroups: z.array(z.string().min(1)).min(1), message: z.string().trim().min(1).max(1024) }).strict(),
+]);
+export type UploadAvailability = z.infer<typeof uploadAvailabilitySchema>;
+
+export const uploadReceiptSchema = z.union([
   z.object({ state: z.literal("started"), uploadId: z.uuid() }).strict(),
-  z
-    .object({
-      state: z.literal("completed"),
-      uploadId: z.uuid(),
-      ...uploadTransportResponseSchema.shape,
-    })
-    .strict(),
+  z.object({ state: z.literal("completed"), uploadId: z.uuid(), kind: z.literal("evidence"), evidenceId: z.string().trim().min(1).max(256), uploadReference: uploadReferenceSchema, quarantineStatus: z.enum(["quarantined", "released", "rejected"]), processingStatus: z.enum(["scanning", "ready", "failed"]), reviewStatus: z.enum(["pending", "accepted", "returned", "rejected"]) }).strict(),
+  z.object({ state: z.literal("completed"), uploadId: z.uuid(), kind: z.literal("archive"), uploadReference: uploadReferenceSchema, sha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict(),
   z.object({
     state: z.literal("unavailable"),
     reason: z.literal("UNAVAILABLE_CONTRACT"),
@@ -369,6 +383,7 @@ export interface OccApi {
   workspaces: { query(input: WorkspaceQuery): Promise<WorkspaceResult> };
   commands: { execute(input: WorkspaceCommand): Promise<CommandReceipt> };
   uploads: {
+    preflight(input: EvidenceUploadMetadata): Promise<UploadAvailability>;
     start(input: EvidenceUploadInput): Promise<UploadReceipt>;
     cancel(uploadId: string): Promise<void>;
     subscribeProgress(listener: (progress: UploadProgress) => void): () => void;

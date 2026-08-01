@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createCoreClient, type CoreClient } from "../src/core-client";
 import {
   createSessionManager,
+  customerInstanceIdFromAccessToken,
   type CredentialVault,
   type VaultCredential,
 } from "../src/session-manager";
@@ -89,6 +90,15 @@ function harness(
 }
 
 describe("Session manager", () => {
+  it("extracts only a bounded UUID customer instance claim from a JWT payload", () => {
+    const customerInstanceId = "22222222-2222-4222-8222-222222222222";
+    const payload = Buffer.from(JSON.stringify({ instance_id: customerInstanceId })).toString("base64url");
+    expect(customerInstanceIdFromAccessToken(`header.${payload}.signature`)).toBe(customerInstanceId);
+    expect(customerInstanceIdFromAccessToken("opaque-token")).toBeNull();
+    expect(customerInstanceIdFromAccessToken(`header.${Buffer.from(JSON.stringify({ instance_id: "not-uuid" })).toString("base64url")}.signature`)).toBeNull();
+    expect(customerInstanceIdFromAccessToken(`header.${"a".repeat(16_385)}.signature`)).toBeNull();
+  });
+
   it("logs in, persists only the refresh token, and returns a secret-free snapshot", async () => {
     const h = harness();
     vi.mocked(h.core.login).mockResolvedValue(token("R"));

@@ -28,6 +28,7 @@ const api: OccApi = freezeApi({
   workspaces: { query: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.workspaces.query, input) },
   commands: { execute: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.commands.execute, input) },
   uploads: {
+    preflight: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.preflight, input),
     start: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.start, input),
     cancel: (uploadId) => ipcRenderer.invoke(DESKTOP_CHANNELS.uploads.cancel, uploadId),
     subscribeProgress(listener) {

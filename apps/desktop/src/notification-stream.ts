@@ -32,7 +32,7 @@ interface NotificationScope {
   readonly principalId: string;
 }
 
-interface StreamSession {
+export interface NotificationSession {
   readonly scope: NotificationScope;
   readonly origin: string;
   readonly endpointAvailable: boolean;
@@ -76,7 +76,7 @@ export function createNotificationStream(options: NotificationStreamOptions) {
   const baseDelayMs = options.baseDelayMs ?? 1_000;
   const maxDelayMs = options.maxDelayMs ?? 30_000;
   const listeners = new Set<(event: NotificationEvent) => void>();
-  let session: StreamSession | null = null;
+  let session: NotificationSession | null = null;
   let connection: NotificationConnection | undefined;
   let reconnectTimer: unknown;
   let reconnectAttempt = 0;
@@ -84,6 +84,8 @@ export function createNotificationStream(options: NotificationStreamOptions) {
   let generation = 0;
   let tail = Promise.resolve();
   let connectFlight: Promise<void> | undefined;
+  const seenEventIds = new Set<string>();
+  const seenCursors = new Set<string>();
 
   const serialized = (operation: () => Promise<void>) => {
     const result = tail.then(operation);
@@ -98,26 +100,34 @@ export function createNotificationStream(options: NotificationStreamOptions) {
       return {};
     }
   };
-  const persistCursor = (scope: NotificationScope, cursor: string) => serialized(async () => {
+  const persistCursor = async (scope: NotificationScope, cursor: string) => {
     const cursors = await readCursors();
     await options.persistence.write(cursorFileSchema.parse({
       version: 1,
       cursors: { ...cursors, [scopeKey(scope)]: z.string().min(1).max(2048).parse(cursor) },
     }));
-  });
-  const emitValidated = async (raw: unknown, eventCursor?: string, expectedGeneration = generation) => {
+  };
+  const remember = (values: Set<string>, value: string) => {
+    values.add(value);
+    if (values.size > 2_000) values.delete(values.values().next().value!);
+  };
+  const emitValidated = (raw: unknown, eventCursor?: string, expectedGeneration = generation) => serialized(async () => {
     if (serializedSize(raw) > MAX_EVENT_BYTES) return;
     const parsed = notificationEventSchema.safeParse(raw);
     if (!parsed.success || !session || expectedGeneration !== generation) return;
     const cursor = eventCursor || parsed.data.cursor;
     if (!cursor) return;
-    await persistCursor(session.scope, cursor);
+    if (seenEventIds.has(parsed.data.id) || seenCursors.has(cursor)) return;
+    const activeScope = session.scope;
+    await persistCursor(activeScope, cursor);
     if (!session || expectedGeneration !== generation) return;
+    remember(seenEventIds, parsed.data.id);
+    remember(seenCursors, cursor);
     if (parsed.data.commandState && parsed.data.intentHandle && parsed.data.correlationId) {
       options.settleCommand?.(parsed.data.intentHandle, parsed.data.correlationId);
     }
     for (const listener of listeners) listener(parsed.data);
-  };
+  });
   const disconnect = () => {
     connection?.close();
     connection = undefined;
@@ -130,7 +140,24 @@ export function createNotificationStream(options: NotificationStreamOptions) {
     const origin = exactHttpsOrigin(session.origin);
     const token = options.getAccessToken();
     if (!token) return;
-    const cursor = (await readCursors())[scopeKey(session.scope)];
+    let cursor = (await readCursors())[scopeKey(session.scope)];
+    if (!session || expectedGeneration !== generation) return;
+    if (options.listFallback) {
+      try {
+        const page = notificationPageSchema.parse(await options.listFallback(cursor));
+        for (const item of page.items) await emitValidated(item, item.cursor, expectedGeneration);
+        if (page.nextCursor && session && expectedGeneration === generation) {
+          const catchUpScope = session.scope;
+          await serialized(async () => {
+            if (!session || expectedGeneration !== generation) return;
+            await persistCursor(catchUpScope, page.nextCursor!);
+          });
+        }
+        if (session && expectedGeneration === generation) cursor = (await readCursors())[scopeKey(session.scope)];
+      } catch {
+        // The persisted cursor still permits a live connection when catch-up is unavailable.
+      }
+    }
     if (!session || expectedGeneration !== generation) return;
     connection = options.connector({
       url: `${origin}/api/v1/notifications/stream`,
@@ -162,14 +189,6 @@ export function createNotificationStream(options: NotificationStreamOptions) {
         }, delay);
       },
     });
-    if (reconnecting && options.listFallback) {
-      try {
-        const page = notificationPageSchema.parse(await options.listFallback(cursor));
-        for (const item of page.items) await emitValidated(item, item.cursor, expectedGeneration);
-      } catch {
-        // The live stream remains useful when query fallback is temporarily unavailable.
-      }
-    }
   };
   const connect = (reconnecting: boolean, expectedGeneration = generation): Promise<void> => {
     if (connectFlight) return connectFlight;
@@ -182,10 +201,12 @@ export function createNotificationStream(options: NotificationStreamOptions) {
   };
 
   return {
-    async setSession(next: StreamSession | null): Promise<void> {
+    async setSession(next: NotificationSession | null): Promise<void> {
       generation += 1;
       const expectedGeneration = generation;
       disconnect();
+      seenEventIds.clear();
+      seenCursors.clear();
       reconnectAttempt = 0;
       if (next) {
         session = { ...next, scope: scopeSchema.parse(next.scope), origin: exactHttpsOrigin(next.origin) };
