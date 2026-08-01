@@ -121,6 +121,38 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
 });
 
+test("quick verification excludes the strict OPA integration gate", () => {
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--dry-run"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /gradlew(?:\.bat)? :services:core:build --dependency-verification strict -PexcludeStrictAuthz=true/u,
+  );
+});
+
+test("full verification runs the strict OPA test and prints only strict environment key names", () => {
+  const opaSecret = "C:\\secret\\opa-value.exe";
+  const strictSecret = "strict-secret-value";
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--full", "--dry-run"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+    env: { ...process.env, OPA_PATH: opaSecret, INNORDER_STRICT_AUTHZ_TESTS: strictSecret },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /strict Core authorization and real OPA integration[\s\S]*--tests com\.innorder\.occ\.PlatformSecurityKernelIntegrationTest/u,
+  );
+  assert.match(result.stdout, /strict environment keys: OPA_PATH, INNORDER_STRICT_AUTHZ_TESTS/u);
+  assert.doesNotMatch(result.stdout, new RegExp(opaSecret.replaceAll("\\", "\\\\"), "u"));
+  assert.doesNotMatch(result.stdout, new RegExp(strictSecret, "u"));
+});
+
 async function fakeTool(t, cwd, name, exitCode, output = name.startsWith("opa-available") ? "Version: 1.5.1" : "") {
   const path = join(cwd, process.platform === "win32" ? `${name}.cmd` : name);
   const content = process.platform === "win32"

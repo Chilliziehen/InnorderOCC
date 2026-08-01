@@ -162,7 +162,9 @@ async function main() {
   await run("database static contracts", npm, ["run", "test:database"]);
 
   if (testsOnly) {
-    await run("Core Kotlin tests", gradle, [":services:core:test", "--dependency-verification", "strict"]);
+    await run("Core Kotlin tests", gradle, [
+      ":services:core:test", "--dependency-verification", "strict", "-PexcludeStrictAuthz=true",
+    ]);
     return;
   }
 
@@ -176,7 +178,9 @@ async function main() {
     ]);
   }
 
-  await run("Core Gradle build and tests", gradle, [":services:core:build", "--dependency-verification", "strict"]);
+  await run("Core Gradle build and tests", gradle, [
+    ":services:core:build", "--dependency-verification", "strict", "-PexcludeStrictAuthz=true",
+  ]);
   await run("TypeScript workspace typechecks", npm, ["run", "typecheck", "--workspaces", "--if-present"]);
   await run("AI service build", npm, ["run", "build", "--workspace", "@innorder/ai-service"]);
   await run("Electron package build", npm, ["run", "build", "--workspace", "@innorder/desktop"]);
@@ -186,6 +190,7 @@ async function main() {
   }
 
   if (full) {
+    if (dryRun) console.log("[verify] strict environment keys: OPA_PATH, INNORDER_STRICT_AUTHZ_TESTS");
     await run("strict Core authorization and real OPA integration", gradle, [
       ":services:core:test",
       "--tests", "com.innorder.occ.PlatformSecurityKernelIntegrationTest",
