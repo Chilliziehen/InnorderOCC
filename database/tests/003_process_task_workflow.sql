@@ -33,7 +33,16 @@ INSERT INTO catalog.relation_definition
 VALUES
   ('55000000-0000-7000-8000-000000000001', '51000000-0000-7000-8000-000000000001',
    'cohort_owner', '52000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000002',
-   'ONE_TO_MANY', false, false, true);
+   'ONE_TO_MANY', false, false, true),
+  ('55000000-0000-7000-8000-000000000002', '51000000-0000-7000-8000-000000000001',
+   'temporal_one_to_one', '52000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000002',
+   'ONE_TO_ONE', false, false, false),
+  ('55000000-0000-7000-8000-000000000003', '51000000-0000-7000-8000-000000000001',
+   'temporal_one_to_many', '52000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000002',
+   'ONE_TO_MANY', false, false, false),
+  ('55000000-0000-7000-8000-000000000004', '51000000-0000-7000-8000-000000000001',
+   'temporal_acyclic', '52000000-0000-7000-8000-000000000001', '52000000-0000-7000-8000-000000000001',
+   'MANY_TO_MANY', true, true, false);
 INSERT INTO catalog.evidence_requirement
   (id, package_version_id, requirement_key, allowed_types, min_count, validation_schema)
 VALUES ('55000000-0000-7000-8000-000000000010', '51000000-0000-7000-8000-000000000001',
@@ -58,7 +67,8 @@ VALUES
   ('5a000000-0000-7000-8000-000000000010', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'evidence:gate', 'ACTIVE', '{}', 1),
   ('5a000000-0000-7000-8000-000000000011', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'resource:gate', 'ACTIVE', '{}', 1),
   ('5a000000-0000-7000-8000-000000000012', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'evidence:other-task', 'ACTIVE', '{}', 1),
-  ('5a000000-0000-7000-8000-000000000013', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'resource:other-task', 'ACTIVE', '{}', 1);
+  ('5a000000-0000-7000-8000-000000000013', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'resource:other-task', 'ACTIVE', '{}', 1),
+  ('5a000000-0000-7000-8000-000000000014', '52000000-0000-7000-8000-000000000004', '53000000-0000-7000-8000-000000000004', 'evidence:review-two', 'ACTIVE', '{}', 1);
 INSERT INTO iam.principal (id, principal_kind, display_name, status, profile, row_version)
 VALUES
   ('56000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE', '{}', 1),
@@ -161,6 +171,98 @@ SELECT pg_temp.assert_true(
   (SELECT row_version = 2 FROM occ.cohort WHERE id = '57000000-0000-7000-8000-000000000001'),
   'cohort row version increments from explicit version one');
 
+INSERT INTO authz.relationship
+  (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+VALUES
+  ('5f100000-0000-7000-8000-000000000001', '55000000-0000-7000-8000-000000000002',
+   '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000001',
+   transaction_timestamp() - interval '4 hours', transaction_timestamp() - interval '3 hours', 'SYSTEM', 'one-to-one-expired'),
+  ('5f100000-0000-7000-8000-000000000002', '55000000-0000-7000-8000-000000000002',
+   '56000000-0000-7000-8000-000000000002', '57000000-0000-7000-8000-000000000001',
+   transaction_timestamp() - interval '3 hours', transaction_timestamp() - interval '2 hours', 'SYSTEM', 'one-to-one-reentry'),
+  ('5f100000-0000-7000-8000-000000000003', '55000000-0000-7000-8000-000000000003',
+   '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000002',
+   transaction_timestamp() - interval '4 hours', transaction_timestamp() - interval '3 hours', 'SYSTEM', 'one-to-many-expired'),
+  ('5f100000-0000-7000-8000-000000000004', '55000000-0000-7000-8000-000000000003',
+   '56000000-0000-7000-8000-000000000002', '57000000-0000-7000-8000-000000000002',
+   transaction_timestamp() - interval '3 hours', transaction_timestamp() - interval '2 hours', 'SYSTEM', 'one-to-many-reentry');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000005', '55000000-0000-7000-8000-000000000002',
+      '56000000-0000-7000-8000-000000000003', '57000000-0000-7000-8000-000000000001',
+      transaction_timestamp() - interval '150 minutes', transaction_timestamp() - interval '90 minutes',
+      'SYSTEM', 'one-to-one-overlap')$$,
+  '23514', 'ONE_TO_ONE rejects an overlapping subject for the same object');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000006', '55000000-0000-7000-8000-000000000003',
+      '56000000-0000-7000-8000-000000000003', '57000000-0000-7000-8000-000000000002',
+      transaction_timestamp() - interval '150 minutes', transaction_timestamp() - interval '90 minutes',
+      'SYSTEM', 'one-to-many-overlap')$$,
+  '23514', 'ONE_TO_MANY rejects overlapping subjects for the same object');
+INSERT INTO authz.relationship
+  (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+   revoked_at, revoked_by, source_kind, source_ref)
+VALUES
+  ('5f100000-0000-7000-8000-000000000007', '55000000-0000-7000-8000-000000000002',
+   '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000002',
+   transaction_timestamp() - interval '10 hours', transaction_timestamp() - interval '5 hours',
+   transaction_timestamp() - interval '7 hours', '56000000-0000-7000-8000-000000000001', 'SYSTEM', 'one-to-one-revoked'),
+  ('5f100000-0000-7000-8000-000000000008', '55000000-0000-7000-8000-000000000003',
+   '56000000-0000-7000-8000-000000000001', '57000000-0000-7000-8000-000000000001',
+   transaction_timestamp() - interval '10 hours', transaction_timestamp() - interval '5 hours',
+   transaction_timestamp() - interval '7 hours', '56000000-0000-7000-8000-000000000001', 'SYSTEM', 'one-to-many-revoked');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000009', '55000000-0000-7000-8000-000000000002',
+      '56000000-0000-7000-8000-000000000002', '57000000-0000-7000-8000-000000000002',
+      transaction_timestamp() - interval '9 hours', transaction_timestamp() - interval '8 hours',
+      'SYSTEM', 'one-to-one-revoked-overlap')$$,
+  '23514', 'ONE_TO_ONE counts the effective interval before revocation');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000010', '55000000-0000-7000-8000-000000000003',
+      '56000000-0000-7000-8000-000000000002', '57000000-0000-7000-8000-000000000001',
+      transaction_timestamp() - interval '9 hours', transaction_timestamp() - interval '8 hours',
+      'SYSTEM', 'one-to-many-revoked-overlap')$$,
+  '23514', 'ONE_TO_MANY counts the effective interval before revocation');
+INSERT INTO authz.relationship
+  (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+   revoked_at, revoked_by, source_kind, source_ref)
+VALUES
+  ('5f100000-0000-7000-8000-000000000011', '55000000-0000-7000-8000-000000000004',
+   '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002',
+   transaction_timestamp() - interval '10 hours', transaction_timestamp() - interval '5 hours',
+   transaction_timestamp() - interval '7 hours', '56000000-0000-7000-8000-000000000001', 'SYSTEM', 'cycle-revoked-one'),
+  ('5f100000-0000-7000-8000-000000000012', '55000000-0000-7000-8000-000000000004',
+   '56000000-0000-7000-8000-000000000002', '56000000-0000-7000-8000-000000000003',
+   transaction_timestamp() - interval '10 hours', transaction_timestamp() - interval '5 hours',
+   transaction_timestamp() - interval '7 hours', '56000000-0000-7000-8000-000000000001', 'SYSTEM', 'cycle-revoked-two');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO authz.relationship
+      (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+    VALUES ('5f100000-0000-7000-8000-000000000013', '55000000-0000-7000-8000-000000000004',
+      '56000000-0000-7000-8000-000000000003', '56000000-0000-7000-8000-000000000001',
+      transaction_timestamp() - interval '9 hours', transaction_timestamp() - interval '8 hours',
+      'SYSTEM', 'cycle-revoked-overlap')$$,
+  '23514', 'acyclic validation counts the effective interval before revocation');
+INSERT INTO authz.relationship
+  (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)
+VALUES
+  ('5f100000-0000-7000-8000-000000000014', '55000000-0000-7000-8000-000000000004',
+   '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002',
+   transaction_timestamp() - interval '6 hours', transaction_timestamp() - interval '5 hours', 'SYSTEM', 'cycle-expired-one'),
+  ('5f100000-0000-7000-8000-000000000015', '55000000-0000-7000-8000-000000000004',
+   '56000000-0000-7000-8000-000000000002', '56000000-0000-7000-8000-000000000003',
+   transaction_timestamp() - interval '6 hours', transaction_timestamp() - interval '5 hours', 'SYSTEM', 'cycle-expired-two'),
+  ('5f100000-0000-7000-8000-000000000016', '55000000-0000-7000-8000-000000000004',
+   '56000000-0000-7000-8000-000000000003', '56000000-0000-7000-8000-000000000001',
+   transaction_timestamp() - interval '5 hours', transaction_timestamp() - interval '4 hours', 'SYSTEM', 'cycle-after-expiry');
+
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.process_definition_binding
       (id, workflow_definition_id, package_version_id, bpmn_key, flowable_deployment_id, flowable_definition_id, content_hash)
@@ -241,6 +343,19 @@ INSERT INTO occ.evidence
   (id, task_id, requirement_id, state, row_version, created_by)
 VALUES ('5a000000-0000-7000-8000-000000000012', '59000000-0000-7000-8000-000000000002',
   '55000000-0000-7000-8000-000000000010', 'PENDING', 1, '56000000-0000-7000-8000-000000000002');
+INSERT INTO occ.evidence
+  (id, task_id, requirement_id, state, row_version, created_by)
+VALUES ('5a000000-0000-7000-8000-000000000014', '59000000-0000-7000-8000-000000000002',
+  '55000000-0000-7000-8000-000000000010', 'PENDING', 1, '56000000-0000-7000-8000-000000000002');
+INSERT INTO occ.evidence_version
+  (id, evidence_id, version, object_key, sha256, mime_type, size_bytes, submitted_by)
+VALUES
+  ('5e000000-0000-7000-8000-000000000010', '5a000000-0000-7000-8000-000000000010', 1,
+   'review/task-one', repeat('a', 64), 'application/pdf', 10, '56000000-0000-7000-8000-000000000002'),
+  ('5e000000-0000-7000-8000-000000000011', '5a000000-0000-7000-8000-000000000012', 1,
+   'review/task-two-one', repeat('b', 64), 'application/pdf', 10, '56000000-0000-7000-8000-000000000002'),
+  ('5e000000-0000-7000-8000-000000000013', '5a000000-0000-7000-8000-000000000014', 1,
+   'review/task-two-two', repeat('c', 64), 'application/pdf', 10, '56000000-0000-7000-8000-000000000002');
 INSERT INTO occ.managed_resource
   (id, resource_type, capacity, state, data, row_version)
 VALUES ('5a000000-0000-7000-8000-000000000011', 'test-resource', 1, 'AVAILABLE', '{}', 1);
@@ -437,6 +552,34 @@ VALUES ('5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-0000000
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.task_review_projection_fact
       (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+    VALUES ('5e000000-0000-7000-8000-000000000030', '59000000-0000-7000-8000-000000000002',
+      'SUBMITTED', 1, '5e000000-0000-7000-8000-000000000099', '5e000000-0000-7000-8000-000000000098',
+      '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002')$$,
+  '23503', 'review submission requires existing evidence and version');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_review_projection_fact
+      (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+    VALUES ('5e000000-0000-7000-8000-000000000031', '59000000-0000-7000-8000-000000000002',
+      'SUBMITTED', 1, '5a000000-0000-7000-8000-000000000012', '5e000000-0000-7000-8000-000000000010',
+      '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002')$$,
+  '23503', 'review evidence version must belong to its evidence');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_review_projection_fact
+      (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+    VALUES ('5e000000-0000-7000-8000-000000000032', '59000000-0000-7000-8000-000000000002',
+      'SUBMITTED', 1, '5a000000-0000-7000-8000-000000000010', '5e000000-0000-7000-8000-000000000010',
+      '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002')$$,
+  '23514', 'review evidence must belong to its task');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_review_projection_fact
+      (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+    VALUES ('5e000000-0000-7000-8000-000000000033', '59000000-0000-7000-8000-000000000002',
+      'SUBMITTED', 2, '5a000000-0000-7000-8000-000000000012', '5e000000-0000-7000-8000-000000000011',
+      '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002')$$,
+  '23514', 'first review submission sequence must be one');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_review_projection_fact
+      (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
     VALUES ('5e000000-0000-7000-8000-000000000005', '59000000-0000-7000-8000-000000000002',
       'SUBMITTED', 1, '5e000000-0000-7000-8000-000000000014', '5e000000-0000-7000-8000-000000000015',
       '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001')$$,
@@ -451,8 +594,15 @@ SELECT pg_temp.assert_raises(
 INSERT INTO occ.task_review_projection_fact
   (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
 VALUES ('5e000000-0000-7000-8000-000000000001', '59000000-0000-7000-8000-000000000002',
-  'SUBMITTED', 1, '5e000000-0000-7000-8000-000000000010', '5e000000-0000-7000-8000-000000000011',
+  'SUBMITTED', 1, '5a000000-0000-7000-8000-000000000012', '5e000000-0000-7000-8000-000000000011',
   '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.task_review_projection_fact
+      (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+    VALUES ('5e000000-0000-7000-8000-000000000034', '59000000-0000-7000-8000-000000000002',
+      'SUBMITTED', 2, '5a000000-0000-7000-8000-000000000014', '5e000000-0000-7000-8000-000000000013',
+      '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002')$$,
+  '23514', 'next review submission requires the prior decision');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.task_review_projection_fact
       (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id)
@@ -464,6 +614,11 @@ INSERT INTO occ.task_review_projection_fact
   (id, task_id, fact_kind, review_sequence, submission_fact_id, review_id, review_version, decision)
 VALUES ('5e000000-0000-7000-8000-000000000002', '59000000-0000-7000-8000-000000000002',
   'DECIDED', 1, '5e000000-0000-7000-8000-000000000001', '5e000000-0000-7000-8000-000000000020', 1, 'ACCEPTED');
+INSERT INTO occ.task_review_projection_fact
+  (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+VALUES ('5e000000-0000-7000-8000-000000000035', '59000000-0000-7000-8000-000000000002',
+  'SUBMITTED', 2, '5a000000-0000-7000-8000-000000000014', '5e000000-0000-7000-8000-000000000013',
+  '5d000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.task_review_projection_fact
       (id, task_id, fact_kind, review_sequence, submission_fact_id, review_id, review_version, decision)

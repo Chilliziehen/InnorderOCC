@@ -176,6 +176,15 @@ CREATE TABLE occ.task_review_projection_fact (
     )
 );
 
+ALTER TABLE occ.evidence_version
+    ADD CONSTRAINT uq_evidence_version_identity UNIQUE (id, evidence_id);
+ALTER TABLE occ.task_review_projection_fact
+    ADD CONSTRAINT fk_task_review_evidence
+        FOREIGN KEY (evidence_id) REFERENCES occ.evidence(id),
+    ADD CONSTRAINT fk_task_review_evidence_version
+        FOREIGN KEY (evidence_version_id, evidence_id)
+        REFERENCES occ.evidence_version(id, evidence_id);
+
 CREATE TABLE occ.notification (
     id uuid PRIMARY KEY,
     recipient_id uuid NOT NULL REFERENCES iam.principal(id),
@@ -192,6 +201,185 @@ CREATE TABLE occ.notification (
 );
 
 DROP INDEX IF EXISTS authz.uq_relationship_active;
+
+CREATE OR REPLACE FUNCTION authz.validate_relationship()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    definition catalog.relation_definition%ROWTYPE;
+    subject_type uuid;
+    object_type uuid;
+    definition_package_status text;
+    subject_limit integer;
+    object_limit integer;
+BEGIN
+    PERFORM 1
+    FROM catalog.relation_definition
+    WHERE id = NEW.relation_definition_id
+    FOR UPDATE;
+
+    SELECT * INTO STRICT definition
+    FROM catalog.relation_definition
+    WHERE id = NEW.relation_definition_id;
+
+    SELECT status INTO STRICT definition_package_status
+    FROM catalog.package_version
+    WHERE id = definition.package_version_id;
+    IF definition_package_status NOT IN ('PUBLISHED', 'DEPRECATED') THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'relationship definition must be published';
+    END IF;
+
+    SELECT entity_type_id INTO STRICT subject_type FROM authz.entity WHERE id = NEW.subject_entity_id;
+    SELECT entity_type_id INTO STRICT object_type FROM authz.entity WHERE id = NEW.object_entity_id;
+    IF subject_type <> definition.subject_type_id OR object_type <> definition.object_type_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'relationship endpoint type mismatch';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM authz.relationship r
+        WHERE r.relation_definition_id = NEW.relation_definition_id
+          AND r.id <> NEW.id
+          AND r.subject_entity_id = NEW.subject_entity_id
+          AND r.object_entity_id = NEW.object_entity_id
+          AND tstzrange(
+              r.valid_from,
+              least(coalesce(r.valid_until, 'infinity'::timestamptz), coalesce(r.revoked_at, 'infinity'::timestamptz)),
+              '[)'
+          ) && tstzrange(
+              NEW.valid_from,
+              least(coalesce(NEW.valid_until, 'infinity'::timestamptz), coalesce(NEW.revoked_at, 'infinity'::timestamptz)),
+              '[)'
+          )
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'overlapping duplicate relationship';
+    END IF;
+
+    subject_limit := CASE definition.cardinality
+        WHEN 'ONE_TO_ONE' THEN 1
+        WHEN 'ONE_TO_MANY' THEN 1
+        ELSE definition.max_subjects
+    END;
+    IF definition.max_subjects IS NOT NULL THEN
+        subject_limit := least(coalesce(subject_limit, definition.max_subjects), definition.max_subjects);
+    END IF;
+    object_limit := CASE definition.cardinality
+        WHEN 'ONE_TO_ONE' THEN 1
+        ELSE definition.max_objects
+    END;
+    IF definition.max_objects IS NOT NULL THEN
+        object_limit := least(coalesce(object_limit, definition.max_objects), definition.max_objects);
+    END IF;
+
+    IF object_limit IS NOT NULL AND EXISTS (
+        WITH boundary(point_at) AS (
+            SELECT NEW.valid_from
+            UNION
+            SELECT greatest(r.valid_from, NEW.valid_from)
+            FROM authz.relationship r
+            WHERE r.relation_definition_id = NEW.relation_definition_id
+              AND r.id <> NEW.id
+              AND r.subject_entity_id = NEW.subject_entity_id
+              AND tstzrange(
+                  r.valid_from,
+                  least(coalesce(r.valid_until, 'infinity'::timestamptz), coalesce(r.revoked_at, 'infinity'::timestamptz)),
+                  '[)'
+              ) && tstzrange(
+                  NEW.valid_from,
+                  least(coalesce(NEW.valid_until, 'infinity'::timestamptz), coalesce(NEW.revoked_at, 'infinity'::timestamptz)),
+                  '[)'
+              )
+        )
+        SELECT 1
+        FROM boundary b
+        WHERE (
+            SELECT count(*)
+            FROM authz.relationship r
+            WHERE r.relation_definition_id = NEW.relation_definition_id
+              AND r.id <> NEW.id
+              AND r.subject_entity_id = NEW.subject_entity_id
+              AND tstzrange(
+                  r.valid_from,
+                  least(coalesce(r.valid_until, 'infinity'::timestamptz), coalesce(r.revoked_at, 'infinity'::timestamptz)),
+                  '[)'
+              ) @> b.point_at
+        ) >= object_limit
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'relationship max_objects exceeded in validity window';
+    END IF;
+
+    IF subject_limit IS NOT NULL AND EXISTS (
+        WITH boundary(point_at) AS (
+            SELECT NEW.valid_from
+            UNION
+            SELECT greatest(r.valid_from, NEW.valid_from)
+            FROM authz.relationship r
+            WHERE r.relation_definition_id = NEW.relation_definition_id
+              AND r.id <> NEW.id
+              AND r.object_entity_id = NEW.object_entity_id
+              AND tstzrange(
+                  r.valid_from,
+                  least(coalesce(r.valid_until, 'infinity'::timestamptz), coalesce(r.revoked_at, 'infinity'::timestamptz)),
+                  '[)'
+              ) && tstzrange(
+                  NEW.valid_from,
+                  least(coalesce(NEW.valid_until, 'infinity'::timestamptz), coalesce(NEW.revoked_at, 'infinity'::timestamptz)),
+                  '[)'
+              )
+        )
+        SELECT 1
+        FROM boundary b
+        WHERE (
+            SELECT count(*)
+            FROM authz.relationship r
+            WHERE r.relation_definition_id = NEW.relation_definition_id
+              AND r.id <> NEW.id
+              AND r.object_entity_id = NEW.object_entity_id
+              AND tstzrange(
+                  r.valid_from,
+                  least(coalesce(r.valid_until, 'infinity'::timestamptz), coalesce(r.revoked_at, 'infinity'::timestamptz)),
+                  '[)'
+              ) @> b.point_at
+        ) >= subject_limit
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'relationship max_subjects exceeded in validity window';
+    END IF;
+
+    IF definition.acyclic AND EXISTS (
+        WITH RECURSIVE reachable(entity_id, window_from, window_until, path) AS (
+            SELECT NEW.object_entity_id,
+                   NEW.valid_from,
+                   least(coalesce(NEW.valid_until, 'infinity'::timestamptz), coalesce(NEW.revoked_at, 'infinity'::timestamptz)),
+                   ARRAY[NEW.object_entity_id]
+            UNION ALL
+            SELECT r.object_entity_id,
+                   greatest(p.window_from, r.valid_from),
+                   least(
+                       p.window_until,
+                       coalesce(r.valid_until, 'infinity'::timestamptz),
+                       coalesce(r.revoked_at, 'infinity'::timestamptz)
+                   ),
+                   p.path || r.object_entity_id
+            FROM authz.relationship r
+            JOIN reachable p ON r.subject_entity_id = p.entity_id
+            WHERE r.relation_definition_id = NEW.relation_definition_id
+              AND r.id <> NEW.id
+              AND p.entity_id <> NEW.subject_entity_id
+              AND greatest(p.window_from, r.valid_from) < least(
+                  p.window_until,
+                  coalesce(r.valid_until, 'infinity'::timestamptz),
+                  coalesce(r.revoked_at, 'infinity'::timestamptz)
+              )
+              AND (r.object_entity_id = NEW.subject_entity_id OR NOT r.object_entity_id = ANY(p.path))
+        )
+        SELECT 1 FROM reachable WHERE entity_id = NEW.subject_entity_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'acyclic relationship would create a cycle';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
 
 CREATE FUNCTION authz.align_relationship_revocation_time()
 RETURNS trigger
@@ -737,7 +925,13 @@ DECLARE
     submission occ.task_review_projection_fact%ROWTYPE;
     task_state text;
     task_assignee_id uuid;
+    latest_submission_sequence bigint;
 BEGIN
+    SELECT state, assignee_id INTO STRICT task_state, task_assignee_id
+    FROM occ.task_projection
+    WHERE id = NEW.task_id
+    FOR UPDATE;
+
     IF NEW.fact_kind = 'DECIDED' THEN
         SELECT * INTO STRICT submission
         FROM occ.task_review_projection_fact
@@ -747,19 +941,35 @@ BEGIN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'decision must match its submission task and sequence';
         END IF;
     ELSE
-        SELECT state, assignee_id INTO STRICT task_state, task_assignee_id
-        FROM occ.task_projection
-        WHERE id = NEW.task_id
-        FOR SHARE;
         IF task_state <> 'CLAIMED' OR task_assignee_id IS NULL
            OR NEW.prior_assignee_id IS DISTINCT FROM task_assignee_id THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'submission requires the claimed task assignee';
         END IF;
         IF EXISTS (
-            SELECT 1 FROM occ.task_review_projection_fact fact
-            WHERE fact.task_id = NEW.task_id AND fact.review_sequence >= NEW.review_sequence
+            SELECT 1 FROM occ.evidence evidence
+            WHERE evidence.id = NEW.evidence_id
+              AND evidence.task_id IS DISTINCT FROM NEW.task_id
         ) THEN
-            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review sequence must increase monotonically';
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'submission evidence must belong to its task';
+        END IF;
+        IF EXISTS (
+            SELECT 1
+            FROM occ.task_review_projection_fact submitted
+            WHERE submitted.task_id = NEW.task_id
+              AND submitted.fact_kind = 'SUBMITTED'
+              AND NOT EXISTS (
+                  SELECT 1 FROM occ.task_review_projection_fact decided
+                  WHERE decided.submission_fact_id = submitted.id
+                    AND decided.fact_kind = 'DECIDED'
+              )
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'prior review submission requires a decision';
+        END IF;
+        SELECT max(review_sequence) INTO latest_submission_sequence
+        FROM occ.task_review_projection_fact
+        WHERE task_id = NEW.task_id AND fact_kind = 'SUBMITTED';
+        IF NEW.review_sequence IS DISTINCT FROM coalesce(latest_submission_sequence, 0) + 1 THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review submission sequence must be contiguous';
         END IF;
     END IF;
     RETURN NEW;

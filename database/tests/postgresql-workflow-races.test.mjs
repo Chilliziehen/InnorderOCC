@@ -59,6 +59,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('64000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000003', '62000000-0000-7000-8000-000000000001', 1, '{}'),
         ('64000000-0000-7000-8000-000000000004', '63000000-0000-7000-8000-000000000004', '62000000-0000-7000-8000-000000000001', 1, '{}');
       INSERT INTO catalog.workflow_definition (id, package_version_id, workflow_key, bpmn_object_key, content_hash) VALUES ('65000000-0000-7000-8000-000000000001', '62000000-0000-7000-8000-000000000001', 'route', 'route.bpmn', repeat('a',64));
+      INSERT INTO catalog.evidence_requirement (id, package_version_id, requirement_key, allowed_types, min_count, validation_schema)
+        VALUES ('65000000-0000-7000-8000-000000000010', '62000000-0000-7000-8000-000000000001', 'review', '[]', 1, '{}');
       INSERT INTO catalog.relation_definition (id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, transitive, acyclic, auth_relevant) VALUES
         ('66000000-0000-7000-8000-000000000001', '62000000-0000-7000-8000-000000000001', 'cohort_owner', '63000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000002', 'ONE_TO_MANY', false, false, true),
         ('66000000-0000-7000-8000-000000000002', '62000000-0000-7000-8000-000000000001', 'membership', '63000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000002', 'MANY_TO_MANY', false, false, true);
@@ -74,7 +76,10 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('6a000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:blocker-race', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:requirement-race', 'ACTIVE'),
-        ('6a000000-0000-7000-8000-000000000004', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:source-first-race', 'ACTIVE');
+        ('6a000000-0000-7000-8000-000000000004', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:source-first-race', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000005', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:review-race', 'ACTIVE'),
+        ('6e000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-one', 'ACTIVE'),
+        ('6e000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'evidence:review-two', 'ACTIVE');
       INSERT INTO iam.principal (id, principal_kind, display_name, status) VALUES
         ('67000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', 'USER', 'Participant', 'ACTIVE');
@@ -141,6 +146,9 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     await pool.query(`INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
       VALUES ('6a000000-0000-7000-8000-000000000004', $1, 'source-first-work', 'Source first work', 'source-first-race-task', 'source-first-race-execution', 'AVAILABLE')`, [processId]);
+    await pool.query(`INSERT INTO occ.task_projection
+      (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
+      VALUES ('6a000000-0000-7000-8000-000000000005', $1, 'review-work', 'Review work', 'review-race-task', 'review-race-execution', 'AVAILABLE')`, [processId]);
     const claims = await Promise.all([
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000001', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
@@ -152,6 +160,52 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       WHERE id='6a000000-0000-7000-8000-000000000003'`);
     await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
       WHERE id='6a000000-0000-7000-8000-000000000004'`);
+    await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
+      WHERE id='6a000000-0000-7000-8000-000000000005'`);
+    await pool.query(`INSERT INTO occ.evidence (id, task_id, requirement_id, state, created_by) VALUES
+      ('6e000000-0000-7000-8000-000000000001', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002'),
+      ('6e000000-0000-7000-8000-000000000002', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002');
+      INSERT INTO occ.evidence_version (id, evidence_id, version, object_key, sha256, mime_type, size_bytes, submitted_by) VALUES
+      ('6e100000-0000-7000-8000-000000000001', '6e000000-0000-7000-8000-000000000001', 1, 'race-review-one', repeat('d',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002'),
+      ('6e100000-0000-7000-8000-000000000002', '6e000000-0000-7000-8000-000000000002', 1, 'race-review-two', repeat('e',64), 'application/pdf', 10, '67000000-0000-7000-8000-000000000002');
+      INSERT INTO audit.idempotency_record
+        (id, principal_id, command_key, idempotency_key, request_hash, state, expires_at) VALUES
+      ('6e200000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-one', repeat('f',64), 'IN_PROGRESS', now()+interval '1 hour'),
+      ('6e200000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002', 'review.submit', 'review-two', repeat('0',64), 'IN_PROGRESS', now()+interval '1 hour')`);
+    const firstReview = await pool.connect();
+    const outOfOrderReview = await pool.connect();
+    try {
+      await firstReview.query('BEGIN');
+      await firstReview.query(`INSERT INTO occ.task_review_projection_fact
+        (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+        VALUES ('6e300000-0000-7000-8000-000000000001', '6a000000-0000-7000-8000-000000000005', 'SUBMITTED', 1,
+          '6e000000-0000-7000-8000-000000000001', '6e100000-0000-7000-8000-000000000001',
+          '6e200000-0000-7000-8000-000000000001', '67000000-0000-7000-8000-000000000002')`);
+      await outOfOrderReview.query('BEGIN');
+      await outOfOrderReview.query(`SET LOCAL application_name='workflow-review-out-of-order'`);
+      const outOfOrderInsert = outOfOrderReview.query(`INSERT INTO occ.task_review_projection_fact
+        (id, task_id, fact_kind, review_sequence, evidence_id, evidence_version_id, submission_idempotency_id, prior_assignee_id)
+        VALUES ('6e300000-0000-7000-8000-000000000002', '6a000000-0000-7000-8000-000000000005', 'SUBMITTED', 2,
+          '6e000000-0000-7000-8000-000000000002', '6e100000-0000-7000-8000-000000000002',
+          '6e200000-0000-7000-8000-000000000002', '67000000-0000-7000-8000-000000000002')`);
+      const outOfOrderResult = outOfOrderInsert.then(
+        () => ({ error: null }),
+        (error) => ({ error }),
+      );
+      await waitForBlockedApplications(pool, ['workflow-review-out-of-order']);
+      await firstReview.query('COMMIT');
+      assert.match((await outOfOrderResult).error?.message ?? '', /decision|pending|sequence|review/i);
+      await outOfOrderReview.query('ROLLBACK');
+    } finally {
+      await firstReview.query('ROLLBACK').catch(() => {});
+      await outOfOrderReview.query('ROLLBACK').catch(() => {});
+      firstReview.release();
+      outOfOrderReview.release();
+    }
+    const reviewRaceState = await pool.query(`SELECT review_sequence, fact_kind
+      FROM occ.task_review_projection_fact WHERE task_id='6a000000-0000-7000-8000-000000000005'`);
+    assert.deepEqual(reviewRaceState.rows, [{ review_sequence: '1', fact_kind: 'SUBMITTED' }],
+      'review stream serializes submissions and rejects an out-of-order sequence');
     await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
       VALUES ('6a000000-0000-7000-8000-000000000001', 'process.lifecycle')`);
     await pool.query(`INSERT INTO occ.task_gate_provider_state
