@@ -7,7 +7,13 @@ import com.innorder.occ.command.CanonicalJsonObject
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer
+import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.springframework.boot.convert.ApplicationConversionService
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -18,6 +24,9 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 class CursorCodecTest {
+    @TempDir
+    lateinit var configTree: Path
+
     private val mapper = ObjectMapper().findAndRegisterModules()
     private val now = Instant.parse("2026-08-01T12:00:00Z")
     private val clock = Clock.fixed(now, ZoneOffset.UTC)
@@ -39,6 +48,25 @@ class CursorCodecTest {
         assertThat(codec.decode(token, context)).isEqualTo(tuple)
         assertThat(token).matches("^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$")
         assertThat(token).doesNotContain("=").doesNotContain(context.customerId.toString()).doesNotContain("ACTIVE")
+    }
+
+    @Test
+    fun `rejects alternate trailing-bit encoding of payload segment`() {
+        val token = generateSequence(0) { it + 1 }
+            .map { codec.encode(context, array("tuple-$it")) }
+            .first { it.substringBefore('.').length % 4 != 0 }
+        val payload = token.substringBefore('.')
+        val alternate = "${alternateEncoding(payload)}.${token.substringAfter('.')}"
+
+        assertInvalid { codec.decode(alternate, context) }
+    }
+
+    @Test
+    fun `rejects alternate trailing-bit encoding of signature segment`() {
+        val token = codec.encode(context, tuple)
+        val alternate = "${token.substringBefore('.')}.${alternateEncoding(token.substringAfter('.'))}"
+
+        assertInvalid { codec.decode(alternate, context) }
     }
 
     @Test
@@ -143,6 +171,26 @@ class CursorCodecTest {
         ).forEach { invalid -> assertInvalid { codec.encode(invalid, tuple) } }
     }
 
+    @Test
+    fun `config tree creates codec from strong mounted secret`() {
+        Files.write(configTree.resolve("occ.cursor.secret"), SECRET.toByteArray(StandardCharsets.UTF_8))
+
+        cursorContext().run { context ->
+            assertThat(context).hasNotFailed()
+            assertThat(context).hasSingleBean(CursorCodec::class.java)
+        }
+    }
+
+    @Test
+    fun `startup fails when config tree cursor secret is missing or weak`() {
+        cursorContext().run { context -> assertThat(context).hasFailed() }
+        Files.write(configTree.resolve("occ.cursor.secret"), "weak".toByteArray(StandardCharsets.UTF_8))
+        cursorContext().run { context ->
+            assertThat(context).hasFailed()
+            assertThat(context.startupFailure).hasMessageNotContaining("weak")
+        }
+    }
+
     private fun payloadNode() = mapper.createObjectNode().apply {
         put("version", 1)
         put("endpoint", context.endpoint)
@@ -166,6 +214,23 @@ class CursorCodecTest {
         return "${ENCODER.encodeToString(bytes)}.${ENCODER.encodeToString(mac.doFinal(bytes))}"
     }
 
+    private fun alternateEncoding(segment: String): String {
+        val decoded = Base64.getUrlDecoder().decode(segment)
+        return BASE64URL_ALPHABET.asSequence()
+            .map { segment.dropLast(1) + it }
+            .first { it != segment && runCatching { Base64.getUrlDecoder().decode(it) }.getOrNull()?.contentEquals(decoded) == true }
+    }
+
+    private fun cursorContext() = ApplicationContextRunner()
+        .withInitializer(ConfigDataApplicationContextInitializer())
+        .withInitializer { it.beanFactory.setConversionService(ApplicationConversionService.getSharedInstance()) }
+        .withPropertyValues(
+            "spring.config.name=cursor-codec-test",
+            "spring.config.import=configtree:${configTree.toAbsolutePath().toString().replace('\\', '/')}/",
+        )
+        .withBean(Clock::class.java, { clock })
+        .withUserConfiguration(CursorCodec::class.java)
+
     private fun canonical(json: String) = CanonicalJsonObject.from(mapper.readTree(json))
     private fun array(vararg values: Any): ArrayNode = mapper.valueToTree(values)
     private fun assertInvalid(action: () -> Unit) = assertThatThrownBy(action)
@@ -174,6 +239,7 @@ class CursorCodecTest {
 
     private companion object {
         const val SECRET = "test-only-cursor-secret-material-32-bytes-minimum"
+        const val BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
         val ENCODER: Base64.Encoder = Base64.getUrlEncoder().withoutPadding()
     }
 }

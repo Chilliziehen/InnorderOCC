@@ -315,6 +315,7 @@ test("Compose wiring follows application config and completion gates", () => {
 test("Compose enforces least-privilege file-backed secret boundaries", () => {
   const compose = parse(read(composePath));
   const secretNames = [
+    "cursor_hmac_key",
     "minio_app_password",
     "minio_app_user",
     "minio_root_password",
@@ -330,6 +331,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   }
 
   assert.deepEqual(secretTargets(compose.services.core), {
+    cursor_hmac_key: "occ.cursor.secret",
     minio_app_password: "occ.object-storage.secret-key",
     minio_app_user: "occ.object-storage.access-key",
     postgres_flyway_password: "spring.flyway.password",
@@ -365,6 +367,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   }
   for (const names of Object.values(consumers)) names.sort();
   assert.deepEqual(consumers, {
+    cursor_hmac_key: ["core"],
     minio_app_password: ["core", "minio-init"],
     minio_app_user: ["core", "minio-init"],
     minio_root_password: ["minio", "minio-init"],
@@ -408,6 +411,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
 
   const example = read("infra/compose/.env.example");
   const expectedSecretPaths = [
+    "CURSOR_HMAC_KEY_FILE",
     "MINIO_APP_PASSWORD_FILE",
     "MINIO_APP_USER_FILE",
     "MINIO_ROOT_PASSWORD_FILE",
@@ -503,6 +507,7 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /POSTGRES_FLYWAY_PASSWORD_FILE/u);
   assert.match(readme, /POSTGRES_RUNTIME_PASSWORD_FILE/u);
   assert.match(readme, /MINIO_APP_PASSWORD_FILE/u);
+  assert.match(readme, /CURSOR_HMAC_KEY_FILE/u);
   assert.match(readme, /Flyway/u);
   assert.match(readme, /Docker Hub\s+Registry API/u);
   assert.match(readme, /Docker-Content-Digest/u);

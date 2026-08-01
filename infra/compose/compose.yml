@@ -187,6 +187,8 @@ services:
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-innorder-occ}
       FLOWABLE_DATABASE_SCHEMA_UPDATE: "false"
     secrets:
+      - source: cursor_hmac_key
+        target: occ.cursor.secret
       - source: postgres_runtime_password
         target: spring.datasource.password
       - source: postgres_flyway_password
@@ -275,6 +277,8 @@ networks:
     driver: bridge
 
 secrets:
+  cursor_hmac_key:
+    file: ${CURSOR_HMAC_KEY_FILE:?Set CURSOR_HMAC_KEY_FILE}
   postgres_admin_password:
     file: ${POSTGRES_ADMIN_PASSWORD_FILE:?Set POSTGRES_ADMIN_PASSWORD_FILE}
   postgres_flyway_password:
