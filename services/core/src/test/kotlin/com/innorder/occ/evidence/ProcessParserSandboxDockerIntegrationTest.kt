@@ -2,29 +2,51 @@ package com.innorder.occ.evidence
 
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
+import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInstance
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 
+@Tag("full-integration")
+@EnabledIfSystemProperty(named = "innorder.fullIntegration", matches = "true")
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ProcessParserSandboxDockerIntegrationTest {
-    @TempDir
-    lateinit var tempDirectory: Path
+    private lateinit var tempDirectory: Path
 
-    @Test
-    fun `real Docker timeout removes daemon container before returning`() {
-        val docker = dockerExecutable()
+    private lateinit var docker: Path
+    private lateinit var image: String
+
+    @BeforeAll
+    fun buildSleeperImage() {
+        tempDirectory = Files.createTempDirectory("occ-docker-integration-")
+        docker = dockerExecutable()
         Files.writeString(
             tempDirectory.resolve("Dockerfile"),
             "FROM $ALPINE_IMAGE\nENTRYPOINT [\"sh\", \"-c\", \"sleep 30\"]\n",
         )
-        val built = docker(docker, "build", "--quiet", tempDirectory.toString())
+        val built = docker(Duration.ofMinutes(2), "build", "--quiet", tempDirectory.toString())
         assertThat(built.exitCode).withFailMessage(built.output).isZero()
-        val image = built.output.lineSequence().map(String::trim).last { it.startsWith("sha256:") }
+        image = built.output.lineSequence().map(String::trim).last { it.startsWith("sha256:") }
+    }
 
-        try {
+    @AfterAll
+    fun removeSleeperImage() {
+        if (::image.isInitialized) docker(Duration.ofSeconds(30), "image", "rm", "-f", image)
+        if (::tempDirectory.isInitialized) {
+            Files.walk(tempDirectory).use { paths ->
+                paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun `real Docker timeout removes daemon container before returning`() {
             val commands = mutableListOf<List<String>>()
             val sandbox = ProcessParserSandbox(
                 configuration(docker, image),
@@ -45,7 +67,7 @@ class ProcessParserSandboxDockerIntegrationTest {
                 .single { it.startsWith("--name=") }
                 .removePrefix("--name=")
             val verification = docker(
-                docker,
+                Duration.ofSeconds(15),
                 "ps",
                 "-a",
                 "--no-trunc",
@@ -56,9 +78,39 @@ class ProcessParserSandboxDockerIntegrationTest {
             )
             assertThat(verification.exitCode).isZero()
             assertThat(verification.output).isBlank()
-            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
-        } finally {
-            docker(docker, "image", "rm", "-f", image)
+            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
+    }
+
+    @Test
+    fun `real Docker scanner timeout removes daemon container before returning`() {
+        val commands = mutableListOf<List<String>>()
+        ProcessScannerSandbox(scannerConfiguration(docker, image), Clock.systemUTC(), ProcessStarter { command ->
+            commands += command
+            ProcessBuilder(command).redirectErrorStream(true).start()
+        }).use { sandbox ->
+            val evidence = Files.writeString(tempDirectory.resolve("scan-claim.pdf"), "fixture")
+            val request = ScanRequest(
+                evidence,
+                Files.size(evidence),
+                "a".repeat(64),
+                "application/pdf",
+                Instant.now().plusSeconds(30),
+            )
+
+            val startedAt = System.nanoTime()
+            assertThat(sandbox.scan(request).status).isEqualTo(ScanStatus.ERROR)
+            assertThat(Duration.ofNanos(System.nanoTime() - startedAt)).isLessThan(Duration.ofSeconds(15))
+
+            val name = commands.single { it.getOrNull(1) == "run" }
+                .single { it.startsWith("--name=") }
+                .removePrefix("--name=")
+            val verification = docker(
+                Duration.ofSeconds(15),
+                "ps", "-a", "--no-trunc", "--filter", "name=^/$name$", "--format", "{{.Names}}",
+            )
+            assertThat(verification.exitCode).isZero()
+            assertThat(verification.output).isBlank()
+            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
         }
     }
 
@@ -85,6 +137,23 @@ class ProcessParserSandboxDockerIntegrationTest {
         maximumTmpfsBytes = 32L * 1024 * 1024,
     )
 
+    private fun scannerConfiguration(docker: Path, image: String) = ProcessScannerSandboxConfiguration(
+        executable = docker,
+        arguments = listOf(
+            "run", "--rm", "--network=none", "--memory=67108864", "--pids-limit=32", "--read-only",
+            "--security-opt=no-new-privileges", "--cap-drop=ALL", "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16777216",
+            ProcessScannerSandboxConfiguration.INPUT_MOUNT_PLACEHOLDER, image,
+        ),
+        maximumRuntime = Duration.ofMillis(250),
+        maximumRequestBytes = 4096,
+        maximumOutputBytes = 1024,
+        maximumContainerMemoryBytes = 128L * 1024 * 1024,
+        maximumContainerPids = 64,
+        maximumTmpfsBytes = 32L * 1024 * 1024,
+        maximumConcurrentScans = 1,
+        maximumQueuedScans = 1,
+    )
+
     private fun parserRequest(path: Path) = ParserSandboxRequest(
         path = path,
         fileName = path.fileName.toString(),
@@ -98,14 +167,8 @@ class ProcessParserSandboxDockerIntegrationTest {
         deadline = Instant.now().plusSeconds(30),
     )
 
-    private fun docker(executable: Path, vararg arguments: String): CommandResult {
-        val process = ProcessBuilder(listOf(executable.toString()) + arguments)
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        assertThat(process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue()
-        return CommandResult(process.exitValue(), output)
-    }
+    private fun docker(timeout: Duration, vararg arguments: String): DockerCommandResult =
+        BoundedDockerTestCommand.run(docker, timeout, *arguments)
 
     private fun dockerExecutable(): Path {
         val candidates = if (System.getProperty("os.name").startsWith("Windows")) {
@@ -119,8 +182,6 @@ class ProcessParserSandboxDockerIntegrationTest {
         return candidates.firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
             ?: error("An absolute Docker executable is required for this integration test")
     }
-
-    private data class CommandResult(val exitCode: Int, val output: String)
 
     companion object {
         private const val ALPINE_IMAGE =

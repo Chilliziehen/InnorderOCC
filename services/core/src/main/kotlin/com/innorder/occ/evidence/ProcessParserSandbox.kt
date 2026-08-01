@@ -182,16 +182,25 @@ class ProcessParserSandbox internal constructor(
     }
 
     private fun cleanup(containerName: String): CleanupOutcome {
-        val removal = control(configuration.removalCommand(containerName))
-        val verification = control(configuration.absenceVerificationCommand(containerName))
+        val firstRemoval = control(configuration.removalCommand(containerName))
+        val firstVerification = control(configuration.absenceVerificationCommand(containerName))
+        var settleInterrupted = false
+        try {
+            Thread.sleep(CLEANUP_SETTLE_MILLIS)
+        } catch (_: InterruptedException) {
+            settleInterrupted = true
+        }
+        val finalRemoval = control(configuration.removalCommand(containerName))
+        val finalVerification = control(configuration.absenceVerificationCommand(containerName))
         return CleanupOutcome(
-            absent = verification.completed &&
-                !verification.oversized &&
-                verification.exitCode == 0 &&
-                verification.output.toString(Charsets.UTF_8).trim().isEmpty(),
-            interrupted = removal.interrupted || verification.interrupted,
+            absent = provesAbsent(firstVerification) && provesAbsent(finalVerification),
+            interrupted = firstRemoval.interrupted || firstVerification.interrupted || settleInterrupted ||
+                finalRemoval.interrupted || finalVerification.interrupted,
         )
     }
+
+    private fun provesAbsent(outcome: ControlOutcome) = outcome.completed && !outcome.oversized &&
+        outcome.exitCode == 0 && outcome.output.toString(Charsets.UTF_8).trim().isEmpty()
 
     private fun control(command: List<String>): ControlOutcome {
         val process = try {
@@ -318,5 +327,6 @@ class ProcessParserSandbox internal constructor(
         const val INPUT_MOUNT_PLACEHOLDER = ProcessParserSandboxConfiguration.INPUT_MOUNT_PLACEHOLDER
         private const val CONTROL_TIMEOUT_MILLIS = 2_000L
         private const val CONTROL_OUTPUT_TIMEOUT_MILLIS = 1_000L
+        private const val CLEANUP_SETTLE_MILLIS = 500L
     }
 }

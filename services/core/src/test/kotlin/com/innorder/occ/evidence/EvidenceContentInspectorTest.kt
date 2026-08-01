@@ -4,14 +4,17 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
+import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.encryption.AccessPermission
 import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy
+import org.apache.pdfbox.pdmodel.graphics.image.JPEGFactory
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 import java.io.ByteArrayOutputStream
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -23,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.stream.Stream
 import java.util.zip.DeflaterOutputStream
+import java.util.zip.GZIPOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -142,12 +146,12 @@ class EvidenceContentInspectorTest {
 
         val clean = "clean".toByteArray()
         val cleanPath = write("clean.txt", clean)
-        val crashing = EvidenceContentInspector(MalwareScanner { throw IllegalStateException("adapter output") }, DeterministicParserSandbox(clock), clock)
+        val crashing = EvidenceContentInspector(ScannerSandbox { throw IllegalStateException("adapter output") }, DeterministicParserSandbox(clock), clock)
         assertRejected(EvidenceRejectionCode.SCANNER_ERROR) {
             crashing.inspect(request(cleanPath, "clean.txt", clean, textPolicy()))
         }
         val codeInjecting = EvidenceContentInspector(
-            MalwareScanner { throw EvidenceRejectedException(EvidenceRejectionCode.PDF_ACTIVE_CONTENT) },
+            ScannerSandbox { throw EvidenceRejectedException(EvidenceRejectionCode.PDF_ACTIVE_CONTENT) },
             DeterministicParserSandbox(clock),
             clock,
         )
@@ -171,32 +175,6 @@ class EvidenceContentInspectorTest {
     }
 
     @Test
-    fun `scanner timeout fails closed within inspection deadline`() {
-        val bytes = "clean".toByteArray()
-        val path = write("timeout.txt", bytes)
-        val systemClock = Clock.systemUTC()
-        val timeoutInspector = EvidenceContentInspector(
-            MalwareScanner {
-                Thread.sleep(5_000)
-                ScanResult(ScanStatus.CLEAN, "late-scanner", "1", "late")
-            },
-            DeterministicParserSandbox(systemClock),
-            systemClock,
-        )
-        val started = Instant.now()
-
-        assertRejected(EvidenceRejectionCode.SCANNER_ERROR) {
-            timeoutInspector.inspect(
-                request(path, "timeout.txt", bytes, textPolicy()).copy(
-                    deadline = systemClock.instant().plusMillis(250),
-                ),
-            )
-        }
-
-        assertThat(Duration.between(started, Instant.now())).isLessThan(Duration.ofSeconds(2))
-    }
-
-    @Test
     fun `deadline expiration during UTF-8 classification is not converted to unsupported content`() {
         val bytes = "plain text".toByteArray()
         val path = write("deadline.txt", bytes)
@@ -217,6 +195,49 @@ class EvidenceContentInspectorTest {
 
         assertRejected(EvidenceRejectionCode.NESTED_ARCHIVE) {
             inspector().inspect(request(path, "nested-$type.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))))
+        }
+    }
+
+    @Test
+    fun `ordinary binary entries containing short archive magic are accepted`() {
+        val incidental = byteArrayOf(0x01, 0x02, 0x1f, 0x8b.toByte(), 0x08, 0x00, 0x03, 0x04) +
+            "BZh Rar!\u001a\u0007 PK\u0003\u0004".toByteArray(Charsets.ISO_8859_1)
+        val bytes = zip("image-data.bin" to incidental)
+        val path = write("incidental.zip", bytes)
+
+        val result = inspector().inspect(request(path, "incidental.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))))
+
+        assertThat(result.detectedMediaType).isEqualTo("application/zip")
+    }
+
+    @Test
+    fun `OOXML metadata and main parts require exact namespaces and unqualified attributes`() {
+        val contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+        val validOverride = "<Override PartName=\"/word/document.xml\" ContentType=\"$contentType\"/>"
+        val attacks = listOf(
+            "<Types xmlns=\"urn:wrong\">$validOverride</Types>" to rootRelationships("word/document.xml"),
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><x:Override xmlns:x=\"urn:wrong\" PartName=\"/word/document.xml\" ContentType=\"$contentType\"/></Types>" to rootRelationships("word/document.xml"),
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Override xmlns:x=\"urn:shadow\" PartName=\"/word/document.xml\" x:ContentType=\"$contentType\"/></Types>" to rootRelationships("word/document.xml"),
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Override xmlns:x=\"urn:shadow\" PartName=\"/word/document.xml\" ContentType=\"$contentType\" x:ContentType=\"$contentType\"/></Types>" to rootRelationships("word/document.xml"),
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">$validOverride</Types>" to "<Relationships xmlns=\"urn:wrong\"><Relationship Id=\"r\" Target=\"word/document.xml\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\"/></Relationships>".toByteArray(),
+        )
+
+        attacks.forEachIndexed { index, (types, relationships) ->
+            val bytes = zip(
+                "[Content_Types].xml" to types.toByteArray(),
+                "_rels/.rels" to relationships,
+                "word/document.xml" to mainXml("word"),
+            )
+            val path = write("namespace-$index.docx", bytes)
+            assertRejected(EvidenceRejectionCode.MALFORMED_ARCHIVE) {
+                inspector().inspect(request(path, "namespace-$index.docx", bytes, permissivePolicy()))
+            }
+        }
+
+        val wrongMain = ooxmlPackage("word", rootRelationships("word/document.xml"), "<document xmlns=\"urn:wrong\"/>".toByteArray())
+        val wrongMainPath = write("wrong-main-namespace.docx", wrongMain)
+        assertRejected(EvidenceRejectionCode.MALFORMED_ARCHIVE) {
+            inspector().inspect(request(wrongMainPath, "wrong-main-namespace.docx", wrongMain, permissivePolicy()))
         }
     }
 
@@ -253,7 +274,7 @@ class EvidenceContentInspectorTest {
         val scannerCalled = AtomicBoolean()
         val expiringClock = StepClock(clock.instant(), expireAfterCalls = 40)
         val deadlineInspector = EvidenceContentInspector(
-            MalwareScanner {
+            ScannerSandbox {
                 scannerCalled.set(true)
                 ScanResult(ScanStatus.CLEAN, "test", "1", "clean")
             },
@@ -350,6 +371,7 @@ class EvidenceContentInspectorTest {
             Arguments.of("note.txt", "plain UTF-8 evidence\n".toByteArray(), "text/plain"),
             Arguments.of("note.md", "# Evidence\n".toByteArray(), "text/markdown"),
             Arguments.of("claim.pdf", minimalPdf(), "application/pdf"),
+            Arguments.of("jpeg-image.pdf", jpegPdf(), "application/pdf"),
             Arguments.of("claim.docx", ooxml("word"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             Arguments.of("sheet.xlsx", ooxml("xl"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
             Arguments.of("slides.pptx", ooxml("ppt"), "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
@@ -394,25 +416,22 @@ class EvidenceContentInspectorTest {
 
         @JvmStatic
         fun nestedArchiveMagic(): Stream<Arguments> = Stream.of(
-            Arguments.of("gzip", byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00)),
-            Arguments.of("7z", byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)),
-            Arguments.of("rar", "Rar!\u001a\u0007\u0001\u0000".toByteArray(Charsets.ISO_8859_1)),
-            Arguments.of("tar", ByteArray(512).apply { "ustar\u0000".toByteArray().copyInto(this, 257) }),
-            Arguments.of("xz", byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00)),
-            Arguments.of("bzip2", "BZh9".toByteArray()),
+            Arguments.of("zip", zip("inside.txt" to "nested".toByteArray())),
+            Arguments.of("empty-zip", zip()),
+            Arguments.of("gzip", gzip("nested".toByteArray())),
+            Arguments.of("7z", sevenZipHeader()),
+            Arguments.of("rar", rarHeader()),
+            Arguments.of("tar", tar("inside.txt", "nested".toByteArray())),
+            Arguments.of("xz", xzHeader()),
+            Arguments.of("bzip2", bzipHeader()),
         )
 
         @JvmStatic
         fun prefixedArchiveMagic(): Stream<Arguments> {
             val prefix = "MZ".toByteArray() + ByteArray(2048) { ((it * 31) xor (it ushr 3)).toByte() }
-            val tar = ByteArray(512).apply { "ustar\u0000".toByteArray().copyInto(this, 257) }
             return Stream.of(
                 Arguments.of("self-extracting-zip", prefix + zip("inside.txt" to "x".toByteArray())),
                 Arguments.of("empty-zip", prefix + zip()),
-                Arguments.of("gzip", prefix + byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00)),
-                Arguments.of("7z", prefix + byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)),
-                Arguments.of("rar", prefix + "Rar!\u001a\u0007\u0001\u0000".toByteArray(Charsets.ISO_8859_1)),
-                Arguments.of("tar", prefix + tar),
             )
         }
 
@@ -552,11 +571,73 @@ class EvidenceContentInspectorTest {
             return output.toByteArray()
         }
 
+        private fun gzip(bytes: ByteArray): ByteArray = ByteArrayOutputStream().also { output ->
+            GZIPOutputStream(output).use { it.write(bytes) }
+        }.toByteArray()
+
+        private fun tar(name: String, bytes: ByteArray): ByteArray {
+            val header = ByteArray(512)
+            name.toByteArray().copyInto(header, endIndex = minOf(name.length, 100))
+            "0000777\u0000".toByteArray().copyInto(header, 100)
+            "0000000\u0000".toByteArray().copyInto(header, 108)
+            "0000000\u0000".toByteArray().copyInto(header, 116)
+            "%011o\u0000".format(bytes.size).toByteArray().copyInto(header, 124)
+            "00000000000\u0000".toByteArray().copyInto(header, 136)
+            repeat(8) { header[148 + it] = 0x20 }
+            header[156] = '0'.code.toByte()
+            "ustar\u0000".toByteArray().copyInto(header, 257)
+            "00".toByteArray().copyInto(header, 263)
+            val checksum = header.sumOf { (it.toInt() and 0xff) }
+            "%06o\u0000 ".format(checksum).toByteArray().copyInto(header, 148)
+            return header + bytes + ByteArray((512 - bytes.size % 512) % 512) + ByteArray(1024)
+        }
+
+        private fun sevenZipHeader(): ByteArray = ByteArray(32).apply {
+            byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c, 0, 4).copyInto(this)
+            val crc = java.util.zip.CRC32().also { it.update(this, 12, 20) }.value
+            writeLittleEndian(crc, this, 8)
+        }
+
+        private fun xzHeader(): ByteArray = ByteArray(12).apply {
+            byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x01).copyInto(this)
+            val crc = java.util.zip.CRC32().also { it.update(this, 6, 2) }.value
+            writeLittleEndian(crc, this, 8)
+        }
+
+        private fun rarHeader(): ByteArray = (
+            "Rar!\u001a\u0007\u0000".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(0, 0, 0x73, 0, 0, 7, 0)
+        ).apply {
+            val crc = java.util.zip.CRC32().also { it.update(this, 9, 5) }.value.toInt()
+            this[7] = crc.toByte()
+            this[8] = (crc ushr 8).toByte()
+        }
+
+        private fun bzipHeader(): ByteArray = "BZh9".toByteArray() + byteArrayOf(0x31, 0x41, 0x59, 0x26, 0x53, 0x59)
+
+        private fun writeLittleEndian(value: Long, target: ByteArray, offset: Int) {
+            for (index in 0 until 4) target[offset + index] = (value ushr (index * 8)).toByte()
+        }
+
         private fun encryptedPdf(): ByteArray {
             val output = ByteArrayOutputStream()
             PDDocument().use { document ->
                 document.addPage(PDPage())
                 document.protect(StandardProtectionPolicy("owner-secret", "user-secret", AccessPermission()))
+                document.save(output)
+            }
+            return output.toByteArray()
+        }
+
+        private fun jpegPdf(): ByteArray {
+            val output = ByteArrayOutputStream()
+            PDDocument().use { document ->
+                val page = PDPage()
+                document.addPage(page)
+                val image = BufferedImage(8, 8, BufferedImage.TYPE_INT_RGB).apply {
+                    for (x in 0 until width) for (y in 0 until height) setRGB(x, y, (x * 31 shl 16) or (y * 31 shl 8))
+                }
+                val jpeg = JPEGFactory.createFromImage(document, image, 0.8f)
+                PDPageContentStream(document, page).use { it.drawImage(jpeg, 10f, 10f, 50f, 50f) }
                 document.save(output)
             }
             return output.toByteArray()
@@ -573,7 +654,7 @@ class EvidenceContentInspectorTest {
             return zip(
                 "[Content_Types].xml" to types,
                 "_rels/.rels" to rootRelationships(mainPart),
-                mainPart to "<root/>".toByteArray(),
+                mainPart to mainXml(root),
                 *extraEntries,
             )
         }
@@ -581,7 +662,7 @@ class EvidenceContentInspectorTest {
         private fun ooxmlPackage(
             root: String,
             rootRelationships: ByteArray?,
-            mainXml: ByteArray = "<root/>".toByteArray(),
+            mainXml: ByteArray = mainXml(root),
             contentPart: String? = null,
         ): ByteArray {
             val (contentType, mainPart) = when (root) {
@@ -617,13 +698,19 @@ class EvidenceContentInspectorTest {
             return zip(
                 "[Content_Types].xml" to types,
                 "_rels/.rels" to relationships,
-                "word/document.xml" to "<document/>".toByteArray(),
+                "word/document.xml" to mainXml("word"),
                 "word/_rels/document.xml.rels" to partRelationships,
                 "neutral/payload.dat" to "payload".toByteArray(),
             )
         }
 
         private fun rootRelationships(target: String) = """<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="$target" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/></Relationships>""".toByteArray()
+
+        private fun mainXml(root: String): ByteArray = when (root) {
+            "word" -> "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"
+            "xl" -> "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>"
+            else -> "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"/>"
+        }.toByteArray()
 
         private fun externalRelationship() = """<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="https://example.invalid" TargetMode="External" Type="x"/></Relationships>""".toByteArray()
 

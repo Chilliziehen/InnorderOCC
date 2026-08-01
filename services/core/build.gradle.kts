@@ -85,6 +85,10 @@ tasks.withType<Test>().configureEach {
     jvmArgumentProviders.add(CommandLineArgumentProvider {
         listOf("-Dinnorder.evidence-risk-resource-postgresql.required=${evidenceDatabaseRequired.get()}")
     })
+    val fullEvidenceIntegration = providers.gradleProperty("fullEvidenceIntegration")
+        .orElse(providers.systemProperty("innorder.fullIntegration"))
+        .orElse("false")
+    systemProperty("innorder.fullIntegration", fullEvidenceIntegration.get())
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

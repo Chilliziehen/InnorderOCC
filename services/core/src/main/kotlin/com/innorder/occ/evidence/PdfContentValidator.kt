@@ -14,6 +14,8 @@ import org.apache.pdfbox.pdfparser.PDFParser
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException
 import java.io.IOException
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.IdentityHashMap
 
@@ -35,6 +37,7 @@ internal class PdfContentValidator(
                         reject(EvidenceRejectionCode.PDF_ENCRYPTED)
                     }
                     inspectDocument(document.document)
+                    validateTerminalBoundary(path)
                 }
             }
         } catch (rejected: EvidenceRejectedException) {
@@ -46,6 +49,24 @@ internal class PdfContentValidator(
         } catch (failure: RuntimeException) {
             throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_PDF, failure)
         }
+    }
+
+    private fun validateTerminalBoundary(path: Path) {
+        val size = Files.size(path)
+        val tailSize = minOf(size, MAXIMUM_PDF_TAIL_BYTES.toLong()).toInt()
+        val tail = Files.newByteChannel(path).use { channel ->
+            channel.position(size - tailSize)
+            val buffer = java.nio.ByteBuffer.allocate(tailSize)
+            while (buffer.hasRemaining()) {
+                checkDeadline()
+                if (channel.read(buffer) < 0) break
+            }
+            buffer.array()
+        }
+        val terminal = PDF_TERMINAL.find(String(tail, StandardCharsets.ISO_8859_1))
+            ?: reject(EvidenceRejectionCode.POLYGLOT)
+        val xrefOffset = terminal.groupValues[1].toLongOrNull() ?: reject(EvidenceRejectionCode.MALFORMED_PDF)
+        if (xrefOffset !in 0 until size) reject(EvidenceRejectionCode.MALFORMED_PDF)
     }
 
     private fun inspectDocument(document: COSDocument) {
@@ -156,6 +177,8 @@ internal class PdfContentValidator(
         private const val BUFFER_SIZE = 8 * 1024
         private const val MAXIMUM_PDF_OBJECTS = 10_000
         private const val MAXIMUM_PDF_DEPTH = 64
+        private const val MAXIMUM_PDF_TAIL_BYTES = 65_536
+        private val PDF_TERMINAL = Regex("startxref[\\x00\\x09\\x0a\\x0c\\x0d\\x20]+([0-9]+)[\\x00\\x09\\x0a\\x0c\\x0d\\x20]+%%EOF[\\x00\\x09\\x0a\\x0c\\x0d\\x20]*\\z")
         private val ENCRYPTION_KEYS = setOf("Encrypt", "EncryptedPayload")
         private val ACTIVE_KEYS = setOf(
             "A", "AA", "OpenAction", "JS", "JavaScript", "EmbeddedFiles", "EmbeddedFDFs", "EF", "Filespec",
