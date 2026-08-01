@@ -18,6 +18,24 @@ import {
   taskPresentationStateSchema,
   taskCompletionConflictCodeSchema,
   taskCompletionDependencyCodeSchema,
+  taskCompletionGenericConflictProblemDetailsSchema,
+  taskCompletionGenericDependencyProblemDetailsSchema,
+  cohortCreationConflictProblemDetailsSchema,
+  participantProcessStartConflictProblemDetailsSchema,
+  processCommandConflictProblemDetailsSchema,
+  processTransferConflictProblemDetailsSchema,
+  processWaitReleaseConflictProblemDetailsSchema,
+  taskClaimConflictProblemDetailsSchema,
+  taskCommandConflictProblemDetailsSchema,
+  versionedCommandConflictProblemDetailsSchema,
+  workflowAuthorizationUnavailableProblemDetailsSchema,
+  workflowBadRequestProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
+  workflowRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowUnavailableProblemDetailsSchema,
   workflowEventSchemas,
 } from "../src/index.js";
 
@@ -48,6 +66,7 @@ type Schema = {
 type Parameter = { in?: string; name?: string; required?: boolean; schema?: Schema };
 type Response = { $ref?: string; headers?: Record<string, Schema>; content?: Record<string, { schema?: Schema }> };
 type Operation = {
+  operationId?: string;
   parameters?: Parameter[];
   requestBody?: { required?: boolean; content?: Record<string, { schema?: Schema }> };
   responses?: Record<string, Response>;
@@ -117,8 +136,39 @@ const operations = {
   "/api/v1/events": { get: undefined },
 } as const;
 
-const errorStatuses = ["400", "401", "403", "404", "409", "503", "500"];
 const commandMethods = new Set(["post", "patch", "delete"]);
+const cursorOperations = new Set([
+  "listCohorts", "listProcesses", "listProcessParticipants", "listProcessTasks",
+  "listProcessTimeline", "listMyWork", "listTaskHistory", "listTaskBlockers",
+  "listNotifications", "catchUpAuthorizedEvents",
+]);
+const noNotFoundOperations = new Set([
+  "listCohorts", "listProcesses", "listMyWork", "listNotifications", "catchUpAuthorizedEvents",
+]);
+const workflowEngineOperations = new Set([
+  "startParticipantProcess", "suspendProcess", "resumeProcess", "cancelProcess", "failProcess",
+  "transferProcess", "reconcileProcess", "releaseProcessWait", "claimTask", "completeTask", "failTask",
+]);
+const conflictResponseByOperation: Record<string, string> = {
+  createCohort: "CohortCreationConflict",
+  updateCohort: "VersionedCommandConflict",
+  addCohortMember: "VersionedCommandConflict",
+  removeCohortMember: "VersionedCommandConflict",
+  archiveCohort: "VersionedCommandConflict",
+  transferCohortOwner: "VersionedCommandConflict",
+  startParticipantProcess: "ParticipantProcessStartConflict",
+  suspendProcess: "ProcessCommandConflict",
+  resumeProcess: "ProcessCommandConflict",
+  cancelProcess: "ProcessCommandConflict",
+  failProcess: "ProcessCommandConflict",
+  transferProcess: "ProcessTransferConflict",
+  reconcileProcess: "ProcessCommandConflict",
+  releaseProcessWait: "ProcessWaitReleaseConflict",
+  claimTask: "TaskClaimConflict",
+  completeTask: "TaskBlocked",
+  failTask: "TaskCommandConflict",
+  markNotificationRead: "VersionedCommandConflict",
+};
 const parametersFor = (operation: Operation): Parameter[] => operation.parameters ?? [];
 const resolveParameter = (parameter: Parameter): Parameter => {
   const name = parameter.schema?.$ref?.replace("#/components/parameters/", "");
@@ -175,32 +225,30 @@ describe("workflow OpenAPI surface", () => {
     }
   });
 
-  it("uses Problem Details for the complete workflow error matrix", () => {
+  it("binds each operation to status-specific and operation-specific errors", () => {
     for (const [path, methods] of Object.entries(operations)) {
       for (const method of Object.keys(methods)) {
         const operation = document.paths[path][method];
-        expect(Object.keys(operation.responses ?? {})).toEqual(expect.arrayContaining(errorStatuses));
-        for (const status of errorStatuses) {
-          const response = operation.responses?.[status];
-          const component = response?.$ref?.replace("#/components/responses/", "");
-          const resolved = component ? document.components.responses[component] : response;
-          const schema = resolved?.content?.["application/problem+json"]?.schema;
-          if (path === "/api/v1/tasks/{taskId}/complete" && status === "409") {
-            expect(schema?.oneOf).toEqual([
-              { $ref: "#/components/schemas/TaskBlockedProblem" },
-              { $ref: "#/components/schemas/TaskCompletionConflictProblem" },
-            ]);
-          } else if (path === "/api/v1/tasks/{taskId}/complete" && status === "503") {
-            expect(schema?.oneOf).toEqual([
-              { $ref: "#/components/schemas/TaskGateUnavailableProblem" },
-              { $ref: "#/components/schemas/TaskCompletionDependencyProblem" },
-            ]);
-          } else {
-            expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
-          }
-        }
+        const operationId = operation.operationId ?? "";
+        expect(operation.responses?.["400"]?.$ref).toBe(
+          `#/components/responses/${cursorOperations.has(operationId) ? "WorkflowBadRequest" : "WorkflowRequestError"}`,
+        );
+        expect(operation.responses?.["401"]?.$ref).toBe("#/components/responses/WorkflowUnauthorized");
+        expect(operation.responses?.["403"]?.$ref).toBe("#/components/responses/WorkflowForbidden");
+        expect(operation.responses?.["500"]?.$ref).toBe("#/components/responses/WorkflowInternalError");
+        expect(operation.responses?.["503"]?.$ref).toBe(
+          `#/components/responses/${operationId === "completeTask" ? "TaskGateUnavailable" : workflowEngineOperations.has(operationId) ? "WorkflowUnavailable" : "WorkflowAuthorizationUnavailable"}`,
+        );
+        expect(operation.responses?.["404"]?.$ref).toBe(
+          noNotFoundOperations.has(operationId) ? undefined : "#/components/responses/WorkflowNotFound",
+        );
+        const conflictResponse = conflictResponseByOperation[operationId];
+        expect(operation.responses?.["409"]?.$ref).toBe(
+          conflictResponse === undefined ? undefined : `#/components/responses/${conflictResponse}`,
+        );
       }
     }
+    expect(JSON.stringify(document.paths)).not.toContain("#/components/responses/WorkflowError");
   });
 });
 
@@ -215,6 +263,40 @@ describe("workflow OpenAPI schema parity", () => {
     expect(document.components.schemas.PageSize).toEqual({ type: "integer", minimum: 1, maximum: 100, default: 25 });
     expect(document.components.schemas.ProblemCode.enum).toEqual(problemCodeSchema.options);
     expect(document.components.schemas.ProblemDetails.properties?.code).toEqual({ $ref: "#/components/schemas/ProblemCode" });
+  });
+
+  it("keeps every reusable and operation conflict schema aligned with Zod", () => {
+    const variants = {
+      WorkflowRequestProblem: workflowRequestProblemDetailsSchema,
+      WorkflowBadRequestProblem: workflowBadRequestProblemDetailsSchema,
+      WorkflowUnauthorizedProblem: workflowUnauthorizedProblemDetailsSchema,
+      WorkflowForbiddenProblem: workflowForbiddenProblemDetailsSchema,
+      WorkflowNotFoundProblem: workflowNotFoundProblemDetailsSchema,
+      WorkflowInternalProblem: workflowInternalProblemDetailsSchema,
+      WorkflowAuthorizationUnavailableProblem: workflowAuthorizationUnavailableProblemDetailsSchema,
+      WorkflowUnavailableProblem: workflowUnavailableProblemDetailsSchema,
+      CohortCreationConflictProblem: cohortCreationConflictProblemDetailsSchema,
+      VersionedCommandConflictProblem: versionedCommandConflictProblemDetailsSchema,
+      ParticipantProcessStartConflictProblem: participantProcessStartConflictProblemDetailsSchema,
+      ProcessCommandConflictProblem: processCommandConflictProblemDetailsSchema,
+      ProcessTransferConflictProblem: processTransferConflictProblemDetailsSchema,
+      ProcessWaitReleaseConflictProblem: processWaitReleaseConflictProblemDetailsSchema,
+      TaskClaimConflictProblem: taskClaimConflictProblemDetailsSchema,
+      TaskCommandConflictProblem: taskCommandConflictProblemDetailsSchema,
+      TaskCompletionConflictProblem: taskCompletionGenericConflictProblemDetailsSchema,
+      TaskCompletionDependencyProblem: taskCompletionGenericDependencyProblemDetailsSchema,
+    };
+    for (const [name, zodSchema] of Object.entries(variants)) {
+      const zodJson = z.toJSONSchema(zodSchema) as Schema;
+      const openApi = document.components.schemas[name].allOf?.[1];
+      expect(openApi?.required, name).toEqual(["status", "code"]);
+      expect(openApi?.properties?.status, `${name}.status`).toEqual({
+        type: "integer", const: zodJson.properties?.status?.const,
+      });
+      expect(openApi?.properties?.code?.type, `${name}.code.type`).toBe("string");
+      expect(openApi?.properties?.code?.const, `${name}.code.const`).toBe(zodJson.properties?.code?.const);
+      expect(openApi?.properties?.code?.enum, `${name}.code.enum`).toEqual(zodJson.properties?.code?.enum);
+    }
   });
 
   it("keeps all workflow object schemas closed with exact required fields", () => {
@@ -298,7 +380,7 @@ describe("workflow OpenAPI schema parity", () => {
           type: "object",
           required: ["status", "code"],
           properties: {
-            status: { const: 409 },
+            status: { type: "integer", const: 409 },
             code: { type: "string", enum: taskCompletionConflictCodeSchema.options },
           },
         },
@@ -311,7 +393,7 @@ describe("workflow OpenAPI schema parity", () => {
           type: "object",
           required: ["status", "code"],
           properties: {
-            status: { const: 503 },
+            status: { type: "integer", const: 503 },
             code: { type: "string", enum: taskCompletionDependencyCodeSchema.options },
           },
         },

@@ -50,6 +50,34 @@ import {
   taskCompletionDependencyCodeSchema,
   taskCompletionDependencyProblemDetailsSchema,
   taskGateUnavailableProblemDetailsSchema,
+  cohortCreationConflictProblemDetailsSchema,
+  participantProcessStartConflictProblemDetailsSchema,
+  processCommandConflictProblemDetailsSchema,
+  processTransferConflictProblemDetailsSchema,
+  processWaitReleaseConflictProblemDetailsSchema,
+  taskClaimConflictProblemDetailsSchema,
+  taskCommandConflictProblemDetailsSchema,
+  versionedCommandConflictProblemDetailsSchema,
+  workflowAuthorizationUnavailableProblemDetailsSchema,
+  workflowBadRequestProblemDetailsSchema,
+  workflowCommonProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
+  workflowRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowUnavailableProblemDetailsSchema,
+  cohortCreationOperationProblemDetailsSchema,
+  participantProcessStartOperationProblemDetailsSchema,
+  processCommandOperationProblemDetailsSchema,
+  processTransferOperationProblemDetailsSchema,
+  processWaitReleaseOperationProblemDetailsSchema,
+  taskClaimOperationProblemDetailsSchema,
+  taskCommandOperationProblemDetailsSchema,
+  taskCompletionProblemDetailsSchema,
+  versionedCommandOperationProblemDetailsSchema,
+  workflowDetailProblemDetailsSchema,
+  workflowListProblemDetailsSchema,
   transferCohortOwnerRequestSchema,
   transferProcessRequestSchema,
   updateCohortRequestSchema,
@@ -298,29 +326,94 @@ describe("workflow Problem Details", () => {
     expect(() => taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["Invalid Provider"] })).toThrow();
   });
 
-  it("keeps generic completion conflict and dependency codes valid", () => {
-    for (const [status, code] of [
-      [409, "OCC_STALE_VERSION"],
-      [409, "OCC_INVALID_TRANSITION"],
-      [409, "OCC_PROCESS_NOT_RUNNING"],
-      [503, "OCC_AUTHORIZATION_UNAVAILABLE"],
-      [503, "OCC_WORKFLOW_UNAVAILABLE"],
-    ] as const) {
-      expect(problemDetailsSchema.parse({
-        type: "https://innorder.example/problems/workflow",
-        title: "Workflow error",
-        status,
-        code,
-        correlationId: id,
-      })).toBeDefined();
+  it("binds reusable workflow problems to their HTTP status and code set", () => {
+    const cases = [
+      [workflowBadRequestProblemDetailsSchema, 400, "OCC_INVALID_CURSOR"],
+      [workflowUnauthorizedProblemDetailsSchema, 401, "OCC_UNAUTHENTICATED"],
+      [workflowForbiddenProblemDetailsSchema, 403, "OCC_FORBIDDEN"],
+      [workflowNotFoundProblemDetailsSchema, 404, "OCC_NOT_FOUND"],
+      [workflowInternalProblemDetailsSchema, 500, "OCC_INTERNAL_ERROR"],
+      [workflowUnavailableProblemDetailsSchema, 503, "OCC_WORKFLOW_UNAVAILABLE"],
+    ] as const;
+    for (const [schema, status, code] of cases) {
+      const value = { ...problem, status, code };
+      expect(schema.parse(value)).toEqual(value);
+      expect(workflowCommonProblemDetailsSchema.parse(value)).toEqual(value);
+      expect(() => schema.parse({ ...value, status: status + 1 })).toThrow();
+      expect(() => schema.parse({ ...value, code: "OCC_TASK_BLOCKED" })).toThrow();
+    }
+    expect(workflowRequestProblemDetailsSchema.parse({
+      ...problem, status: 400, code: "OCC_INVALID_REQUEST",
+    })).toBeDefined();
+    expect(() => workflowRequestProblemDetailsSchema.parse({
+      ...problem, status: 400, code: "OCC_INVALID_CURSOR",
+    })).toThrow();
+    expect(workflowAuthorizationUnavailableProblemDetailsSchema.parse({
+      ...problem, code: "OCC_AUTHORIZATION_UNAVAILABLE",
+    })).toBeDefined();
+    expect(() => workflowAuthorizationUnavailableProblemDetailsSchema.parse({
+      ...problem, code: "OCC_WORKFLOW_UNAVAILABLE",
+    })).toThrow();
+  });
+
+  it("binds conflict codes to the operation that can emit them", () => {
+    const cases = [
+      [cohortCreationConflictProblemDetailsSchema, "OCC_DUPLICATE_COHORT_CODE", "OCC_STALE_VERSION"],
+      [versionedCommandConflictProblemDetailsSchema, "OCC_STALE_VERSION", "OCC_CLAIM_CONFLICT"],
+      [participantProcessStartConflictProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS", "OCC_CLAIM_CONFLICT"],
+      [processCommandConflictProblemDetailsSchema, "OCC_PROCESS_NOT_RUNNING", "OCC_WAIT_NOT_ACTIVE"],
+      [processTransferConflictProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS", "OCC_WAIT_NOT_ACTIVE"],
+      [processWaitReleaseConflictProblemDetailsSchema, "OCC_WAIT_NOT_ACTIVE", "OCC_CLAIM_CONFLICT"],
+      [taskClaimConflictProblemDetailsSchema, "OCC_CLAIM_CONFLICT", "OCC_WAIT_NOT_ACTIVE"],
+      [taskCommandConflictProblemDetailsSchema, "OCC_INVALID_TRANSITION", "OCC_CLAIM_CONFLICT"],
+    ] as const;
+    for (const [schema, code, unrelatedCode] of cases) {
+      expect(schema.parse({ ...problem, status: 409, code })).toBeDefined();
+      expect(() => schema.parse({ ...problem, status: 503, code })).toThrow();
+      expect(() => schema.parse({ ...problem, status: 409, code: unrelatedCode })).toThrow();
     }
   });
 
-  it("requires specialized fields whenever completion uses a specialized code", () => {
+  it("exports complete status-discriminated error contracts per operation family", () => {
+    expect(workflowListProblemDetailsSchema.parse({
+      ...problem, status: 400, code: "OCC_INVALID_CURSOR",
+    })).toBeDefined();
+    expect(workflowDetailProblemDetailsSchema.parse({
+      ...problem, status: 404, code: "OCC_NOT_FOUND",
+    })).toBeDefined();
+    const cases = [
+      [cohortCreationOperationProblemDetailsSchema, "OCC_DUPLICATE_COHORT_CODE"],
+      [versionedCommandOperationProblemDetailsSchema, "OCC_STALE_VERSION"],
+      [participantProcessStartOperationProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS"],
+      [processCommandOperationProblemDetailsSchema, "OCC_PROCESS_NOT_RUNNING"],
+      [processTransferOperationProblemDetailsSchema, "OCC_PARTICIPANT_PROCESS_EXISTS"],
+      [processWaitReleaseOperationProblemDetailsSchema, "OCC_WAIT_NOT_ACTIVE"],
+      [taskClaimOperationProblemDetailsSchema, "OCC_CLAIM_CONFLICT"],
+      [taskCommandOperationProblemDetailsSchema, "OCC_INVALID_TRANSITION"],
+    ] as const;
+    for (const [schema, code] of cases) {
+      expect(schema.parse({ ...problem, status: 409, code })).toBeDefined();
+      expect(() => schema.parse({ ...problem, status: 409, code: "OCC_TASK_BLOCKED" })).toThrow();
+    }
+    expect(taskCompletionProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_TASK_BLOCKED", blockerCodes: ["EVIDENCE_REQUIRED"],
+    })).toBeDefined();
+    expect(taskCompletionProblemDetailsSchema.parse({
+      ...problem, providerKeys: ["evidence"],
+    })).toBeDefined();
+  });
+
+  it("requires specialized fields in completion response unions", () => {
     expect(() => taskCompletionConflictProblemDetailsSchema.parse({
       ...problem, status: 409, code: "OCC_TASK_BLOCKED",
     })).toThrow();
     expect(() => taskCompletionDependencyProblemDetailsSchema.parse(problem)).toThrow();
+    expect(taskCompletionConflictProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_TASK_BLOCKED", blockerCodes: ["EVIDENCE_REQUIRED"],
+    })).toBeDefined();
+    expect(taskCompletionDependencyProblemDetailsSchema.parse({
+      ...problem, providerKeys: ["evidence"],
+    })).toBeDefined();
     expect(taskCompletionConflictProblemDetailsSchema.parse({
       ...problem, status: 409, code: "OCC_STALE_VERSION",
     })).toBeDefined();
@@ -331,19 +424,10 @@ describe("workflow Problem Details", () => {
 
   it("allows only status-specific generic completion codes", () => {
     expect(taskCompletionConflictCodeSchema.options).toEqual([
-      "OCC-API-CONFLICT",
-      "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
-      "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
-      "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
-      "OCC-COMMAND-OPTIMISTIC-CONFLICT",
-      "OCC_IDEMPOTENCY_CONFLICT",
-      "OCC_DUPLICATE_COHORT_CODE",
       "OCC_STALE_VERSION",
-      "OCC_CLAIM_CONFLICT",
-      "OCC_PARTICIPANT_PROCESS_EXISTS",
+      "OCC_IDEMPOTENCY_CONFLICT",
       "OCC_INVALID_TRANSITION",
       "OCC_PROCESS_NOT_RUNNING",
-      "OCC_WAIT_NOT_ACTIVE",
     ]);
     expect(taskCompletionDependencyCodeSchema.options).toEqual([
       "OCC_AUTHORIZATION_UNAVAILABLE",

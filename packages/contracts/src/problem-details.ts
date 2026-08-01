@@ -106,20 +106,116 @@ export const taskGateUnavailableProblemDetailsSchema = problemDetailsSchema
   })
   .strict();
 
+const statusProblemDetails = <
+  const Status extends number,
+  CodeSchema extends z.ZodType,
+>(status: Status, code: CodeSchema) => problemDetailsSchema
+  .extend({ status: z.literal(status), code })
+  .strict();
+
+export const workflowRequestProblemDetailsSchema = statusProblemDetails(
+  400,
+  z.literal("OCC_INVALID_REQUEST"),
+);
+export const workflowBadRequestProblemDetailsSchema = statusProblemDetails(
+  400,
+  z.enum(["OCC_INVALID_REQUEST", "OCC_INVALID_CURSOR"]),
+);
+export const workflowUnauthorizedProblemDetailsSchema = statusProblemDetails(
+  401,
+  z.literal("OCC_UNAUTHENTICATED"),
+);
+export const workflowForbiddenProblemDetailsSchema = statusProblemDetails(
+  403,
+  z.literal("OCC_FORBIDDEN"),
+);
+export const workflowNotFoundProblemDetailsSchema = statusProblemDetails(
+  404,
+  z.literal("OCC_NOT_FOUND"),
+);
+export const workflowInternalProblemDetailsSchema = statusProblemDetails(
+  500,
+  z.literal("OCC_INTERNAL_ERROR"),
+);
+export const workflowAuthorizationUnavailableProblemDetailsSchema = statusProblemDetails(
+  503,
+  z.literal("OCC_AUTHORIZATION_UNAVAILABLE"),
+);
+export const workflowUnavailableProblemDetailsSchema = statusProblemDetails(
+  503,
+  z.enum(["OCC_AUTHORIZATION_UNAVAILABLE", "OCC_WORKFLOW_UNAVAILABLE"]),
+);
+
+export const workflowCommonProblemDetailsSchema = z.discriminatedUnion("status", [
+  workflowBadRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+  workflowUnavailableProblemDetailsSchema,
+]);
+
+export const cohortCreationConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum(["OCC_IDEMPOTENCY_CONFLICT", "OCC_DUPLICATE_COHORT_CODE"]),
+);
+export const versionedCommandConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum(["OCC_STALE_VERSION", "OCC_IDEMPOTENCY_CONFLICT", "OCC_INVALID_TRANSITION"]),
+);
+export const participantProcessStartConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum([
+    "OCC_STALE_VERSION",
+    "OCC_IDEMPOTENCY_CONFLICT",
+    "OCC_INVALID_TRANSITION",
+    "OCC_PARTICIPANT_PROCESS_EXISTS",
+  ]),
+);
+export const processCommandConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum([
+    "OCC_STALE_VERSION",
+    "OCC_IDEMPOTENCY_CONFLICT",
+    "OCC_INVALID_TRANSITION",
+    "OCC_PROCESS_NOT_RUNNING",
+  ]),
+);
+export const processTransferConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum([
+    "OCC_STALE_VERSION",
+    "OCC_IDEMPOTENCY_CONFLICT",
+    "OCC_INVALID_TRANSITION",
+    "OCC_PROCESS_NOT_RUNNING",
+    "OCC_PARTICIPANT_PROCESS_EXISTS",
+  ]),
+);
+export const processWaitReleaseConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum([
+    "OCC_STALE_VERSION",
+    "OCC_IDEMPOTENCY_CONFLICT",
+    "OCC_PROCESS_NOT_RUNNING",
+    "OCC_WAIT_NOT_ACTIVE",
+  ]),
+);
+export const taskClaimConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  z.enum([
+    "OCC_STALE_VERSION",
+    "OCC_IDEMPOTENCY_CONFLICT",
+    "OCC_INVALID_TRANSITION",
+    "OCC_PROCESS_NOT_RUNNING",
+    "OCC_CLAIM_CONFLICT",
+  ]),
+);
+
 export const taskCompletionConflictCodeSchema = z.enum([
-  "OCC-API-CONFLICT",
-  "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
-  "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
-  "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
-  "OCC-COMMAND-OPTIMISTIC-CONFLICT",
-  "OCC_IDEMPOTENCY_CONFLICT",
-  "OCC_DUPLICATE_COHORT_CODE",
   "OCC_STALE_VERSION",
-  "OCC_CLAIM_CONFLICT",
-  "OCC_PARTICIPANT_PROCESS_EXISTS",
+  "OCC_IDEMPOTENCY_CONFLICT",
   "OCC_INVALID_TRANSITION",
   "OCC_PROCESS_NOT_RUNNING",
-  "OCC_WAIT_NOT_ACTIVE",
 ]);
 
 export const taskCompletionDependencyCodeSchema = z.enum([
@@ -127,13 +223,97 @@ export const taskCompletionDependencyCodeSchema = z.enum([
   "OCC_WORKFLOW_UNAVAILABLE",
 ]);
 
-export const taskCompletionConflictProblemDetailsSchema = problemDetailsSchema
-  .extend({ status: z.literal(409), code: taskCompletionConflictCodeSchema })
-  .strict();
+export const taskCommandConflictProblemDetailsSchema = statusProblemDetails(
+  409,
+  taskCompletionConflictCodeSchema,
+);
 
-export const taskCompletionDependencyProblemDetailsSchema = problemDetailsSchema
-  .extend({ status: z.literal(503), code: taskCompletionDependencyCodeSchema })
-  .strict();
+export const taskCompletionGenericConflictProblemDetailsSchema = taskCommandConflictProblemDetailsSchema;
+export const taskCompletionConflictProblemDetailsSchema = z.union([
+  taskCompletionGenericConflictProblemDetailsSchema,
+  taskBlockedProblemDetailsSchema,
+]);
+
+export const taskCompletionGenericDependencyProblemDetailsSchema = statusProblemDetails(
+  503,
+  taskCompletionDependencyCodeSchema,
+);
+export const taskCompletionDependencyProblemDetailsSchema = z.union([
+  taskCompletionGenericDependencyProblemDetailsSchema,
+  taskGateUnavailableProblemDetailsSchema,
+]);
+
+export const workflowListProblemDetailsSchema = z.discriminatedUnion("status", [
+  workflowBadRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowAuthorizationUnavailableProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+]);
+export const workflowDetailProblemDetailsSchema = z.discriminatedUnion("status", [
+  workflowRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
+  workflowAuthorizationUnavailableProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+]);
+
+const workflowCommandProblemSchemas = [
+  workflowRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
+  workflowAuthorizationUnavailableProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+] as const;
+const workflowEngineCommandProblemSchemas = [
+  workflowRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
+  workflowUnavailableProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+] as const;
+
+export const cohortCreationOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowCommandProblemSchemas,
+  cohortCreationConflictProblemDetailsSchema,
+]);
+export const versionedCommandOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowCommandProblemSchemas,
+  versionedCommandConflictProblemDetailsSchema,
+]);
+export const participantProcessStartOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowEngineCommandProblemSchemas,
+  participantProcessStartConflictProblemDetailsSchema,
+]);
+export const processCommandOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowEngineCommandProblemSchemas,
+  processCommandConflictProblemDetailsSchema,
+]);
+export const processTransferOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowEngineCommandProblemSchemas,
+  processTransferConflictProblemDetailsSchema,
+]);
+export const processWaitReleaseOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowEngineCommandProblemSchemas,
+  processWaitReleaseConflictProblemDetailsSchema,
+]);
+export const taskClaimOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowEngineCommandProblemSchemas,
+  taskClaimConflictProblemDetailsSchema,
+]);
+export const taskCommandOperationProblemDetailsSchema = z.discriminatedUnion("status", [
+  ...workflowEngineCommandProblemSchemas,
+  taskCommandConflictProblemDetailsSchema,
+]);
+export const taskCompletionProblemDetailsSchema = z.union([
+  ...workflowEngineCommandProblemSchemas,
+  taskCompletionGenericConflictProblemDetailsSchema,
+  taskBlockedProblemDetailsSchema,
+  taskGateUnavailableProblemDetailsSchema,
+]);
 
 export type WorkflowErrorCode = z.infer<typeof workflowErrorCodeSchema>;
 export type PlatformProblemCode = z.infer<typeof platformProblemCodeSchema>;
@@ -142,3 +322,4 @@ export type TaskBlockedProblemDetails = z.infer<typeof taskBlockedProblemDetails
 export type TaskGateUnavailableProblemDetails = z.infer<typeof taskGateUnavailableProblemDetailsSchema>;
 export type TaskCompletionConflictProblemDetails = z.infer<typeof taskCompletionConflictProblemDetailsSchema>;
 export type TaskCompletionDependencyProblemDetails = z.infer<typeof taskCompletionDependencyProblemDetailsSchema>;
+export type WorkflowCommonProblemDetails = z.infer<typeof workflowCommonProblemDetailsSchema>;

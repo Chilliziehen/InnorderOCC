@@ -203,6 +203,24 @@ describe("OCC Core OpenAPI system status", () => {
       maxLength: LOGIN_PASSWORD_MAX_CODE_POINTS,
     });
 
+    const workflowSchemaByResponse: Record<string, string> = {
+      WorkflowRequestError: "WorkflowRequestProblem",
+      WorkflowBadRequest: "WorkflowBadRequestProblem",
+      WorkflowUnauthorized: "WorkflowUnauthorizedProblem",
+      WorkflowForbidden: "WorkflowForbiddenProblem",
+      WorkflowNotFound: "WorkflowNotFoundProblem",
+      WorkflowInternalError: "WorkflowInternalProblem",
+      WorkflowAuthorizationUnavailable: "WorkflowAuthorizationUnavailableProblem",
+      WorkflowUnavailable: "WorkflowUnavailableProblem",
+      CohortCreationConflict: "CohortCreationConflictProblem",
+      VersionedCommandConflict: "VersionedCommandConflictProblem",
+      ParticipantProcessStartConflict: "ParticipantProcessStartConflictProblem",
+      ProcessCommandConflict: "ProcessCommandConflictProblem",
+      ProcessTransferConflict: "ProcessTransferConflictProblem",
+      ProcessWaitReleaseConflict: "ProcessWaitReleaseConflictProblem",
+      TaskClaimConflict: "TaskClaimConflictProblem",
+      TaskCommandConflict: "TaskCommandConflictProblem",
+    };
     for (const [name, response] of Object.entries(document.components.responses ?? {})) {
       const schema = response.content?.["application/problem+json"]?.schema;
       if (name === "TaskBlocked" || name === "TaskGateUnavailable") {
@@ -211,6 +229,8 @@ describe("OCC Core OpenAPI system status", () => {
           ? "TaskCompletionConflictProblem"
           : "TaskCompletionDependencyProblem";
         expect(schema?.oneOf?.[1]?.$ref).toBe(`#/components/schemas/${genericSchema}`);
+      } else if (workflowSchemaByResponse[name] !== undefined) {
+        expect(schema?.$ref).toBe(`#/components/schemas/${workflowSchemaByResponse[name]}`);
       } else {
         expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
       }
@@ -258,6 +278,8 @@ describe("OCC Core OpenAPI system status", () => {
               ? "TaskCompletionConflictProblem"
               : "TaskCompletionDependencyProblem";
             expect(schema?.oneOf?.[1]?.$ref).toBe(`#/components/schemas/${genericSchema}`);
+          } else if (path.startsWith("/api/v1/cohorts") || path.startsWith("/api/v1/processes") || path.startsWith("/api/v1/tasks") || path.startsWith("/api/v1/me/notifications") || path === "/api/v1/events") {
+            expect(response.$ref).toMatch(/^#\/components\/responses\/(?!WorkflowError$)/);
           } else {
             expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
           }
