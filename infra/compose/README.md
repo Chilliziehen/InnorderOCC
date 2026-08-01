@@ -20,12 +20,27 @@ PKCS#8 private/X.509 public RSA key pair. Create `infra/compose/.env` from
 - `MINIO_APP_PASSWORD_FILE`
 - `OCC_JWT_PRIVATE_KEY_FILE`
 - `OCC_JWT_PUBLIC_KEY_FILE`
+- `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE`
 
 Set required `OCC_JWT_ISSUER` to the deployment's explicit HTTPS issuer URI.
 
 The three PostgreSQL passwords must differ. The MinIO application username and
 password must differ from the root credentials. Blank paths stop Compose
 interpolation. Do not commit `.env` or any secret file.
+
+The bootstrap password is a one-shot bind mount, not a Compose file secret.
+On a Linux host, create its parent and file without a symbolic link, owned by
+UID/GID `10001`; the parent must be `0700` and the file `0400`. Core mounts it
+read-only at `/run/innorder-bootstrap/admin-password`, expects owner `innorder`,
+and never deletes it through the read-only mount. `flowable-init` does not receive
+the bootstrap password.
+
+After the first successful startup has created exactly one administrator and the
+active platform policy, stop Core. Atomically replace the host password file with
+an owner-only, zero-byte `0400` tombstone at the same required path, then
+force-recreate Core. Recreating closes the old bind-mounted inode; the existing-user
+gate restarts without reading the tombstone. Never retain the original bootstrap
+password after this verification.
 
 ## Start
 

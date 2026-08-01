@@ -65,7 +65,7 @@ java -version
 
 ## 密钥、umask 与配置文件准备
 
-严格执行[第 03 章 Linux 密钥和配置步骤](03-secrets-and-configuration.md)。八个互异标量密钥和一对 JWT PEM 文件必须位于仓库外持久本地文件系统；目录 `0700`、文件 `0600`，由执行 Compose 的批准身份拥有。`infra/compose/.env` 只能包含十个绝对密钥路径、必填 issuer 和十二个可选非敏感覆盖值。
+严格执行[第 03 章 Linux 密钥和配置步骤](03-secrets-and-configuration.md)。八个互异标量密钥和一对 JWT PEM 文件必须位于仓库外持久本地文件系统；长期密钥目录 `0700`、文件 `0600`，由执行 Compose 的批准身份拥有。另按第 03 章创建不含符号链接、numeric `10001:10001`、父目录 `0700`、文件 `0400` 的一次性管理员引导文件，并设置 `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE`。`infra/compose/.env` 只能包含十一个绝对文件路径、必填 issuer 和十二个可选非敏感覆盖值。
 
 ```bash
 set -euo pipefail
@@ -106,7 +106,7 @@ repository_root=$(realpath "$OCC_REPOSITORY_ROOT")
 cd -- "$repository_root"
 declare -A config=()
 declare -A allowed=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue
@@ -181,6 +181,8 @@ compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.y
 "${compose[@]}" up -d
 "${compose[@]}" ps -a
 ```
+
+clean deployment 执行 `up -d` 后，只要数据库门禁返回 `1|1`，就立即执行第 03 章“管理员引导密码生命周期”的停止 Core、零字节墓碑原子替换和 force-recreate 流程，不等待全栈状态验收。完成前不得结束部署窗口或把原密码留在主机；`flowable-init` 从始至终不挂载该文件。
 
 **注意：** Compose v5 的 `up -d --wait` 可能因成功完成且退出的 `postgres-init`/`flowable-init`/`minio-init` 返回非零，即使八个长运行服务均健康。标准流程不用该返回值作最终判定；必须分别检查三个精确退出码和八个健康状态。
 

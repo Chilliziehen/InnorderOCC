@@ -198,6 +198,16 @@ services:
       OCC_JWT_ISSUER: ${OCC_JWT_ISSUER:?Set OCC_JWT_ISSUER}
       OCC_JWT_PRIVATE_KEY_FILE: /run/secrets/occ-jwt-private-key.pem
       OCC_JWT_PUBLIC_KEY_FILE: /run/secrets/occ-jwt-public-key.pem
+      OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/innorder-bootstrap/admin-password
+      OCC_BOOTSTRAP_SECRET_OWNER: innorder
+      OCC_BOOTSTRAP_DELETE_SECRET: "false"
+    volumes:
+      - type: bind
+        source: ${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:?Set OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE}
+        target: /run/innorder-bootstrap/admin-password
+        read_only: true
+        bind:
+          create_host_path: false
     secrets:
       - source: jwt_private_key
         target: occ-jwt-private-key.pem

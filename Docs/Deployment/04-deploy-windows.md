@@ -82,7 +82,9 @@ Invoke-CheckedNative -FilePath './gradlew.bat' -ArgumentList @('--version') -Fai
 
 ## 密钥准备与第 03 章门禁
 
-严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建八个互异标量文件和一对 JWT PEM 文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建只保存十个绝对文件路径、必填 issuer 和十二个可选非敏感覆盖项的 `infra/compose/.env`。
+严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建八个互异标量文件和一对 JWT PEM 文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建保存十一个绝对文件路径、必填 issuer 和十二个可选非敏感覆盖项的 `infra/compose/.env`。
+
+**安全：** clean deployment 的管理员引导读取要求主机文件 numeric `10001:10001`、父目录 `0700`、文件 `0400` 且不是符号链接。原生 Windows/NTFS bind 不能提供该 POSIX 证明，因此本章不能执行首次管理员引导；必须在批准的 Linux 部署主机按第 03/05 章完成。不得改用 root/`0444` Docker file secret 或放宽 Core 读取器。已有数据库只能绑定第 03 章规定的零字节墓碑文件，并仍需由支持平台验证 Compose 语义。
 
 **安全：** 不在命令、工单、截图、PowerShell history、进程参数、`.env`、Compose YAML 或日志中放置密钥值。三个 PostgreSQL 密码必须互异，MinIO root 与应用用户名/密码必须不同。密钥生成与内容/ACL 检验直接使用第 03 章脚本，不另造较弱版本。
 
@@ -110,7 +112,7 @@ Write-Output '密钥目录文件名、外部位置和 .env 忽略规则门禁通
 ```powershell
 $ErrorActionPreference = 'Stop'
 $Config = @{}
-$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
     $parts = $_ -split '=', 2

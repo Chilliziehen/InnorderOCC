@@ -184,6 +184,17 @@ describe("authorization contracts", () => {
     })).toThrow();
   });
 
+  it("bounds canonical context serialization in Unicode code points", () => {
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      context: { value: "🚀".repeat(4084) },
+    })).toBeDefined();
+    expect(() => authorizationInputSchema.parse({
+      ...authorizationInput,
+      context: { value: "🚀".repeat(4085) },
+    })).toThrow();
+  });
+
   it("rejects ambiguous authorization Unicode and accepts valid astral strings", () => {
     const grant = authorizationInput.grants[0];
     for (const invalid of [
@@ -757,6 +768,8 @@ describe("eventEnvelopeSchema", () => {
     for (const invalid of [
       { ...event, type: "T".repeat(EVENT_TYPE_MIN_LENGTH - 1) },
       { ...event, type: "T".repeat(EVENT_TYPE_MAX_LENGTH + 1) },
+      { ...event, type: "bad type" },
+      { ...event, type: "_bad" },
       { ...event, schemaVersion: EVENT_SCHEMA_VERSION_MIN - 1 },
       { ...event, schemaVersion: EVENT_SCHEMA_VERSION_MAX + 1 },
       {
@@ -767,6 +780,8 @@ describe("eventEnvelopeSchema", () => {
         ...event,
         aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
       },
+      { ...event, aggregateType: "bad type" },
+      { ...event, aggregateType: ":bad" },
       { ...event, aggregateVersion: EVENT_AGGREGATE_VERSION_MIN - 1 },
       { ...event, aggregateVersion: EVENT_AGGREGATE_VERSION_MAX + 1 },
     ]) {

@@ -101,8 +101,8 @@ function assertCoreBootJarUsesGradleCache(ast) {
     ["mount", "type=cache,target=/root/.gradle,sharing=locked"],
   ], "core bootJar RUN must use the locked Gradle cache mount");
   assert.match(bootJarRuns[0].getArgumentsContent(),
-    /^chmod \+x gradlew\s+&& \.\/gradlew :services:core:bootJar --no-daemon\b/u,
-    "core bootJar RUN must chmod and invoke Gradle in the mounted instruction");
+    /^sed -i 's\/\\r\$\/\/' gradlew\s+&& chmod \+x gradlew\s+&& \.\/gradlew :services:core:bootJar --no-daemon\b/u,
+    "core bootJar RUN must normalize, chmod, and invoke Gradle in the mounted instruction");
 }
 
 function assertPinnedFroms(ast, path) {
@@ -270,6 +270,9 @@ test("Compose wiring follows application config and completion gates", () => {
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
     "OBJECT_STORAGE_ENDPOINT",
+    "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
+    "OCC_BOOTSTRAP_DELETE_SECRET",
+    "OCC_BOOTSTRAP_SECRET_OWNER",
     "OCC_JWT_ISSUER",
     "OCC_JWT_PRIVATE_KEY_FILE",
     "OCC_JWT_PUBLIC_KEY_FILE",
@@ -399,6 +402,24 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.equal(compose.services.minio.environment.MINIO_ROOT_USER_FILE, "/run/secrets/minio_root_user");
   assert.equal(compose.services.minio.environment.MINIO_ROOT_PASSWORD_FILE, "/run/secrets/minio_root_password");
   assert.equal(compose.services.core.environment.SPRING_CONFIG_IMPORT, "configtree:/run/secrets/");
+  const coreConfig = read("services/core/src/main/resources/application.yml");
+  assert.match(coreConfig, /delete-secret: \$\{OCC_BOOTSTRAP_DELETE_SECRET:false\}/u);
+  assert.match(coreConfig, /secret-owner: \$\{OCC_BOOTSTRAP_SECRET_OWNER:\$\{user\.name\}\}/u);
+  assert.equal(
+    compose.services.core.environment.OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE,
+    "/run/innorder-bootstrap/admin-password",
+  );
+  assert.equal(compose.services.core.environment.OCC_BOOTSTRAP_SECRET_OWNER, "innorder");
+  assert.equal(compose.services.core.environment.OCC_BOOTSTRAP_DELETE_SECRET, "false");
+  assert.deepEqual(compose.services.core.volumes, [{
+    type: "bind",
+    source: "${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:?Set OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE}",
+    target: "/run/innorder-bootstrap/admin-password",
+    read_only: true,
+    bind: { create_host_path: false },
+  }]);
+  assert.equal(compose.services["flowable-init"].volumes, undefined);
+  assert.equal(compose.secrets.bootstrap_admin_password, undefined);
   for (const name of ["core", "flowable-init"]) {
     assert.equal(compose.services[name].environment.OCC_JWT_ISSUER, "${OCC_JWT_ISSUER:?Set OCC_JWT_ISSUER}");
     assert.equal(compose.services[name].environment.OCC_JWT_PRIVATE_KEY_FILE, "/run/secrets/occ-jwt-private-key.pem");
@@ -433,6 +454,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
 
   const example = read("infra/compose/.env.example");
   const expectedSecretPaths = [
+    "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
     "OCC_JWT_PRIVATE_KEY_FILE",
     "OCC_JWT_PUBLIC_KEY_FILE",
     "MINIO_APP_PASSWORD_FILE",
@@ -461,6 +483,7 @@ test("rendered Compose gives only Core runtimes readable production JWT paths", 
       "POSTGRES_ADMIN_PASSWORD_FILE", "POSTGRES_FLYWAY_PASSWORD_FILE", "POSTGRES_RUNTIME_PASSWORD_FILE",
       "REDIS_PASSWORD_FILE", "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE",
       "MINIO_APP_USER_FILE", "MINIO_APP_PASSWORD_FILE", "OCC_JWT_PRIVATE_KEY_FILE", "OCC_JWT_PUBLIC_KEY_FILE",
+      "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
     ].map((name) => {
       const path = join(directory, name.toLowerCase()).replaceAll("\\", "/");
       writeFileSync(path, name.startsWith("OCC_JWT") ? "-----BEGIN TEST KEY-----\nproduction-compose-only\n-----END TEST KEY-----\n" : `${name}-value\n`, "utf8");
@@ -541,6 +564,14 @@ RUN ./gradlew :services:core:bootJar --no-daemon
 `);
   assert.throws(() => assertCoreBootJarUsesGradleCache(splitCoreBuild), /core bootJar RUN must use the locked Gradle cache mount/u);
   assertCoreBootJarUsesGradleCache(core);
+  const coreInstructions = core.getInstructions();
+  const bootstrapDirectoryIndex = coreInstructions.findIndex((instruction) =>
+    instruction.getKeyword() === "RUN" &&
+    /install -d -o 10001 -g 10001 -m 0700 \/run\/innorder-bootstrap/u.test(instruction.getArgumentsContent() ?? ""));
+  const coreUserIndex = coreInstructions.findIndex((instruction) =>
+    instruction.getKeyword() === "USER" && instruction.getArgumentsContent() === "10001");
+  assert.ok(bootstrapDirectoryIndex >= 0, "Core runtime must create the bootstrap mount parent securely");
+  assert.ok(bootstrapDirectoryIndex < coreUserIndex, "Core runtime must create the bootstrap mount parent before USER");
   assert.equal(core.getInstructions().filter((instruction) => instruction.getKeyword() === "USER").at(-1).getArgumentsContent(), "10001");
   assert.deepEqual(core.getENTRYPOINTs().at(-1).getJSONStrings().map((arg) => arg.getJSONValue()), ["java", "-jar", "/app/app.jar"]);
   assert.ok(core.getHEALTHCHECKs().at(-1).getArgumentsContent().includes("http://localhost:8080/actuator/health/readiness"));
@@ -568,6 +599,11 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /POSTGRES_FLYWAY_PASSWORD_FILE/u);
   assert.match(readme, /POSTGRES_RUNTIME_PASSWORD_FILE/u);
   assert.match(readme, /MINIO_APP_PASSWORD_FILE/u);
+  assert.match(readme, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
+  assert.match(readme, /UID\/GID `10001`[\s\S]*`0700`[\s\S]*`0400`/u);
+  assert.match(readme, /zero-byte[\s\S]*tombstone/iu);
+  assert.match(readme, /symbolic link/iu);
+  assert.match(readme, /flowable-init[\s\S]*does not receive[\s\S]*bootstrap/iu);
   assert.match(readme, /Flyway/u);
   assert.match(readme, /Docker Hub\s+Registry API/u);
   assert.match(readme, /Docker-Content-Digest/u);

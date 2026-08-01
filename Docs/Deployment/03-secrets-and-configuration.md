@@ -1,10 +1,10 @@
 # 密钥与配置管理
 
-本章给出当前 Compose 所需的十个文件型密钥、JWT issuer、`.env.example` 的全部变量与默认值、权限、生成、验证和协调轮换方法。`.env` 只能保存密钥文件路径及非敏感值，不能保存密钥内容。
+本章给出当前 Compose 所需的十个长期文件型密钥、一次性管理员引导密码文件、JWT issuer、`.env.example` 的全部变量与默认值、权限、生成、验证和协调轮换方法。`.env` 只能保存文件路径及非敏感值，不能保存密钥内容。
 
 ## 配置模型
 
-Compose 从 `infra/compose/.env` 插值，十个密钥路径和 `OCC_JWT_ISSUER` 使用 `${VAR:?message}`，未设置或空值会使配置失败。其余变量使用 `${VAR:-default}`，未设置或空字符串都采用 Compose 默认值。
+Compose 从 `infra/compose/.env` 插值，十个长期密钥路径、`OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE` 和 `OCC_JWT_ISSUER` 使用 `${VAR:?message}`，未设置或空值会使配置失败。其余变量使用 `${VAR:-default}`，未设置或空字符串都采用 Compose 默认值。
 
 **安全：** 密钥文件位于仓库外；每个文件只包含一个部署专用非空值，不带引号。文件路径应为稳定的绝对路径。
 
@@ -24,6 +24,12 @@ Compose 从 `infra/compose/.env` 插值，十个密钥路径和 `OCC_JWT_ISSUER`
 | `MINIO_APP_PASSWORD_FILE` | 空 | 必填，无默认值 |
 | `OCC_JWT_PRIVATE_KEY_FILE` | 空 | 必填，PKCS#8 RSA 私钥文件 |
 | `OCC_JWT_PUBLIC_KEY_FILE` | 空 | 必填，X.509 RSA 公钥文件 |
+
+### 一次性管理员引导路径
+
+| 变量 | `.env.example` 值 | Compose 行为 |
+|---|---|---|
+| `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE` | 空 | 必填，只读 bind 到 Core；首次成功后原路径保留零字节墓碑文件 |
 
 ### 必填非敏感身份配置
 
@@ -75,6 +81,55 @@ Compose 从 `infra/compose/.env` 插值，十个密钥路径和 `OCC_JWT_ISSUER`
 - 运维基线要求八个标量值全部独立，禁止跨 PostgreSQL、Redis 和 MinIO 复用。
 - JWT 文件必须是匹配的至少 3072 位 RSA 密钥对；私钥只能由 `core` 和受控 `flowable-init` 消费，其他服务不得挂载私钥或公钥。
 - 用户名也按不可猜测密钥保管，不写入工单或命令历史。
+
+`OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE` 不属于上述十个 Compose `secrets`。Docker file secret 会以 `root:root`、`0444` 挂载，不能满足 Core 安全读取器，因此 Core 使用 required long-syntax bind mount，`read_only: true` 且 `create_host_path: false`。只有 `core` 收到该挂载；`flowable-init` 不得挂载管理员引导密码。容器目标固定为 `/run/innorder-bootstrap/admin-password`，读取器要求文件所有者解析为 `innorder`，Compose 固定 `delete-secret=false`。
+
+## 管理员引导密码生命周期
+
+当前安全读取器依赖 Linux POSIX 所有者与 mode。生产首次部署必须在 Linux 主机执行；原生 Windows/NTFS 文件无法证明 numeric owner，不得用放宽 ACL、`0444` Docker secret 或跳过读取器替代。创建前由批准密码管理器向标准输入提供密码，命令行、环境、日志和工单均不得出现值：
+
+```bash
+set -euo pipefail
+set +x
+: "${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:?必须设置绝对引导密码路径}"
+case "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE" in /*) ;; *) exit 1;; esac
+bootstrap_parent=$(dirname -- "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE")
+[ ! -L "$bootstrap_parent" ]
+[ ! -e "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE" ] && [ ! -L "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE" ]
+sudo install -d -o 10001 -g 10001 -m 0700 -- "$bootstrap_parent"
+sudo -v
+IFS= read -r -s bootstrap_password
+[ -n "$bootstrap_password" ]
+printf '%s' "$bootstrap_password" | sudo install -o 10001 -g 10001 -m 0400 /dev/stdin "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE"
+bootstrap_password=
+[ ! -L "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE" ]
+[ "$(stat -c '%u:%g' "$bootstrap_parent")" = 10001:10001 ]
+[ "$(stat -c '%a' "$bootstrap_parent")" = 700 ]
+[ "$(stat -c '%u:%g' "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE")" = 10001:10001 ]
+[ "$(stat -c '%a' "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE")" = 400 ]
+[ "$(stat -c '%s' "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE")" -gt 0 ]
+```
+
+首次启动后，先通过数据库只读检查确认恰好一个用户和一个 active policy release，再停止 Core。该检查一旦返回 `1|1`，墓碑替换就是下一项强制操作，不得等待其他服务健康或最终验收。必须在项目全局生命周期锁内用同目录临时文件原子替换为 numeric `10001:10001`、`0400` 的零字节墓碑，并 force-recreate Core；这样旧 bind inode 随旧容器关闭，不会把原密码无限期留在已挂载 inode。已有 USER 门禁在打开文件前返回，重启不会读取墓碑：
+
+```bash
+set -euo pipefail
+set +x
+compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.yml)
+bootstrap_state=$("${compose[@]}" exec -T postgres sh -ec 'export PGPASSWORD="$(cat /run/secrets/postgres_runtime_password)"; exec psql -h 127.0.0.1 -U innorder_runtime -d "$POSTGRES_DB" -At -F "|" -c "SELECT (SELECT count(*) FROM iam.user_account), (SELECT count(*) FROM authz.policy_release WHERE status = '\''ACTIVE'\'');"')
+[ "$bootstrap_state" = '1|1' ]
+"${compose[@]}" stop core
+bootstrap_tombstone="${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE}.tombstone"
+[ ! -e "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+sudo install -o 10001 -g 10001 -m 0400 /dev/null "$bootstrap_tombstone"
+sudo mv -fT -- "$bootstrap_tombstone" "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE"
+[ ! -L "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE" ]
+[ "$(stat -c '%u:%g %a %s' "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE")" = '10001:10001 400 0' ]
+"${compose[@]}" up -d --no-deps --force-recreate core
+"${compose[@]}" exec -T core curl -fsS http://localhost:8080/actuator/health/readiness >/dev/null
+```
+
+若数据库检查失败或状态未知，立即停止 Core 后原子安装墓碑；恢复数据库可读性后，空库必须生成全新的引导密码，已有用户库继续使用墓碑，原密码不得恢复。若正常 stop 失败，升级处置并关闭 Core 容器或 Docker daemon，确认旧容器不再运行后才能替换，避免旧 bind inode 存活。替换后的重建或 readiness 失败不回退墓碑；保持 Core 停止并修复启动问题。零字节墓碑必须保留在同一路径，供后续 `docker compose config` 和容器重建使用。
 
 ## 安全创建目录和权限
 
@@ -302,6 +357,7 @@ $lines = @(
   'MINIO_APP_PASSWORD_FILE=' + (Join-Path $secretRoot 'minio-app-password')
   'OCC_JWT_PRIVATE_KEY_FILE=' + (Join-Path $secretRoot 'occ-jwt-private-key.pem')
   'OCC_JWT_PUBLIC_KEY_FILE=' + (Join-Path $secretRoot 'occ-jwt-public-key.pem')
+  'OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=' + $env:OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE
   'OCC_JWT_ISSUER=' + $env:OCC_JWT_ISSUER
   'POSTGRES_DB='
   'POSTGRES_PORT='
@@ -336,6 +392,7 @@ umask 077
   printf 'MINIO_APP_PASSWORD_FILE=%s/minio-app-password\n' "$secret_root"
   printf 'OCC_JWT_PRIVATE_KEY_FILE=%s/occ-jwt-private-key.pem\n' "$secret_root"
   printf 'OCC_JWT_PUBLIC_KEY_FILE=%s/occ-jwt-public-key.pem\n' "$secret_root"
+  printf 'OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s\n' "$OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE"
   printf 'OCC_JWT_ISSUER=%s\n' "$OCC_JWT_ISSUER"
   printf '%s\n' 'POSTGRES_DB=' 'POSTGRES_PORT=' 'KAFKA_PORT=' 'REDIS_PORT=' 'MINIO_API_PORT=' 'MINIO_CONSOLE_PORT=' 'OPA_PORT=' 'AI_PORT=' 'CORE_PORT=' 'AI_LOG_LEVEL=' 'APP_VERSION=' 'OBJECT_STORAGE_BUCKET='
 } >infra/compose/.env
@@ -348,7 +405,7 @@ chmod 0600 infra/compose/.env
 
 ### 非敏感值约束
 
-Compose 插值只选择字符串和默认值，不验证端口范围、端口冲突、AI 日志级别、数据库名、版本或完整桶规则。以下 Windows/Bash 验证器还把 `.env.example` 的 23 个变量作为精确允许集合：十个路径 key 和 `OCC_JWT_ISSUER` 必须出现，十二个可选 key 可以缺失或为空，重复 key、未知 key 和 literal credential key 一律失败。应用/初始化脚本会在不同阶段拒绝部分错误值，因此必须在启动前统一验证：
+Compose 插值只选择字符串和默认值，不验证端口范围、端口冲突、AI 日志级别、数据库名、版本或完整桶规则。以下 Windows/Bash 验证器还把 `.env.example` 的 24 个变量作为精确允许集合：十一个路径 key 和 `OCC_JWT_ISSUER` 必须出现，十二个可选 key 可以缺失或为空，重复 key、未知 key 和 literal credential key 一律失败。应用/初始化脚本会在不同阶段拒绝部分错误值，因此必须在启动前统一验证：
 
 - `AI_LOG_LEVEL` 只能是 `fatal`、`error`、`warn`、`info`、`debug`、`trace`，默认 `info`，区分大小写。
 - 八个主机端口必须是 `1-65535` 的十进制整数，彼此不同，并在启动前未被监听。
@@ -361,8 +418,8 @@ Windows PowerShell 5.1 的预启动验证：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
-$requiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE')
+$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$requiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE')
 $config = @{}
 Get-Content -LiteralPath 'infra/compose/.env' | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -392,6 +449,8 @@ foreach ($entry in $secretPathNames.GetEnumerator()) {
   $source = Get-Item -LiteralPath $config[$entry.Key] -Force
   if ($source.PSIsContainer -or ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$($entry.Key) 未指向现有普通文件" }
 }
+$bootstrapSource = Get-Item -LiteralPath $config.OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE -Force
+if ($bootstrapSource.PSIsContainer -or ($bootstrapSource.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '管理员引导路径未指向现有普通文件' }
 $portDefaults = [ordered]@{ POSTGRES_PORT=5432; KAFKA_PORT=9092; REDIS_PORT=6379; MINIO_API_PORT=9000; MINIO_CONSOLE_PORT=9001; OPA_PORT=8181; AI_PORT=3100; CORE_PORT=8080 }
 $ports = New-Object System.Collections.Generic.List[int]
 foreach ($entry in $portDefaults.GetEnumerator()) {
@@ -419,8 +478,8 @@ Linux Bash 的预启动验证：
 set -euo pipefail
 declare -A config=()
 declare -A allowed=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
-required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue
@@ -441,6 +500,7 @@ for index in "${!path_names[@]}"; do
   [ "${config[$name]:-}" = "$secret_root/${file_names[$index]}" ] || exit 1
   [ -f "${config[$name]}" ] && [ ! -L "${config[$name]}" ] || exit 1
 done
+[ -f "${config[OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE]}" ] && [ ! -L "${config[OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE]}" ] || exit 1
 names=(POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT)
 defaults=(5432 9092 6379 9000 9001 8181 3100 8080)
 declare -A seen=()
@@ -495,6 +555,7 @@ npm run test:infra
 - 四个卷名不变；十个 secret 的 `file` 指向预期绝对路径。
 - Core 的数据库用户是 `innorder_runtime`，Flyway 用户是 `innorder_flyway`。
 - Core config tree 的五个属性目标文件名与 Spring 属性完全一致；Core 与 `flowable-init` 的 JWT 路径精确为 Option A 两个 `/run/secrets/occ-jwt-*.pem` 文件。
+- 只有 Core 有 required bootstrap bind；目标为 `/run/innorder-bootstrap/admin-password`，`read_only` 为 true，`create_host_path` 为 false，`flowable-init` 没有该挂载。
 - `APP_VERSION`、日志级别、桶名和端口覆盖符合变更单。
 
 **安全：** 展开配置不应含密钥值，但会包含主机密钥路径；证据归档前对路径做必要脱敏。

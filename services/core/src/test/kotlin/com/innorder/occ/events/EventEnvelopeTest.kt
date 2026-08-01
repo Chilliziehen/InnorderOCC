@@ -35,6 +35,13 @@ class EventEnvelopeTest {
     fun `rejects unstable types unsafe versions and messages over 256 KiB`() {
         assertThatThrownBy { envelope("{}", type = "bad type") }
             .isInstanceOf(InvalidEventEnvelopeException::class.java)
+        assertThatThrownBy { envelope("{}", type = "_bad") }
+            .isInstanceOf(InvalidEventEnvelopeException::class.java)
+        assertThatThrownBy { envelope("{}", aggregateType = "bad type") }
+            .isInstanceOf(InvalidEventEnvelopeException::class.java)
+        assertThatThrownBy { envelope("{}", aggregateType = ":bad") }
+            .isInstanceOf(InvalidEventEnvelopeException::class.java)
+        assertThat(envelope("{}", type = "T".repeat(256), aggregateType = "A".repeat(256))).isNotNull()
         assertThatThrownBy { envelope("{}", aggregateVersion = EventPayloadPolicy.MAX_SAFE_INTEGER + 1) }
             .isInstanceOf(InvalidEventEnvelopeException::class.java)
         assertThatThrownBy {
@@ -50,13 +57,14 @@ class EventEnvelopeTest {
     private fun envelope(
         payload: String,
         type: String = "order.updated",
+        aggregateType: String = "order",
         aggregateVersion: Long = 4,
     ) = EventEnvelope(
         UUID.fromString("10000000-0000-7000-8000-000000000001"),
         UUID.fromString("10000000-0000-7000-8000-000000000002"),
         type,
         1,
-        "order",
+        aggregateType,
         UUID.fromString("10000000-0000-7000-8000-000000000003"),
         aggregateVersion,
         Instant.parse("2026-08-01T12:00:00Z"),

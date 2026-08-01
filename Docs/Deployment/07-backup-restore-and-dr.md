@@ -439,8 +439,8 @@ $revision | Out-File (Join-Path $BackupSet 'source-revision.txt') -Encoding asci
 $status | Out-File (Join-Path $BackupSet 'source-status.txt') -Encoding utf8
 $images | Out-File (Join-Path $BackupSet 'compose-images.txt') -Encoding utf8
 @('compose=infra/compose/compose.yml','env=infra/compose/.env') | Out-File (Join-Path $BackupSet 'configuration-paths-only.txt') -Encoding ascii
-$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE|OCC_JWT_PRIVATE_KEY_FILE|OCC_JWT_PUBLIC_KEY_FILE)=' })
-if ($pathOnlyEnv.Count -ne 10) { throw 'Compose env 必须精确提供十个 secret 路径行' }
+$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE|OCC_JWT_PRIVATE_KEY_FILE|OCC_JWT_PUBLIC_KEY_FILE|OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE)=' })
+if ($pathOnlyEnv.Count -ne 11) { throw 'Compose env 必须精确提供十一个文件路径行' }
 [IO.File]::WriteAllLines((Join-Path $BackupSet 'compose-env-paths-only.txt'),$pathOnlyEnv,(New-Object Text.UTF8Encoding($false)))
 $nonSecretKeys = @('OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 $nonSecretEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { ($_ -split '=',2)[0] -in $nonSecretKeys })
@@ -759,7 +759,7 @@ test -f "$backup_set/COMPLETE"
 
 ## 隔离恢复准备
 
-恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 只含指向独立 secret escrow 副本的十个路径、JWT issuer 和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。
+恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 包含指向独立 secret escrow 副本的十个长期路径、一个按第 03 章创建的独立管理员引导路径、JWT issuer 和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。恢复到空数据库时该引导文件必须是非空的受限新密码；恢复已有用户数据库时只能使用零字节墓碑。
 
 Windows 初始化后先验证所选 `$RestoreSet`，再验证 secret、project 和端口隔离。以下块不启动容器：
 
@@ -867,7 +867,7 @@ $kafkaDisposition = [IO.File]::ReadAllText((Join-Path $RestoreSet 'kafka-disposi
 if ($kafkaDisposition -eq 'cold-archive') { if ($inventory -notcontains 'kafka-data-cold.tar.gz') { throw 'Kafka cold-archive disposition 缺少归档' } } elseif ($kafkaDisposition -eq 'metadata-only') { if ($inventory -contains 'kafka-data-cold.tar.gz') { throw 'Kafka metadata-only disposition 含归档' } } else { throw 'Kafka disposition 无效' }
 
 function Read-OccEnv([string]$Path) {
-  $allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+  $allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
   $result = @{}
   Get-Content -LiteralPath $Path | ForEach-Object {
     if ($_ -and -not $_.StartsWith('#')) {
@@ -1035,7 +1035,7 @@ kafka_disposition=$(tr -d '\r\n' <"$restore_set/kafka-disposition.txt")
 case "$kafka_disposition" in cold-archive) printf '%s\n' "${inventory[@]}" | grep -Fqx kafka-data-cold.tar.gz;; metadata-only) ! printf '%s\n' "${inventory[@]}" | grep -Fqx kafka-data-cold.tar.gz;; *) exit 1;; esac
 
 declare -A allowed=() production_config=() restore_config=() seen_secret_paths=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 read_occ_env() {
   local path=$1 target_name=$2 key value
   local -n target=$target_name

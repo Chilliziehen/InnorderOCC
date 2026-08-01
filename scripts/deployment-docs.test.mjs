@@ -601,6 +601,22 @@ test("manual records the required Compose and operational facts", () => {
   assert.doesNotMatch(reference, /^kafka-topics(?:[.]sh)? --bootstrap-server/mu);
 });
 
+test("manual defines the one-shot administrator bootstrap secret lifecycle", () => {
+  const configuration = documents.get("03-secrets-and-configuration.md");
+  const windows = documents.get("04-deploy-windows.md");
+  const linux = documents.get("05-deploy-linux.md");
+  const corpus = `${configuration}\n${windows}\n${linux}`;
+
+  assert.match(corpus, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
+  assert.match(corpus, /10001:10001/u);
+  assert.match(corpus, /0700/u);
+  assert.match(corpus, /0400/u);
+  assert.match(corpus, /零字节/u);
+  assert.match(corpus, /符号链接/u);
+  assert.match(corpus, /flowable-init/u);
+  assert.match(corpus, /成功[\s\S]*替换/u);
+});
+
 test("repository sources drive the documented deployment facts", () => {
   const corpus = [...documents.values()].join("\n");
   const architecture = documents.get("01-architecture-and-boundaries.md");
