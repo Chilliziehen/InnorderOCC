@@ -196,6 +196,7 @@ CREATE TABLE occ.notification (
     cursor bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     created_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
     read_at timestamptz,
+    row_version bigint NOT NULL DEFAULT 0 CHECK (row_version >= 0),
     UNIQUE (recipient_id, event_id, type),
     CHECK (read_at IS NULL OR read_at >= created_at)
 );
@@ -1076,14 +1077,25 @@ BEGIN
         IF NEW.read_at IS NOT NULL THEN
             RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification must be created unread';
         END IF;
+        IF NEW.row_version <> 0 THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification must start at row version zero';
+        END IF;
         RETURN NEW;
     END IF;
-    IF (to_jsonb(NEW) - 'read_at') IS DISTINCT FROM (to_jsonb(OLD) - 'read_at') THEN
+    IF OLD.read_at IS NOT NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'read notification is immutable';
+    END IF;
+    IF NEW.read_at IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification update must mark it read';
+    END IF;
+    IF (to_jsonb(NEW) - ARRAY['read_at', 'row_version'])
+       IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['read_at', 'row_version']) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification identity and content are immutable';
     END IF;
-    IF OLD.read_at IS NOT NULL AND NEW.read_at IS DISTINCT FROM OLD.read_at THEN
-        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification read state is one way';
+    IF NEW.row_version IS DISTINCT FROM OLD.row_version THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification row version is database-managed';
     END IF;
+    NEW.row_version := OLD.row_version + 1;
     RETURN NEW;
 END;
 $$;

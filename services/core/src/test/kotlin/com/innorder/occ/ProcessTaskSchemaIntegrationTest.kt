@@ -22,6 +22,13 @@ class ProcessTaskSchemaIntegrationTest {
             assertThat(hasTablePrivilege(jdbc, "occ.notification", privilege)).isTrue()
         }
         assertThat(hasTablePrivilege(jdbc, "occ.notification", "DELETE")).isFalse()
+        assertThat(hasTablePrivilege(jdbc, "occ.notification", "TRUNCATE")).isFalse()
+        assertThat(jdbc.queryForObject(
+            """SELECT data_type = 'bigint' AND is_nullable = 'NO' AND column_default = '0'
+               FROM information_schema.columns
+               WHERE table_schema = 'occ' AND table_name = 'notification' AND column_name = 'row_version'""",
+            Boolean::class.java,
+        )).isTrue()
         for (privilege in listOf("SELECT", "INSERT")) {
             assertThat(hasTablePrivilege(jdbc, "audit.dependency_failure_attempt", privilege)).isTrue()
         }

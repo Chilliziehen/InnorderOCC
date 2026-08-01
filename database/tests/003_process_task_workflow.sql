@@ -714,6 +714,24 @@ INSERT INTO occ.notification
 VALUES ('5f000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000002',
   'task.completed', 'INFO', 'task', '59000000-0000-7000-8000-000000000001',
   '5b000000-0000-7000-8000-000000000001');
+SELECT pg_temp.assert_true(
+  (SELECT row_version = 0 FROM occ.notification WHERE id = '5f000000-0000-7000-8000-000000000001'),
+  'notification starts at row version zero');
+SELECT pg_temp.assert_raises(
+  $$INSERT INTO occ.notification
+      (id, recipient_id, type, severity, resource_type, resource_id, event_id, row_version)
+    VALUES ('5f000000-0000-7000-8000-000000000002', '56000000-0000-7000-8000-000000000003',
+      'task.completed.versioned', 'INFO', 'task', '59000000-0000-7000-8000-000000000001',
+      '5b000000-0000-7000-8000-000000000001', 7)$$,
+  '55000', 'notification cannot be created with a client-supplied version');
+SELECT pg_temp.assert_raises(
+  $$UPDATE occ.notification SET severity = 'WARNING'
+    WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
+  '55000', 'notification content is immutable');
+SELECT pg_temp.assert_raises(
+  $$UPDATE occ.notification SET read_at = transaction_timestamp(), row_version = 7
+    WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
+  '55000', 'notification row version is database-managed');
 SELECT pg_temp.assert_raises(
   $$INSERT INTO occ.notification
       (id, recipient_id, type, severity, resource_type, resource_id, event_id, read_at)
@@ -723,9 +741,16 @@ SELECT pg_temp.assert_raises(
   '55000', 'notification must be created unread');
 UPDATE occ.notification SET read_at = transaction_timestamp()
 WHERE id = '5f000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+  (SELECT row_version = 1 FROM occ.notification WHERE id = '5f000000-0000-7000-8000-000000000001'),
+  'notification mark-read increments row version exactly once');
 SELECT pg_temp.assert_raises(
   $$UPDATE occ.notification SET read_at = NULL WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
   '55000', 'notification read state is one way');
+SELECT pg_temp.assert_raises(
+  $$UPDATE occ.notification SET read_at = read_at
+    WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
+  '55000', 'read notification rejects no-op updates');
 
 UPDATE occ.process_instance SET state = 'COMPLETED', ended_at = transaction_timestamp()
 WHERE id = '58000000-0000-7000-8000-000000000002';

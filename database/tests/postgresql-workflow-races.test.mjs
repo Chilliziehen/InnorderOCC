@@ -183,6 +183,24 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
       WHERE id IN ('6a000000-0000-7000-8000-000000000006', '6a000000-0000-7000-8000-000000000007',
         '6a000000-0000-7000-8000-000000000008', '6a000000-0000-7000-8000-000000000009')`);
+    await pool.query(`INSERT INTO audit.outbox_event
+      (id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version, payload, correlation_id, customer_instance_id, status)
+      VALUES ('6f200000-0000-7000-8000-000000000001', 'task', '6a000000-0000-7000-8000-000000000005', 1,
+        'notification.race', 1, '{}', '6f200000-0000-7000-8000-000000000002', '00000000-0000-7000-8000-000000000001', 'PENDING');
+      INSERT INTO occ.notification (id, recipient_id, type, severity, resource_type, resource_id, event_id)
+      VALUES ('6f200000-0000-7000-8000-000000000003', '67000000-0000-7000-8000-000000000002',
+        'task.ready', 'INFO', 'task', '6a000000-0000-7000-8000-000000000005', '6f200000-0000-7000-8000-000000000001')`);
+    const notificationReads = await Promise.all([
+      pool.query(`UPDATE occ.notification SET read_at=clock_timestamp()
+        WHERE id='6f200000-0000-7000-8000-000000000003' AND row_version=0 AND read_at IS NULL RETURNING row_version`),
+      pool.query(`UPDATE occ.notification SET read_at=clock_timestamp()
+        WHERE id='6f200000-0000-7000-8000-000000000003' AND row_version=0 AND read_at IS NULL RETURNING row_version`),
+    ]);
+    assert.deepEqual(notificationReads.map((result) => result.rowCount).sort(), [0, 1],
+      'expected-version notification read race admits one update');
+    assert.equal((await pool.query(`SELECT row_version FROM occ.notification
+      WHERE id='6f200000-0000-7000-8000-000000000003'`)).rows[0].row_version, '1',
+      'notification read race increments the version once');
     await pool.query(`INSERT INTO occ.evidence (id, task_id, requirement_id, state, created_by) VALUES
       ('6e000000-0000-7000-8000-000000000001', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002'),
       ('6e000000-0000-7000-8000-000000000002', '6a000000-0000-7000-8000-000000000005', '65000000-0000-7000-8000-000000000010', 'SUBMITTED', '67000000-0000-7000-8000-000000000002'),
