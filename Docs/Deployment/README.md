@@ -114,7 +114,7 @@ npm run verify:full
 
 ### 准备
 
-1. 按第 03 章生成八个互异、非空的文件型密钥。
+1. 按第 03 章生成九个互异、非空的文件型密钥，其中包括 cursor key。
 2. 创建只保存密钥文件路径和非敏感覆盖值的 `infra/compose/.env`。
 3. 运行 Compose 插值验证；检查镜像 tag 与 digest 均保留。
 

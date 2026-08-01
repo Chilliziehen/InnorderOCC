@@ -904,7 +904,7 @@ foreach ($key in $secretKeys) {
     if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$key 的父路径含 reparse point" }
     $cursor = $cursor.Parent
   }
-  if ($seenSecretPaths.ContainsKey($resolved.ToLowerInvariant())) { throw '八个恢复 secret 必须使用不同文件' }
+  if ($seenSecretPaths.ContainsKey($resolved.ToLowerInvariant())) { throw '九个恢复 secret 必须使用不同文件并包含 cursor key' }
   $seenSecretPaths[$resolved.ToLowerInvariant()] = $true
 }
 $portDefaults = [ordered]@{ POSTGRES_PORT=5432; KAFKA_PORT=9092; REDIS_PORT=6379; MINIO_API_PORT=9000; MINIO_CONSOLE_PORT=9001; OPA_PORT=8181; AI_PORT=3100; CORE_PORT=8080 }
@@ -1113,7 +1113,7 @@ done
 "${restore_compose[@]}" config --quiet
 ```
 
-**验证：** 此时尚未启动任何恢复状态服务。只有每个 artifact checksum、精确 inventory、信任分类（外部模式还必须由外部工具实时重验）、PostgreSQL/MinIO 必需恢复材料、Redis/Kafka disposition、八个 canonical secret 路径、实际 Compose project 名和八个空闲非生产端口全部通过，`config --quiet` 才作为附加结构检查。本流程不提供 resume：project label 清单是补充检查；按已验证规范名派生的四个精确卷名必须逐一由 `docker volume inspect` 返回明确的 `no such volume`。Windows PowerShell 5.1 会把重定向后的 native stderr 包装为 error record，因此每次 inspect 只在紧邻的 `try` 中临时使用 `Continue` 捕获输出和退出码，并在 `finally` 中恢复原始 `ErrorActionPreference`；随后以每个对象的 `ToString()` 值还原原始诊断文本，避免 `Out-String` 注入 PowerShell 显示元数据，再进行分类。任何卷存在、daemon/权限/上下文错误或其他非预期响应都立即停止，不用 `down --volumes` 清除未知环境。
+**验证：** 此时尚未启动任何恢复状态服务。只有每个 artifact checksum、精确 inventory、信任分类（外部模式还必须由外部工具实时重验）、PostgreSQL/MinIO 必需恢复材料、Redis/Kafka disposition、包含 cursor key 的九个 canonical secret 路径、实际 Compose project 名和八个空闲非生产端口全部通过，`config --quiet` 才作为附加结构检查。本流程不提供 resume：project label 清单是补充检查；按已验证规范名派生的四个精确卷名必须逐一由 `docker volume inspect` 返回明确的 `no such volume`。Windows PowerShell 5.1 会把重定向后的 native stderr 包装为 error record，因此每次 inspect 只在紧邻的 `try` 中临时使用 `Continue` 捕获输出和退出码，并在 `finally` 中恢复原始 `ErrorActionPreference`；随后以每个对象的 `ToString()` 值还原原始诊断文本，避免 `Out-String` 注入 PowerShell 显示元数据，再进行分类。任何卷存在、daemon/权限/上下文错误或其他非预期响应都立即停止，不用 `down --volumes` 清除未知环境。
 
 ## 隔离恢复顺序
 

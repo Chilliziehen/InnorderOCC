@@ -730,6 +730,24 @@ test("cursor HMAC key has complete dual-platform lifecycle coverage", () => {
   assert.match(recovery, /九个 secret 路径/u);
 });
 
+test("deployment commands and checklists contain no stale eight-secret contracts", () => {
+  const staleCounts = [];
+  const staleLists = [];
+  for (const [name, markdown] of documents) {
+    for (const [index, line] of markdown.split(/\r?\n/u).entries()) {
+      if (/(?:八个[^，。；\r\n]{0,24}密钥|八个\s+(?:恢复|canonical)\s+secret(?:\s+路径)?|八路径|八密钥)/u.test(line)) {
+        staleCounts.push(`${name}:${index + 1}`);
+      }
+      if (line.includes("POSTGRES_ADMIN_PASSWORD_FILE")
+          && line.includes("MINIO_APP_PASSWORD_FILE")
+          && !line.includes("CURSOR_HMAC_KEY_FILE")) {
+        staleLists.push(`${name}:${index + 1}`);
+      }
+    }
+  }
+  assert.deepEqual({ staleCounts, staleLists }, { staleCounts: [], staleLists: [] });
+});
+
 test("incident and Linux lifecycle writes use the shared lock ownership paths", () => {
   const incidents = documents.get("09-incident-runbooks.md");
   const linux = documents.get("05-deploy-linux.md");
