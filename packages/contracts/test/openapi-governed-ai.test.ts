@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 import {
+  STABLE_AI_ERROR_CODE_PATTERN,
   aiGrantClaimsSchema,
   aiGuidanceRequestedPayloadSchema,
   aiOperationDeadLetteredPayloadSchema,
@@ -49,6 +50,7 @@ import {
 
 type Schema = {
   additionalProperties?: boolean;
+  dependentRequired?: Record<string, string[]>;
   properties?: Record<string, Record<string, unknown>>;
   required?: string[];
   type?: string;
@@ -265,5 +267,49 @@ describe("OCC Core governed AI OpenAPI", () => {
         );
       }
     }
+  });
+
+  it("documents exact provider origin and normalized prefix semantic validation", () => {
+    const provider = {
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      name: "Provider",
+      origin: "https://models.example.test",
+      apiPrefix: "/v1",
+      approvedPrivateCidrs: [],
+      credentialFile: "/run/secrets/provider-key",
+      enabled: true,
+      version: 0,
+    };
+    expect(() => providerConfigSchema.parse({ ...provider, origin: "https://user@models.example.test" })).toThrow();
+    expect(() => providerConfigSchema.parse({ ...provider, apiPrefix: "/v1/../admin" })).toThrow();
+
+    const expectedOriginValidation = {
+      kind: "exact-https-origin",
+      requirements: ["https-only", "no-userinfo", "origin-only", "canonical-origin"],
+    };
+    const expectedPrefixValidation = {
+      kind: "normalized-api-prefix",
+      requirements: ["single-leading-slash", "no-trailing-slash", "no-dot-segments", "no-encoded-separators"],
+    };
+    for (const name of ["ProviderConfig", "ProviderConfigCreate", "ProviderConfigUpdate"]) {
+      expect(document.components.schemas[name]?.properties?.origin?.["x-occ-validation"]).toEqual(expectedOriginValidation);
+      expect(document.components.schemas[name]?.properties?.apiPrefix?.["x-occ-validation"]).toEqual(expectedPrefixValidation);
+    }
+  });
+
+  it("aligns the dead-letter error code with the shared stable schema", () => {
+    expect(document.components.schemas.AiOperationDeadLetteredPayload?.properties?.errorCode).toMatchObject({
+      type: "string",
+      pattern: STABLE_AI_ERROR_CODE_PATTERN,
+    });
+  });
+
+  it("requires complete capability context when a profile model changes", () => {
+    expect(document.components.schemas.ProviderProfileUpdate?.dependentRequired).toEqual({
+      model: ["purpose", "requiredCapabilities", "capabilitySnapshot"],
+      purpose: ["requiredCapabilities", "capabilitySnapshot"],
+      requiredCapabilities: ["purpose", "capabilitySnapshot"],
+      capabilitySnapshot: ["purpose", "requiredCapabilities"],
+    });
   });
 });

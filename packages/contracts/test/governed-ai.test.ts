@@ -188,7 +188,22 @@ describe("governed AI provider contracts", () => {
     expect(() => providerProfileUpdateSchema.parse({ expectedVersion: 2 })).toThrow();
     expect(() => providerProfileUpdateSchema.parse({ expectedVersion: 2, purpose: "EMBEDDING" })).toThrow();
     expect(providerConfigUpdateSchema.parse({ expectedVersion: 2, enabled: false })).toBeDefined();
-    expect(providerProfileUpdateSchema.parse({ expectedVersion: 2, model: "chat-2" })).toBeDefined();
+    expect(() => providerProfileUpdateSchema.parse({ expectedVersion: 2, model: "chat-2" })).toThrow();
+    expect(providerProfileUpdateSchema.parse({
+      expectedVersion: 2,
+      model: "chat-2",
+      purpose: "CHAT",
+      requiredCapabilities: { structuredOutput: true },
+      capabilitySnapshot: {
+        chat: true,
+        embeddings: false,
+        structuredOutput: true,
+        maxInputTokens: 128_000,
+        maxOutputTokens: 4096,
+        probedAt: NOW,
+        snapshotHash: SHA,
+      },
+    })).toBeDefined();
   });
 });
 
@@ -215,7 +230,7 @@ describe("AI authorization grant claims", () => {
     modelProfileId: UUID_2,
     promptVersionId: UUID_3,
     packageVersionId: UUID,
-    candidateEmbeddingSpaceId: UUID_2,
+    embeddingSpaceId: UUID_2,
   } as const;
 
   it("accepts exact five-minute single-use grant claims", () => {
@@ -234,6 +249,7 @@ describe("AI authorization grant claims", () => {
       { ...claims, exp: claims.iat + 301 },
       { ...claims, exp: claims.iat },
       { ...claims, nbf: claims.exp + 1 },
+      { ...claims, candidateEmbeddingSpaceId: UUID_2 },
     ]) expect(() => aiGrantClaimsSchema.parse(invalid)).toThrow();
   });
 });
@@ -392,6 +408,21 @@ describe("governed guidance and recommendation contracts", () => {
     })).toBeDefined();
     expect(() => guidanceStatusSchema.parse({ operationId: UUID, status: "SUCCEEDED", requestedAt: NOW, updatedAt: LATER })).toThrow();
     expect(() => guidanceStatusSchema.parse({ operationId: UUID, status: "FAILED", requestedAt: NOW, updatedAt: LATER })).toThrow();
+    expect(guidanceStatusSchema.parse({
+      operationId: UUID,
+      status: "DEAD_LETTERED",
+      errorCode: "OCC-AI-RETRY-EXHAUSTED",
+      requestedAt: NOW,
+      updatedAt: LATER,
+    })).toBeDefined();
+    expect(() => guidanceStatusSchema.parse({ operationId: UUID, status: "DEAD_LETTERED", requestedAt: NOW, updatedAt: LATER })).toThrow();
+    expect(() => guidanceStatusSchema.parse({
+      operationId: UUID,
+      status: "CANCELLED",
+      errorCode: "OCC-AI-CANCELLED",
+      requestedAt: NOW,
+      updatedAt: LATER,
+    })).toThrow();
   });
 
   it("accepts only fully cited generated recommendations", () => {
@@ -486,8 +517,30 @@ describe("governed AI event contracts", () => {
       type: "knowledge.ingestion-requested.v1",
       schemaVersion: 1,
       aggregateType: "KnowledgeDocument",
-      payload: { operationId: UUID, ingestionJobId: UUID_2, documentVersionId: UUID_3 },
+      payload: {
+        operationId: UUID,
+        ingestionJobId: UUID_2,
+        sourceId: UUID_3,
+        documentId: UUID,
+        candidateEmbeddingSpaceId: UUID_2,
+        sourceVersion: "source-v1",
+        sourceObjectHash: SHA,
+      },
     })).toBeDefined();
+    expect(() => knowledgeIngestionRequestedEventSchema.parse({
+      ...envelope,
+      type: "knowledge.ingestion-requested.v1",
+      schemaVersion: 1,
+      aggregateType: "KnowledgeDocument",
+      payload: {
+        operationId: UUID,
+        ingestionJobId: UUID_2,
+        sourceId: UUID_3,
+        candidateEmbeddingSpaceId: UUID_2,
+        sourceVersion: "source-v1",
+        sourceObjectHash: SHA,
+      },
+    })).toThrow();
     expect(aiGuidanceRequestedEventSchema.parse({
       ...envelope,
       type: "ai.guidance-requested.v1",
@@ -518,21 +571,87 @@ describe("governed AI event contracts", () => {
   });
 
   it("rejects wrong versions and every secret or generated content field", () => {
+    const events = [
+      [knowledgeIngestionRequestedEventSchema, {
+        ...envelope,
+        type: "knowledge.ingestion-requested.v1",
+        schemaVersion: 1,
+        aggregateType: "KnowledgeDocument",
+        payload: {
+          operationId: UUID,
+          ingestionJobId: UUID_2,
+          sourceId: UUID_3,
+          documentId: UUID_2,
+          candidateEmbeddingSpaceId: UUID,
+          sourceVersion: "source-v1",
+          sourceObjectHash: SHA,
+        },
+      }],
+      [aiGuidanceRequestedEventSchema, {
+        ...envelope,
+        type: "ai.guidance-requested.v1",
+        schemaVersion: 1,
+        aggregateType: "AiGuidanceOperation",
+        payload: { operationId: UUID },
+      }],
+      [aiRecommendationProposedEventSchema, {
+        ...envelope,
+        type: "ai.recommendation-proposed.v1",
+        schemaVersion: 1,
+        aggregateType: "AiRecommendation",
+        payload: { operationId: UUID, recommendationId: UUID_2, runId: UUID_3 },
+      }],
+      [aiOperationDeadLetteredEventSchema, {
+        ...envelope,
+        type: "ai.operation-dead-lettered.v1",
+        schemaVersion: 1,
+        aggregateType: "AiGuidanceOperation",
+        payload: {
+          operationId: UUID,
+          failedEventId: UUID_2,
+          failedEventType: "ai.guidance-requested.v1",
+          attempts: 5,
+          errorCode: "OCC-AI-RETRY-EXHAUSTED",
+        },
+      }],
+    ] as const;
+
+    for (const [schema, event] of events) {
+      expect(schema.parse(event)).toBeDefined();
+      for (const extra of [
+        { credential: "secret" },
+        { grantToken: "a.b.c" },
+        { content: "prompt" },
+      ]) expect(() => schema.parse({ ...event, payload: { ...event.payload, ...extra } })).toThrow();
+    }
+
+    const guidance = events[1][1];
+    expect(() => aiGuidanceRequestedEventSchema.parse({ ...guidance, schemaVersion: 2 })).toThrow();
+    expect(() => aiGuidanceRequestedEventSchema.parse({ ...guidance, type: "ai.guidance-requested.v2" })).toThrow();
+  });
+
+  it("uses the bounded shared stable error code for dead letters", () => {
     const event = {
       ...envelope,
-      type: "ai.guidance-requested.v1",
+      type: "ai.operation-dead-lettered.v1",
       schemaVersion: 1,
       aggregateType: "AiGuidanceOperation",
-      payload: { operationId: UUID },
-    };
-    for (const invalid of [
-      { ...event, schemaVersion: 2 },
-      { ...event, type: "ai.guidance-requested.v2" },
-      { ...event, payload: { ...event.payload, grantToken: "a.b.c" } },
-      { ...event, payload: { ...event.payload, content: "prompt" } },
-      { ...event, payload: { ...event.payload, providerCredential: "secret" } },
-      { ...event, payload: { ...event.payload, routingKey: "guidance" } },
-      { ...event, payload: { ...event.payload, attempt: 0 } },
-    ]) expect(() => aiGuidanceRequestedEventSchema.parse(invalid)).toThrow();
+      payload: {
+        operationId: UUID,
+        failedEventId: UUID_2,
+        failedEventType: "ai.guidance-requested.v1",
+        attempts: 5,
+        errorCode: `OCC-AI-${"A".repeat(112)}`,
+      },
+    } as const;
+    expect(aiOperationDeadLetteredEventSchema.parse(event)).toBeDefined();
+    for (const errorCode of [
+      "provider-timeout",
+      "OCC-AI-provider-timeout",
+      `OCC-AI-${"A".repeat(113)}`,
+    ]) expect(() => aiOperationDeadLetteredEventSchema.parse({
+      ...event,
+      payload: { ...event.payload, errorCode },
+    })).toThrow();
   });
 });

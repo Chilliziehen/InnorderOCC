@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { uuidSchema } from "./governed-ai.js";
+import { sha256Schema, stableAiErrorCodeSchema, uuidSchema } from "./governed-ai.js";
 
 export const EVENT_TYPE_MIN_LENGTH = 1;
 export const EVENT_TYPE_MAX_LENGTH = 256;
@@ -49,7 +49,11 @@ export const knowledgeIngestionRequestedPayloadSchema = z
   .object({
     operationId: uuidSchema,
     ingestionJobId: uuidSchema,
-    documentVersionId: uuidSchema,
+    sourceId: uuidSchema,
+    documentId: uuidSchema,
+    candidateEmbeddingSpaceId: uuidSchema,
+    sourceVersion: z.string().min(1).max(256),
+    sourceObjectHash: sha256Schema,
   })
   .strict();
 
@@ -73,7 +77,7 @@ export const aiOperationDeadLetteredPayloadSchema = z
     failedEventId: uuidSchema,
     failedEventType: z.string().min(1).max(EVENT_TYPE_MAX_LENGTH),
     attempts: z.number().int().min(1).max(100),
-    errorCode: z.string().min(1).max(128),
+    errorCode: stableAiErrorCodeSchema,
   })
   .strict();
 

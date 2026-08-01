@@ -5,7 +5,7 @@ export const CURSOR_MAX_LENGTH = 1024;
 export const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 export const JWT_MAX_LENGTH = 8192;
 export const SHA256_PATTERN = "^[a-f0-9]{64}$";
-export const STABLE_AI_ERROR_CODE_PATTERN = "^OCC-AI-[A-Z0-9]+(?:-[A-Z0-9]+)*$";
+export const STABLE_AI_ERROR_CODE_PATTERN = "^OCC-AI-[A-Z0-9-]{1,112}$";
 
 export const uuidSchema = z.uuid();
 export const sha256Schema = z.string().regex(new RegExp(SHA256_PATTERN));
@@ -15,8 +15,8 @@ export const boundedCursorSchema = z.string().min(1).max(CURSOR_MAX_LENGTH);
 export const idempotencyKeySchema = z.string().min(1).max(IDEMPOTENCY_KEY_MAX_LENGTH);
 export const stableAiErrorCodeSchema = z
   .string()
-  .min(1)
-  .max(128)
+  .min(8)
+  .max(119)
   .regex(new RegExp(STABLE_AI_ERROR_CODE_PATTERN));
 
 export const DATA_CLASSIFICATION_ORDER = [
@@ -185,7 +185,8 @@ export const providerProfileUpdateSchema = providerProfileCreateObjectSchema
   .superRefine((value, context) => {
     const compatibilityValues = [value.purpose, value.requiredCapabilities, value.capabilitySnapshot];
     const present = compatibilityValues.filter((item) => item !== undefined).length;
-    if (present > 0 && present < compatibilityValues.length) {
+    const changesCompatibility = value.model !== undefined || present > 0;
+    if (changesCompatibility && present < compatibilityValues.length) {
       context.addIssue({ code: "custom", message: "Compatibility changes require purpose, requirements, and snapshot", path: [] });
     } else if (present === compatibilityValues.length) {
       refineProviderProfile(value as Required<Pick<
@@ -245,7 +246,7 @@ export const aiGrantClaimsSchema = z
     modelProfileId: uuidSchema,
     promptVersionId: uuidSchema,
     packageVersionId: uuidSchema,
-    candidateEmbeddingSpaceId: uuidSchema,
+    embeddingSpaceId: uuidSchema,
   })
   .strict()
   .refine(({ iat, nbf, exp }) => nbf <= exp && exp > iat && exp - iat <= 300);
@@ -421,13 +422,14 @@ export const guidanceStatusSchema = z
   })
   .strict()
   .superRefine(({ status, recommendationId, errorCode }, context) => {
+    const failure = status === "FAILED" || status === "DEAD_LETTERED";
     if (status === "SUCCEEDED" && (recommendationId === undefined || errorCode !== undefined)) {
       context.addIssue({ code: "custom", message: "Successful guidance requires a recommendation", path: ["status"] });
     }
-    if (status === "FAILED" && (errorCode === undefined || recommendationId !== undefined)) {
+    if (failure && (errorCode === undefined || recommendationId !== undefined)) {
       context.addIssue({ code: "custom", message: "Failed guidance requires an error code", path: ["status"] });
     }
-    if (status !== "SUCCEEDED" && status !== "FAILED" && (recommendationId !== undefined || errorCode !== undefined)) {
+    if (status !== "SUCCEEDED" && !failure && (recommendationId !== undefined || errorCode !== undefined)) {
       context.addIssue({ code: "custom", message: "Incomplete guidance cannot contain an outcome", path: ["status"] });
     }
   });
