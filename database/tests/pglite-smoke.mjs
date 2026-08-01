@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -43,6 +44,7 @@ const migrations = [
   'V012__outbox_publisher_lifecycle.sql',
   'V013__process_task_workflow.sql',
 ];
+const appliedMigrations = [];
 
 async function applyMigration(migration) {
   let sql = readFileSync(join(migrationDir, migration), 'utf8');
@@ -53,6 +55,7 @@ async function applyMigration(migration) {
     );
   }
   await db.exec(sql);
+  appliedMigrations.push(migration);
   console.log(`applied ${migration}`);
 }
 
@@ -190,6 +193,21 @@ console.log('passed V011 legacy account failure-window backfill');
 
 await applyMigration('V012__outbox_publisher_lifecycle.sql');
 await applyMigration('V013__process_task_workflow.sql');
+assert.deepEqual(appliedMigrations, migrations, 'PGlite must apply every declared migration in order');
+
+const workflowSchema = await db.query(`
+  SELECT to_regclass('occ.cohort') IS NOT NULL AS cohort,
+         to_regclass('occ.task_gate_provider_state') IS NOT NULL AS gate_provider_state,
+         to_regclass('occ.task_review_projection_fact') IS NOT NULL AS review_projection_fact,
+         to_regclass('occ.notification') IS NOT NULL AS notification
+`);
+assert.deepEqual(workflowSchema.rows, [{
+  cohort: true,
+  gate_provider_state: true,
+  review_projection_fact: true,
+  notification: true,
+}], 'V013 workflow objects must exist after migration application');
+console.log('verified applied migration list and V013 workflow objects');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)

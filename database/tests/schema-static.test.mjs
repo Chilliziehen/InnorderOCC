@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -27,6 +28,20 @@ const migrations = [
   'V012__outbox_publisher_lifecycle.sql',
   'V013__process_task_workflow.sql',
 ];
+const frozenMigrationDigests = {
+  'V001__bootstrap.sql': '5bfe3250f881a3321a8f900f98477dd733ed14d6ef54d1ddc566c68254102b27',
+  'V002__catalog.sql': '376e530809075dc55d91b4f70c7b3faff7423938be748acda35014f02468af57',
+  'V003__identity_and_entities.sql': '4a5bec615f06c701abed3a24015897abbb1baffdfb853b7d945deecc906fa0b9',
+  'V004__policy_control_plane.sql': 'd14ef5eaf0251ca018f8567192e92ad38553b939089a9c41ef2567c4c5eccfc8',
+  'V005__occ_runtime.sql': '7b33f24c1c8769afae488f95c32f273dfe4889aca5a60b320b5a68fe07c7a28d',
+  'V006__audit_and_outbox.sql': '515d9a324fb5303389d1d319d12ad2b5fc9d3695d557d2b7566aba216df1569a',
+  'V007__ai_rag.sql': 'dd6bcff27a8744ca1ea9385f9b859334cfe2ff0d7dad7b85599f9c2bca533757',
+  'V008__cross_schema_constraints.sql': '7b601d25af06c4a7034bb213824a3f0084807888d522b9283391ec4997e10cac',
+  'V009__runtime_privileges.sql': '6e7cbe9994601f8f820f10179e227002ce2309a3ad659607a8a0dc2d439504f5',
+  'V010__platform_security_kernel.sql': '0d951300326889dbdcb76112aa92622e1639ce54e48f3fa40d3ce6f04fe4b7cb',
+  'V011__account_failed_attempt_window.sql': '57aed42c4420670e923fce52eb719948a07581186781279b46d3f1fc035d7099',
+  'V012__outbox_publisher_lifecycle.sql': 'c8ec9cdb9febbefd39a86bfa04b3d4e7922c6e59e4279a9cb367d2a4c092ea4b',
+};
 
 function readMigration(name) {
   return readFileSync(join(root, name), 'utf8');
@@ -35,6 +50,15 @@ function readMigration(name) {
 test('provides every ordered Flyway migration without placeholders', () => {
   const sql = migrations.map(readMigration).join('\n');
   assert.doesNotMatch(sql, /\b(?:TODO|TBD)\b|待定|待补充/i);
+});
+
+test('keeps published V001 through V012 migration content immutable', () => {
+  assert.deepEqual(Object.keys(frozenMigrationDigests), migrations.slice(0, 12));
+  for (const [migration, expectedDigest] of Object.entries(frozenMigrationDigests)) {
+    const normalizedSql = readMigration(migration).replace(/\r\n?/gu, '\n');
+    const actualDigest = createHash('sha256').update(normalizedSql).digest('hex');
+    assert.equal(actualDigest, expectedDigest, `${migration} SHA-256`);
+  }
 });
 
 test('V013 is the only migration after V012 and reserves the process task schema', () => {
@@ -68,8 +92,17 @@ test('registers V013 in every database schema entrypoint', () => {
   const migration = 'V013__process_task_workflow.sql';
   const entrypoint = readFileSync(fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)), 'utf8');
   const pgliteSmoke = readFileSync(pgliteSmokePath, 'utf8');
+  const explicitApplications = [...pgliteSmoke.matchAll(
+    /await\s+applyMigration\(\s*(['"])(V\d+__[^'"]+\.sql)\1\s*\)/gu,
+  )].map((match) => match[2]);
   assert.ok(entrypoint.indexOf(migration) > entrypoint.indexOf('V012__outbox_publisher_lifecycle.sql'));
   assert.ok(pgliteSmoke.indexOf(migration) > pgliteSmoke.indexOf('V012__outbox_publisher_lifecycle.sql'));
+  assert.ok(explicitApplications.includes(migration), 'PGlite explicitly applies V013');
+  assert.match(pgliteSmoke, /appliedMigrations\.push\(migration\)/u);
+  assert.match(pgliteSmoke, /assert\.deepEqual\(appliedMigrations, migrations/u);
+  for (const table of ['occ.cohort', 'occ.task_gate_provider_state', 'occ.task_review_projection_fact', 'occ.notification']) {
+    assert.match(pgliteSmoke, new RegExp(`to_regclass\\('${table.replace('.', '\\.')}'\\)`, 'u'), table);
+  }
 });
 
 test('creates all approved schemas and extensions', () => {
