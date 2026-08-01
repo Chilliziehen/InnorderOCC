@@ -428,25 +428,25 @@ Commit: `feat(core): publish transactional outbox events`
 - Modify: `scripts/verify.mjs`
 - Modify: `Docs/Development/verification.md`
 
-- [ ] **Step 1: Write one full-stack test**
+- [x] **Step 1: Write one full-stack test**
 
 Start real PostgreSQL and a bounded fake OPA endpoint. Bootstrap admin, login, execute a test authorized command, retry it, attempt a stale version, revoke the role relationship, and retry a new command. Assert one successful transition/event, deterministic replay, one conflict, one denial, revision increment, retained denial log, and no credentials in logs/responses/events.
 
-- [ ] **Step 2: Add Flowable transaction-manager assertion**
+- [x] **Step 2: Add Flowable transaction-manager assertion**
 
 Assert Flowable uses the application datasource and Spring transaction manager. In a forced exception after a synchronous Flowable state change, verify both Flowable and OCC rows roll back. Fail application startup in a test profile configured with a separate Flowable datasource.
 
-- [ ] **Step 3: Run focused integration tests and verify RED/GREEN**
+- [x] **Step 3: Run focused integration tests and verify RED/GREEN**
 
 Run: `./gradlew.bat :services:core:test --tests com.innorder.occ.PlatformSecurityKernelIntegrationTest --tests com.innorder.occ.PostgreSqlFlowableIntegrationTest`
 
 Expected after implementation: PASS with no skipped PostgreSQL tests.
 
-- [ ] **Step 4: Wire strict verification**
+- [x] **Step 4: Wire strict verification**
 
 Update `scripts/verify.mjs` so strict full verification checks the structured JUnit results for the new integration classes and fails if any are skipped. Document the exact local and full commands and required OPA/Docker prerequisites.
 
-- [ ] **Step 5: Run the complete workstream gate**
+- [x] **Step 5: Run the complete workstream gate**
 
 Run:
 
@@ -464,7 +464,7 @@ npm run verify:full
 
 Expected: every required test PASS and `verify:full` reports no skipped OPA/PostgreSQL security-kernel integration test.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Commit: `test: verify platform security kernel`
 

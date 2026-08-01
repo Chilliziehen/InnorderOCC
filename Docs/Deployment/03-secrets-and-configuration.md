@@ -447,7 +447,7 @@ npm run test:infra
 
 查看展开配置时应确认：
 
-- 服务恰好为十个，两个一次性服务保留 `restart: "no"`。
+- 服务恰好为十一个，三个一次性服务保留 `restart: "no"`。
 - 只有 `host-gateway` 有 `ports`，且八个绑定都以 `127.0.0.1` 开头。
 - `backend` 仍为 internal，只有网关还连接 `host-access`。
 - 四个卷名不变；八个 secret 的 `file` 指向预期绝对路径。
@@ -901,4 +901,4 @@ if ! rm -f -- "$rotation_env"; then printf '临时 env 清理失败，保留证�
 
 ## 变更完成验证
 
-**验证：** 密钥或配置变更关闭前必须同时满足：Compose config 通过；十个服务结构未漂移；受影响容器已重建；PostgreSQL/Redis/MinIO 的服务端状态与文件一致；Core/AI/OPA/MinIO HTTP 探测符合预期；协议探测成功；旧凭据失效；日志和证据不含密钥；回退材料仍在批准的保留期内。
+**验证：** 密钥或配置变更关闭前必须同时满足：Compose config 通过；十一个服务结构未漂移；受影响容器已重建；PostgreSQL/Redis/MinIO 的服务端状态与文件一致；Core/AI/OPA/MinIO HTTP 探测符合预期；协议探测成功；旧凭据失效；日志和证据不含密钥；回退材料仍在批准的保留期内。

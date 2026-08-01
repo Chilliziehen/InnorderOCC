@@ -185,6 +185,7 @@ services:
       AI_BASE_URL: http://ai:3100
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-innorder-occ}
+      FLOWABLE_DATABASE_SCHEMA_UPDATE: "false"
     secrets:
       - source: postgres_runtime_password
         target: spring.datasource.password
@@ -199,6 +200,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      flowable-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
       interval: 5s
@@ -207,6 +210,31 @@ services:
       start_period: 30s
     networks: [backend]
     restart: unless-stopped
+
+  flowable-init:
+    build:
+      context: ../..
+      dockerfile: services/core/Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: flowable-init
+      SPRING_MAIN_WEB_APPLICATION_TYPE: none
+      SPRING_CONFIG_IMPORT: configtree:/run/secrets/
+      DATABASE_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-innorder_occ}
+      DATABASE_USERNAME: innorder_runtime
+      FLYWAY_USERNAME: innorder_flyway
+      FLOWABLE_DATABASE_SCHEMA_UPDATE: "true"
+      OCC_OUTBOX_ENABLED: "false"
+      STATUS_EXTERNAL_PROBES_ENABLED: "false"
+    secrets:
+      - source: postgres_runtime_password
+        target: spring.datasource.password
+      - source: postgres_flyway_password
+        target: spring.flyway.password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"
 
   host-gateway:
     build:

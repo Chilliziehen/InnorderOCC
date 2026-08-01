@@ -467,7 +467,7 @@ Add-ToolVersion 'docker' ($ComposeArgs + @('exec','-T','kafka','/opt/kafka/bin/k
 $containerIdOutput = & docker @ComposeArgs ps -a -q
 $containerIdExit = $LASTEXITCODE
 $containerIds = @($containerIdOutput | Where-Object { $_ })
-if ($containerIdExit -ne 0 -or $containerIds.Count -ne 10) { throw '镜像身份收集要求精确十个 Compose 容器' }
+if ($containerIdExit -ne 0 -or $containerIds.Count -ne 11) { throw '镜像身份收集要求精确十一个 Compose 容器' }
 $imageLines = New-Object System.Collections.Generic.List[string]
 foreach ($containerId in $containerIds) {
   $containerLine = & docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }} container={{.Id}} image={{.Image}}' $containerId

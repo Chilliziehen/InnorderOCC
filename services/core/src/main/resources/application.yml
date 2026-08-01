@@ -52,10 +52,10 @@ management:
       exposure:
         include: health
 
-# Flyway creates the schema; Flowable owns and upgrades its internal tables.
+# Flyway creates the schema. A controlled initializer owns Flowable vendor DDL.
 flowable:
   database-schema: flowable
-  database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
+  database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:false}
 
 occ:
   outbox:

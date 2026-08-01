@@ -214,7 +214,7 @@ Windows要求八个长运行服务 `running healthy`、两个 one-shot `exited 0
 ```powershell
 & docker @ComposeArgs ps -a
 if ($LASTEXITCODE -ne 0) { throw 'Compose 状态失败' }
-foreach ($service in 'minio-volume-init','minio-init') {
+foreach ($service in 'minio-volume-init','minio-init','flowable-init') {
   $ids = @(& docker @ComposeArgs ps -a -q $service | Where-Object { $_ })
   if ($LASTEXITCODE -ne 0 -or $ids.Count -ne 1) { throw "$service 容器查询失败" }
   $state = & docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' $ids[0]
@@ -234,7 +234,7 @@ Linux：
 ```bash
 set -euo pipefail
 "${compose[@]}" ps -a
-for service in minio-volume-init minio-init; do
+for service in minio-volume-init minio-init flowable-init; do
   id=$("${compose[@]}" ps -a -q "$service")
   [ -n "$id" ] && [ "$(printf '%s\n' "$id" | wc -l)" -eq 1 ]
   [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$id")" = 'exited 0' ]

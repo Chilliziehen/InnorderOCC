@@ -623,7 +623,7 @@ test("repository sources drive the documented deployment facts", () => {
     ...publishedDefaults,
   ];
   assert.deepEqual(sourceFacts.filter((fact) => !corpus.includes(fact)), []);
-  assert.equal(Object.keys(composeModel.services).length, 10);
+  assert.equal(Object.keys(composeModel.services).length, 11);
   assert.equal(composeModel.services.backend, undefined);
   assert.equal(composeModel.networks.backend.internal, true);
   assert.equal(composeModel.services["host-gateway"].ports.length, 8);

@@ -203,7 +203,7 @@ df -ih
 
 ### 4. 主机到容器到依赖决策树
 
-主机磁盘/时间/虚拟化异常，先修主机；主机正常但 daemon inactive，检查服务日志；daemon active 但客户端失败，核对批准 context、socket 权限和服务身份；Engine 响应后才检查十个容器，再检查 PostgreSQL、Core 和其他依赖。不要在 Engine 不可观察时操作卷文件。
+主机磁盘/时间/虚拟化异常，先修主机；主机正常但 daemon inactive，检查服务日志；daemon active 但客户端失败，核对批准 context、socket 权限和服务身份；Engine 响应后才检查十一个容器，再检查 PostgreSQL、Core 和其他依赖。不要在 Engine 不可观察时操作卷文件。
 
 ### 5. 从最小到最大修正
 

@@ -182,7 +182,7 @@ compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.y
 "${compose[@]}" ps -a
 ```
 
-**注意：** Compose v5 的 `up -d --wait` 可能因成功完成且退出的 `minio-volume-init`/`minio-init` 返回非零，即使八个长运行服务均健康。标准流程不用该返回值作最终判定；必须分别检查两个精确退出码和八个健康状态。
+**注意：** Compose v5 的 `up -d --wait` 可能因成功完成且退出的 `minio-volume-init`/`minio-init`/`flowable-init` 返回非零，即使八个长运行服务均健康。标准流程不用该返回值作最终判定；必须分别检查三个精确退出码和八个健康状态。
 
 ## 状态、一次性任务和健康验收
 
@@ -191,7 +191,7 @@ set -euo pipefail
 : "${OCC_REPOSITORY_ROOT:?必须设置 OCC_REPOSITORY_ROOT}"
 cd -- "$(realpath "$OCC_REPOSITORY_ROOT")"
 compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.yml)
-for service in minio-volume-init minio-init; do
+for service in minio-volume-init minio-init flowable-init; do
   container_id=$("${compose[@]}" ps -a -q "$service")
   test -n "$container_id"
   state=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$container_id")
@@ -215,7 +215,7 @@ done
 "${compose[@]}" ps -a
 ```
 
-**验证：** 精确终态为 `minio-volume-init` 和 `minio-init` 各 `exited 0`，其余八个服务各 `running healthy`。任一一次性任务非零时先保存其日志并修复卷权限、MinIO readiness、桶名或密钥差异；不得改 restart policy 或无限重跑。网关 healthy 不证明上游，Core readiness 只证明 `ping` 与数据库。
+**验证：** 精确终态为 `minio-volume-init`、`minio-init` 和 `flowable-init` 各 `exited 0`，其余八个服务各 `running healthy`。任一一次性任务非零时先保存其日志并修复根因；不得改 restart policy 或无限重跑。网关 healthy 不证明上游，Core readiness 只证明 `ping` 与数据库。
 
 ## HTTP 探测与有效端口
 
@@ -373,7 +373,7 @@ compose=(docker compose --env-file infra/compose/.env -f infra/compose/compose.y
 unset OCC_RECREATE_SERVICE OCC_CONFIRM_RECREATE
 ```
 
-Docker daemon/主机重启影响全栈。八个长运行服务的 `unless-stopped` 在 daemon 恢复后通常重启；手工 stop 或 `down` 的状态不能假定恢复。两个一次性服务保持 `restart: "no"`。维护重启前确认静默、备份、开机值班人；恢复后执行 `systemctl is-active docker`、`config --quiet`、`up -d` 及完整验收。失败时禁止删卷，先修复 daemon、磁盘、权限或挂载。
+Docker daemon/主机重启影响全栈。八个长运行服务的 `unless-stopped` 在 daemon 恢复后通常重启；手工 stop 或 `down` 的状态不能假定恢复。三个一次性服务保持 `restart: "no"`。维护重启前确认静默、备份、开机值班人；恢复后执行 `systemctl is-active docker`、`config --quiet`、`up -d` 及完整验收。失败时禁止删卷，先修复 daemon、磁盘、权限或挂载。
 
 ## systemd 生产监督与路径环境
 
@@ -561,7 +561,7 @@ unset OCC_CONFIRM_SYSTEMD_REMOVAL
 release_lifecycle_lock
 ```
 
-验证 unit 不再 enabled/存在、包括两个一次性服务在内的 Compose 项目容器均已删除、四卷仍存在。恢复时还原已评审 unit 和路径文件，执行 `daemon-reload`、`enable`、`start` 和完整验收；若只需恢复人工生命周期，则运行精确 Compose `config --quiet`、`up -d` 和完整验收。仅在系统最终退役且数据销毁另获批准后删除路径环境、密钥和证据。
+验证 unit 不再 enabled/存在、包括三个一次性服务在内的 Compose 项目容器均已删除、四卷仍存在。恢复时还原已评审 unit 和路径文件，执行 `daemon-reload`、`enable`、`start` 和完整验收；若只需恢复人工生命周期，则运行精确 Compose `config --quiet`、`up -d` 和完整验收。仅在系统最终退役且数据销毁另获批准后删除路径环境、密钥和证据。
 
 ## 日志与脱敏支持包
 
@@ -671,7 +671,7 @@ release_lifecycle_lock
 unset OCC_CONFIRM_DOWN
 ```
 
-验证包括两个一次性服务在内的项目容器均不存在、四卷仍存在且 unit 保持 runtime mask。恢复先 `sudo systemctl unmask --runtime innorder-occ.service`；`lifecycle_owner=systemd` 使用 `systemctl start innorder-occ.service`；`lifecycle_owner=manual` 执行精确 Compose `config --quiet`、`up -d`；`lifecycle_owner=failed-unit` 先审查 journal、修复根因并执行 `systemctl reset-failed innorder-occ.service`，再由 systemd start。所有路径随后都执行完整验收。误现空数据库时立即停止，禁止继续写入，并从已验证备份恢复。
+验证包括三个一次性服务在内的项目容器均不存在、四卷仍存在且 unit 保持 runtime mask。恢复先 `sudo systemctl unmask --runtime innorder-occ.service`；`lifecycle_owner=systemd` 使用 `systemctl start innorder-occ.service`；`lifecycle_owner=manual` 执行精确 Compose `config --quiet`、`up -d`；`lifecycle_owner=failed-unit` 先审查 journal、修复根因并执行 `systemctl reset-failed innorder-occ.service`，再由 systemd start。所有路径随后都执行完整验收。误现空数据库时立即停止，禁止继续写入，并从已验证备份恢复。
 
 ## 危险的数据删除与恢复限制
 

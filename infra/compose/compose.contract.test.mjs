@@ -184,6 +184,7 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.deepEqual(Object.keys(compose.services).sort(), [
     "ai",
     "core",
+    "flowable-init",
     "host-gateway",
     "kafka",
     "minio",
@@ -197,7 +198,7 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.equal(compose.networks["host-access"].internal, undefined);
 
   for (const [name, service] of Object.entries(compose.services)) {
-    if (!["minio-init", "minio-volume-init"].includes(name)) {
+    if (!["flowable-init", "minio-init", "minio-volume-init"].includes(name)) {
       assert.ok(service.healthcheck?.test, `${name} must have a healthcheck`);
     }
     if (name === "host-gateway") {
@@ -258,6 +259,7 @@ test("Compose wiring follows application config and completion gates", () => {
     "APP_VERSION",
     "DATABASE_JDBC_URL",
     "DATABASE_USERNAME",
+    "FLOWABLE_DATABASE_SCHEMA_UPDATE",
     "FLYWAY_USERNAME",
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
@@ -283,8 +285,16 @@ test("Compose wiring follows application config and completion gates", () => {
   assert.equal(core.environment.APP_VERSION, "${APP_VERSION:-0.1.0}");
   assert.equal(ai.environment.npm_package_version, "${APP_VERSION:-0.1.0}");
   assert.deepEqual(core.depends_on, {
+    "flowable-init": { condition: "service_completed_successfully" },
     postgres: { condition: "service_healthy" },
   });
+  assert.equal(core.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "false");
+  const flowableInit = compose.services["flowable-init"];
+  assert.equal(flowableInit.environment.SPRING_PROFILES_ACTIVE, "flowable-init");
+  assert.equal(flowableInit.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "true");
+  assert.equal(flowableInit.environment.SPRING_MAIN_WEB_APPLICATION_TYPE, "none");
+  assert.equal(flowableInit.restart, "no");
+  assert.deepEqual(flowableInit.depends_on, { postgres: { condition: "service_healthy" } });
   assert.ok(core.healthcheck.test.includes("http://localhost:8080/actuator/health/readiness"));
 
   const opa = compose.services.opa;
@@ -344,6 +354,10 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.deepEqual(secretTargets(compose.services.redis), {
     redis_password: "redis_password",
   });
+  assert.deepEqual(secretTargets(compose.services["flowable-init"]), {
+    postgres_flyway_password: "spring.flyway.password",
+    postgres_runtime_password: "spring.datasource.password",
+  });
 
   const consumers = Object.fromEntries(secretNames.map((secret) => [secret, []]));
   for (const [serviceName, service] of Object.entries(compose.services)) {
@@ -356,8 +370,8 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     minio_root_password: ["minio", "minio-init"],
     minio_root_user: ["minio", "minio-init"],
     postgres_admin_password: ["postgres"],
-    postgres_flyway_password: ["core", "postgres"],
-    postgres_runtime_password: ["core", "postgres"],
+    postgres_flyway_password: ["core", "flowable-init", "postgres"],
+    postgres_runtime_password: ["core", "flowable-init", "postgres"],
     redis_password: ["core", "redis"],
   });
 

@@ -119,7 +119,7 @@ Windows 精确状态检查会在原生命令后立即读取 `$LASTEXITCODE`，�
 $ErrorActionPreference = 'Stop'
 & docker @ComposeArgs ps -a
 if ($LASTEXITCODE -ne 0) { throw 'Compose ps -a 失败' }
-foreach ($service in 'minio-volume-init','minio-init') {
+foreach ($service in 'minio-volume-init','minio-init','flowable-init') {
   $idOutput = & docker @ComposeArgs ps -a -q $service
   $idExit = $LASTEXITCODE
   $ids = @($idOutput | Where-Object { $_ })
@@ -143,7 +143,7 @@ Linux 等价检查：
 ```bash
 set -euo pipefail
 "${compose[@]}" ps -a
-for service in minio-volume-init minio-init; do
+for service in minio-volume-init minio-init flowable-init; do
   id=$("${compose[@]}" ps -a -q "$service")
   [ -n "$id" ] && [ "$(printf '%s\n' "$id" | wc -l)" -eq 1 ]
   state=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$id")

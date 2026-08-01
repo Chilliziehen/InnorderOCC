@@ -201,15 +201,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Compose up -d 创建或启动失败；立即�
 & docker @ComposeArgs ps -a
 ```
 
-**注意：** Compose v5 的 `up -d --wait` 可能因为成功完成的 `minio-volume-init` 或 `minio-init` 已退出而返回非零，即使八个长运行服务全部健康。这是一次性容器与 wait 判定的交互，不能把非零直接改写为部署失败，也不能忽略。标准流程使用 `up -d`，随后按下一节分别验证两个精确退出码和八个健康状态；即使使用了 `--wait`，最终结论也只能来自这两组检查。
+**注意：** Compose v5 的 `up -d --wait` 可能因为成功完成的 `minio-volume-init`、`minio-init` 或 `flowable-init` 已退出而返回非零，即使八个长运行服务全部健康。这是一次性容器与 wait 判定的交互，不能把非零直接改写为部署失败，也不能忽略。标准流程使用 `up -d`，随后按下一节分别验证三个精确退出码和八个健康状态；即使使用了 `--wait`，最终结论也只能来自这两组检查。
 
 ## 状态与一次性任务验收
 
-### 两个一次性服务的精确退出码
+### 三个一次性服务的精确退出码
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$OneShots = 'minio-volume-init','minio-init'
+$OneShots = 'minio-volume-init','minio-init','flowable-init'
 foreach ($service in $OneShots) {
   $containerId = (& docker @ComposeArgs ps -a -q $service | Select-Object -First 1)
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($containerId)) { throw "$service 容器不存在" }
@@ -221,7 +221,7 @@ foreach ($service in $OneShots) {
 }
 ```
 
-`minio-volume-init` 的零退出证明 `minio-data` 所有权准备命令完成；`minio-init` 的零退出证明建桶、应用用户和策略命令完成。非零时不得反复重跑掩盖原因：先保存对应日志，检查卷权限、MinIO readiness、桶名和密钥差异，修复后再用 `up -d` 协调。
+`minio-volume-init` 的零退出证明 `minio-data` 所有权准备命令完成；`minio-init` 的零退出证明建桶、应用用户和策略命令完成；`flowable-init` 的零退出证明 Flowable 私有表初始化完成。非零时不得反复重跑掩盖原因：先保存对应日志并修复根因，再用 `up -d` 协调。
 
 ### 八个长运行服务的健康状态
 
@@ -242,10 +242,10 @@ do {
 } while ((Get-Date) -lt $Deadline)
 if ($notReady.Count -gt 0) { $notReady | ForEach-Object { [Console]::Error.WriteLine($_) }; throw '八个长运行服务未在时限内全部达到 running healthy' }
 & docker @ComposeArgs ps -a
-Write-Output '八个长运行服务均为 running healthy；两个一次性服务仍需保持 exited 0'
+Write-Output '八个长运行服务均为 running healthy；三个一次性服务仍需保持 exited 0'
 ```
 
-**验证：** 总体期望是八个 `running healthy` 加两个 `exited 0`。网关 healthy 只证明八个监听器存在，不证明上游；Core readiness 只证明 `ping` 和数据库，不证明 Kafka、Redis、MinIO、OPA、AI 全部可用。
+**验证：** 总体期望是八个 `running healthy` 加三个 `exited 0`。网关 healthy 只证明八个监听器存在，不证明上游；Core readiness 只证明 `ping` 和数据库，不证明 Kafka、Redis、MinIO、OPA、AI 全部可用。
 
 ## HTTP 探测与有效端口
 
@@ -411,7 +411,7 @@ Core 重建可能运行 Flyway；镜像回退不等于数据库迁移回退。�
 
 ### Windows 或 Docker Desktop 重启
 
-八个长运行服务配置 `restart: unless-stopped`。Docker Desktop Engine 正常重启后，未被显式停止的容器通常自动恢复；`docker compose down` 删除的容器不会恢复，曾被手工 stop 的容器也不能假定自动启动。两个一次性服务为 `restart: "no"`，正常保持 `exited 0`。
+八个长运行服务配置 `restart: unless-stopped`。Docker Desktop Engine 正常重启后，未被显式停止的容器通常自动恢复；`docker compose down` 删除的容器不会恢复，曾被手工 stop 的容器也不能假定自动启动。三个一次性服务为 `restart: "no"`，正常保持 `exited 0`。
 
 主机重启影响全部本机 OCC 连接。前提是维护窗口、应用静默、数据库/对象备份状态、Docker Desktop 登录启动策略和恢复值班人已确认；在操作系统界面确认重启，不在文档提供可误执行的强制重启命令。系统回来后登录批准的部署账号，等待 Docker Desktop Engine 可响应，重新初始化会话，然后执行：
 

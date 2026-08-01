@@ -92,7 +92,7 @@ for port in "${effective_ports[@]}"; do
 done
 ```
 
-Windows 块已经从受限 `.env` 解析最终八端口，不允许手工替换。还应以 `docker compose config --format json` 自动确认：十个服务、只有 `host-gateway` 有 `ports`、`backend.internal=true`、只有网关加入 `host-access`。
+Windows 块已经从受限 `.env` 解析最终八端口，不允许手工替换。还应以 `docker compose config --format json` 自动确认：十一个服务、只有 `host-gateway` 有 `ports`、`backend.internal=true`、只有网关加入 `host-access`。
 
 ### 主机防火墙
 

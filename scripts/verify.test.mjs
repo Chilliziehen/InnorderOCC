@@ -101,9 +101,12 @@ test("full verification audits official npm provenance and enforces strict Gradl
   const guardIndex = result.stdout.indexOf("scripts/electron-provenance.mjs");
   const packageIndex = result.stdout.indexOf("build --workspace @innorder/desktop");
   const smokeIndex = result.stdout.indexOf("smoke --workspace @innorder/desktop");
-  assert.ok(guardIndex >= 0 && guardIndex < packageIndex && guardIndex < smokeIndex);
+  assert.ok(guardIndex >= 0 && guardIndex < packageIndex);
+  if (process.platform === "win32") assert.ok(smokeIndex > guardIndex);
+  else assert.equal(smokeIndex, -1, "Linux backend verification must not launch packaged Windows Electron smoke");
   assert.match(result.stdout, /gradlew(?:\.bat)? :services:core:build --dependency-verification strict/u);
   assert.match(result.stdout, /PostgreSqlFlowableIntegrationTest/u);
+  assert.match(result.stdout, /PlatformSecurityKernelIntegrationTest/u);
   assert.match(result.stdout, /SessionRepositoryIntegrationTest/u);
   assert.match(result.stdout, /AuthControllerIntegrationTest/u);
   assert.match(result.stdout, /BootstrapAdministratorIntegrationTest/u);
@@ -118,11 +121,11 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
 });
 
-async function fakeTool(t, cwd, name, exitCode) {
+async function fakeTool(t, cwd, name, exitCode, output = name.startsWith("opa-available") ? "Version: 1.5.1" : "") {
   const path = join(cwd, process.platform === "win32" ? `${name}.cmd` : name);
   const content = process.platform === "win32"
-    ? `@echo off\r\nexit /b ${exitCode}\r\n`
-    : `#!/bin/sh\nexit ${exitCode}\n`;
+    ? `@echo off\r\n${output ? `echo ${output}\r\n` : ""}exit /b ${exitCode}\r\n`
+    : `#!/bin/sh\n${output ? `printf '%s\\n' '${output}'\n` : ""}exit ${exitCode}\n`;
   await writeFile(path, content, "utf8");
   if (process.platform !== "win32") await chmod(path, 0o755);
   t.after(() => rm(path, { force: true }));
@@ -159,6 +162,17 @@ test("strict full fails preflight when a real OPA executable is unavailable", as
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /OPA executable unavailable/u);
   assert.doesNotMatch(result.stdout, /full verification passed/u);
+});
+
+test("strict full rejects an OPA executable that is not version 1.5.1", async (t) => {
+  const cwd = await temporaryToolCwd(t);
+  const docker = await fakeTool(t, cwd, "docker-available", 0);
+  const opa = await fakeTool(t, cwd, "opa-wrong-version", 0, "Version: 1.6.0");
+
+  const result = runStrictFull({ ...process.env, PATH: cwd, DOCKER_PATH: docker, OPA_PATH: opa });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /OPA 1\.5\.1/u);
 });
 
 test("local verification has explicit non-full success semantics", () => {
