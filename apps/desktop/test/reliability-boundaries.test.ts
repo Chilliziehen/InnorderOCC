@@ -298,7 +298,7 @@ describe("evidence upload boundary", () => {
     expect(progress).toEqual([0, 50, 100]);
   });
 
-  it("cancels active uploads and retains an exact intent only for retry", async () => {
+  it("cancels active uploads, retains exact retry binding, and rejects changed content", async () => {
     const transport: EvidenceTransport = vi.fn((request) => new Promise((_resolve, rejectPromise) => {
       request.signal.addEventListener("abort", () => rejectPromise(new Error("aborted")));
     }));
@@ -312,8 +312,25 @@ describe("evidence upload boundary", () => {
     await vi.waitFor(() => expect(transport).toHaveBeenCalled());
     await service.cancel(uploadId);
     await expect(pending).resolves.toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED", retryable: true } });
+    await expect(service.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("intent mismatch");
+    expect(transport).toHaveBeenCalledOnce();
     vi.mocked(transport).mockRejectedValueOnce(new Error("retry transport"));
-    await expect(service.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("retry transport");
+    await expect(service.start(uploadInput())).rejects.toThrow("retry transport");
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a concurrent duplicate intent deterministically with one network call", async () => {
+    const transport: EvidenceTransport = vi.fn((request) => new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("aborted")))));
+    const service = createEvidenceUploadService({
+      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token",
+      transport, createUploadId: () => uploadId,
+    });
+    const first = service.start(uploadInput());
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+    await expect(service.start(uploadInput())).rejects.toThrow("already active");
+    expect(transport).toHaveBeenCalledOnce();
+    await service.cancel(uploadId);
+    await expect(first).resolves.toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED" } });
   });
 
   it("rejects offline before upload dependencies and rejects untrusted profile origins", async () => {
@@ -362,7 +379,19 @@ describe("evidence upload boundary", () => {
     await expect(service.start({ ...archive, intentHandle: "88888888-8888-4888-8888-888888888888" })).rejects.toThrow();
   });
 
-  it("bounds retained retry intents by capacity and TTL and releases cancellation", async () => {
+  it("releases a canonical intent binding after successful receipt delivery", async () => {
+    const response = { kind: "evidence" as const, evidenceId: "evidence-1", uploadReference: "ref-1", quarantineStatus: "released" as const, processingStatus: "ready" as const, reviewStatus: "pending" as const };
+    const transport: EvidenceTransport = vi.fn().mockResolvedValue(response);
+    const service = createEvidenceUploadService({
+      getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token",
+      transport, createUploadId: () => uploadId,
+    });
+    await expect(service.start(uploadInput())).resolves.toMatchObject({ state: "completed" });
+    await expect(service.start(uploadInput({ fileName: "changed.pdf" }))).resolves.toMatchObject({ state: "completed" });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds retained retry and cancelled intents by capacity and TTL", async () => {
     let now = 0;
     const transport = vi.fn().mockRejectedValue(new Error("transport"));
     const service = createEvidenceUploadService({
@@ -383,13 +412,15 @@ describe("evidence upload boundary", () => {
     const pendingTransport: EvidenceTransport = vi.fn((request) => { hold = request; return new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("aborted")))); });
     const cancellable = createEvidenceUploadService({
       getProfile: () => ({ origin: "https://core.example.test", endpointAvailable: true }), getAccessToken: () => "token",
-      transport: pendingTransport, maxIntents: 1, createUploadId: () => uploadId,
+      transport: pendingTransport, maxIntents: 1, createUploadId: () => uploadId, now: () => now, intentTtlMs: 1_000,
     });
     const pending = cancellable.start(uploadInput());
     await vi.waitFor(() => expect(hold).toBeDefined());
     await cancellable.cancel(uploadId);
     await expect(pending).resolves.toMatchObject({ state: "problem", problem: { code: "UPLOAD_CANCELLED" } });
-    vi.mocked(pendingTransport).mockRejectedValueOnce(new Error("transport after cancel"));
-    await expect(cancellable.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("transport after cancel");
+    await expect(cancellable.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("intent mismatch");
+    now += 1_001;
+    vi.mocked(pendingTransport).mockRejectedValueOnce(new Error("transport after expiry"));
+    await expect(cancellable.start(uploadInput({ fileName: "changed.pdf" }))).rejects.toThrow("transport after expiry");
   });
 });

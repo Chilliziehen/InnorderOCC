@@ -28,6 +28,8 @@ import { DESKTOP_CHANNELS } from "../src/ipc-contract";
 import { createCommandIntentRegistry } from "../src/command-intents";
 import { createProfileStore } from "../src/profile-store";
 import { createMainReliabilityApi } from "../src/main-reliability-composition";
+import { createConnectivityTracker } from "../src/connectivity";
+import { createEvidenceUploadService } from "../src/evidence-upload";
 
 const rendererUrl = "file:///D:/OCC/index.html";
 const profileId = "11111111-1111-4111-8111-111111111111";
@@ -320,6 +322,27 @@ describe("desktop IPC", () => {
     expect(deps.uploads.preflight).toHaveBeenCalledOnce();
   });
 
+  it("rejects compromised renderer command and upload IPC while main connectivity is offline", async () => {
+    const connectivity = createConnectivityTracker();
+    const executeCommand = vi.fn();
+    const transport = vi.fn();
+    const uploads = createEvidenceUploadService({
+      getProfile: () => ({ origin: profile.origin, endpointAvailable: true }), getAccessToken: () => "token",
+      isOnline: connectivity.isOnline, transport,
+    });
+    const api = createDesktopApi({
+      profiles: { list: vi.fn(), selected: () => profile, save: vi.fn(), select: vi.fn(), remove: vi.fn(), validate: vi.fn() } as never,
+      session: { restore: vi.fn(), login: vi.fn(), logout: vi.fn(), profileSwitched: vi.fn() },
+      statuses: vi.fn(), clearProfile: vi.fn(), executeCommand, isOnline: connectivity.isOnline, uploads,
+    });
+    registerDesktopIpc(rendererUrl, api);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    await expect(registeredHandler(DESKTOP_CHANNELS.commands.execute)(event, { workspace: "risks", operation: "acknowledge", targetId: "risk-1", payload: { expectedVersion: 1 }, intentHandle: profileId })).rejects.toThrow("IPC request failed");
+    await expect(registeredHandler(DESKTOP_CHANNELS.uploads.preflight)(event, { workspace: "my-work", taskId: "task-1", fileName: "evidence.pdf", mediaType: "application/pdf", size: 4, intentHandle: profileId })).rejects.toThrow("IPC request failed");
+    expect(executeCommand).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("sends only validated monotonic upload progress on the named channel", () => {
     const send = vi.fn();
     const target = { send };
@@ -365,28 +388,52 @@ describe("desktop main composition", () => {
     };
     const uploads = { preflight: vi.fn().mockResolvedValue({ state: "unavailable", reason: "UNAVAILABLE_CONTRACT", resourceGroups: ["/evidence"], message: "证据提交 API 合同尚未集成" }), start: vi.fn(), cancel: vi.fn() };
     const profiles = { ...deps.profiles, selected: () => profile, validate: (input: unknown) => input };
+    const connectivity = createConnectivityTracker();
+    connectivity.recordRequestOutcome("success");
     const api = createMainReliabilityApi({
       profiles: profiles as never,
       session: { ...deps.session, profileSwitched: vi.fn() },
       statuses: deps.runtime.statuses,
       clearProfile: vi.fn(), readCache: readCache as never, notificationStream,
-      uploads, getCustomerInstanceId: () => customerInstanceId, isOnline: () => true,
+      uploads, getCustomerInstanceId: () => customerInstanceId, connectivity,
+      getNotificationSession: (scope) => ({ scope, origin: "http://127.0.0.1:8080", endpointAvailable: false }),
     });
     await api.session.restore();
-    expect(notificationStream.setSession).toHaveBeenLastCalledWith({ scope: { profileId, customerInstanceId, principalId }, origin: profile.origin, endpointAvailable: false });
+    expect(notificationStream.setSession).not.toHaveBeenCalled();
     await api.session.login({ username: "user", password: "long-password" });
-    expect(notificationStream.setSession).toHaveBeenLastCalledWith({ scope: { profileId, customerInstanceId, principalId }, origin: profile.origin, endpointAvailable: false });
+    expect(notificationStream.setSession).not.toHaveBeenCalled();
     await expect(api.workspaces.query({ workspace: "risks", operation: "risks.query" })).resolves.toMatchObject({ state: "unavailable", reason: "UNAVAILABLE_CONTRACT" });
     expect(readCache.query).toHaveBeenCalledOnce();
     await expect(api.commands.execute({ workspace: "risks", operation: "acknowledge", targetId: "risk-1", payload: { expectedVersion: 1 }, idempotencyKey: profileId })).resolves.toMatchObject({ state: "unavailable" });
     await expect(api.uploads.preflight({ workspace: "my-work", taskId: "task-1", fileName: "evidence.pdf", mediaType: "application/pdf", size: 4, intentHandle: profileId })).resolves.toMatchObject({ state: "unavailable" });
 
     const logout = api.session.logout();
-    expect(notificationStream.setSession).toHaveBeenLastCalledWith(null);
+    expect(notificationStream.setSession).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(deps.session.logout).toHaveBeenCalled());
     releaseLogout();
     await logout;
     expect(readCache.purgeAccount).toHaveBeenCalledWith({ profileId, customerInstanceId, principalId });
+  });
+
+  it("activates only available HTTPS notifications and contains background rejection", async () => {
+    const deps = dependencies();
+    const backgroundError = vi.fn();
+    const notificationStream = { setSession: vi.fn().mockRejectedValue(new Error("raw connector failure")) };
+    const connectivity = createConnectivityTracker();
+    const scope = { profileId, customerInstanceId: "22222222-2222-4222-8222-222222222222", principalId: "33333333-3333-4333-8333-333333333333" };
+    deps.session.login.mockResolvedValue({ state: "authenticated", user: { id: scope.principalId, username: "user", displayName: "User", status: "ACTIVE", capabilities: [] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    const api = createMainReliabilityApi({
+      profiles: { ...deps.profiles, selected: () => profile, validate: vi.fn() } as never,
+      session: { ...deps.session, profileSwitched: vi.fn() }, statuses: deps.runtime.statuses, clearProfile: vi.fn(),
+      readCache: { query: vi.fn(), purgeAccount: vi.fn() }, notificationStream,
+      uploads: deps.uploads, getCustomerInstanceId: () => scope.customerInstanceId, connectivity,
+      getNotificationSession: (authenticatedScope) => ({ scope: authenticatedScope, origin: profile.origin, endpointAvailable: true }),
+      onBackgroundError: backgroundError,
+    });
+    await api.session.login({ username: "user", password: "long-password" });
+    expect(notificationStream.setSession).toHaveBeenCalledWith({ scope, origin: profile.origin, endpointAvailable: true });
+    await vi.waitFor(() => expect(backgroundError).toHaveBeenCalledWith(expect.objectContaining({ message: "Notification session update failed" })));
+    expect(JSON.stringify(backgroundError.mock.calls)).not.toContain("raw connector failure");
   });
 
   it("uses authenticated scoped cache fallback, purges logout scope, and rejects offline commands first", async () => {
@@ -563,6 +610,7 @@ describe("desktop main composition", () => {
     const files = new Map<string, string>([[file, "{not-json"]]);
     const fs = {
       mkdir: vi.fn().mockResolvedValue(undefined),
+      stat: vi.fn(async (name: string) => ({ size: Buffer.byteLength(files.get(name) ?? "") })),
       readFile: vi.fn(async (name: string) => {
         if (!files.has(name)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
         return files.get(name)!;
@@ -571,11 +619,23 @@ describe("desktop main composition", () => {
       rename: vi.fn(async (from: string, to: string) => { files.set(to, files.get(from)!); files.delete(from); }),
       unlink: vi.fn().mockResolvedValue(undefined),
     };
-    const persistence = createAtomicTextPersistence(file, fs);
+    const persistence = createAtomicTextPersistence(file, fs, 1_000);
     await expect(persistence.read()).resolves.toEqual({ text: "{not-json", byteLength: 9 });
     await persistence.write({ version: 1, entries: [] });
     const text = JSON.stringify({ version: 1, entries: [] });
     await expect(persistence.read()).resolves.toEqual({ text, byteLength: Buffer.byteLength(text) });
+  });
+
+  it("rejects oversized cache files from stat without allocating a read", async () => {
+    const fs = {
+      stat: vi.fn().mockResolvedValue({ size: 1_001 }),
+      readFile: vi.fn(),
+      mkdir: vi.fn(), writeFile: vi.fn(), rename: vi.fn(), unlink: vi.fn(),
+    };
+    const persistence = createAtomicTextPersistence("D:\\user-data\\cache.json", fs, 1_000);
+    await expect(persistence.read()).resolves.toBeUndefined();
+    expect(fs.stat).toHaveBeenCalledOnce();
+    expect(fs.readFile).not.toHaveBeenCalled();
   });
 
   it.each(["write", "rename"] as const)(

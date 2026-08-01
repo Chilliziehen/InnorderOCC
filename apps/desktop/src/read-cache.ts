@@ -16,6 +16,8 @@ export interface ReadCachePersistence {
   write(value: unknown): Promise<void>;
 }
 
+export const READ_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+
 export interface ReadCacheScope {
   readonly profileId: string;
   readonly customerInstanceId: string;
@@ -157,7 +159,7 @@ export function createReadCache(options: ReadCacheOptions) {
   const freshTtlMs = options.freshTtlMs ?? 5 * 60_000;
   const maxStaleMs = options.maxStaleMs ?? 24 * 60 * 60_000;
   const maxEntries = options.maxEntries ?? 500;
-  const maxBytes = options.maxBytes ?? 16 * 1024 * 1024;
+  const maxBytes = options.maxBytes ?? READ_CACHE_MAX_BYTES;
   const isNetworkFailure = options.isNetworkFailure ?? ((error: unknown) =>
     error instanceof CoreClientError && ["NETWORK_ERROR", "TIMEOUT"].includes(error.problem.code)
   );

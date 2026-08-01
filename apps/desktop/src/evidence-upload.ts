@@ -81,6 +81,7 @@ export function validateEvidenceUpload(input: unknown): EvidenceUploadInput {
 
 export function createEvidenceUploadService(options: EvidenceUploadServiceOptions) {
   const active = new Map<string, { controller: AbortController; intentHandle: string }>();
+  const activeIntents = new Map<string, string>();
   const intents = new Map<string, { hash: string; touchedAt: number }>();
   const createUploadId = options.createUploadId ?? (() => crypto.randomUUID());
   const chunkBytes = options.chunkBytes ?? 256 * 1024;
@@ -91,7 +92,7 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
   const cleanupIntents = () => {
     const time = now();
     for (const [handle, binding] of intents) {
-      if (time - binding.touchedAt > intentTtlMs && ![...active.values()].some((entry) => entry.intentHandle === handle)) intents.delete(handle);
+      if (time - binding.touchedAt > intentTtlMs && !activeIntents.has(handle)) intents.delete(handle);
     }
   };
 
@@ -122,11 +123,13 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
       cleanupIntents();
       const existing = intents.get(upload.intentHandle);
       if (existing && existing.hash !== hash) throw new Error("Evidence upload intent mismatch");
+      if (activeIntents.has(upload.intentHandle)) throw new Error("Evidence upload intent already active");
       if (!existing && intents.size >= maxIntents) throw new Error("Evidence upload intent capacity exceeded");
       intents.set(upload.intentHandle, { hash, touchedAt: now() });
       const uploadId = z.uuid().parse(createUploadId());
       const controller = new AbortController();
       active.set(uploadId, { controller, intentHandle: upload.intentHandle });
+      activeIntents.set(upload.intentHandle, uploadId);
       let sent = 0;
       const progress = (percent: number) => emit({ uploadId, intentHandle: upload.intentHandle, percent });
       progress(0);
@@ -164,7 +167,7 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
         return { state: "completed", uploadId, ...response };
       } catch (error) {
         if (controller.signal.aborted) {
-          intents.delete(upload.intentHandle);
+          intents.set(upload.intentHandle, { hash, touchedAt: now() });
           return {
             state: "problem",
             problem: { title: "Upload cancelled", code: "UPLOAD_CANCELLED", status: 499, retryable: true },
@@ -173,12 +176,14 @@ export function createEvidenceUploadService(options: EvidenceUploadServiceOption
         throw error;
       } finally {
         active.delete(uploadId);
+        if (activeIntents.get(upload.intentHandle) === uploadId) activeIntents.delete(upload.intentHandle);
       }
     },
     async cancel(uploadId: string): Promise<void> {
       const entry = active.get(z.uuid().parse(uploadId));
       if (entry) {
-        intents.delete(entry.intentHandle);
+        const binding = intents.get(entry.intentHandle);
+        if (binding) intents.set(entry.intentHandle, { ...binding, touchedAt: now() });
         entry.controller.abort();
       }
     },

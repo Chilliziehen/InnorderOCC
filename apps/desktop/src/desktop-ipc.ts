@@ -240,16 +240,26 @@ export interface DesktopApiDependencies {
   onSessionScopeChanged?: (scope: ReadCacheScope | null, generation: number) => void;
 }
 
+interface BoundedTextFileSystem extends JsonFileSystem {
+  stat(file: string): Promise<{ size: number }>;
+}
+
 export function createAtomicTextPersistence(
   file: string,
-  fs: JsonFileSystem,
+  fs: BoundedTextFileSystem,
+  maxBytes: number,
 ) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Text persistence byte limit is invalid");
   const writer = createAtomicJsonPersistence(file, fs);
   return {
     async read(): Promise<{ text: string; byteLength: number } | undefined> {
       try {
+        const { size } = await fs.stat(file);
+        if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes) return undefined;
         const text = await fs.readFile(file, "utf8");
-        return { text, byteLength: Buffer.byteLength(text, "utf8") };
+        const byteLength = Buffer.byteLength(text, "utf8");
+        if (byteLength !== size || byteLength > maxBytes) return undefined;
+        return { text, byteLength };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw error;

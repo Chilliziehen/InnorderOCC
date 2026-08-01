@@ -11,6 +11,7 @@ import {
   type TokenResponse,
 } from "@innorder/contracts";
 import type { ZodType } from "zod";
+import type { CoreRequestOutcome } from "./connectivity";
 
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
@@ -47,6 +48,7 @@ interface CoreClientOptions {
   timeoutMs: number;
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
+  onConnectivityChange?: (outcome: CoreRequestOutcome) => void;
 }
 
 type Operation = "login" | "refresh" | "logout" | "me" | "systemStatus";
@@ -116,6 +118,9 @@ async function readBounded(response: Response, controller: AbortController): Pro
 export function createCoreClient(options: CoreClientOptions): CoreClient {
   const schedule = options.setTimeout ?? globalThis.setTimeout;
   const cancel = options.clearTimeout ?? globalThis.clearTimeout;
+  const reportConnectivity = (outcome: CoreRequestOutcome) => {
+    try { options.onConnectivityChange?.(outcome); } catch { /* Connectivity reporting must not change request behavior. */ }
+  };
 
   async function request<T>(
     operation: Operation,
@@ -148,7 +153,10 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
         redirect: "error",
         signal: controller.signal,
       });
-      if (operation === "logout" && response.status === 204) return undefined as T;
+      if (operation === "logout" && response.status === 204) {
+        reportConnectivity("success");
+        return undefined as T;
+      }
 
       if (operation === "login" && (response.status === 401 || response.status === 403)) {
         let correlationId: string | undefined;
@@ -188,10 +196,18 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
       if (!schema) throw new CoreClientError(receipt("INVALID_RESPONSE", 502));
       const parsed = schema.safeParse(value);
       if (!parsed.success) throw new CoreClientError(receipt("INVALID_RESPONSE", 502));
+      reportConnectivity("success");
       return parsed.data;
     } catch (error) {
-      if (error instanceof CoreClientError) throw error;
-      if (timedOut) throw new CoreClientError(receipt("TIMEOUT", 408));
+      if (error instanceof CoreClientError) {
+        if (error.problem.code === "NETWORK_ERROR" || error.problem.code === "TIMEOUT") reportConnectivity("network-failure");
+        throw error;
+      }
+      if (timedOut) {
+        reportConnectivity("network-failure");
+        throw new CoreClientError(receipt("TIMEOUT", 408));
+      }
+      reportConnectivity("network-failure");
       throw new CoreClientError(receipt("NETWORK_ERROR", 503));
     } finally {
       cancel(timeout);

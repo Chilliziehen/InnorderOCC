@@ -6,6 +6,7 @@ import { app, BrowserWindow, safeStorage, session } from "electron";
 
 import { createCoreClient } from "./core-client";
 import { createCommandIntentRegistry } from "./command-intents";
+import { createConnectivityTracker } from "./connectivity";
 import {
   createAtomicJsonPersistence,
   createAtomicTextPersistence,
@@ -24,7 +25,7 @@ import {
   registerSingleInstanceLifecycle,
 } from "./electron-security";
 import { createProfileStore } from "./profile-store";
-import { createReadCache } from "./read-cache";
+import { createReadCache, READ_CACHE_MAX_BYTES } from "./read-cache";
 import { createNotificationStream } from "./notification-stream";
 import { createSessionManager, customerInstanceIdFromAccessToken } from "./session-manager";
 import { createMainReliabilityApi } from "./main-reliability-composition";
@@ -90,6 +91,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
   const readCachePersistence = createAtomicTextPersistence(
     path.join(userData, "workspace-read-cache.json"),
     fs,
+    READ_CACHE_MAX_BYTES,
   );
   const notificationPersistence = createAtomicJsonPersistence(
     path.join(userData, "notification-cursors.json"),
@@ -105,6 +107,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
   });
   let accessToken: string | null = null;
   let customerInstanceId: string | null = null;
+  const connectivity = createConnectivityTracker();
   const selectedProfile = () => {
     const selected = profiles.selected();
     if (!selected) throw new Error("No server profile selected");
@@ -115,6 +118,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
     getOrigin: () => selectedProfile().origin,
     getAccessToken: () => accessToken,
     timeoutMs: STATUS_TIMEOUT_MS,
+    onConnectivityChange: connectivity.recordRequestOutcome,
   });
   const sessionManager = createSessionManager({
     core,
@@ -139,6 +143,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
   const uploads = createEvidenceUploadService({
     getProfile: () => ({ origin: selectedProfile().origin, endpointAvailable: false }),
     getAccessToken: () => accessToken,
+    isOnline: connectivity.isOnline,
     transport: async () => { throw new Error("Evidence contract unavailable"); },
     onProgress: (progress) => {
       if (mainWindow) sendDesktopUploadProgress(mainWindow.webContents, progress);
@@ -163,7 +168,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
     readCache,
     notificationStream,
     getCustomerInstanceId: () => customerInstanceId,
-    isOnline: () => accessToken !== null,
+    connectivity,
     uploads,
   });
 
