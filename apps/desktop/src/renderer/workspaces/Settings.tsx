@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 
 import { profileInputSchema, type ProfileInput, type ServerProfile } from "../../desktop-contract";
 import { WORKSPACE_DEFINITIONS } from "./workspace-definitions";
@@ -20,6 +21,7 @@ export interface SettingsProps {
   readonly onLogout: () => void | Promise<void>;
   readonly onTabChange?: (tabId: string) => void;
   readonly activeTab?: string;
+  readonly onModalOpenChange?: (open: boolean) => void;
 }
 
 const definition = WORKSPACE_DEFINITIONS.settings;
@@ -39,7 +41,7 @@ function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number, select:
   event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
 }
 
-export function Settings({ profiles, current, connectivity, onSelect, onSave, onRemove, onPreferencesChange, onLogout, onTabChange, activeTab: controlledActiveTab }: SettingsProps) {
+export function Settings({ profiles, current, connectivity, onSelect, onSave, onRemove, onPreferencesChange, onLogout, onTabChange, activeTab: controlledActiveTab, onModalOpenChange }: SettingsProps) {
   const [localActiveTab, setActiveTab] = useState(definition.tabs[0]!.id);
   const activeTab = definition.tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const [name, setName] = useState(current?.name ?? "");
@@ -74,6 +76,13 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
     removalTriggerRef.current?.focus();
     removalTriggerRef.current = undefined;
   }, [pendingRemoval]);
+
+  useEffect(() => {
+    onModalOpenChange?.(Boolean(pendingRemoval));
+    return () => {
+      if (pendingRemoval) onModalOpenChange?.(false);
+    };
+  }, [onModalOpenChange, pendingRemoval]);
 
   const runAction = async (action: PendingAction, message: string, callback: () => void | Promise<void>, onSuccess?: () => void) => {
     if (pendingActionRef.current) return;
@@ -200,15 +209,17 @@ export function Settings({ profiles, current, connectivity, onSelect, onSave, on
         {active.id === "session" ? <><button type="button" disabled={Boolean(pendingAction)} onClick={() => { if (pendingActionRef.current) return; void runAction("logout", "无法退出登录，请重试。", onLogout); }}>{pendingAction === "logout" ? "正在退出" : "退出登录"}</button>{actionError?.action === "logout" ? <p role="alert">{actionError.message}</p> : null}</> : null}
         </div>
       </div>
-      {pendingRemoval ? (
-        <div role="dialog" aria-modal="true" aria-labelledby="remove-profile-title" onKeyDown={handleDialogKey}>
+      {pendingRemoval ? createPortal(
+        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="remove-profile-title" onKeyDown={handleDialogKey}>
           <h2 id="remove-profile-title">确认移除配置</h2>
           <p>{pendingRemoval.id === current?.id ? "这是当前选中的配置。移除后需要选择其他服务器。" : `将移除 ${pendingRemoval.name}。`}</p>
           {actionError?.action === "remove" ? <p role="alert">{actionError.message}</p> : null}
           <button ref={cancelRemovalRef} type="button" disabled={pendingAction === "remove"} onClick={closeRemoval}>取消</button>
           <button ref={confirmRemovalRef} type="button" disabled={!mutable || pendingAction === "remove"} onClick={() => { if (!mutable || pendingActionRef.current) return; void runAction("remove", "无法移除服务器配置，请重试。", () => onRemove(pendingRemoval.id), () => setPendingRemoval(undefined)); }}>{pendingAction === "remove" ? "正在移除" : "确认移除"}</button>
+          </div>
         </div>
-      ) : null}
+      , document.body) : null}
     </section>
   );
 }

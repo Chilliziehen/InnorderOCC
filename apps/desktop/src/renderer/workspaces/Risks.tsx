@@ -96,9 +96,9 @@ export function Risks({ result, query, activeTab, selectedRiskId, capabilities, 
   };
   const renderItem = (item: RiskItem) => (
     <table aria-label={item.risk}><tbody><tr aria-label={item.risk}>
-      <td><button type="button" aria-pressed={selectedRiskId === item.id} onClick={() => onSelectRisk(item.id)}>选择风险：{item.risk}</button></td>
-      <td>严重性：{severityLabels[item.severity]}</td><td>负责人：{item.owner ?? "未分派"}</td><td>状态：{item.status}</td>
-      <td>时限：<time dateTime={item.deadline}>{new Date(item.deadline).toLocaleString("zh-CN")}</time></td><td>SLA：{slaLabels[item.sla]}</td><td>版本：{item.version}</td>
+      <td data-label="操作"><button type="button" aria-pressed={selectedRiskId === item.id} onClick={() => onSelectRisk(item.id)}>选择风险：{item.risk}</button></td>
+      <td data-label="严重性"><span className="cell-inline-label">严重性：</span>{severityLabels[item.severity]}</td><td data-label="负责人"><span className="cell-inline-label">负责人：</span>{item.owner ?? "未分派"}</td><td data-label="状态"><span className="cell-inline-label">状态：</span>{item.status}</td>
+      <td data-label="时限"><span className="cell-inline-label">时限：</span><time dateTime={item.deadline}>{new Date(item.deadline).toLocaleString("zh-CN")}</time></td><td data-label="SLA"><span className="cell-inline-label">SLA：</span>{slaLabels[item.sla]}</td><td data-label="版本"><span className="cell-inline-label">版本：</span>{item.version}</td>
     </tr></tbody></table>
   );
   const action = (operation: keyof typeof riskCommandPayloadSchemas, payload: Record<string, unknown>) => {

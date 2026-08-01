@@ -83,8 +83,10 @@ function ValidatedData<Item>({
           ) : null}
           {items.map((item, index) => {
             const record = item as Record<string, unknown>;
-            const values = columns.length > 0 ? columns.map(({ key }) => record[key]) : Object.values(record);
-            return <div role="row" key={index}>{renderRowAction ? <span role="cell">{renderRowAction(item)}</span> : null}{values.map((value, cell) => <span role="cell" key={cell}>{displayValue(value)}</span>)}</div>;
+            const dataColumns = columns.length > 0
+              ? columns
+              : Object.keys(record).map((key) => ({ key, label: key }));
+            return <div role="row" key={index}>{renderRowAction ? <span role="cell" data-label="选择">{renderRowAction(item)}</span> : null}{dataColumns.map(({ key, label }) => <span role="cell" data-label={label.trim() || key} key={key}>{displayValue(record[key])}</span>)}</div>;
           })}
         </div>
       )}

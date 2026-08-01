@@ -1,7 +1,7 @@
 import type { SystemStatus } from "@innorder/contracts";
 import { Tooltip } from "antd";
 import { LogOut, Settings } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ProfileInput, ServerProfile } from "../../desktop-contract";
 import type { AuthenticatedState, OfflineState, ReconnectingState } from "../app-controller";
@@ -27,6 +27,7 @@ export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfile
   const identity = state.mode === "authenticated" ? state.identity : state.cachedIdentity;
   const resolution = resolveRoute(state.route?.path ?? "", identity.capabilities);
   const contentRef = useRef<HTMLDivElement>(null);
+  const [modalOpen, setModalOpen] = useState(false);
   const title = resolution.kind === "route"
     ? resolution.route.title
     : resolution.kind === "access-denied"
@@ -43,7 +44,7 @@ export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfile
   }, [state.route?.focusToken]);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" inert={modalOpen ? true : undefined} aria-hidden={modalOpen ? true : undefined} onClickCapture={(event) => { if (modalOpen && event.currentTarget.contains(event.target as Node)) { event.preventDefault(); event.stopPropagation(); } }}>
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">序</span><div><strong>创序 OCC</strong><small>运营控制中心</small></div></div>
         <nav aria-label="主导航">
@@ -83,6 +84,7 @@ export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfile
               onLogout={onLogout}
               onProfileSelect={onProfileSelect}
               onProfileSave={onProfileSave}
+              onModalOpenChange={setModalOpen}
               {...(onProfileRemove ? { onProfileRemove } : {})}
             />
           )}

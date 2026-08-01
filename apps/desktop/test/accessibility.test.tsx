@@ -46,6 +46,19 @@ const identity: CurrentUser = {
   capabilities,
 };
 
+const statuses = [{
+  service: "occ-core",
+  version: "1.0.0",
+  state: "READY" as const,
+  checkedAt: "2026-08-01T12:00:00.000Z",
+  components: [{
+    id: "database",
+    label: "Database",
+    state: "READY" as const,
+    checkedAt: "2026-08-01T12:00:00.000Z",
+  }],
+}];
+
 function authenticatedState(path: NonNullable<AuthenticatedState["route"]>["path"], focusToken = 1): AuthenticatedState {
   return {
     mode: "authenticated",
@@ -67,6 +80,50 @@ function unavailableResult(): WorkspaceResult {
     resourceGroups: ["/contract"],
     message: "工作区 API 合同不可用",
   };
+}
+
+function representativeResult(path: string): { result: WorkspaceResult; marker: string } {
+  const fetchedAt = "2026-08-01T12:00:00.000Z";
+  const itemsByPath: Record<string, { item: Record<string, unknown>; marker: string }> = {
+    "/overview": { item: { item: "检查生产线", type: "attention", status: "open" }, marker: "检查生产线" },
+    "/my-work": {
+      item: {
+        id: "task-1", task: "检查接线", process: "电子模块", state: "CLAIMED", dueAt: "2026-08-02T08:00:00Z",
+        evidenceRequirements: ["接线照片"], acceptedMediaTypes: ["image/jpeg"], reviewHistory: [],
+      },
+      marker: "检查接线",
+    },
+    "/processes": {
+      item: {
+        id: "process-1", process: "装配流程", cohort: "2026-A", owner: "负责人", status: "ACTIVE",
+        expectedVersion: 1, progress: 30, participants: [], tasks: [], evidence: [], risks: [], timeline: [],
+      },
+      marker: "装配流程",
+    },
+    "/interventions": {
+      item: { id: "review-1", item: "审核证据", type: "review", owner: null, status: "open", version: 1, evidenceVersion: 2 },
+      marker: "审核证据",
+    },
+    "/risks": {
+      item: { id: "risk-1", risk: "供应中断", severity: "high", owner: null, status: "open", deadline: "2026-08-03T08:00:00Z", sla: "due-soon", version: 1 },
+      marker: "供应中断",
+    },
+    "/resources": {
+      item: { id: "gpu-1", name: "GPU Pool", type: "compute", state: "available", capacity: 8, availableCapacity: 4, reservations: [], conflicts: [] },
+      marker: "GPU Pool",
+    },
+    "/domain-design": {
+      item: { id: "package-1", name: "order-domain", version: "1.0.0", status: "draft", assets: [{ name: "schema.json", kind: "schema", digest: "sha256:test" }] },
+      marker: "order-domain",
+    },
+    "/administration": {
+      item: { subject: "值班人员", type: "person", status: "active", updatedAt: fetchedAt },
+      marker: "值班人员",
+    },
+  };
+  const entry = itemsByPath[path];
+  if (!entry) return { result: { state: "empty", fetchedAt }, marker: path === "/system" ? "occ-core" : "Pilot" };
+  return { result: { state: "ready", items: [entry.item], count: 1, fetchedAt }, marker: entry.marker };
 }
 
 function installOcc(result: WorkspaceResult = unavailableResult()): OccApi {
@@ -158,6 +215,32 @@ describe("authenticated console accessibility", () => {
     await expectAccessible(container);
   });
 
+  it.each(ROUTES)("has no axe violations with representative rows and forms on $path", async ({ path, title }) => {
+    const representative = representativeResult(path);
+    const api = installOcc(representative.result);
+    const { container } = render(
+      <AppShell
+        state={authenticatedState(path)}
+        statuses={statuses}
+        onLogout={vi.fn()}
+        onProfileSelect={vi.fn()}
+        onProfileSave={vi.fn()}
+        onProfileRemove={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument();
+    if (path !== "/system" && path !== "/settings") {
+      await waitFor(() => expect(api.workspaces.query).toHaveBeenCalled());
+    }
+    expect((await screen.findAllByText(representative.marker, { exact: false })).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("form").length).toBeGreaterThan(0);
+    for (const cell of container.querySelectorAll<HTMLElement>('td, [role="cell"]')) {
+      expect(cell.dataset.label?.trim(), cell.textContent ?? "cell").toBeTruthy();
+    }
+    await expectAccessible(container);
+  });
+
   it("uses native route links and focuses the destination heading", async () => {
     installOcc();
     const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
@@ -195,14 +278,26 @@ describe("authenticated console accessibility", () => {
     const remove = screen.getByRole("button", { name: "移除 Pilot" });
     fireEvent.click(remove);
     const dialog = screen.getByRole("dialog", { name: "确认移除配置" });
+    const shell = container.querySelector<HTMLElement>(".app-shell");
+    expect(shell).toHaveAttribute("inert");
+    expect(shell).toHaveAttribute("aria-hidden", "true");
+    expect(shell).not.toContainElement(dialog);
+    expect(dialog.parentElement).toHaveClass("modal-backdrop");
     expect(dialog).toHaveAttribute("aria-modal", "true");
     const confirm = within(dialog).getByRole("button", { name: "确认移除" });
     expect(confirm).toHaveFocus();
+    const hashBeforeBlockedNavigation = window.location.hash;
+    fireEvent.click(container.querySelector('a[href="#/risks"]')!);
+    expect(window.location.hash).toBe(hashBeforeBlockedNavigation);
+    fireEvent.mouseDown(dialog.parentElement!);
+    expect(screen.getByRole("dialog", { name: "确认移除配置" })).toBeInTheDocument();
     fireEvent.keyDown(confirm, { key: "Tab" });
     expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(remove).toHaveFocus();
-    await expectAccessible(container);
+    expect(shell).not.toHaveAttribute("inert");
+    expect(shell).not.toHaveAttribute("aria-hidden");
+    await expectAccessible(document.body);
   });
 });
 
@@ -210,6 +305,9 @@ describe("workspace state accessibility", () => {
   const schema = z.object({ name: z.string() }).strict();
   const fetchedAt = "2026-08-01T12:00:00.000Z";
   const cases: Array<[string, WorkspaceResult]> = [
+    ["loading", { state: "loading", label: "正在加载数据" }],
+    ["ready populated", { state: "ready", items: [{ name: "在线记录" }], count: 1, fetchedAt }],
+    ["empty", { state: "empty", fetchedAt }],
     ["offline", { state: "offline", items: [{ name: "离线记录" }], count: 1, fetchedAt }],
     ["stale", { state: "stale", items: [{ name: "过期记录" }], count: 1, fetchedAt }],
     ["error", { state: "error", problem: { title: "查询失败", code: "FAILED", status: 503 } }],
@@ -228,6 +326,9 @@ describe("workspace state accessibility", () => {
         onRefresh={vi.fn()}
       />,
     );
+    for (const cell of container.querySelectorAll<HTMLElement>('[role="cell"]')) {
+      expect(cell.dataset.label?.trim()).toBeTruthy();
+    }
     await expectAccessible(container);
   });
 });

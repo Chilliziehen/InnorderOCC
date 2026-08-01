@@ -147,13 +147,13 @@ export function Overview({ definition, result, statuses, query, activeTab, envir
             <tbody>
               {health.length > 0 ? health.map((status) => (
                 <tr key={status.service}>
-                  <td>{status.service}</td>
-                  <td>{STATE_LABELS[status.state]}</td>
-                  <td>{status.version}</td>
-                  <td>{environment}</td>
-                  <td><time dateTime={status.checkedAt}>{new Date(status.checkedAt).toLocaleString("zh-CN")}</time></td>
+                  <td data-label="服务">{status.service}</td>
+                  <td data-label="状态">{STATE_LABELS[status.state]}</td>
+                  <td data-label="版本">{status.version}</td>
+                  <td data-label="环境">{environment}</td>
+                  <td data-label="新鲜度"><time dateTime={status.checkedAt}>{new Date(status.checkedAt).toLocaleString("zh-CN")}</time></td>
                 </tr>
-              )) : <tr><td>--</td><td>--</td><td>--</td><td>{environment}</td><td>--</td></tr>}
+              )) : <tr><td data-label="服务">--</td><td data-label="状态">--</td><td data-label="版本">--</td><td data-label="环境">{environment}</td><td data-label="新鲜度">--</td></tr>}
             </tbody>
           </table>
         </section>

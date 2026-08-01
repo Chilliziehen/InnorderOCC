@@ -115,14 +115,14 @@ export function SystemOperations({ definition, result, statuses, query, activeTa
             <tbody>
               {validated.length > 0 ? validated.flatMap((status) => [
                 <tr key={`service-${status.service}`}>
-                  <td>服务</td><td>{status.service}</td><td>{STATE_LABELS[status.state]}</td><td>{status.version}</td><td>{environment}</td><td><time dateTime={status.checkedAt}>{new Date(status.checkedAt).toLocaleString("zh-CN")}</time></td><td>--</td>
+                  <td data-label="类型">服务</td><td data-label="名称">{status.service}</td><td data-label="状态">{STATE_LABELS[status.state]}</td><td data-label="版本">{status.version}</td><td data-label="环境">{environment}</td><td data-label="新鲜度"><time dateTime={status.checkedAt}>{new Date(status.checkedAt).toLocaleString("zh-CN")}</time></td><td data-label="详情">--</td>
                 </tr>,
                 ...status.components.map((component) => (
                   <tr key={`${status.service}-${component.id}`}>
-                    <td>组件</td><td>{component.label}</td><td>{STATE_LABELS[component.state]}</td><td>--</td><td>{environment}</td><td><time dateTime={component.checkedAt}>{new Date(component.checkedAt).toLocaleString("zh-CN")}</time></td><td>{component.detail ?? "--"}</td>
+                    <td data-label="类型">组件</td><td data-label="名称">{component.label}</td><td data-label="状态">{STATE_LABELS[component.state]}</td><td data-label="版本">--</td><td data-label="环境">{environment}</td><td data-label="新鲜度"><time dateTime={component.checkedAt}>{new Date(component.checkedAt).toLocaleString("zh-CN")}</time></td><td data-label="详情">{component.detail ?? "--"}</td>
                   </tr>
                 )),
-              ]) : <tr><td>服务</td><td>--</td><td>--</td><td>--</td><td>{environment}</td><td>--</td><td>--</td></tr>}
+              ]) : <tr><td data-label="类型">服务</td><td data-label="名称">--</td><td data-label="状态">--</td><td data-label="版本">--</td><td data-label="环境">{environment}</td><td data-label="新鲜度">--</td><td data-label="详情">--</td></tr>}
             </tbody>
           </table>
         </section>

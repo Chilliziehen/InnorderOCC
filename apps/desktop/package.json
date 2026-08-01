@@ -20,6 +20,7 @@
     "zod": "^4.0.10"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
     "@electron-forge/cli": "8.0.0-alpha.10",
     "@electron-forge/core": "8.0.0-alpha.10",
     "@electron-forge/plugin-vite": "8.0.0-alpha.10",

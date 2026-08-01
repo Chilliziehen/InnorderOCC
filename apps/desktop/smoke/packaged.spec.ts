@@ -7,17 +7,8 @@ const executablePath = path.resolve(
 );
 
 const mutedTextSelectors = [
-  ".brand small",
-  ".operator small",
   ".section-kicker",
-  ".metric > small",
-  ".panel-heading p",
-  ".row-count",
-  ".status-table-head",
-  ".status-mark",
-  ".status-detail",
-  ".empty-state strong",
-  ".empty-state span",
+  ".entry-form label",
 ];
 
 interface Rgb {
@@ -79,9 +70,9 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     if (!documentResponse) {
       throw new Error("Packaged reload did not expose its main document response");
     }
-    await expect(page.getByRole("heading", { name: "运行总览" })).toBeVisible();
-    await expect(page.getByRole("row", { name: /Flowable/ })).toBeVisible();
-    expect((await page.locator("body").innerText()).trim().length).toBeGreaterThan(100);
+    await expect(page.getByRole("heading", { name: "连接服务器" })).toBeVisible();
+    await expect(page.locator("form")).toBeVisible();
+    expect((await page.locator("body").innerText()).trim().length).toBeGreaterThan(50);
 
     const responseCsp = (await documentResponse.allHeaders())[
       "content-security-policy"
@@ -101,7 +92,7 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     expect(rendererBoundary).toEqual({
       requireType: "undefined",
       processType: "undefined",
-      occKeys: ["runtime"],
+      occKeys: ["profiles", "session", "runtime", "workspaces", "commands", "uploads", "notifications"],
     });
 
     const metaCsp = await page
