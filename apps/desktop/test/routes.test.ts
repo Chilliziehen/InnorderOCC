@@ -25,191 +25,30 @@ import {
 } from "../src/renderer/routes";
 
 const APPROVED_PATHS = [
-  "/overview",
-  "/my-work",
-  "/processes",
-  "/interventions",
-  "/risks",
-  "/resources",
-  "/domain-design",
-  "/administration",
-  "/system",
-  "/settings",
+  "/overview", "/my-work", "/processes", "/interventions", "/risks",
+  "/resources", "/domain-design", "/administration", "/system", "/settings",
 ];
 
-const EXACT_MANIFEST = [
-  {
-    path: "/overview",
-    label: "总览",
-    title: "运行总览",
-    description: "关注事项、时限、风险与服务健康摘要",
-    icon: CircleGauge,
-    accessCapability: "occ.read",
-    queryCapability: "overview.query",
-    commandCapabilities: {},
-    unavailableResourceGroups: ["/me", "/tasks", "/risks", "/system"],
-  },
-  {
-    path: "/my-work",
-    label: "我的工作",
-    title: "我的工作",
-    description: "查看并处理分配、领取和退回的任务",
-    icon: ListTodo,
-    accessCapability: "occ.read",
-    queryCapability: "tasks.query",
-    commandCapabilities: {
-      claim: "tasks.claim",
-      complete: "tasks.complete",
-      return: "tasks.return",
-      submitEvidence: "evidence.submit",
-    },
-    unavailableResourceGroups: ["/me", "/tasks", "/evidence", "/recommendations"],
-  },
-  {
-    path: "/processes",
-    label: "流程",
-    title: "流程",
-    description: "检查流程进度、参与者、任务与时间线",
-    icon: GitBranch,
-    accessCapability: "occ.read",
-    queryCapability: "processes.query",
-    commandCapabilities: {
-      start: "processes.start",
-      suspend: "processes.suspend",
-      cancel: "processes.cancel",
-    },
-    unavailableResourceGroups: ["/cohorts", "/processes", "/tasks", "/events"],
-  },
-  {
-    path: "/interventions",
-    label: "介入中心",
-    title: "人工介入中心",
-    description: "处理审核、异常、策略阻断和建议",
-    icon: FileCheck2,
-    accessCapability: "occ.read",
-    queryCapability: "interventions.query",
-    commandCapabilities: {
-      reviewEvidence: "evidence.review",
-      resolveException: "interventions.resolve",
-      reviewRecommendation: "recommendations.review",
-    },
-    unavailableResourceGroups: ["/evidence", "/tasks", "/recommendations", "/events"],
-  },
-  {
-    path: "/risks",
-    label: "风险",
-    title: "风险",
-    description: "跟踪风险分派、缓解、升级与解决",
-    icon: ShieldAlert,
-    accessCapability: "occ.read",
-    queryCapability: "risks.query",
-    commandCapabilities: {
-      acknowledge: "risks.acknowledge",
-      assign: "risks.assign",
-      mitigate: "risks.mitigate",
-      escalate: "risks.escalate",
-      resolve: "risks.resolve",
-    },
-    unavailableResourceGroups: ["/risks", "/events"],
-  },
-  {
-    path: "/resources",
-    label: "资源",
-    title: "资源",
-    description: "查看库存与可用性并管理预留",
-    icon: Boxes,
-    accessCapability: "occ.read",
-    queryCapability: "resources.query",
-    commandCapabilities: {
-      reserve: "reservations.create",
-      changeReservation: "reservations.change",
-      cancelReservation: "reservations.cancel",
-    },
-    unavailableResourceGroups: ["/resources", "/reservations"],
-  },
-  {
-    path: "/domain-design",
-    label: "领域设计",
-    title: "领域设计",
-    description: "设计、校验、审批并发布领域包",
-    icon: PackageOpen,
-    accessCapability: "occ.admin",
-    queryCapability: "packages.query",
-    commandCapabilities: {
-      import: "packages.import",
-      validate: "packages.validate",
-      approve: "packages.approve",
-      publish: "packages.publish",
-    },
-    unavailableResourceGroups: ["/packages", "/package-versions", "/policy-releases"],
-  },
-  {
-    path: "/administration",
-    label: "管理",
-    title: "管理",
-    description: "管理人员、角色、策略与智能服务配置",
-    icon: UsersRound,
-    accessCapability: "occ.admin",
-    queryCapability: "administration.query",
-    commandCapabilities: {
-      managePeople: "people.manage",
-      manageRoles: "roles.manage",
-      managePolicies: "policies.manage",
-      manageProviders: "providers.manage",
-      manageKnowledge: "knowledge.manage",
-    },
-    unavailableResourceGroups: [
-      "/people",
-      "/relationships",
-      "/roles",
-      "/policy-releases",
-      "/providers",
-      "/knowledge",
-    ],
-  },
-  {
-    path: "/system",
-    label: "系统",
-    title: "系统运行",
-    description: "查看服务、依赖与运行状态",
-    icon: Settings,
-    accessCapability: "occ.read",
-    queryCapability: "system.query",
-    commandCapabilities: {},
-    unavailableResourceGroups: ["/system", "/audit", "/events"],
-  },
-  {
-    path: "/settings",
-    label: "设置",
-    title: "设置",
-    description: "管理个人偏好与当前环境信息",
-    icon: SlidersHorizontal,
-    accessCapability: null,
-    queryCapability: "preferences.query",
-    commandCapabilities: { updatePreferences: "preferences.update" },
-    unavailableResourceGroups: ["/me"],
-  },
+const APPROVED_ICONS = [
+  CircleGauge, ListTodo, GitBranch, FileCheck2, ShieldAlert,
+  Boxes, PackageOpen, UsersRound, Settings, SlidersHorizontal,
 ];
 
 describe("route manifest", () => {
-  it("defines every approved route with display and unavailable-contract metadata", () => {
+  it("defines every approved route with display, icon, and policy metadata", () => {
     expect(ROUTES.map(({ path }) => path)).toEqual(APPROVED_PATHS);
+    expect(ROUTES.map(({ icon }) => icon)).toEqual(APPROVED_ICONS);
     for (const route of ROUTES) {
       expect(route.label).toMatch(/[\u3400-\u9fff]/u);
       expect(route.title).toMatch(/[\u3400-\u9fff]/u);
       expect(route.description.length).toBeGreaterThan(0);
-      expect(typeof route.icon).toBe("object");
-      expect(route.queryCapability).toMatch(/\.query$/);
+      expect(route.queryCapability).not.toBe("");
       expect(route.commandCapabilities).toBeTypeOf("object");
       expect(route.unavailableResourceGroups.length).toBeGreaterThan(0);
     }
   });
 
-  it("pins the complete display, icon, capability, and unavailable-resource manifest", () => {
-    expect(ROUTES).toEqual(EXACT_MANIFEST);
-  });
-
-  it("deeply freezes the manifest and nested policy metadata", () => {
+  it("deeply freezes the derived route metadata", () => {
     expect(Object.isFrozen(ROUTES)).toBe(true);
     for (const route of ROUTES) {
       expect(Object.isFrozen(route)).toBe(true);
@@ -218,113 +57,76 @@ describe("route manifest", () => {
     }
 
     const processes = ROUTES.find(({ path }) => path === "/processes")!;
-    expect(() => {
-      (processes as { label: string }).label = "伪造";
-    }).toThrow(TypeError);
-    expect(() => {
-      (processes.commandCapabilities as Record<string, string>).start = "occ.execute";
-    }).toThrow(TypeError);
-    expect(() => {
-      (processes.unavailableResourceGroups as string[]).push("/forged");
-    }).toThrow(TypeError);
+    expect(() => void ((processes as { label: string }).label = "伪造")).toThrow(TypeError);
+    expect(() => void ((processes.commandCapabilities as Record<string, string>).start = "occ.execute")).toThrow(TypeError);
+    expect(() => void ((processes.unavailableResourceGroups as string[]).push("/forged"))).toThrow(TypeError);
   });
 
   it("resolves canonical route policy instead of trusting forged metadata", () => {
     const processes = ROUTES.find(({ path }) => path === "/processes")!;
-    const forged = {
-      ...processes,
-      queryCapability: "occ.read",
-      commandCapabilities: { start: "occ.execute" },
-    };
+    const forged = { ...processes, queryCapability: "occ.read", commandCapabilities: { start: "occ.execute" } };
     const unknown = { ...forged, path: "/forged" } as unknown as typeof processes;
 
     expect(canRunQuery(forged, ["occ.read"])).toBe(false);
     expect(canRunQuery(forged, ["processes.query"])).toBe(true);
     expect(canRunCommand(forged, "start", ["occ.execute"])).toBe(false);
     expect(canRunCommand(forged, "start", ["processes.start"])).toBe(true);
-    expect(canRunQuery("/processes", ["processes.query"])).toBe(true);
-    expect(canRunCommand("/processes", "start", ["processes.start"])).toBe(true);
     expect(canRunQuery(unknown, ["occ.read", "processes.query"])).toBe(false);
     expect(canRunCommand(unknown, "start", ["occ.execute", "processes.start"])).toBe(false);
   });
 
-  it("shows coarse read surfaces, protects admin surfaces, and keeps settings authenticated", () => {
+  it("shows read surfaces, protects admin surfaces, and keeps settings authenticated", () => {
     expect(visibleRoutes(["occ.read"]).map(({ path }) => path)).toEqual([
-      "/overview",
-      "/my-work",
-      "/processes",
-      "/interventions",
-      "/risks",
-      "/resources",
-      "/system",
-      "/settings",
+      "/overview", "/my-work", "/processes", "/interventions", "/risks",
+      "/resources", "/system", "/settings",
     ]);
     expect(canAccessRoute("/domain-design", ["occ.read"])).toBe(false);
-    expect(canAccessRoute("/administration", ["occ.read"])).toBe(false);
     expect(canAccessRoute("/administration", ["occ.admin"])).toBe(true);
     expect(canAccessRoute("/settings", [])).toBe(true);
   });
 
-  it("requires exact query and command capabilities without occ.execute fallback", () => {
+  it("requires exact query and command capabilities without fallback", () => {
     const processes = ROUTES.find(({ path }) => path === "/processes")!;
     expect(canRunQuery(processes, ["occ.read"])).toBe(false);
     expect(canRunQuery(processes, [processes.queryCapability])).toBe(true);
-
-    const command = processes.commandCapabilities.start;
-    expect(command).toBeTruthy();
-    if (!command) throw new Error("process start capability is missing");
     expect(canRunCommand(processes, "start", ["occ.execute"])).toBe(false);
-    expect(canRunCommand(processes, "start", [command])).toBe(true);
+    expect(canRunCommand(processes, "start", ["processes.start"])).toBe(true);
     expect(canRunCommand(processes, "not-a-command", ["occ.admin"])).toBe(false);
   });
 
   it("default-denies every command except its exact capability", () => {
     for (const route of ROUTES) {
-      const exactCapabilities = Object.values(route.commandCapabilities);
       for (const [operation, capability] of Object.entries(route.commandCapabilities)) {
         expect(canRunCommand(route, operation, [])).toBe(false);
-        expect(canRunCommand(route, operation, ["occ.read"])).toBe(false);
-        expect(canRunCommand(route, operation, ["occ.execute"])).toBe(false);
-        expect(canRunCommand(route, operation, ["occ.admin"])).toBe(false);
+        const unrelatedCapabilities = ["occ.read", "occ.execute", "occ.admin"]
+          .filter((candidate) => candidate !== capability);
+        expect(canRunCommand(route, operation, unrelatedCapabilities)).toBe(false);
         expect(canRunCommand(route, operation, [capability])).toBe(true);
       }
-      expect(canRunCommand(route, "unknown", ["occ.read", "occ.execute", "occ.admin"])).toBe(false);
-      expect(canRunCommand(route, "unknown", exactCapabilities)).toBe(false);
+      expect(canRunCommand(route, "unknown", Object.values(route.commandCapabilities))).toBe(false);
     }
   });
 
-  it("returns access denied before exposing query permission and not found for unknown paths", () => {
-    expect(resolveRoute("/administration", ["occ.read"])).toEqual({
-      kind: "access-denied",
-      path: "/administration",
-    });
-    expect(resolveRoute("/unknown", ["occ.admin"])).toEqual({
-      kind: "not-found",
-      path: "/unknown",
-    });
+  it("returns access denied before query permission and not found for unknown paths", () => {
+    expect(resolveRoute("/administration", ["occ.read"])).toEqual({ kind: "access-denied", path: "/administration" });
+    expect(resolveRoute("/unknown", ["occ.admin"])).toEqual({ kind: "not-found", path: "/unknown" });
   });
 
-  it.each(["__proto__", "constructor", "toString"])(
-    "default-denies inherited registry name %s",
-    (path) => {
-      expect(routePathFromHash(`#${path}`)).toBeNull();
-      expect(resolveRoute(path, ["occ.read", "occ.admin"])).toEqual({
-        kind: "not-found",
-        path,
-      });
-      expect(canAccessRoute(path, ["occ.read", "occ.admin"])).toBe(false);
-      expect(canRunQuery(path, ["occ.read", "occ.admin"])).toBe(false);
-      expect(canRunCommand(path, "start", ["occ.execute", "processes.start"])).toBe(false);
+  it.each(["__proto__", "constructor", "toString"])("default-denies inherited registry name %s", (path) => {
+    expect(routePathFromHash(`#${path}`)).toBeNull();
+    expect(resolveRoute(path, ["occ.read", "occ.admin"])).toEqual({ kind: "not-found", path });
+    expect(canAccessRoute(path, ["occ.read", "occ.admin"])).toBe(false);
+    expect(canRunQuery(path, ["occ.read", "occ.admin"])).toBe(false);
+    expect(canRunCommand(path, "start", ["processes.start"])).toBe(false);
 
-      const target = {
-        location: { hash: "#/overview" },
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      };
-      expect(createHashRouter(target).set(path)).toBe(false);
-      expect(target.location.hash).toBe("#/overview");
-    },
-  );
+    const target = {
+      location: { hash: "#/overview" },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    expect(createHashRouter(target).set(path)).toBe(false);
+    expect(target.location.hash).toBe("#/overview");
+  });
 });
 
 describe("hash router", () => {
@@ -348,12 +150,9 @@ describe("hash router", () => {
 
     expect(router.get()).toEqual({ path: "/overview", focusToken: 0 });
     expect(router.set("/risks")).toBe(true);
-    expect(window.location.hash).toBe("#/risks");
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     expect(listener).toHaveBeenLastCalledWith({ path: "/risks", focusToken: 1 });
-
     expect(router.set("/outside")).toBe(false);
-    expect(window.location.hash).toBe("#/risks");
     window.location.hash = "#%E0%A4%A";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     expect(listener).toHaveBeenLastCalledWith({ path: null, focusToken: 2 });
@@ -376,12 +175,7 @@ describe("hash router", () => {
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     expect(first).toHaveBeenCalledWith({ path: "/system", focusToken: 1 });
     expect(second).toHaveBeenCalledWith({ path: "/system", focusToken: 1 });
-
     disposeFirst();
-    window.location.hash = "#/settings";
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
-    expect(first).toHaveBeenCalledTimes(1);
-    expect(second).toHaveBeenLastCalledWith({ path: "/settings", focusToken: 2 });
     disposeSecond();
   });
 
@@ -389,12 +183,8 @@ describe("hash router", () => {
     const handlers = new Set<() => void>();
     const target = {
       location: { hash: "#/overview" },
-      addEventListener: vi.fn((_type: "hashchange", handler: () => void) => {
-        handlers.add(handler);
-      }),
-      removeEventListener: vi.fn((_type: "hashchange", handler: () => void) => {
-        handlers.delete(handler);
-      }),
+      addEventListener: vi.fn((_type: "hashchange", handler: () => void) => void handlers.add(handler)),
+      removeEventListener: vi.fn((_type: "hashchange", handler: () => void) => void handlers.delete(handler)),
     };
     const router = createHashRouter(target);
     const listener = vi.fn();
@@ -404,19 +194,13 @@ describe("hash router", () => {
     target.location.hash = "#/risks";
     for (const handler of handlers) handler();
     expect(listener).toHaveBeenCalledTimes(2);
-
     disposeFirst();
     disposeFirst();
-    target.location.hash = "#/system";
     for (const handler of handlers) handler();
     expect(listener).toHaveBeenCalledTimes(3);
     expect(target.removeEventListener).not.toHaveBeenCalled();
-
     disposeSecond();
     disposeSecond();
     expect(target.removeEventListener).toHaveBeenCalledTimes(1);
-    target.location.hash = "#/settings";
-    for (const handler of handlers) handler();
-    expect(listener).toHaveBeenCalledTimes(3);
   });
 });

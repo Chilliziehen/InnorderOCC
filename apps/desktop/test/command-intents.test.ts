@@ -4,6 +4,7 @@ import { canonicalizeCommandPayload, prepareCommandPayload } from "../src/comman
 import {
   COMMAND_INTENT_ACCEPTED_TTL_MS,
   COMMAND_INTENT_MAX_ENTRIES,
+  COMMAND_INTENT_RETRYABLE_TTL_MS,
   createCommandIntentRegistry,
   type InternalWorkspaceCommand,
 } from "../src/command-intents";
@@ -203,6 +204,73 @@ describe("main command intent registry", () => {
     now += COMMAND_INTENT_ACCEPTED_TTL_MS + 1;
     await intents.execute(command(), execute);
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
+  });
+
+  it("retains retryable bindings and their key until the documented TTL", async () => {
+    let now = 1_000;
+    const keys = [keyA, keyB];
+    const intents = createCommandIntentRegistry({
+      now: () => now,
+      createIdempotencyKey: () => keys.shift()!,
+    });
+    const execute = vi.fn().mockRejectedValue(new Error("offline"));
+
+    await expect(intents.execute(command(), execute)).rejects.toThrow("offline");
+    now += COMMAND_INTENT_RETRYABLE_TTL_MS - 1;
+    await expect(intents.execute(command(), execute)).rejects.toThrow("offline");
+
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyA]);
+  });
+
+  it("expires idle retryable bindings so repeated failures recover registry capacity", async () => {
+    let now = 1_000;
+    const intents = createCommandIntentRegistry({
+      now: () => now,
+      maxEntries: 2,
+      createIdempotencyKey: () => crypto.randomUUID(),
+    });
+    const execute = vi.fn().mockRejectedValue(new Error("offline"));
+
+    await expect(intents.execute(command({ intentHandle: handle }), execute)).rejects.toThrow("offline");
+    await expect(intents.execute(command({ intentHandle: keyA }), execute)).rejects.toThrow("offline");
+    now += COMMAND_INTENT_RETRYABLE_TTL_MS + 1;
+    await expect(intents.execute(command({ intentHandle: keyB }), execute)).rejects.toThrow("offline");
+
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers the production cap after 1,000 failed intents expire", async () => {
+    let now = 1_000;
+    const intents = createCommandIntentRegistry({ now: () => now });
+    const execute = vi.fn().mockRejectedValue(new Error("offline"));
+
+    for (let index = 0; index < COMMAND_INTENT_MAX_ENTRIES; index += 1) {
+      await expect(intents.execute(command({ intentHandle: crypto.randomUUID() }), execute)).rejects.toThrow("offline");
+    }
+    await expect(intents.execute(command({ intentHandle: crypto.randomUUID() }), execute)).rejects.toThrow("Command intent registry capacity exceeded");
+
+    now += COMMAND_INTENT_RETRYABLE_TTL_MS + 1;
+    await expect(intents.execute(command({ intentHandle: crypto.randomUUID() }), execute)).rejects.toThrow("offline");
+    expect(execute).toHaveBeenCalledTimes(COMMAND_INTENT_MAX_ENTRIES + 1);
+  });
+
+  it("does not expire a retryable binding while its dependency request is in flight", async () => {
+    let now = 1_000;
+    let reject!: (error: Error) => void;
+    const execute = vi.fn(() => new Promise<CommandReceipt>((_resolve, fail) => void (reject = fail)));
+    const intents = createCommandIntentRegistry({
+      now: () => now,
+      maxEntries: 1,
+      createIdempotencyKey: () => keyA,
+    });
+    const pending = intents.execute(command(), execute);
+
+    now += COMMAND_INTENT_RETRYABLE_TTL_MS + 1;
+    await expect(intents.execute(command({ intentHandle: keyB }), execute)).rejects.toThrow("Command intent registry capacity exceeded");
+    expect(execute).toHaveBeenCalledOnce();
+
+    reject(new Error("offline"));
+    await expect(pending).rejects.toThrow("offline");
   });
 
   it("enforces the documented registry entry cap", async () => {

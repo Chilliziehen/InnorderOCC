@@ -17,6 +17,7 @@ interface IntentBinding {
   readonly payloadHash: string;
   readonly idempotencyKey: string;
   state: "retryable" | "accepted";
+  retryableAt?: number;
   acceptedAt?: number;
   inFlight?: Promise<CommandReceipt>;
 }
@@ -25,6 +26,7 @@ interface CommandIntentRegistryOptions {
   readonly createIdempotencyKey?: () => string;
   readonly now?: () => number;
   readonly acceptedTtlMs?: number;
+  readonly retryableTtlMs?: number;
   readonly maxEntries?: number;
 }
 
@@ -38,6 +40,8 @@ export interface CommandIntentRegistry {
 
 /** Accepted bindings expire after 15 minutes if no terminal notification settles them. */
 export const COMMAND_INTENT_ACCEPTED_TTL_MS = 15 * 60 * 1_000;
+/** Idle retryable bindings retain their key for 15 minutes before releasing capacity. */
+export const COMMAND_INTENT_RETRYABLE_TTL_MS = 15 * 60 * 1_000;
 /** The hard entry cap bounds accepted and retryable bindings during prolonged outages. */
 export const COMMAND_INTENT_MAX_ENTRIES = 1_000;
 const intentHandleSchema = z.uuid();
@@ -61,16 +65,18 @@ export function createCommandIntentRegistry(
   const createIdempotencyKey = options.createIdempotencyKey ?? (() => crypto.randomUUID());
   const now = options.now ?? Date.now;
   const acceptedTtlMs = options.acceptedTtlMs ?? COMMAND_INTENT_ACCEPTED_TTL_MS;
+  const retryableTtlMs = options.retryableTtlMs ?? COMMAND_INTENT_RETRYABLE_TTL_MS;
   const maxEntries = options.maxEntries ?? COMMAND_INTENT_MAX_ENTRIES;
   const cleanupExpired = () => {
     const currentTime = now();
     for (const [handle, binding] of bindings) {
-      if (
-        binding.state === "accepted" &&
-        binding.inFlight === undefined &&
+      const expiredAccepted = binding.state === "accepted" &&
         binding.acceptedAt !== undefined &&
-        currentTime - binding.acceptedAt >= acceptedTtlMs
-      ) {
+        currentTime - binding.acceptedAt >= acceptedTtlMs;
+      const expiredRetryable = binding.state === "retryable" &&
+        binding.retryableAt !== undefined &&
+        currentTime - binding.retryableAt >= retryableTtlMs;
+      if (binding.inFlight === undefined && (expiredAccepted || expiredRetryable)) {
         bindings.delete(handle);
       }
     }
@@ -95,6 +101,7 @@ export function createCommandIntentRegistry(
           payloadHash: hash,
           idempotencyKey: createIdempotencyKey(),
           state: "retryable",
+          retryableAt: now(),
         };
         bindings.set(command.intentHandle, binding);
       }
@@ -124,8 +131,10 @@ export function createCommandIntentRegistry(
           if (receipt.state === "accepted") {
             binding.state = "accepted";
             binding.acceptedAt = now();
+            delete binding.retryableAt;
           } else if (receipt.state === "problem" && receipt.problem.retryable === true) {
             binding.state = "retryable";
+            binding.retryableAt = now();
             delete binding.acceptedAt;
           } else {
             bindings.delete(command.intentHandle);
@@ -134,11 +143,13 @@ export function createCommandIntentRegistry(
           resolveFlight(receipt);
         } catch (error) {
           clearInFlight();
+          binding.retryableAt = now();
           rejectFlight(error);
         }
       };
       const rejectTransport = (error: unknown) => {
         clearInFlight();
+        binding.retryableAt = now();
         rejectFlight(error);
       };
       try {

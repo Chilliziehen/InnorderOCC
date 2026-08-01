@@ -12,21 +12,18 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export const ROUTE_PATHS = [
-  "/overview",
-  "/my-work",
-  "/processes",
-  "/interventions",
-  "/risks",
-  "/resources",
-  "/domain-design",
-  "/administration",
-  "/system",
-  "/settings",
-] as const;
+import {
+  WORKSPACE_MANIFEST,
+  type RouteAccessCapability,
+  type RoutePath,
+  type WorkspaceId,
+} from "./workspace-manifest";
 
-export type RoutePath = (typeof ROUTE_PATHS)[number];
-export type RouteAccessCapability = "occ.read" | "occ.admin" | null;
+export type { RouteAccessCapability, RoutePath } from "./workspace-manifest";
+
+export const ROUTE_PATHS: readonly RoutePath[] = Object.freeze(
+  WORKSPACE_MANIFEST.map(({ path }) => path),
+);
 
 export interface AppRoute {
   path: RoutePath;
@@ -40,165 +37,32 @@ export interface AppRoute {
   unavailableResourceGroups: readonly string[];
 }
 
-const ROUTE_DEFINITIONS: readonly AppRoute[] = [
-  {
-    path: "/overview",
-    label: "总览",
-    icon: CircleGauge,
-    title: "运行总览",
-    description: "关注事项、时限、风险与服务健康摘要",
-    accessCapability: "occ.read",
-    queryCapability: "overview.query",
-    commandCapabilities: {},
-    unavailableResourceGroups: ["/me", "/tasks", "/risks", "/system"],
-  },
-  {
-    path: "/my-work",
-    label: "我的工作",
-    icon: ListTodo,
-    title: "我的工作",
-    description: "查看并处理分配、领取和退回的任务",
-    accessCapability: "occ.read",
-    queryCapability: "tasks.query",
-    commandCapabilities: {
-      claim: "tasks.claim",
-      complete: "tasks.complete",
-      return: "tasks.return",
-      submitEvidence: "evidence.submit",
-    },
-    unavailableResourceGroups: ["/me", "/tasks", "/evidence", "/recommendations"],
-  },
-  {
-    path: "/processes",
-    label: "流程",
-    icon: GitBranch,
-    title: "流程",
-    description: "检查流程进度、参与者、任务与时间线",
-    accessCapability: "occ.read",
-    queryCapability: "processes.query",
-    commandCapabilities: {
-      start: "processes.start",
-      suspend: "processes.suspend",
-      cancel: "processes.cancel",
-    },
-    unavailableResourceGroups: ["/cohorts", "/processes", "/tasks", "/events"],
-  },
-  {
-    path: "/interventions",
-    label: "介入中心",
-    icon: FileCheck2,
-    title: "人工介入中心",
-    description: "处理审核、异常、策略阻断和建议",
-    accessCapability: "occ.read",
-    queryCapability: "interventions.query",
-    commandCapabilities: {
-      reviewEvidence: "evidence.review",
-      resolveException: "interventions.resolve",
-      reviewRecommendation: "recommendations.review",
-    },
-    unavailableResourceGroups: ["/evidence", "/tasks", "/recommendations", "/events"],
-  },
-  {
-    path: "/risks",
-    label: "风险",
-    icon: ShieldAlert,
-    title: "风险",
-    description: "跟踪风险分派、缓解、升级与解决",
-    accessCapability: "occ.read",
-    queryCapability: "risks.query",
-    commandCapabilities: {
-      acknowledge: "risks.acknowledge",
-      assign: "risks.assign",
-      mitigate: "risks.mitigate",
-      escalate: "risks.escalate",
-      resolve: "risks.resolve",
-    },
-    unavailableResourceGroups: ["/risks", "/events"],
-  },
-  {
-    path: "/resources",
-    label: "资源",
-    icon: Boxes,
-    title: "资源",
-    description: "查看库存与可用性并管理预留",
-    accessCapability: "occ.read",
-    queryCapability: "resources.query",
-    commandCapabilities: {
-      reserve: "reservations.create",
-      changeReservation: "reservations.change",
-      cancelReservation: "reservations.cancel",
-    },
-    unavailableResourceGroups: ["/resources", "/reservations"],
-  },
-  {
-    path: "/domain-design",
-    label: "领域设计",
-    icon: PackageOpen,
-    title: "领域设计",
-    description: "设计、校验、审批并发布领域包",
-    accessCapability: "occ.admin",
-    queryCapability: "packages.query",
-    commandCapabilities: {
-      import: "packages.import",
-      validate: "packages.validate",
-      approve: "packages.approve",
-      publish: "packages.publish",
-    },
-    unavailableResourceGroups: ["/packages", "/package-versions", "/policy-releases"],
-  },
-  {
-    path: "/administration",
-    label: "管理",
-    icon: UsersRound,
-    title: "管理",
-    description: "管理人员、角色、策略与智能服务配置",
-    accessCapability: "occ.admin",
-    queryCapability: "administration.query",
-    commandCapabilities: {
-      managePeople: "people.manage",
-      manageRoles: "roles.manage",
-      managePolicies: "policies.manage",
-      manageProviders: "providers.manage",
-      manageKnowledge: "knowledge.manage",
-    },
-    unavailableResourceGroups: [
-      "/people",
-      "/relationships",
-      "/roles",
-      "/policy-releases",
-      "/providers",
-      "/knowledge",
-    ],
-  },
-  {
-    path: "/system",
-    label: "系统",
-    icon: Settings,
-    title: "系统运行",
-    description: "查看服务、依赖与运行状态",
-    accessCapability: "occ.read",
-    queryCapability: "system.query",
-    commandCapabilities: {},
-    unavailableResourceGroups: ["/system", "/audit", "/events"],
-  },
-  {
-    path: "/settings",
-    label: "设置",
-    icon: SlidersHorizontal,
-    title: "设置",
-    description: "管理个人偏好与当前环境信息",
-    accessCapability: null,
-    queryCapability: "preferences.query",
-    commandCapabilities: { updatePreferences: "preferences.update" },
-    unavailableResourceGroups: ["/me"],
-  },
-] as const;
+const ICONS: Readonly<Record<WorkspaceId, LucideIcon>> = Object.freeze({
+  overview: CircleGauge,
+  "my-work": ListTodo,
+  processes: GitBranch,
+  interventions: FileCheck2,
+  risks: ShieldAlert,
+  resources: Boxes,
+  "domain-design": PackageOpen,
+  administration: UsersRound,
+  system: Settings,
+  settings: SlidersHorizontal,
+});
 
 export const ROUTES: readonly AppRoute[] = Object.freeze(
-  ROUTE_DEFINITIONS.map((route) => Object.freeze({
-    ...route,
-    commandCapabilities: Object.freeze({ ...route.commandCapabilities }),
-    unavailableResourceGroups: Object.freeze([...route.unavailableResourceGroups]),
+  WORKSPACE_MANIFEST.map((workspace) => Object.freeze({
+    path: workspace.path,
+    label: workspace.label,
+    icon: ICONS[workspace.id],
+    title: workspace.title,
+    description: workspace.description,
+    accessCapability: workspace.accessCapability,
+    queryCapability: workspace.query.capability,
+    commandCapabilities: Object.freeze(Object.fromEntries(
+      workspace.commands.map(({ operation, capability }) => [operation, capability]),
+    )),
+    unavailableResourceGroups: workspace.resourceGroups,
   })),
 );
 
