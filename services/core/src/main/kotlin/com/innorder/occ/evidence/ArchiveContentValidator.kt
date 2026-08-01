@@ -401,76 +401,211 @@ internal class ArchiveContentValidator(private val clock: Clock) {
     private fun isValidZipStructure(path: java.nio.file.Path, deadline: Instant): Boolean = try {
         Files.newByteChannel(path, StandardOpenOption.READ).use { channel ->
             val size = channel.size()
-            val tailSize = minOf(size, MAXIMUM_ZIP_END_BYTES.toLong()).toInt()
+            val tailSize = minOf(size, MAXIMUM_NESTED_ZIP_TAIL_BYTES.toLong()).toInt()
             val tail = probeRead(channel, size - tailSize, tailSize, deadline) ?: return false
             val endIndex = (tail.size - ZIP_END_BYTES downTo 0).firstOrNull { index ->
                 tail.matchesAt(index, ZIP_END_MAGIC) &&
                     size - tailSize + index + ZIP_END_BYTES + unsignedShort(tail, index + 20) == size
             } ?: return false
-            val entries = unsignedShort(tail, endIndex + 10)
-            if (unsignedShort(tail, endIndex + 4) != 0 || unsignedShort(tail, endIndex + 6) != 0 ||
-                unsignedShort(tail, endIndex + 8) != entries
-            ) return false
-            val centralSize = unsignedInt(tail, endIndex + 12)
-            val centralOffset = unsignedInt(tail, endIndex + 16)
-            if (centralSize == ZIP64_SENTINEL || centralOffset == ZIP64_SENTINEL) return false
             val absoluteEnd = size - tailSize + endIndex
-            val prefixBytes = absoluteEnd - centralSize - centralOffset
-            if (prefixBytes < 0) return false
-            val absoluteCentral = prefixBytes + centralOffset
-            if (absoluteCentral < 0 || absoluteCentral + centralSize != absoluteEnd) return false
+            val legacyEntriesOnDisk = unsignedShort(tail, endIndex + 8)
+            val legacyEntries = unsignedShort(tail, endIndex + 10)
+            val legacyCentralSize = unsignedInt(tail, endIndex + 12)
+            val legacyCentralOffset = unsignedInt(tail, endIndex + 16)
+            if (unsignedShort(tail, endIndex + 4) != 0 || unsignedShort(tail, endIndex + 6) != 0) return false
+            val layout = if (legacyEntries == ZIP64_SHORT_SENTINEL || legacyEntriesOnDisk == ZIP64_SHORT_SENTINEL ||
+                legacyCentralSize == ZIP64_SENTINEL || legacyCentralOffset == ZIP64_SENTINEL
+            ) {
+                zip64Layout(
+                    tail,
+                    endIndex,
+                    size - tailSize,
+                    legacyEntriesOnDisk,
+                    legacyEntries,
+                    legacyCentralSize,
+                    legacyCentralOffset,
+                ) ?: return false
+            } else {
+                if (legacyEntriesOnDisk != legacyEntries) return false
+                val prefixBytes = absoluteEnd - legacyCentralSize - legacyCentralOffset
+                if (prefixBytes < 0) return false
+                ZipDirectoryLayout(legacyEntries, legacyCentralSize, legacyCentralOffset, prefixBytes, absoluteEnd)
+            }
+            if (layout.centralOffset > Long.MAX_VALUE - layout.prefixBytes) return false
+            val absoluteCentral = layout.prefixBytes + layout.centralOffset
+            if (absoluteCentral < 0 || absoluteCentral > layout.directoryEnd ||
+                layout.centralSize > layout.directoryEnd - absoluteCentral || absoluteCentral + layout.centralSize != layout.directoryEnd
+            ) return false
 
             var centralPosition = absoluteCentral
-            var centralRemaining = centralSize
+            var centralRemaining = layout.centralSize
             val localOffsets = HashSet<Long>()
-            repeat(entries) {
+            repeat(layout.entries) {
                 checkDeadline(deadline)
                 if (centralRemaining < ZIP_CENTRAL_HEADER_BYTES) return false
                 val fixed = probeRead(channel, centralPosition, ZIP_CENTRAL_HEADER_BYTES, deadline) ?: return false
                 if (!fixed.matchesAt(0, ZIP_CENTRAL_MAGIC)) return false
+                val versionNeeded = unsignedShort(fixed, 6)
                 val flags = unsignedShort(fixed, 8)
                 val method = unsignedShort(fixed, 10)
                 val crc = unsignedInt(fixed, 16)
-                val compressedSize = unsignedInt(fixed, 20)
-                val expandedSize = unsignedInt(fixed, 24)
+                val legacyCompressedSize = unsignedInt(fixed, 20)
+                val legacyExpandedSize = unsignedInt(fixed, 24)
                 val nameLength = unsignedShort(fixed, 28)
                 val extraLength = unsignedShort(fixed, 30)
                 val commentLength = unsignedShort(fixed, 32)
-                val localOffset = unsignedInt(fixed, 42)
-                if (compressedSize == ZIP64_SENTINEL || expandedSize == ZIP64_SENTINEL || localOffset == ZIP64_SENTINEL ||
-                    unsignedShort(fixed, 34) != 0
-                ) return false
+                val legacyLocalOffset = unsignedInt(fixed, 42)
+                val legacyDiskStart = unsignedShort(fixed, 34)
                 val variableLength = nameLength.toLong() + extraLength + commentLength
                 if (ZIP_CENTRAL_HEADER_BYTES + variableLength > centralRemaining) return false
                 val centralName = probeRead(channel, centralPosition + ZIP_CENTRAL_HEADER_BYTES, nameLength, deadline) ?: return false
+                val centralExtra = probeRead(
+                    channel,
+                    centralPosition + ZIP_CENTRAL_HEADER_BYTES + nameLength,
+                    extraLength,
+                    deadline,
+                ) ?: return false
+                val zip64 = zip64Extra(
+                    centralExtra,
+                    legacyExpandedSize == ZIP64_SENTINEL,
+                    legacyCompressedSize == ZIP64_SENTINEL,
+                    legacyLocalOffset == ZIP64_SENTINEL,
+                    legacyDiskStart == ZIP64_SHORT_SENTINEL,
+                ) ?: return false
+                if ((legacyExpandedSize == ZIP64_SENTINEL || legacyCompressedSize == ZIP64_SENTINEL ||
+                        legacyLocalOffset == ZIP64_SENTINEL || legacyDiskStart == ZIP64_SHORT_SENTINEL) && versionNeeded < ZIP64_VERSION
+                ) return false
+                val expandedSize = if (legacyExpandedSize == ZIP64_SENTINEL) zip64.expandedSize ?: return false else legacyExpandedSize
+                val compressedSize = if (legacyCompressedSize == ZIP64_SENTINEL) zip64.compressedSize ?: return false else legacyCompressedSize
+                val localOffset = if (legacyLocalOffset == ZIP64_SENTINEL) zip64.localOffset ?: return false else legacyLocalOffset
+                val diskStart = if (legacyDiskStart == ZIP64_SHORT_SENTINEL) zip64.diskStart ?: return false else legacyDiskStart.toLong()
+                if (diskStart != 0L) return false
 
-                val absoluteLocal = prefixBytes + localOffset
+                val absoluteLocal = layout.prefixBytes + localOffset
                 if (!localOffsets.add(absoluteLocal)) return false
                 val local = probeRead(channel, absoluteLocal, ZIP_LOCAL_HEADER_BYTES, deadline) ?: return false
                 if (!local.matchesAt(0, ZIP_LOCAL_MAGIC) || unsignedShort(local, 6) != flags || unsignedShort(local, 8) != method) return false
-                if (flags and ZIP_DATA_DESCRIPTOR_FLAG == 0 &&
-                    (unsignedInt(local, 14) != crc || unsignedInt(local, 18) != compressedSize || unsignedInt(local, 22) != expandedSize)
+                if ((unsignedInt(local, 18) == ZIP64_SENTINEL || unsignedInt(local, 22) == ZIP64_SENTINEL) &&
+                    unsignedShort(local, 4) < ZIP64_VERSION
                 ) return false
-                if (flags and ZIP_DATA_DESCRIPTOR_FLAG != 0 &&
-                    (unsignedInt(local, 14) != 0L || unsignedInt(local, 18) != 0L || unsignedInt(local, 22) != 0L)
+                val legacyLocalCompressed = unsignedInt(local, 18)
+                val legacyLocalExpanded = unsignedInt(local, 22)
+                if (flags and ZIP_DATA_DESCRIPTOR_FLAG == 0 &&
+                    unsignedInt(local, 14) != crc
                 ) return false
                 val localNameLength = unsignedShort(local, 26)
                 val localExtraLength = unsignedShort(local, 28)
                 val localName = probeRead(channel, absoluteLocal + ZIP_LOCAL_HEADER_BYTES, localNameLength, deadline) ?: return false
                 if (!centralName.contentEquals(localName)) return false
+                val localExtra = probeRead(
+                    channel,
+                    absoluteLocal + ZIP_LOCAL_HEADER_BYTES + localNameLength,
+                    localExtraLength,
+                    deadline,
+                ) ?: return false
+                val localZip64 = zip64Extra(
+                    localExtra,
+                    legacyLocalExpanded == ZIP64_SENTINEL,
+                    legacyLocalCompressed == ZIP64_SENTINEL,
+                    needsLocalOffset = false,
+                    needsDiskStart = false,
+                ) ?: return false
+                val localExpanded = if (legacyLocalExpanded == ZIP64_SENTINEL) localZip64.expandedSize ?: return false else legacyLocalExpanded
+                val localCompressed = if (legacyLocalCompressed == ZIP64_SENTINEL) localZip64.compressedSize ?: return false else legacyLocalCompressed
+                if (flags and ZIP_DATA_DESCRIPTOR_FLAG == 0 &&
+                    (localCompressed != compressedSize || localExpanded != expandedSize)
+                ) return false
+                if (flags and ZIP_DATA_DESCRIPTOR_FLAG != 0 &&
+                    (unsignedInt(local, 14) != 0L || legacyLocalCompressed !in setOf(0L, ZIP64_SENTINEL) ||
+                        legacyLocalExpanded !in setOf(0L, ZIP64_SENTINEL))
+                ) return false
                 val dataStart = absoluteLocal + ZIP_LOCAL_HEADER_BYTES + localNameLength + localExtraLength
-                if (absoluteLocal < prefixBytes || dataStart < absoluteLocal || compressedSize > absoluteCentral - dataStart) return false
+                if (absoluteLocal < layout.prefixBytes || dataStart < absoluteLocal || compressedSize > absoluteCentral - dataStart) return false
 
                 val recordLength = ZIP_CENTRAL_HEADER_BYTES + variableLength
                 centralPosition += recordLength
                 centralRemaining -= recordLength
             }
-            centralRemaining == 0L && centralPosition == absoluteEnd
+            centralRemaining == 0L && centralPosition == layout.directoryEnd
         }
     } catch (rejected: EvidenceRejectedException) {
         throw rejected
     } catch (_: IOException) {
         false
+    }
+
+    private fun zip64Layout(
+        tail: ByteArray,
+        endIndex: Int,
+        absoluteTailStart: Long,
+        legacyEntriesOnDisk: Int,
+        legacyEntries: Int,
+        legacyCentralSize: Long,
+        legacyCentralOffset: Long,
+    ): ZipDirectoryLayout? {
+        val locatorIndex = endIndex - ZIP64_LOCATOR_BYTES
+        if (locatorIndex < 0 || !tail.matchesAt(locatorIndex, ZIP64_LOCATOR_MAGIC) || unsignedInt(tail, locatorIndex + 4) != 0L ||
+            unsignedInt(tail, locatorIndex + 16) != 1L
+        ) return null
+        val relativeRecordOffset = unsignedLong(tail, locatorIndex + 8) ?: return null
+        val minimumRecordIndex = maxOf(0, locatorIndex - MAXIMUM_ZIP64_END_BYTES)
+        val recordIndex = (locatorIndex - ZIP64_END_MINIMUM_BYTES downTo minimumRecordIndex).firstOrNull { candidate ->
+            if (!tail.matchesAt(candidate, ZIP64_END_MAGIC)) return@firstOrNull false
+            val recordSize = unsignedLong(tail, candidate + 4) ?: return@firstOrNull false
+            recordSize in ZIP64_END_MINIMUM_DATA_BYTES.toLong()..(MAXIMUM_ZIP64_END_BYTES - 12).toLong() &&
+                candidate.toLong() + 12 + recordSize == locatorIndex.toLong()
+        } ?: return null
+        val absoluteRecord = absoluteTailStart + recordIndex
+        val prefixBytes = absoluteRecord - relativeRecordOffset
+        if (prefixBytes < 0 || unsignedShort(tail, recordIndex + 14) < ZIP64_VERSION ||
+            unsignedInt(tail, recordIndex + 16) != 0L || unsignedInt(tail, recordIndex + 20) != 0L
+        ) return null
+        val entriesOnDisk = unsignedLong(tail, recordIndex + 24) ?: return null
+        val entries = unsignedLong(tail, recordIndex + 32) ?: return null
+        val centralSize = unsignedLong(tail, recordIndex + 40) ?: return null
+        val centralOffset = unsignedLong(tail, recordIndex + 48) ?: return null
+        if (entries != entriesOnDisk || entries > Int.MAX_VALUE ||
+            legacyEntriesOnDisk != ZIP64_SHORT_SENTINEL && legacyEntriesOnDisk.toLong() != entriesOnDisk ||
+            legacyEntries != ZIP64_SHORT_SENTINEL && legacyEntries.toLong() != entries ||
+            legacyCentralSize != ZIP64_SENTINEL && legacyCentralSize != centralSize ||
+            legacyCentralOffset != ZIP64_SENTINEL && legacyCentralOffset != centralOffset
+        ) return null
+        return ZipDirectoryLayout(entries.toInt(), centralSize, centralOffset, prefixBytes, absoluteRecord)
+    }
+
+    private fun zip64Extra(
+        extra: ByteArray,
+        needsExpandedSize: Boolean,
+        needsCompressedSize: Boolean,
+        needsLocalOffset: Boolean,
+        needsDiskStart: Boolean,
+    ): Zip64ExtraValues? {
+        if (!needsExpandedSize && !needsCompressedSize && !needsLocalOffset && !needsDiskStart) return Zip64ExtraValues()
+        var position = 0
+        while (position + 4 <= extra.size) {
+            val id = unsignedShort(extra, position)
+            val length = unsignedShort(extra, position + 2)
+            val dataStart = position + 4
+            if (length > extra.size - dataStart) return null
+            if (id == ZIP64_EXTRA_ID) {
+                var cursor = dataStart
+                val end = dataStart + length
+                fun nextLong(): Long? {
+                    if (cursor + 8 > end) return null
+                    return unsignedLong(extra, cursor).also { cursor += 8 }
+                }
+                val expanded = if (needsExpandedSize) nextLong() ?: return null else null
+                val compressed = if (needsCompressedSize) nextLong() ?: return null else null
+                val localOffset = if (needsLocalOffset) nextLong() ?: return null else null
+                val diskStart = if (needsDiskStart) {
+                    if (cursor + 4 > end) return null
+                    unsignedInt(extra, cursor)
+                } else null
+                return Zip64ExtraValues(expanded, compressed, localOffset, diskStart)
+            }
+            position = dataStart + length
+        }
+        return null
     }
 
     private fun probeRead(
@@ -558,11 +693,30 @@ internal class ArchiveContentValidator(private val clock: Clock) {
     }
     private fun unsignedShort(bytes: ByteArray, offset: Int) = (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
     private fun unsignedInt(bytes: ByteArray, offset: Int) = (bytes[offset].toLong() and 0xff) or ((bytes[offset + 1].toLong() and 0xff) shl 8) or ((bytes[offset + 2].toLong() and 0xff) shl 16) or ((bytes[offset + 3].toLong() and 0xff) shl 24)
+    private fun unsignedLong(bytes: ByteArray, offset: Int): Long? {
+        if (offset < 0 || bytes.size - offset < 8 || bytes[offset + 7].toInt() and 0x80 != 0) return null
+        var value = 0L
+        for (index in 0 until 8) value = value or ((bytes[offset + index].toLong() and 0xff) shl (index * 8))
+        return value
+    }
     private fun ByteArray.matchesAt(offset: Int, expected: ByteArray) = offset >= 0 && size - offset >= expected.size && expected.indices.all { this[offset + it] == expected[it] }
     private fun reject(code: EvidenceRejectionCode): Nothing = throw EvidenceRejectedException(code)
 
     private data class PackageRelationship(val type: String, val target: String)
     private data class XmlAttribute(val name: QName, val value: String)
+    private data class ZipDirectoryLayout(
+        val entries: Int,
+        val centralSize: Long,
+        val centralOffset: Long,
+        val prefixBytes: Long,
+        val directoryEnd: Long,
+    )
+    private data class Zip64ExtraValues(
+        val expandedSize: Long? = null,
+        val compressedSize: Long? = null,
+        val localOffset: Long? = null,
+        val diskStart: Long? = null,
+    )
 
     companion object {
         private const val BUFFER_SIZE = 8192
@@ -579,6 +733,14 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private const val UTF8_FLAG = 1 shl 11
         private const val ZIP_DATA_DESCRIPTOR_FLAG = 1 shl 3
         private const val ZIP64_SENTINEL = 0xffff_ffffL
+        private const val ZIP64_SHORT_SENTINEL = 0xffff
+        private const val ZIP64_EXTRA_ID = 0x0001
+        private const val ZIP64_LOCATOR_BYTES = 20
+        private const val ZIP64_END_MINIMUM_BYTES = 56
+        private const val ZIP64_END_MINIMUM_DATA_BYTES = 44
+        private const val MAXIMUM_ZIP64_END_BYTES = 4096
+        private const val MAXIMUM_NESTED_ZIP_TAIL_BYTES = MAXIMUM_ZIP_END_BYTES + ZIP64_LOCATOR_BYTES + MAXIMUM_ZIP64_END_BYTES
+        private const val ZIP64_VERSION = 45
         private const val CONTENT_TYPES = "[Content_Types].xml"
         private const val ROOT_RELATIONSHIPS = "_rels/.rels"
         private const val CONTENT_TYPES_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -588,6 +750,8 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private val ZIP_LOCAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x03, 0x04)
         private val ZIP_END_MAGIC = byteArrayOf(0x50, 0x4b, 0x05, 0x06)
         private val ZIP_CENTRAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x01, 0x02)
+        private val ZIP64_END_MAGIC = byteArrayOf(0x50, 0x4b, 0x06, 0x06)
+        private val ZIP64_LOCATOR_MAGIC = byteArrayOf(0x50, 0x4b, 0x06, 0x07)
         private val OLE_MAGIC = byteArrayOf(0xd0.toByte(), 0xcf.toByte(), 0x11, 0xe0.toByte(), 0xa1.toByte(), 0xb1.toByte(), 0x1a, 0xe1.toByte())
         private val GZIP_MAGIC = byteArrayOf(0x1f, 0x8b.toByte())
         private val SEVEN_Z_MAGIC = byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)

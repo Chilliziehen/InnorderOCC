@@ -28,6 +28,7 @@ import java.util.stream.Stream
 import java.util.zip.DeflaterOutputStream
 import java.util.zip.GZIPOutputStream
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 class EvidenceContentInspectorTest {
@@ -224,6 +225,39 @@ class EvidenceContentInspectorTest {
         )
 
         assertThat(result.detectedMediaType).isEqualTo("application/zip")
+    }
+
+    @Test
+    fun `valid neutral-name ZIP64 entry is detected structurally`() {
+        val nested = zip64("inside.bin", "payload".toByteArray())
+        val nestedPath = write("valid-small.zip", nested)
+        ZipFile(nestedPath.toFile()).use { archive ->
+            assertThat(archive.getInputStream(archive.getEntry("inside.bin")).readAllBytes()).isEqualTo("payload".toByteArray())
+        }
+        val bytes = zip("neutral/payload.bin" to nested)
+        val path = write("nested-zip64.zip", bytes)
+
+        assertRejected(EvidenceRejectionCode.NESTED_ARCHIVE) {
+            inspector().inspect(request(path, "nested-zip64.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))))
+        }
+    }
+
+    @Test
+    fun `uncorroborated ZIP64 sentinels are ordinary binary`() {
+        val valid = zip64("inside.bin", "payload".toByteArray())
+        val malformed = listOf(
+            valid.copyOf().also { it.writeLittleEndianLong(it.size - 34, 1_000_000L) },
+            "PK\u0003\u0004 random \uffff\uffff PK\u0006\u0006 PK\u0006\u0007".toByteArray(Charsets.ISO_8859_1),
+        )
+
+        malformed.forEachIndexed { index, nested ->
+            val bytes = zip("neutral/payload.bin" to nested)
+            val path = write("malformed-zip64-$index.zip", bytes)
+            val result = inspector().inspect(
+                request(path, "malformed-zip64-$index.zip", bytes, zipPolicy(ArchiveLimits(10, 1024 * 1024, 100.0))),
+            )
+            assertThat(result.detectedMediaType).isEqualTo("application/zip")
+        }
     }
 
     @Test
@@ -788,6 +822,44 @@ class EvidenceContentInspectorTest {
 
         private fun ByteArray.readLittleEndianShort(offset: Int): Int =
             (this[offset].toInt() and 0xff) or ((this[offset + 1].toInt() and 0xff) shl 8)
+
+        private fun zip64(name: String, data: ByteArray): ByteArray {
+            val output = ByteArrayOutputStream()
+            val nameBytes = name.toByteArray()
+            val crc = java.util.zip.CRC32().also { it.update(data) }.value
+            fun short(value: Int) = output.write(byteArrayOf(value.toByte(), (value ushr 8).toByte()))
+            fun int(value: Long) = output.write(ByteArray(4) { index -> (value ushr (index * 8)).toByte() })
+            fun long(value: Long) = output.write(ByteArray(8) { index -> (value ushr (index * 8)).toByte() })
+
+            int(0x04034b50)
+            short(45); short(0); short(0); short(0); short(0)
+            int(crc); int(0xffff_ffffL); int(0xffff_ffffL)
+            short(nameBytes.size); short(20)
+            output.write(nameBytes)
+            short(0x0001); short(16); long(data.size.toLong()); long(data.size.toLong())
+            output.write(data)
+
+            val centralOffset = output.size().toLong()
+            int(0x02014b50)
+            short(45); short(45); short(0); short(0); short(0); short(0)
+            int(crc); int(0xffff_ffffL); int(0xffff_ffffL)
+            short(nameBytes.size); short(28); short(0); short(0); short(0); int(0); int(0xffff_ffffL)
+            output.write(nameBytes)
+            short(0x0001); short(24); long(data.size.toLong()); long(data.size.toLong()); long(0)
+            val centralSize = output.size().toLong() - centralOffset
+
+            val zip64EndOffset = output.size().toLong()
+            int(0x06064b50); long(44); short(45); short(45); int(0); int(0)
+            long(1); long(1); long(centralSize); long(centralOffset)
+            int(0x07064b50); int(0); long(zip64EndOffset); int(1)
+            int(0x06054b50); short(0); short(0); short(0xffff); short(0xffff)
+            int(0xffff_ffffL); int(0xffff_ffffL); short(0)
+            return output.toByteArray()
+        }
+
+        private fun ByteArray.writeLittleEndianLong(offset: Int, value: Long) {
+            for (index in 0 until 8) this[offset + index] = (value ushr (index * 8)).toByte()
+        }
 
         private fun encryptedEmptyZip(): ByteArray = byteArrayOf(
             0x50, 0x4b, 0x03, 0x04, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
