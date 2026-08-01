@@ -40,12 +40,27 @@ ALTER TABLE occ.process_definition_binding
     ADD CONSTRAINT uq_process_definition_binding_id_package
         UNIQUE (id, package_version_id);
 
+ALTER TABLE catalog.workflow_definition
+    ADD CONSTRAINT uq_workflow_definition_id_package
+        UNIQUE (id, package_version_id);
+
+ALTER TABLE occ.process_definition_binding
+    ADD CONSTRAINT fk_process_binding_workflow_package
+        FOREIGN KEY (workflow_definition_id, package_version_id)
+        REFERENCES catalog.workflow_definition(id, package_version_id);
+
 ALTER TABLE occ.process_instance
     ADD COLUMN cohort_id uuid NOT NULL REFERENCES occ.cohort(id),
     ADD COLUMN started_for_participant_id uuid NOT NULL REFERENCES iam.principal(id),
     ADD COLUMN participant_id uuid NOT NULL REFERENCES iam.principal(id),
     ADD COLUMN route_key text NOT NULL CHECK (route_key = btrim(route_key) AND route_key <> ''),
     ADD COLUMN route_version integer NOT NULL CHECK (route_version > 0),
+    ADD CONSTRAINT fk_process_definition_package
+        FOREIGN KEY (definition_binding_id, package_version_id)
+        REFERENCES occ.process_definition_binding(id, package_version_id),
+    ADD CONSTRAINT fk_process_cohort_package
+        FOREIGN KEY (cohort_id, package_version_id)
+        REFERENCES occ.cohort(id, package_version_id),
     ADD CONSTRAINT uq_process_cohort_started_participant
         UNIQUE (cohort_id, started_for_participant_id);
 
@@ -88,7 +103,8 @@ CREATE TABLE occ.task_blocker (
     safe_metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(safe_metadata)),
     created_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
     resolved_at timestamptz,
-    CHECK (resolved_at IS NULL OR resolved_at >= created_at)
+    CHECK (resolved_at IS NULL OR resolved_at >= created_at),
+    CHECK (octet_length(safe_metadata::text) <= 4096)
 );
 
 CREATE TABLE occ.task_gate_requirement (
@@ -121,7 +137,8 @@ CREATE TABLE occ.task_timeline (
     actor_principal_id uuid REFERENCES iam.principal(id),
     event_id uuid NOT NULL REFERENCES audit.outbox_event(id),
     fact_data jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(fact_data)),
-    created_at timestamptz NOT NULL DEFAULT transaction_timestamp()
+    created_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+    CHECK (octet_length(fact_data::text) <= 8192)
 );
 
 CREATE TABLE occ.task_review_projection_fact (
@@ -152,7 +169,10 @@ CREATE TABLE occ.task_review_projection_fact (
             AND submission_fact_id IS NOT NULL AND review_id IS NOT NULL
             AND review_version IS NOT NULL AND decision IS NOT NULL)
     ),
-    CHECK (decision = 'CONDITIONAL' OR (follow_up_due_at IS NULL AND conditional_rule_version IS NULL))
+    CHECK (
+        (decision = 'CONDITIONAL' AND follow_up_due_at IS NOT NULL AND conditional_rule_version IS NOT NULL)
+        OR (decision IS DISTINCT FROM 'CONDITIONAL' AND follow_up_due_at IS NULL AND conditional_rule_version IS NULL)
+    )
 );
 
 CREATE TABLE occ.notification (
@@ -169,3 +189,424 @@ CREATE TABLE occ.notification (
     UNIQUE (recipient_id, event_id, type),
     CHECK (read_at IS NULL OR read_at >= created_at)
 );
+
+DROP INDEX IF EXISTS authz.uq_relationship_active;
+
+CREATE FUNCTION authz.align_relationship_revocation_time()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.revoked_at IS NULL
+       AND NEW.revoked_at IS NOT NULL
+       AND OLD.valid_from <= transaction_timestamp()
+       AND NEW.revoked_at >= transaction_timestamp()
+       AND NEW.revoked_at <= statement_timestamp() THEN
+        NEW.revoked_at := transaction_timestamp();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_relationship_align_revocation_time
+BEFORE UPDATE OF revoked_at ON authz.relationship
+FOR EACH ROW EXECUTE FUNCTION authz.align_relationship_revocation_time();
+
+CREATE FUNCTION authz.normalize_relationship_reentry()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    prior_end timestamptz;
+BEGIN
+    IF NEW.valid_from = transaction_timestamp() THEN
+        SELECT max(least(
+            coalesce(relationship.valid_until, 'infinity'::timestamptz),
+            coalesce(relationship.revoked_at, 'infinity'::timestamptz)
+        )) INTO prior_end
+        FROM authz.relationship relationship
+        WHERE relationship.relation_definition_id = NEW.relation_definition_id
+          AND relationship.subject_entity_id = NEW.subject_entity_id
+          AND relationship.object_entity_id = NEW.object_entity_id
+          AND relationship.revoked_at IS NOT NULL
+          AND relationship.revoked_at <= statement_timestamp();
+        IF prior_end IS NOT NULL AND prior_end <> 'infinity'::timestamptz AND prior_end > NEW.valid_from THEN
+            NEW.valid_from := prior_end;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_relationship_effective_reentry
+BEFORE INSERT ON authz.relationship
+FOR EACH ROW EXECUTE FUNCTION authz.normalize_relationship_reentry();
+
+ALTER TABLE authz.relationship
+    ADD CONSTRAINT ex_relationship_effective_window
+    EXCLUDE USING gist (
+        relation_definition_id WITH =,
+        subject_entity_id WITH =,
+        object_entity_id WITH =,
+        tstzrange(
+            valid_from,
+            least(
+                coalesce(valid_until, 'infinity'::timestamptz),
+                coalesce(revoked_at, 'infinity'::timestamptz)
+            ),
+            '[)'
+        ) WITH &&
+    );
+
+CREATE FUNCTION occ.enforce_process_definition_binding()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'process definition binding is immutable';
+END;
+$$;
+
+CREATE TRIGGER trg_process_definition_binding_immutable
+BEFORE UPDATE OR DELETE ON occ.process_definition_binding
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_process_definition_binding();
+
+CREATE FUNCTION occ.enforce_cohort_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.customer_instance_id IS DISTINCT FROM OLD.customer_instance_id
+       OR NEW.code IS DISTINCT FROM OLD.code
+       OR NEW.package_version_id IS DISTINCT FROM OLD.package_version_id
+       OR NEW.start_date IS DISTINCT FROM OLD.start_date
+       OR NEW.created_by IS DISTINCT FROM OLD.created_by
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'cohort identity and package are immutable';
+    END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+        (OLD.status = 'DRAFT' AND NEW.status = 'ACTIVE')
+        OR (OLD.status = 'ACTIVE' AND NEW.status = 'ARCHIVED')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid cohort lifecycle transition';
+    END IF;
+    IF OLD.status = 'ARCHIVED' AND to_jsonb(NEW) IS DISTINCT FROM to_jsonb(OLD) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'archived cohort is immutable';
+    END IF;
+    IF NEW.status = 'ARCHIVED' AND EXISTS (
+        SELECT 1 FROM occ.process_instance p
+        WHERE p.cohort_id = OLD.id AND p.state IN ('RUNNING', 'SUSPENDED')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'cohort with active processes cannot be archived';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_cohort_lifecycle
+BEFORE UPDATE ON occ.cohort
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_cohort_lifecycle();
+
+CREATE TRIGGER trg_cohort_touch
+BEFORE UPDATE ON occ.cohort
+FOR EACH ROW EXECUTE FUNCTION platform.touch_updated_at();
+
+CREATE FUNCTION occ.project_cohort_owner()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    owner_relation_id uuid;
+    changed_at timestamptz := transaction_timestamp();
+BEGIN
+    SELECT id INTO STRICT owner_relation_id
+    FROM catalog.relation_definition
+    WHERE package_version_id = NEW.package_version_id
+      AND relation_key = 'cohort_owner';
+
+    IF TG_OP = 'UPDATE' AND NEW.owner_principal_id IS DISTINCT FROM OLD.owner_principal_id THEN
+        UPDATE authz.relationship
+        SET revoked_at = greatest(changed_at, valid_from),
+            revoked_by = NEW.updated_by,
+            updated_by = NEW.updated_by
+        WHERE relation_definition_id = owner_relation_id
+          AND subject_entity_id = OLD.owner_principal_id
+          AND object_entity_id = NEW.id
+          AND revoked_at IS NULL;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'cohort owner projection is missing';
+        END IF;
+    END IF;
+
+    IF TG_OP = 'INSERT' OR NEW.owner_principal_id IS DISTINCT FROM OLD.owner_principal_id THEN
+        INSERT INTO authz.relationship (
+            id, relation_definition_id, subject_entity_id, object_entity_id,
+            source_kind, source_ref, created_by, updated_by
+        ) VALUES (
+            md5(NEW.id::text || NEW.owner_principal_id::text || clock_timestamp()::text)::uuid,
+            owner_relation_id, NEW.owner_principal_id, NEW.id,
+            'SYSTEM', 'cohort-owner-projection', NEW.updated_by, NEW.updated_by
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_cohort_owner_projection
+AFTER INSERT OR UPDATE OF owner_principal_id ON occ.cohort
+FOR EACH ROW EXECUTE FUNCTION occ.project_cohort_owner();
+
+CREATE FUNCTION occ.protect_cohort_owner_projection()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    relation_id uuid := CASE WHEN TG_OP = 'DELETE' THEN OLD.relation_definition_id ELSE NEW.relation_definition_id END;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM catalog.relation_definition
+        WHERE id = relation_id AND relation_key = 'cohort_owner'
+    ) AND pg_trigger_depth() <= 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'cohort owner relationship is database-maintained';
+    END IF;
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE TRIGGER trg_relationship_cohort_owner_projection
+BEFORE INSERT OR UPDATE OR DELETE ON authz.relationship
+FOR EACH ROW EXECUTE FUNCTION occ.protect_cohort_owner_projection();
+
+CREATE FUNCTION occ.enforce_process_instance_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.definition_binding_id IS DISTINCT FROM OLD.definition_binding_id
+       OR NEW.package_version_id IS DISTINCT FROM OLD.package_version_id
+       OR NEW.cohort_id IS DISTINCT FROM OLD.cohort_id
+       OR NEW.started_for_participant_id IS DISTINCT FROM OLD.started_for_participant_id
+       OR NEW.flowable_instance_id IS DISTINCT FROM OLD.flowable_instance_id
+       OR NEW.business_key IS DISTINCT FROM OLD.business_key
+       OR NEW.route_key IS DISTINCT FROM OLD.route_key
+       OR NEW.route_version IS DISTINCT FROM OLD.route_version
+       OR NEW.started_by IS DISTINCT FROM OLD.started_by
+       OR NEW.started_at IS DISTINCT FROM OLD.started_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'process identity and package are immutable';
+    END IF;
+    IF OLD.state IN ('COMPLETED', 'CANCELLED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal process is immutable';
+    END IF;
+    IF NEW.state IS DISTINCT FROM OLD.state AND NOT (
+        (OLD.state = 'RUNNING' AND NEW.state IN ('SUSPENDED', 'COMPLETED', 'CANCELLED', 'FAILED'))
+        OR (OLD.state = 'SUSPENDED' AND NEW.state IN ('RUNNING', 'CANCELLED', 'FAILED'))
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid process lifecycle transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_process_instance_lifecycle
+BEFORE UPDATE ON occ.process_instance
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_process_instance_lifecycle();
+
+ALTER TABLE occ.process_instance
+    DROP CONSTRAINT process_instance_check,
+    ADD CONSTRAINT ck_process_instance_ended_at CHECK (
+        (state IN ('COMPLETED', 'CANCELLED', 'FAILED') AND ended_at IS NOT NULL)
+        OR (state IN ('RUNNING', 'SUSPENDED') AND ended_at IS NULL)
+    );
+
+CREATE FUNCTION occ.enforce_task_projection_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.process_instance_id IS DISTINCT FROM OLD.process_instance_id
+       OR NEW.activity_key IS DISTINCT FROM OLD.activity_key
+       OR NEW.activity_name IS DISTINCT FROM OLD.activity_name
+       OR NEW.flowable_task_id IS DISTINCT FROM OLD.flowable_task_id
+       OR NEW.flowable_execution_id IS DISTINCT FROM OLD.flowable_execution_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task occurrence identity is immutable';
+    END IF;
+    IF OLD.state IN ('COMPLETED', 'CANCELLED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal task is immutable';
+    END IF;
+    IF NEW.state IS DISTINCT FROM OLD.state AND NOT (
+        (OLD.state = 'AVAILABLE' AND NEW.state IN ('CLAIMED', 'CANCELLED', 'FAILED'))
+        OR (OLD.state = 'CLAIMED' AND NEW.state IN ('AVAILABLE', 'COMPLETED', 'CANCELLED', 'FAILED'))
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid task lifecycle transition';
+    END IF;
+    IF NEW.state = 'AVAILABLE' AND (NEW.assignee_id IS NOT NULL OR NEW.claimed_at IS NOT NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'available task cannot have an assignee or claim time';
+    END IF;
+    IF NEW.state IN ('CLAIMED', 'COMPLETED') AND (NEW.assignee_id IS NULL OR NEW.claimed_at IS NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'claimed task requires assignee and claim time';
+    END IF;
+    IF NEW.state = 'COMPLETED' AND EXISTS (
+        SELECT 1
+        FROM occ.task_gate_requirement requirement
+        LEFT JOIN occ.task_gate_provider_state provider
+          ON provider.task_id = requirement.task_id
+         AND provider.provider_key = requirement.provider_key
+        WHERE requirement.task_id = NEW.id
+          AND coalesce(provider.status, 'UNAVAILABLE') <> 'READY'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider is unavailable';
+    END IF;
+    IF NEW.state = 'COMPLETED' AND EXISTS (
+        SELECT 1 FROM occ.task_blocker blocker
+        WHERE blocker.task_id = NEW.id AND blocker.resolved_at IS NULL AND blocker.severity = 'HARD'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task has an active hard blocker';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_task_projection_lifecycle
+BEFORE UPDATE ON occ.task_projection
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_projection_lifecycle();
+
+CREATE UNIQUE INDEX uq_task_blocker_active
+ON occ.task_blocker (task_id, source_entity_id, blocker_code)
+WHERE resolved_at IS NULL;
+
+CREATE TRIGGER trg_task_timeline_immutable
+BEFORE UPDATE OR DELETE ON occ.task_timeline
+FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_task_timeline_no_truncate
+BEFORE TRUNCATE ON occ.task_timeline
+FOR EACH STATEMENT EXECUTE FUNCTION platform.reject_immutable_row();
+
+CREATE UNIQUE INDEX uq_task_review_submission
+ON occ.task_review_projection_fact (task_id, evidence_version_id)
+WHERE fact_kind = 'SUBMITTED';
+CREATE UNIQUE INDEX uq_task_review_decision
+ON occ.task_review_projection_fact (submission_fact_id)
+WHERE fact_kind = 'DECIDED';
+CREATE UNIQUE INDEX uq_task_review_id
+ON occ.task_review_projection_fact (review_id)
+WHERE review_id IS NOT NULL;
+
+CREATE FUNCTION occ.validate_task_review_projection_fact()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    submission occ.task_review_projection_fact%ROWTYPE;
+BEGIN
+    IF NEW.fact_kind = 'DECIDED' THEN
+        SELECT * INTO STRICT submission
+        FROM occ.task_review_projection_fact
+        WHERE id = NEW.submission_fact_id AND fact_kind = 'SUBMITTED';
+        IF submission.task_id IS DISTINCT FROM NEW.task_id
+           OR submission.review_sequence IS DISTINCT FROM NEW.review_sequence THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'decision must match its submission task and sequence';
+        END IF;
+    ELSIF EXISTS (
+        SELECT 1 FROM occ.task_review_projection_fact fact
+        WHERE fact.task_id = NEW.task_id AND fact.review_sequence >= NEW.review_sequence
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review sequence must increase monotonically';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_task_review_projection_validate
+BEFORE INSERT ON occ.task_review_projection_fact
+FOR EACH ROW EXECUTE FUNCTION occ.validate_task_review_projection_fact();
+CREATE TRIGGER trg_task_review_projection_immutable
+BEFORE UPDATE OR DELETE ON occ.task_review_projection_fact
+FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_task_review_projection_no_truncate
+BEFORE TRUNCATE ON occ.task_review_projection_fact
+FOR EACH STATEMENT EXECUTE FUNCTION platform.reject_immutable_row();
+
+CREATE FUNCTION occ.enforce_notification_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF (to_jsonb(NEW) - 'read_at') IS DISTINCT FROM (to_jsonb(OLD) - 'read_at') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification identity and content are immutable';
+    END IF;
+    IF OLD.read_at IS NOT NULL AND NEW.read_at IS DISTINCT FROM OLD.read_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'notification read state is one way';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_notification_lifecycle
+BEFORE UPDATE ON occ.notification
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_notification_lifecycle();
+
+CREATE TABLE audit.dependency_failure_attempt (
+    id uuid PRIMARY KEY,
+    command_key text NOT NULL CHECK (
+        command_key = lower(btrim(command_key))
+        AND command_key ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
+    ),
+    actor_principal_id uuid NOT NULL REFERENCES iam.principal(id),
+    target_entity_id uuid REFERENCES authz.entity(id),
+    correlation_id uuid NOT NULL,
+    dependency_code text NOT NULL CHECK (
+        dependency_code = lower(btrim(dependency_code))
+        AND dependency_code ~ '^[a-z0-9][a-z0-9._-]{0,63}$'
+    ),
+    failure_category text NOT NULL CHECK (failure_category IN (
+        'UNAVAILABLE', 'TIMEOUT', 'CONFLICT', 'REJECTED', 'INCONSISTENT_STATE'
+    )),
+    attempted_at timestamptz NOT NULL DEFAULT transaction_timestamp()
+);
+
+CREATE TRIGGER trg_dependency_failure_attempt_immutable
+BEFORE UPDATE OR DELETE ON audit.dependency_failure_attempt
+FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_dependency_failure_attempt_no_truncate
+BEFORE TRUNCATE ON audit.dependency_failure_attempt
+FOR EACH STATEMENT EXECUTE FUNCTION platform.reject_immutable_row();
+
+CREATE INDEX ix_cohort_customer_status
+ON occ.cohort (customer_instance_id, status, start_date, id);
+CREATE INDEX ix_process_cohort_state
+ON occ.process_instance (cohort_id, state, started_at, id);
+CREATE INDEX ix_process_participant_state
+ON occ.process_instance (participant_id, state, started_at, id);
+CREATE INDEX ix_task_projection_assignee_state
+ON occ.task_projection (assignee_id, state, due_at, id);
+CREATE INDEX ix_task_blocker_task_active
+ON occ.task_blocker (task_id, severity, blocker_code)
+WHERE resolved_at IS NULL;
+CREATE INDEX ix_task_timeline_task_cursor
+ON occ.task_timeline (task_id, cursor);
+CREATE INDEX ix_task_review_task_sequence
+ON occ.task_review_projection_fact (task_id, review_sequence DESC, fact_kind);
+CREATE INDEX ix_notification_recipient_cursor
+ON occ.notification (recipient_id, cursor DESC);
+CREATE INDEX ix_notification_recipient_unread
+ON occ.notification (recipient_id, cursor DESC)
+WHERE read_at IS NULL;
+CREATE INDEX ix_dependency_failure_correlation
+ON audit.dependency_failure_attempt (correlation_id, attempted_at);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    occ.cohort,
+    occ.task_blocker,
+    occ.task_gate_requirement,
+    occ.task_gate_provider_state,
+    occ.task_timeline,
+    occ.task_review_projection_fact,
+    occ.notification
+TO innorder_runtime;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA occ TO innorder_runtime;
+GRANT SELECT, INSERT ON audit.dependency_failure_attempt TO innorder_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON audit.dependency_failure_attempt FROM innorder_runtime;

@@ -158,7 +158,10 @@ test('provides a full-schema psql entrypoint in migration order', () => {
   const entrypoint = readFileSync(fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)), 'utf8');
   let previous = -1;
   for (const migration of migrations) {
-    const position = entrypoint.indexOf(migration);
+    const directive = new RegExp(`^\\\\ir[ \\t]+migrations/${migration.replaceAll('.', '\\.') }[ \\t]*$`, 'mu');
+    const match = directive.exec(entrypoint);
+    assert.ok(match, `${migration} has a complete \\ir directive`);
+    const position = match.index;
     assert.ok(position > previous, `${migration} is included in order`);
     previous = position;
   }
