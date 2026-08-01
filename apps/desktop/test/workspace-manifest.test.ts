@@ -12,7 +12,7 @@ const EXACT_POLICY = {
   risks: ["/risks", ["/risks"], "risks.query:risks.query", ["acknowledge:risks.acknowledge", "assign:risks.assign", "mitigate:risks.mitigate", "escalate:risks.escalate", "resolve:risks.resolve"]],
   resources: ["/resources", ["/resources", "/reservations"], "resources.query:resources.query", ["create:resources.create", "change:resources.change", "reserve:reservations.create", "cancel:reservations.cancel"]],
   "domain-design": ["/domain-design", ["/packages", "/package-versions", "/policy-releases"], "packages.query:packages.query", ["import:packages.import", "validate:packages.validate", "diff:packages.diff", "approve:packages.approve", "publish:packages.publish"]],
-  administration: ["/administration", ["/people", "/relationships", "/roles", "/policy-releases", "/providers", "/knowledge", "/audit"], "administration.query:administration.query", ["create:people.manage", "disable:people.manage", "assign:roles.manage", "release:policies.manage", "test:providers.manage", "ingest:knowledge.manage", "inspect:audit.query"]],
+  administration: ["/administration", ["/people", "/relationships", "/roles", "/policy-releases", "/providers", "/knowledge", "/audit"], "administration.query:administration.query", ["create:people.manage", "disable:people.manage", "assignRelationship:relationships.manage", "assign:roles.manage", "release:policies.manage", "test:providers.manage", "ingest:knowledge.manage", "inspect:audit.query"]],
   system: ["/system", ["/system", "/audit", "/events"], "system.status:occ.read", []],
   settings: ["/settings", ["/auth", "/me"], "profiles.current:occ.read", ["profiles.select:occ.read", "profiles.save:occ.read", "profiles.remove:occ.read", "session.logout:occ.read", "preferences.update:preferences.update"]],
 } as const;
@@ -44,6 +44,25 @@ describe("canonical workspace manifest", () => {
         }
       }
     }
+  });
+
+  it("separates relationship and role assignment contracts", () => {
+    const commands = WORKSPACE_DEFINITIONS.administration.commands;
+    expect(commands.find(({ operation }) => operation === "assignRelationship")).toMatchObject({
+      label: "分配关系",
+      capability: "relationships.manage",
+      availability: {
+        state: "unavailable",
+        reason: "UNAVAILABLE_CONTRACT",
+        resourceGroups: ["/relationships"],
+        message: "关系分配 API 合同尚未集成",
+      },
+    });
+    expect(commands.find(({ operation }) => operation === "assign")).toMatchObject({
+      label: "分配角色",
+      capability: "roles.manage",
+      availability: { resourceGroups: ["/roles"] },
+    });
   });
 
   it("derives route and workspace policy with exact parity", () => {

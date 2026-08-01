@@ -117,6 +117,26 @@ describe("Administration", () => {
     expect(screen.getByLabelText("服务密钥")).toHaveValue("");
   });
 
+  it("clears provider secrets when a controlled active tab transitions away", () => {
+    const props = {
+      result: { state: "empty" as const, fetchedAt },
+      query,
+      capabilities: ["providers.manage"],
+      connectivity: "online" as const,
+      authenticated: true,
+      onQueryChange: vi.fn(),
+      onRefresh: vi.fn(),
+      onExecute: execute,
+    };
+    const { rerender } = render(<Administration {...props} activeTab="providers" />);
+    fireEvent.change(screen.getByLabelText("服务密钥"), { target: { value: "controlled-provider-secret" } });
+
+    rerender(<Administration {...props} activeTab="audit" />);
+    expect(document.body).not.toHaveTextContent("controlled-provider-secret");
+    rerender(<Administration {...props} activeTab="providers" />);
+    expect(screen.getByLabelText("服务密钥")).toHaveValue("");
+  });
+
   it("exposes the approved administration tabs and their named controls", () => {
     renderAdministration();
     const tabs = screen.getByRole("tablist", { name: "管理分类" });
@@ -127,6 +147,9 @@ describe("Administration", () => {
     expect(screen.getByRole("button", { name: "创建人员" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "停用人员" })).toBeDisabled();
     fireEvent.click(screen.getByRole("tab", { name: "关系" }));
+    expect(screen.getByRole("button", { name: "分配关系" })).toBeDisabled();
+    expect(screen.getByText("缺少能力：relationships.manage")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "角色" }));
     expect(screen.getByRole("button", { name: "分配角色" })).toBeDisabled();
     fireEvent.click(screen.getByRole("tab", { name: "策略发布" }));
     expect(screen.getByRole("button", { name: "发布策略" })).toBeDisabled();

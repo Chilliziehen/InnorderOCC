@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
@@ -137,6 +137,7 @@ export function Administration({
   const [auditTarget, setAuditTarget] = useState("");
   const activeTab = tabs.some(({ id }) => id === controlledActiveTab) ? controlledActiveTab! : localActiveTab;
   const active = tabs.find(({ id }) => id === activeTab) ?? initialTab;
+  const previousActiveTab = useRef(active.id);
   const mutable = connectivity === "online";
   const commandProps = { capabilities, online: mutable, authenticated, onExecute, onRefresh };
   const createPerson = z.object({ name: requiredText, email: z.string().trim().email() }).strict().safeParse({ name: personName, email: personEmail });
@@ -147,8 +148,14 @@ export function Administration({
   const provider = z.object({ endpoint: httpsUrl, model: requiredText, secret: z.string().min(1) }).strict().safeParse({ endpoint: providerUrl, model: providerModel, secret: providerSecret });
   const knowledge = z.object({ uploadRef: requiredText, target: requiredText }).strict().safeParse({ uploadRef, target: knowledgeTarget });
   const audit = z.object({ target: requiredText }).strict().safeParse({ target: auditTarget });
+
+  useEffect(() => {
+    const previous = previousActiveTab.current;
+    previousActiveTab.current = active.id;
+    if (previous === "providers" && active.id !== "providers") setProviderSecret("");
+  }, [active.id]);
+
   const selectTab = (tabId: string) => {
-    if (tabId !== "providers") setProviderSecret("");
     setActiveTab(tabId);
     onTabChange?.(tabId);
   };
@@ -196,7 +203,7 @@ export function Administration({
           <label>关系主体 ID<input value={relationshipSubjectId} onChange={(event) => setRelationshipSubjectId(event.currentTarget.value)} /></label>
           <label>关系对象 ID<input value={relationshipObjectId} onChange={(event) => setRelationshipObjectId(event.currentTarget.value)} /></label>
           <label>关系类型<input value={relationshipType} onChange={(event) => setRelationshipType(event.currentTarget.value)} /></label>
-          <GuardedCommand operation="assign" targetId={relationshipSubjectId.trim() || undefined} payload={relationship.success ? relationship.data : { relatedPersonId: relationshipObjectId, relationshipType }} valid={Boolean(relationshipSubjectId.trim()) && relationship.success} message="关系主体、对象和类型不能为空" {...commandProps} />
+          <GuardedCommand operation="assignRelationship" targetId={relationshipSubjectId.trim() || undefined} payload={relationship.success ? relationship.data : { relatedPersonId: relationshipObjectId, relationshipType }} valid={Boolean(relationshipSubjectId.trim()) && relationship.success} message="关系主体、对象和类型不能为空" {...commandProps} />
         </section> : null}
         {active.id === "roles" ? <section aria-label="分配角色操作">
           <label>人员 ID<input value={rolePersonId} onChange={(event) => setRolePersonId(event.currentTarget.value)} /></label>

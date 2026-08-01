@@ -173,7 +173,8 @@ const manifest: WorkspaceManifestEntry[] = [
     commands: [
       operation("create", "创建人员", "people.manage", ["/people"], "人员创建 API 合同尚未集成"),
       operation("disable", "停用人员", "people.manage", ["/people"], "人员停用 API 合同尚未集成"),
-      operation("assign", "分配角色", "roles.manage", ["/relationships", "/roles"], "角色分配 API 合同尚未集成"),
+      operation("assignRelationship", "分配关系", "relationships.manage", ["/relationships"], "关系分配 API 合同尚未集成"),
+      operation("assign", "分配角色", "roles.manage", ["/roles"], "角色分配 API 合同尚未集成"),
       operation("release", "发布策略", "policies.manage", ["/policy-releases"], "策略发布 API 合同尚未集成"),
       operation("test", "测试智能服务", "providers.manage", ["/providers"], "智能服务测试 API 合同尚未集成"),
       operation("ingest", "导入知识", "knowledge.manage", ["/knowledge"], "知识导入 API 合同尚未集成"),
