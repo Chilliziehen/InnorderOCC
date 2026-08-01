@@ -304,6 +304,38 @@ describe("desktop IPC", () => {
 });
 
 describe("desktop main composition", () => {
+  it("returns exact main-safe unavailable metadata for each workspace operation", async () => {
+    const deps = dependencies();
+    const api = createDesktopApi({
+      profiles: deps.profiles as never,
+      session: { ...deps.session, profileSwitched: vi.fn().mockResolvedValue(undefined) },
+      statuses: deps.runtime.statuses,
+      clearProfile: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(api.workspaces.query({
+      workspace: "my-work",
+      operation: "tasks.query",
+      filters: {},
+    })).resolves.toEqual({
+      state: "unavailable",
+      reason: "UNAVAILABLE_CONTRACT",
+      resourceGroups: ["/tasks"],
+      message: "任务 API 合同尚未集成",
+    });
+    await expect(api.commands.execute({
+      workspace: "domain-design",
+      operation: "import",
+      payload: {},
+      idempotencyKey: profileId,
+    })).resolves.toEqual({
+      state: "unavailable",
+      reason: "UNAVAILABLE_CONTRACT",
+      resourceGroups: ["/packages"],
+      message: "领域包导入 API 合同尚未集成",
+    });
+  });
+
   it("writes JSON atomically with restrictive file intent", async () => {
     const files = new Map<string, string>();
     const fs = {

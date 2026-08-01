@@ -17,7 +17,7 @@ const user: CurrentUser = {
   username: "operator",
   displayName: "值班操作员",
   status: "ACTIVE",
-  capabilities: ["occ.read", "occ.admin"],
+  capabilities: ["occ.read", "occ.admin", "overview.query"],
 };
 
 function status(

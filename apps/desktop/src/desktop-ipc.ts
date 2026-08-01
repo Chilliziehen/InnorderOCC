@@ -18,6 +18,7 @@ import type { CredentialVault, SessionManager, VaultCredential } from "./session
 import { serializedSize } from "./serialized-size";
 import { createCommandIntentRegistry, type CommandIntentRegistry, type InternalWorkspaceCommand } from "./command-intents";
 import type { CommandReceipt } from "./desktop-contract";
+import { mainUnavailableOperation } from "./main-operation-registry";
 
 export const MAX_REQUEST_BYTES = 1024 * 1024;
 export const MAX_UPLOAD_REQUEST_BYTES = 100 * 1024 * 1024 + 64 * 1024;
@@ -230,20 +231,10 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     },
     runtime: { statuses: dependencies.statuses },
     workspaces: {
-      query: async () => ({
-        state: "unavailable",
-        reason: "UNAVAILABLE_CONTRACT",
-        resourceGroups: ["/workspaces"],
-        message: "Workspace API contract is unavailable",
-      }),
+      query: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/workspaces"),
     },
     commands: {
-      execute: async () => ({
-        state: "unavailable",
-        reason: "UNAVAILABLE_CONTRACT",
-        resourceGroups: ["/commands"],
-        message: "Command API contract is unavailable",
-      }),
+      execute: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/commands"),
     },
     uploads: {
       start: async () => ({

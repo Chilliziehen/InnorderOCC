@@ -2,6 +2,21 @@ import type { CurrentUser } from "@innorder/contracts";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const metadataMode = vi.hoisted(() => ({ available: false }));
+
+vi.mock("../src/renderer/workspaces/workspace-definitions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/renderer/workspaces/workspace-definitions")>();
+  return {
+    ...actual,
+    commandFor: (workspace: Parameters<typeof actual.commandFor>[0], operationName: string) => {
+      const operation = actual.commandFor(workspace, operationName);
+      return operation && metadataMode.available
+        ? { ...operation, availability: { state: "available" as const } }
+        : operation;
+    },
+  };
+});
+
 import type { OccApi, ServerProfile, WorkspaceResult } from "../src/desktop-contract";
 import type { AuthenticatedState } from "../src/renderer/app-controller";
 import { AppShell } from "../src/renderer/components/AppShell";
@@ -103,11 +118,10 @@ const routeCases = [
   ["/resources", "resources.query", "资源视图"],
   ["/domain-design", "packages.query", "领域设计视图"],
   ["/administration", "administration.query", "管理分类"],
-  ["/system", "system.status", "系统运行视图"],
-  ["/settings", "profiles.current", "设置分类"],
 ] as const;
 
 beforeEach(() => {
+  metadataMode.available = false;
   window.location.hash = "#/overview";
 });
 
@@ -129,6 +143,26 @@ describe("authenticated workspace integration", () => {
       workspace: path.slice(1),
       operation,
     })));
+  });
+
+  it("uses runtime statuses and profile state directly without workspace queries", async () => {
+    const api = installOcc();
+    const props = { onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const statuses = [{
+      service: "occ-core",
+      version: "1.7.0",
+      state: "READY" as const,
+      checkedAt: "2026-08-01T12:00:00.000Z",
+      components: [],
+    }];
+    const { rerender } = render(<AppShell state={state("/system")} statuses={statuses} {...props} />);
+
+    expect(await screen.findByRole("cell", { name: "occ-core" })).toBeInTheDocument();
+    expect(api.workspaces.query).not.toHaveBeenCalled();
+
+    rerender(<AppShell state={state("/settings")} statuses={statuses} {...props} />);
+    expect(await screen.findByDisplayValue(profile.name)).toBeInTheDocument();
+    expect(api.workspaces.query).not.toHaveBeenCalled();
   });
 
   it("updates tab query state and performs a fresh query", async () => {
@@ -171,6 +205,159 @@ describe("authenticated workspace integration", () => {
       filters: { severity: "high", search: "", tab: "attention" },
       sort: { field: "priority", direction: "desc" },
     }));
+  });
+
+  it("tracks cursor history within scope and resets it for criteria, tab, and profile", async () => {
+    const query = vi.fn(async ({ cursor }: { cursor?: string }): Promise<WorkspaceResult> => ({
+      state: "ready",
+      items: [{
+        id: cursor ?? "first", name: cursor ?? "first page", type: "compute", state: "available",
+        capacity: 1, availableCapacity: 1, reservations: [], conflicts: [],
+      }],
+      count: 1,
+      ...(cursor === "page-3" ? {} : { nextCursor: cursor === "page-2" ? "page-3" : "page-2" }),
+      fetchedAt: "2026-08-01T12:00:00.000Z",
+    }));
+    installOcc(query);
+    const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
+    await waitFor(() => expect(query).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" })));
+    expect(screen.getByRole("button", { name: "上一页" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-3" })));
+
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" })));
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.not.objectContaining({ cursor: expect.anything() })));
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" })));
+    fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "GPU" } });
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.not.objectContaining({ cursor: expect.anything() })));
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" })));
+    fireEvent.click(screen.getByRole("tab", { name: "预留" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.not.objectContaining({ cursor: expect.anything() })));
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: "page-2" })));
+    const otherProfile = { ...profile, id: "00000000-0000-4000-8000-000000000009", name: "Other" };
+    rerender(<AppShell state={{ ...state("/resources"), profile: otherProfile, profiles: [profile, otherProfile] }} {...props} />);
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith(expect.not.objectContaining({ cursor: expect.anything() })));
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+  }, 15_000);
+
+  it("propagates the current validated task and process rows", async () => {
+    const query = vi.fn(async ({ workspace }: { workspace: string }): Promise<WorkspaceResult> => workspace === "my-work" ? {
+      state: "ready",
+      count: 1,
+      fetchedAt: "2026-08-01T12:00:00.000Z",
+      items: [{
+        id: "task-17", task: "校准电源", process: "电子模块", state: "CLAIMED", dueAt: "2026-08-03T08:00:00Z",
+        evidenceRequirements: ["校准记录 PDF"], acceptedMediaTypes: ["application/pdf"], reviewHistory: [],
+      }],
+    } : {
+      state: "ready",
+      count: 1,
+      fetchedAt: "2026-08-01T12:00:00.000Z",
+      items: [{
+        id: "process-7", process: "电子模块", cohort: "2026 春季", owner: "课程负责人", status: "ACTIVE",
+        expectedVersion: 3, progress: 65,
+        participants: [{ id: "person-1", name: "王工", role: "负责人" }],
+        tasks: [], evidence: [], risks: [], timeline: [],
+      }],
+    });
+    installOcc(query);
+    const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const { rerender } = render(<AppShell state={state("/my-work")} {...props} />);
+
+    expect(await screen.findByText("校准记录 PDF")).toBeInTheDocument();
+    expect(screen.queryByText("请选择任务后再领取")).not.toBeInTheDocument();
+
+    rerender(<AppShell state={state("/processes")} {...props} />);
+    expect(await screen.findByRole("progressbar", { name: "流程进度" })).toHaveAttribute("value", "65");
+    expect(screen.getByRole("list", { name: "参与者" })).toHaveTextContent("王工");
+    expect(screen.queryByText("请选择要启动的流程")).not.toBeInTheDocument();
+  });
+
+  it("uses the current task ID and completed named upload reference", async () => {
+    metadataMode.available = true;
+    const result: WorkspaceResult = {
+      state: "ready",
+      count: 1,
+      fetchedAt: "2026-08-01T12:00:00.000Z",
+      items: [{
+        id: "task-17", task: "校准电源", process: "电子模块", state: "CLAIMED", dueAt: "2026-08-03T08:00:00Z",
+        evidenceRequirements: ["校准记录 PDF"], acceptedMediaTypes: ["application/pdf"], reviewHistory: [],
+      }],
+    };
+    const api = installOcc(vi.fn().mockResolvedValue(result));
+    const uploadId = "00000000-0000-4000-8000-000000000077";
+    vi.mocked(api.uploads.start).mockResolvedValue({ state: "completed", uploadId, evidenceId: "evidence-17" });
+    vi.mocked(api.commands.execute).mockResolvedValue({
+      state: "completed",
+      commandId: "00000000-0000-4000-8000-000000000088",
+      correlationId: "00000000-0000-4000-8000-000000000099",
+    });
+    render(<AppShell state={state("/my-work")} statuses={[]} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
+    const input = await screen.findByLabelText("选择证据文件");
+    const file = new File(["pdf"], "record.pdf", { type: "application/pdf" });
+    Object.defineProperty(file, "arrayBuffer", { value: vi.fn().mockResolvedValue(new TextEncoder().encode("pdf").buffer) });
+    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
+
+    await screen.findByRole("status", { name: "证据上传完成" });
+    expect(api.uploads.start).toHaveBeenCalledWith(expect.objectContaining({ targetId: "task-17", fileName: "record.pdf" }));
+    fireEvent.click(screen.getByRole("button", { name: "提交证据" }));
+    await waitFor(() => expect(api.commands.execute).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "submitEvidence",
+      targetId: "task-17",
+      payload: expect.objectContaining({ taskId: "task-17", uploadReference: uploadId }),
+    })));
+
+    fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "next task" } });
+    await waitFor(() => expect(api.workspaces.query).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("status", { name: "证据上传完成" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交证据" })).toBeDisabled();
+    expect(screen.getByText("缺少证据上传引用")).toBeInTheDocument();
+  });
+
+  it("clears row selection when query, tab, generation, or profile changes", async () => {
+    const result: WorkspaceResult = {
+      state: "ready",
+      count: 1,
+      fetchedAt: "2026-08-01T12:00:00.000Z",
+      items: [{ id: "review-1", item: "检查证据", type: "review", owner: null, status: "open", version: 2, evidenceVersion: 3 }],
+    };
+    installOcc(vi.fn().mockResolvedValue(result));
+    const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const { rerender } = render(<AppShell state={state("/interventions")} {...props} />);
+    const select = await screen.findByRole("button", { name: "选择介入事项：检查证据" });
+    fireEvent.click(select);
+    expect(select).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.change(screen.getByLabelText("介入类型"), { target: { value: "review" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择介入事项：检查证据" })).toHaveAttribute("aria-pressed", "false"));
+    fireEvent.click(screen.getByRole("button", { name: "选择介入事项：检查证据" }));
+    fireEvent.click(screen.getByRole("tab", { name: "异常" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择介入事项：检查证据" })).toHaveAttribute("aria-pressed", "false"));
+
+    fireEvent.click(screen.getByRole("button", { name: "选择介入事项：检查证据" }));
+    rerender(<AppShell state={{ ...state("/interventions"), sessionGeneration: 5 }} {...props} />);
+    expect(await screen.findByRole("button", { name: "选择介入事项：检查证据" })).toHaveAttribute("aria-pressed", "false");
+
+    const otherProfile = { ...profile, id: "00000000-0000-4000-8000-000000000009", name: "Other" };
+    fireEvent.click(screen.getByRole("button", { name: "选择介入事项：检查证据" }));
+    rerender(<AppShell state={{ ...state("/interventions"), profile: otherProfile, profiles: [profile, otherProfile] }} {...props} />);
+    expect(await screen.findByRole("button", { name: "选择介入事项：检查证据" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("ignores a stale response after the route changes", async () => {
@@ -218,6 +405,23 @@ describe("authenticated workspace integration", () => {
     expect(api.commands.execute).not.toHaveBeenCalled();
   });
 
+  it("requires the exact route query capability before workspace IPC", async () => {
+    const api = installOcc();
+    render(
+      <AppShell
+        state={{ ...state("/risks"), identity: { ...identity, capabilities: ["occ.read"] } }}
+        statuses={[]}
+        onLogout={vi.fn()}
+        onProfileSelect={vi.fn()}
+        onProfileSave={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("tablist", { name: "风险视图" })).toBeInTheDocument();
+    expect(await screen.findByText("缺少能力：risks.query")).toBeInTheDocument();
+    expect(api.workspaces.query).not.toHaveBeenCalled();
+  });
+
   it("keeps offline settings mutations locked while logout remains local", async () => {
     const api = installOcc();
     const onLogout = vi.fn().mockResolvedValue(undefined);
@@ -230,9 +434,9 @@ describe("authenticated workspace integration", () => {
     expect(api.commands.execute).not.toHaveBeenCalled();
   });
 
-  it("allows an offline workspace query to refresh while mutations remain locked", async () => {
-    const offlineResult: WorkspaceResult = {
-      state: "offline",
+  it("retains the scoped successful result canonically when connectivity goes offline", async () => {
+    const readyResult: WorkspaceResult = {
+      state: "ready",
       items: [{
         id: "resource-1",
         name: "GPU pool",
@@ -246,16 +450,39 @@ describe("authenticated workspace integration", () => {
       count: 1,
       fetchedAt: "2026-08-01T12:00:00.000Z",
     };
-    const api = installOcc(vi.fn().mockResolvedValue(offlineResult));
-    render(<AppShell state={offlineState("/resources")} statuses={[]} onLogout={vi.fn()} onProfileSelect={vi.fn()} onProfileSave={vi.fn()} />);
+    const api = installOcc(vi.fn().mockResolvedValue(readyResult));
+    const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
     await waitFor(() => expect(api.workspaces.query).toHaveBeenCalledOnce());
+    expect(await screen.findByText("GPU pool")).toBeInTheDocument();
 
-    const refresh = screen.getByRole("button", { name: "刷新" });
-    expect(refresh).toBeEnabled();
-    fireEvent.click(refresh);
+    rerender(<AppShell state={offlineState("/resources")} {...props} />);
 
-    await waitFor(() => expect(api.workspaces.query).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("离线数据，只读")).toBeInTheDocument();
+    expect(screen.getByText("GPU pool")).toBeInTheDocument();
+    expect(api.workspaces.query).toHaveBeenCalledOnce();
     expect(screen.getByLabelText("资源名称")).toBeDisabled();
     expect(api.commands.execute).not.toHaveBeenCalled();
+  });
+
+  it("ignores an in-flight online result after connectivity goes offline", async () => {
+    let resolveOnline!: (value: WorkspaceResult) => void;
+    const query = vi.fn(() => new Promise<WorkspaceResult>((resolve) => { resolveOnline = resolve; }));
+    installOcc(query);
+    const props = { statuses: [], onLogout: vi.fn(), onProfileSelect: vi.fn(), onProfileSave: vi.fn() };
+    const { rerender } = render(<AppShell state={state("/resources")} {...props} />);
+    await waitFor(() => expect(query).toHaveBeenCalledOnce());
+
+    rerender(<AppShell state={offlineState("/resources")} {...props} />);
+    resolveOnline({
+      state: "ready",
+      items: [{ id: "late", name: "late online secret", type: "compute", state: "available", capacity: 1, availableCapacity: 1, reservations: [], conflicts: [] }],
+      count: 1,
+      fetchedAt: "2026-08-01T12:00:00.000Z",
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(document.body).not.toHaveTextContent("late online secret");
   });
 });

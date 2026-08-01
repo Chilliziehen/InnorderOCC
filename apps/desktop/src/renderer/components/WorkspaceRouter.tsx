@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { z } from "zod";
 
 import type {
   CommandReceipt,
@@ -14,9 +15,9 @@ import { WORKSPACE_DEFINITIONS, type WorkspaceId } from "../workspaces/workspace
 import { Administration } from "../workspaces/Administration";
 import { DomainDesign, type ArchiveUploadReference } from "../workspaces/DomainDesign";
 import { Interventions, type InterventionTab } from "../workspaces/Interventions";
-import { MyWork, type EvidenceUploadState, type MyWorkTab } from "../workspaces/MyWork";
+import { MyWork, type EvidenceUploadState, type MyWorkTab, type MyWorkTaskDetails } from "../workspaces/MyWork";
 import { Overview } from "../workspaces/Overview";
-import { Processes, type ProcessesTab } from "../workspaces/Processes";
+import { Processes, type ProcessesTab, type SelectedProcess } from "../workspaces/Processes";
 import { Resources } from "../workspaces/Resources";
 import { Risks, type RiskTab } from "../workspaces/Risks";
 import { Settings } from "../workspaces/Settings";
@@ -24,6 +25,7 @@ import { SystemOperations } from "../workspaces/SystemOperations";
 
 interface WorkspaceRouterProps {
   readonly workspaceId: WorkspaceId;
+  readonly queryAllowed: boolean;
   readonly state: ShellState;
   readonly statuses: readonly unknown[];
   readonly onLogout: () => void | Promise<void>;
@@ -41,6 +43,7 @@ const initialTabs = Object.fromEntries(Object.values(WORKSPACE_DEFINITIONS).map(
   definition.id,
   definition.tabs[0]?.id ?? "",
 ])) as Record<WorkspaceId, string>;
+const FIRST_PAGE_CURSOR = "__occ_first_page__";
 
 function loadingResult(label: string): WorkspaceResult {
   return { state: "loading", label: `正在加载${label}…` };
@@ -50,38 +53,129 @@ function callable<T extends (...args: never[]) => unknown>(value: T | undefined)
   return typeof value === "function";
 }
 
-export function WorkspaceRouter({ workspaceId, state, statuses, onLogout, onProfileSelect, onProfileSave, onProfileRemove }: WorkspaceRouterProps) {
+const taskRowSchema = z.object({
+  id: z.string().min(1),
+  task: z.string().min(1),
+  process: z.string().min(1),
+  state: z.enum(["AVAILABLE", "CLAIMED", "BLOCKED", "PENDING_REVIEW", "RETURNED", "COMPLETED"]),
+  dueAt: z.string().min(1),
+  evidenceRequirements: z.array(z.string().min(1)),
+  acceptedMediaTypes: z.array(z.string().min(1)),
+  reservation: z.string().min(1).optional(),
+  reviewHistory: z.array(z.object({
+    id: z.string().min(1),
+    outcome: z.string().min(1),
+    occurredAt: z.string().min(1),
+    note: z.string().optional(),
+  }).strict()),
+}).strict().transform(({ id, task, process, state, dueAt, evidenceRequirements, acceptedMediaTypes, reservation, reviewHistory }) => ({
+  item: { id, task, process, state, dueAt },
+  details: {
+    id,
+    evidenceRequirements,
+    acceptedMediaTypes,
+    ...(reservation ? { reservation } : {}),
+    reviewHistory: reviewHistory.map(({ id: reviewId, outcome, occurredAt, note }) => ({
+      id: reviewId,
+      outcome,
+      occurredAt,
+      ...(note !== undefined ? { note } : {}),
+    })),
+  } satisfies MyWorkTaskDetails,
+}));
+
+const namedStateItemSchema = z.object({ id: z.string().min(1), name: z.string().min(1), state: z.string().min(1) }).strict();
+const processRowSchema = z.object({
+  id: z.string().min(1),
+  process: z.string().min(1),
+  cohort: z.string().min(1),
+  owner: z.string().min(1),
+  status: z.string().min(1),
+  expectedVersion: z.number().int().min(0),
+  progress: z.number().min(0).max(100),
+  participants: z.array(z.object({ id: z.string().min(1), name: z.string().min(1), role: z.string().min(1) }).strict()),
+  tasks: z.array(namedStateItemSchema),
+  evidence: z.array(namedStateItemSchema),
+  risks: z.array(z.object({ id: z.string().min(1), name: z.string().min(1), severity: z.string().min(1) }).strict()),
+  timeline: z.array(z.object({ id: z.string().min(1), occurredAt: z.string().min(1), label: z.string().min(1) }).strict()),
+}).strict().transform(({ id, process, cohort, owner, status, ...details }) => ({
+  item: { id, process, cohort, owner, status },
+  details: { id, ...details } satisfies SelectedProcess,
+}));
+
+function hasWorkspaceItems(result: WorkspaceResult): result is Extract<WorkspaceResult, { state: "ready" | "stale" | "offline" }> {
+  return result.state === "ready" || result.state === "stale" || result.state === "offline";
+}
+
+export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, onLogout, onProfileSelect, onProfileSave, onProfileRemove }: WorkspaceRouterProps) {
   const definition = WORKSPACE_DEFINITIONS[workspaceId];
   const identity = state.mode === "authenticated" ? state.identity : state.cachedIdentity;
   const [queries, setQueries] = useState(initialQueries);
   const [tabs, setTabs] = useState(initialTabs);
   const query = queries[workspaceId];
   const activeTab = tabs[workspaceId];
-  const requestKey = `${state.profile.id}:${state.sessionGeneration}:${workspaceId}:${JSON.stringify(query)}:${activeTab}`;
+  const online = state.mode === "authenticated";
+  const connectivity = state.mode === "authenticated" ? "online" : state.mode;
+  const { cursor: _cursor, previousCursor: _previousCursor, nextCursor: _nextCursor, ...criteria } = query;
+  const historyPrefix = `${state.profile.id}:${state.sessionGeneration}:${workspaceId}:${activeTab}:`;
+  const historyKey = `${historyPrefix}${JSON.stringify(criteria)}`;
+  const scopeKey = `${state.profile.id}:${state.sessionGeneration}:${workspaceId}:${JSON.stringify(query)}:${activeTab}`;
+  const requestKey = `${scopeKey}:${connectivity}`;
   const [resultState, setResultState] = useState<{ key: string; value: WorkspaceResult }>({
     key: "",
     value: loadingResult(definition.query.label),
   });
   const [refreshSequence, setRefreshSequence] = useState(0);
+  const [, setCursorHistoryVersion] = useState(0);
   const requestSequence = useRef(0);
+  const cursorHistory = useRef(new Map<string, Array<string | undefined>>());
+  const retainedResult = useRef<{ key: string; value: WorkspaceResult } | undefined>(undefined);
   const [selectedIntervention, setSelectedIntervention] = useState<string>();
   const [selectedRisk, setSelectedRisk] = useState<string>();
   const [upload, setUpload] = useState<EvidenceUploadState>({ state: "idle" });
+  const [uploadReference, setUploadReference] = useState<string>();
   const uploadRetry = useRef<{ file: File; targetId: string } | undefined>(undefined);
   const result = resultState.key === requestKey
     ? resultState.value
     : loadingResult(definition.query.label);
+  const history = cursorHistory.current.get(historyKey) ?? [];
+  const previousPage = history.at(-1);
   const visibleQuery = {
     ...query,
+    ...(history.length > 0 ? { previousCursor: previousPage ?? FIRST_PAGE_CURSOR } : {}),
     ...("nextCursor" in result && result.nextCursor ? { nextCursor: result.nextCursor } : {}),
   };
-  const online = state.mode === "authenticated";
-  const connectivity = state.mode === "authenticated" ? "online" : state.mode;
+  useEffect(() => {
+    setSelectedIntervention(undefined);
+    setSelectedRisk(undefined);
+    setUpload({ state: "idle" });
+    setUploadReference(undefined);
+    uploadRetry.current = undefined;
+  }, [requestKey]);
 
   useEffect(() => {
     const sequence = ++requestSequence.current;
     let active = true;
     setResultState({ key: requestKey, value: loadingResult(definition.query.label) });
+    if (workspaceId === "system" || workspaceId === "settings") {
+      setResultState({ key: requestKey, value: { state: "empty", fetchedAt: new Date(state.lastFreshAt).toISOString() } });
+      return () => { active = false; };
+    }
+    if (!queryAllowed) {
+      setResultState({ key: requestKey, value: {
+        state: "error",
+        problem: { title: `缺少能力：${definition.query.capability}`, code: "QUERY_CAPABILITY_REQUIRED", status: 403 },
+      } });
+      return () => { active = false; };
+    }
+    if (!online) {
+      const retained = retainedResult.current;
+      const retainedValue = retained?.key === scopeKey ? retained.value : undefined;
+      setResultState({ key: requestKey, value: retainedValue
+        ? hasWorkspaceItems(retainedValue) ? { ...retainedValue, state: "offline" } : retainedValue
+        : { state: "error", problem: { title: "离线且没有可用缓存。", code: "OFFLINE_NO_CACHE", status: 503 } } });
+      return () => { active = false; };
+    }
     const queryApi = window.occ?.workspaces?.query;
     if (!callable(queryApi)) {
       setResultState({ key: requestKey, value: unavailableWorkspaceResult(definition) });
@@ -89,19 +183,45 @@ export function WorkspaceRouter({ workspaceId, state, statuses, onLogout, onProf
     }
     void queryApi(workspaceQueryInput(definition, query, activeTab)).then(
       (value) => {
-        if (active && requestSequence.current === sequence) setResultState({ key: requestKey, value });
+        if (active && requestSequence.current === sequence) {
+          retainedResult.current = { key: scopeKey, value };
+          setResultState({ key: requestKey, value });
+        }
       },
       () => {
         if (active && requestSequence.current === sequence) setResultState({ key: requestKey, value: failedWorkspaceResult() });
       },
     );
     return () => { active = false; };
-  }, [activeTab, definition, query, refreshSequence, requestKey]);
+  }, [activeTab, definition, online, query, queryAllowed, refreshSequence, requestKey, scopeKey, state.lastFreshAt, workspaceId]);
 
   const changeQuery = (value: WorkspaceQueryValue) => {
-    setQueries((current) => ({ ...current, [workspaceId]: value }));
+    const { cursor: nextCursor, previousCursor: _nextPrevious, nextCursor: _nextNext, ...nextCriteria } = value;
+    if (JSON.stringify(criteria) !== JSON.stringify(nextCriteria)) {
+      for (const key of cursorHistory.current.keys()) {
+        if (key.startsWith(historyPrefix)) cursorHistory.current.delete(key);
+      }
+      setCursorHistoryVersion((current) => current + 1);
+      setQueries((current) => ({ ...current, [workspaceId]: nextCriteria }));
+      return;
+    }
+    if (nextCursor !== query.cursor) {
+      const nextHistory = [...history];
+      if (nextCursor === visibleQuery.previousCursor) nextHistory.pop();
+      else if (nextCursor === visibleQuery.nextCursor) nextHistory.push(query.cursor);
+      cursorHistory.current.set(historyKey, nextHistory);
+      setCursorHistoryVersion((current) => current + 1);
+    }
+    setQueries((current) => ({
+      ...current,
+      [workspaceId]: nextCursor === FIRST_PAGE_CURSOR ? nextCriteria : value,
+    }));
   };
   const changeTab = (tab: string) => {
+    for (const key of cursorHistory.current.keys()) {
+      if (key.startsWith(`${state.profile.id}:${state.sessionGeneration}:${workspaceId}:`)) cursorHistory.current.delete(key);
+    }
+    setCursorHistoryVersion((current) => current + 1);
     setTabs((current) => ({ ...current, [workspaceId]: tab }));
     setQueries((current) => {
       const { cursor: _cursor, previousCursor: _previous, nextCursor: _next, ...rest } = current[workspaceId];
@@ -128,6 +248,7 @@ export function WorkspaceRouter({ workspaceId, state, statuses, onLogout, onProf
       const receipt = await start({ workspace: "my-work", targetId, fileName: file.name, contentType: file.type, size: file.size, data: new Uint8Array(await file.arrayBuffer()) });
       if (receipt.state === "completed") {
         setUpload({ state: "accepted", fileName: file.name, evidenceId: receipt.evidenceId });
+        setUploadReference(receipt.uploadId);
       } else if (receipt.state === "started") {
         setUpload({ state: "uploading", fileName: file.name, progress: 0, uploadId: receipt.uploadId });
       } else {
@@ -144,15 +265,28 @@ export function WorkspaceRouter({ workspaceId, state, statuses, onLogout, onProf
     if (receipt.state !== "completed" || !/^[0-9a-f]{64}$/i.test(receipt.evidenceId)) throw new Error("archive-upload-incomplete");
     return { uploadId: receipt.uploadId, sha256: receipt.evidenceId };
   };
-  const common = { result, query: visibleQuery, capabilities: identity.capabilities, online, authenticated: online, onQueryChange: changeQuery, onRefresh: refresh, onExecute: execute };
+  const taskRows = hasWorkspaceItems(result) ? result.items.map((item) => taskRowSchema.safeParse(item)) : [];
+  const processRows = hasWorkspaceItems(result) ? result.items.map((item) => processRowSchema.safeParse(item)) : [];
+  const selectedTask = taskRows.find((entry) => entry.success)?.data.details;
+  const selectedProcess = processRows.find((entry) => entry.success)?.data.details;
+  const routedResult = hasWorkspaceItems(result) && (workspaceId === "my-work" || workspaceId === "processes")
+    ? {
+        ...result,
+        items: result.items.map((item, index) => {
+          const parsed = workspaceId === "my-work" ? taskRows[index] : processRows[index];
+          return parsed?.success ? parsed.data.item : item;
+        }),
+      }
+    : result;
+  const common = { result: routedResult, query: visibleQuery, capabilities: identity.capabilities, online, authenticated: online, onQueryChange: changeQuery, onRefresh: refresh, onExecute: execute };
 
   switch (workspaceId) {
     case "overview":
       return <Overview definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />;
     case "my-work":
-      return <MyWork {...common} activeTab={activeTab as MyWorkTab} upload={upload} uploadProgressAvailable={false} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
+      return <MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={false} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
     case "processes":
-      return <Processes {...common} activeTab={activeTab as ProcessesTab} onTabChange={(tab) => changeTab(tab)} />;
+      return <Processes {...common} activeTab={activeTab as ProcessesTab} {...(selectedProcess ? { selectedProcess } : {})} onTabChange={(tab) => changeTab(tab)} />;
     case "interventions":
       return <Interventions {...common} activeTab={activeTab as InterventionTab} {...(selectedIntervention ? { selectedItemId: selectedIntervention } : {})} onTabChange={(tab) => changeTab(tab)} onSelectItem={setSelectedIntervention} />;
     case "risks":

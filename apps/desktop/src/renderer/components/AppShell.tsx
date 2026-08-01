@@ -77,6 +77,7 @@ export function AppShell({ state, statuses, onLogout, onProfileSelect, onProfile
             <WorkspaceRouter
               key={`${state.profile.id}:${state.sessionGeneration}`}
               workspaceId={resolution.route.path.slice(1) as WorkspaceId}
+              queryAllowed={resolution.queryAllowed}
               state={state}
               statuses={statuses}
               onLogout={onLogout}
