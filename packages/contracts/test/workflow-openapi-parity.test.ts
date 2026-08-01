@@ -15,7 +15,10 @@ import {
   CONDITIONAL_RULE_VERSION_PATTERN,
   conditionalRuleVersionSchema,
   cohortStatusSchema,
+  cursorSchema,
+  displayTextSchema,
   gateProviderStatusSchema,
+  idempotencyKeySchema,
   problemCodeSchema,
   NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH,
   NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH,
@@ -32,6 +35,7 @@ import {
   PROVIDER_KEY_MIN_LENGTH,
   PROVIDER_KEY_PATTERN,
   providerKeySchema,
+  reasonSchema,
   REVIEW_SEQUENCE_MIN,
   reviewSequenceSchema,
   SAFE_INTEGER_MAX,
@@ -255,6 +259,27 @@ describe("workflow OpenAPI surface", () => {
     }
   });
 
+  it("matches OpenAPI string bounds using Unicode code-point Zod semantics", () => {
+    const boundedStrings = [
+      [
+        "Idempotency-Key",
+        idempotencyKeySchema,
+        parametersFor(document.paths["/api/v1/processes/{processId}/suspend"].post)
+          .find((parameter) => parameter.name === "Idempotency-Key")?.schema,
+      ],
+      ["CursorPageInfo.nextCursor", cursorSchema, document.components.schemas.CursorPageInfo.properties?.nextCursor],
+      ["SuspendProcessRequest.reason", reasonSchema, document.components.schemas.SuspendProcessRequest.properties?.reason],
+      ["TaskSummary.activityName", displayTextSchema, document.components.schemas.TaskSummary.properties?.activityName],
+    ] as const;
+    for (const [name, zodSchema, openApiSchema] of boundedStrings) {
+      expect(openApiSchema?.type, name).toBe("string");
+      expect(openApiSchema?.minLength, name).toBe(1);
+      const max = openApiSchema?.maxLength ?? 0;
+      expect(zodSchema.parse("😀".repeat(max)), name).toBe("😀".repeat(max));
+      expect(() => zodSchema.parse("😀".repeat(max + 1)), name).toThrow();
+    }
+  });
+
   it("binds each operation to status-specific and operation-specific errors", () => {
     for (const [path, methods] of Object.entries(operations)) {
       for (const method of Object.keys(methods)) {
@@ -435,6 +460,7 @@ describe("workflow OpenAPI schema parity", () => {
     }
 
     const stale = document.components.schemas.StaleVersionProblem;
+    expect(document.components.schemas.ProblemDetails.properties?.currentVersion).toBeUndefined();
     expect(stale.additionalProperties).toBe(false);
     expect(stale.required).toEqual(["type", "title", "status", "code", "correlationId", "currentVersion"]);
     expect(stale.properties?.status).toEqual({ type: "integer", const: 409 });
@@ -448,6 +474,9 @@ describe("workflow OpenAPI schema parity", () => {
       correlationId: "550e8400-e29b-41d4-a716-446655440000",
       currentVersion: 7,
     })).toBeDefined();
+    for (const name of ["ParticipantProcessExistsProblem", "TaskGateUnavailableProblem", "TaskBlockedProblem"]) {
+      expect(document.components.schemas[name].properties?.currentVersion, name).toBeUndefined();
+    }
 
     const existing = document.components.schemas.ParticipantProcessExistsProblem;
     expect(document.components.schemas.ProblemDetails.properties?.existingProcessId).toBeUndefined();

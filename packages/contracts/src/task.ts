@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { unicodeBoundedStringSchema } from "./unicode.js";
+
 import {
   activityKeySchema,
   cursorPageInfoSchema,
@@ -33,15 +35,15 @@ export const CONDITIONAL_RULE_VERSION_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._+-]*$";
 export const PROVIDER_KEY_MIN_LENGTH = 1;
 export const PROVIDER_KEY_MAX_LENGTH = 64;
 export const PROVIDER_KEY_PATTERN = "^[a-z0-9][a-z0-9._-]{0,63}$";
-export const conditionalRuleVersionSchema = z
-  .string()
-  .min(CONDITIONAL_RULE_VERSION_MIN_LENGTH)
-  .max(CONDITIONAL_RULE_VERSION_MAX_LENGTH)
+export const conditionalRuleVersionSchema = unicodeBoundedStringSchema(
+  CONDITIONAL_RULE_VERSION_MIN_LENGTH,
+  CONDITIONAL_RULE_VERSION_MAX_LENGTH,
+)
   .regex(new RegExp(CONDITIONAL_RULE_VERSION_PATTERN));
-export const providerKeySchema = z
-  .string()
-  .min(PROVIDER_KEY_MIN_LENGTH)
-  .max(PROVIDER_KEY_MAX_LENGTH)
+export const providerKeySchema = unicodeBoundedStringSchema(
+  PROVIDER_KEY_MIN_LENGTH,
+  PROVIDER_KEY_MAX_LENGTH,
+)
   .regex(new RegExp(PROVIDER_KEY_PATTERN));
 export const gateProviderStatusSchema = z.enum(["READY", "UNAVAILABLE", "STALE"]);
 export const taskTimelineTypeSchema = z.enum([

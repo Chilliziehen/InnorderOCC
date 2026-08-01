@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { unicodeBoundedStringSchema } from "./unicode.js";
+
 import {
   cursorPageInfoSchema,
   cursorSchema,
@@ -13,6 +15,10 @@ import {
 } from "./workflow-common.js";
 
 export const COHORT_DATE_ORDER_CONSTRAINT = "endDate-gte-startDate";
+export const COHORT_CODE_MAX_LENGTH = 64;
+export const COHORT_CODE_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
+
+const cohortCodeSchema = unicodeBoundedStringSchema(1, COHORT_CODE_MAX_LENGTH);
 
 const hasValidDateOrder = (value: {
   startDate?: string | undefined;
@@ -26,7 +32,7 @@ export const cohortManageableMemberRoleSchema = z.enum(["TEACHER", "PARTICIPANT"
 
 export const createCohortRequestSchema = z
   .object({
-    code: z.string().min(1).max(64).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    code: cohortCodeSchema.regex(new RegExp(COHORT_CODE_PATTERN)),
     name: displayTextSchema,
     packageVersionId: uuidSchema,
     ownerPrincipalId: uuidSchema,
@@ -100,7 +106,7 @@ export const cohortMemberSchema = z
 export const cohortSummarySchema = z
   .object({
     id: uuidSchema,
-    code: z.string().min(1).max(64),
+    code: cohortCodeSchema,
     name: displayTextSchema,
     packageVersionId: uuidSchema,
     ownerPrincipalId: uuidSchema,

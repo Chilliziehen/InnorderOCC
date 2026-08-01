@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { unicodeBoundedStringSchema } from "./unicode.js";
+
 export const SAFE_INTEGER_MAX = Number.MAX_SAFE_INTEGER;
 export const PAGE_SIZE_DEFAULT = 25;
 export const PAGE_SIZE_MIN = 1;
@@ -20,18 +22,32 @@ export const reviewSequenceSchema = safeIntegerSchema.min(REVIEW_SEQUENCE_MIN);
 export const uuidSchema = z.uuid();
 export const dateSchema = z.iso.date();
 export const instantSchema = z.iso.datetime({ offset: true });
-export const cursorSchema = z.string().min(1).max(CURSOR_MAX_LENGTH);
+export const cursorSchema = unicodeBoundedStringSchema(1, CURSOR_MAX_LENGTH);
 export const pageSizeSchema = z
   .number()
   .int()
   .min(PAGE_SIZE_MIN)
   .max(PAGE_SIZE_MAX)
   .default(PAGE_SIZE_DEFAULT);
-export const idempotencyKeySchema = z.string().min(1).max(IDEMPOTENCY_KEY_MAX_LENGTH);
-export const reasonSchema = z.string().min(1).max(REASON_MAX_LENGTH);
-export const stableCodeSchema = z.string().min(1).max(CODE_MAX_LENGTH).regex(new RegExp(STABLE_CODE_PATTERN));
-export const activityKeySchema = z.string().min(1).max(ACTIVITY_KEY_MAX_LENGTH).regex(new RegExp(ACTIVITY_KEY_PATTERN));
-export const displayTextSchema = z.string().min(1).max(DISPLAY_TEXT_MAX_LENGTH);
+export const idempotencyKeySchema = unicodeBoundedStringSchema(1, IDEMPOTENCY_KEY_MAX_LENGTH);
+export const reasonSchema = unicodeBoundedStringSchema(1, REASON_MAX_LENGTH);
+export const stableCodeSchema = unicodeBoundedStringSchema(1, CODE_MAX_LENGTH).regex(new RegExp(STABLE_CODE_PATTERN));
+export const activityKeySchema = unicodeBoundedStringSchema(1, ACTIVITY_KEY_MAX_LENGTH).regex(new RegExp(ACTIVITY_KEY_PATTERN));
+export const displayTextSchema = unicodeBoundedStringSchema(1, DISPLAY_TEXT_MAX_LENGTH);
+
+const normalizePlainObjectHeaderNames = (input: unknown): unknown => {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return input;
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) return input;
+
+  const normalized = Object.create(null) as Record<string, unknown>;
+  for (const [name, value] of Object.entries(input)) {
+    const canonicalName = name.toLowerCase();
+    if (Object.hasOwn(normalized, canonicalName)) return null;
+    normalized[canonicalName] = value;
+  }
+  return normalized;
+};
 
 export const cursorQuerySchema = z
   .object({
@@ -44,13 +60,15 @@ export const cursorPageInfoSchema = z
   .object({ nextCursor: cursorSchema.optional() })
   .strict();
 
-export const commandHeadersSchema = z
-  .object({ "Idempotency-Key": idempotencyKeySchema })
-  .strict();
+export const commandHeadersSchema = z.preprocess(
+  normalizePlainObjectHeaderNames,
+  z.object({ "idempotency-key": idempotencyKeySchema }).strict(),
+);
 
-export const idempotentResponseHeadersSchema = z
-  .object({ "X-Idempotent-Replay": z.enum(["true", "false"]) })
-  .strict();
+export const idempotentResponseHeadersSchema = z.preprocess(
+  normalizePlainObjectHeaderNames,
+  z.object({ "x-idempotent-replay": z.enum(["true", "false"]) }).strict(),
+);
 
 export type CursorPageInfo = z.infer<typeof cursorPageInfoSchema>;
 export type CommandHeaders = z.infer<typeof commandHeadersSchema>;

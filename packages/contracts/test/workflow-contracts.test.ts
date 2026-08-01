@@ -13,12 +13,14 @@ import {
   cohortStatusSchema,
   COHORT_DATE_ORDER_CONSTRAINT,
   completeTaskRequestSchema,
+  commandHeadersSchema,
   createCohortRequestSchema,
   eventCatchUpQuerySchema,
   failProcessRequestSchema,
   failTaskRequestSchema,
   gateProviderStatusSchema,
   idempotencyKeySchema,
+  idempotentResponseHeadersSchema,
   markNotificationReadRequestSchema,
   notificationListQuerySchema,
   notificationPageSchema,
@@ -151,6 +153,35 @@ describe("workflow primitive contracts", () => {
     expect(idempotencyKeySchema.parse("command-1")).toBe("command-1");
     expect(() => idempotencyKeySchema.parse("")).toThrow();
     expect(() => idempotencyKeySchema.parse("x".repeat(257))).toThrow();
+  });
+
+  it("normalizes HTTP header names and rejects case-folded duplicates", () => {
+    for (const input of [
+      { "idempotency-key": "command-1" },
+      { "Idempotency-Key": "command-1" },
+      { "IDEMPOTENCY-KEY": "command-1" },
+    ]) {
+      expect(commandHeadersSchema.parse(input)).toEqual({ "idempotency-key": "command-1" });
+    }
+    for (const input of [
+      { "x-idempotent-replay": "true" },
+      { "X-Idempotent-Replay": "true" },
+      { "X-IDEMPOTENT-REPLAY": "true" },
+    ]) {
+      expect(idempotentResponseHeadersSchema.parse(input)).toEqual({ "x-idempotent-replay": "true" });
+    }
+    for (const duplicate of [
+      { "Idempotency-Key": "command-1", "idempotency-key": "command-1" },
+      { "Idempotency-Key": "command-1", "IDEMPOTENCY-KEY": "command-2" },
+    ]) {
+      expect(() => commandHeadersSchema.parse(duplicate)).toThrow();
+    }
+    expect(() => idempotentResponseHeadersSchema.parse({
+      "X-Idempotent-Replay": "true", "x-idempotent-replay": "true",
+    })).toThrow();
+    expect(() => commandHeadersSchema.parse({ "idempotency-key": "command-1", extra: "value" })).toThrow();
+    expect(() => commandHeadersSchema.parse(new Map([["idempotency-key", "command-1"]]))).toThrow();
+    expect(() => commandHeadersSchema.parse(["command-1"])).toThrow();
   });
 });
 
@@ -369,6 +400,13 @@ describe("workflow Problem Details", () => {
       code: "OCC_TASK_BLOCKED",
       blockerCodes: ["EVIDENCE_REQUIRED"],
     })).toBeDefined();
+    expect(() => taskGateUnavailableProblemDetailsSchema.parse({
+      ...problem, providerKeys: ["evidence"], currentVersion: 0,
+    })).toThrow();
+    expect(() => taskBlockedProblemDetailsSchema.parse({
+      ...problem, status: 409, code: "OCC_TASK_BLOCKED",
+      blockerCodes: ["EVIDENCE_REQUIRED"], currentVersion: 0,
+    })).toThrow();
     expect(() => taskGateUnavailableProblemDetailsSchema.parse({ ...problem, providerKeys: ["evidence"], blockerCodes: [] })).toThrow();
     for (const providerKey of ["", ".evidence", "Evidence", "Invalid Provider", "x".repeat(65)]) {
       expect(() => providerKeySchema.parse(providerKey)).toThrow();
@@ -391,6 +429,7 @@ describe("workflow Problem Details", () => {
       const value = { ...problem, status, code };
       expect(schema.parse(value)).toEqual(value);
       expect(workflowCommonProblemDetailsSchema.parse(value)).toEqual(value);
+      expect(() => schema.parse({ ...value, currentVersion: 0 })).toThrow();
       expect(() => schema.parse({ ...value, status: status + 1 })).toThrow();
       expect(() => schema.parse({ ...value, code: "OCC_TASK_BLOCKED" })).toThrow();
     }
@@ -421,6 +460,7 @@ describe("workflow Problem Details", () => {
     ] as const;
     for (const [schema, code, unrelatedCode] of cases) {
       expect(schema.parse({ ...problem, status: 409, code })).toBeDefined();
+      expect(() => schema.parse({ ...problem, status: 409, code, currentVersion: 0 })).toThrow();
       expect(() => schema.parse({ ...problem, status: 503, code })).toThrow();
       expect(() => schema.parse({ ...problem, status: 409, code: unrelatedCode })).toThrow();
     }
@@ -465,6 +505,9 @@ describe("workflow Problem Details", () => {
       expect(() => schema.parse(existing)).toThrow();
       expect(() => schema.parse({ ...existing, existingProcessId: "not-a-uuid" })).toThrow();
       expect(schema.parse({ ...existing, existingProcessId: otherId })).toBeDefined();
+      expect(() => schema.parse({
+        ...existing, existingProcessId: otherId, currentVersion: 0,
+      })).toThrow();
     }
 
     expect(versionedCommandConflictProblemDetailsSchema.parse({

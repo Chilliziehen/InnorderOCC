@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export const hasUnicodeCodePointLengthWithin = (
   value: Iterable<string>,
   min: number,
@@ -12,3 +14,6 @@ export const hasUnicodeCodePointLengthWithin = (
 
   return length >= min;
 };
+
+export const unicodeBoundedStringSchema = (min: number, max: number) =>
+  z.string().refine((value) => hasUnicodeCodePointLengthWithin(value, min, max));

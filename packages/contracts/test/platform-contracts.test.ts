@@ -459,7 +459,6 @@ describe("problemDetailsSchema", () => {
       code: "OCC-AUTH-INVALID-CREDENTIALS",
       correlationId: id,
       detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
-      currentVersion: 0,
     };
 
     expect(problemDetailsSchema.parse(boundaryProblem)).toEqual(boundaryProblem);
@@ -470,9 +469,7 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, status: PROBLEM_STATUS_MAX + 1 },
       { ...boundaryProblem, code: "UNKNOWN_PROBLEM_CODE" },
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
-      { ...boundaryProblem, currentVersion: -1 },
-      { ...boundaryProblem, currentVersion: 1.5 },
-      { ...boundaryProblem, currentVersion: Number.MAX_SAFE_INTEGER + 1 },
+      { ...boundaryProblem, currentVersion: 0 },
     ]) {
       expect(() => problemDetailsSchema.parse(invalid)).toThrow();
     }
@@ -769,5 +766,19 @@ describe("eventEnvelopeSchema", () => {
     ]) {
       expect(() => eventEnvelopeSchema.parse(invalid)).toThrow();
     }
+  });
+
+  it("counts event string boundaries in Unicode code points", () => {
+    expect(eventEnvelopeSchema.parse({
+      ...event,
+      type: "😀".repeat(EVENT_TYPE_MAX_LENGTH),
+      aggregateType: "🚀".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
+    })).toBeDefined();
+    expect(() => eventEnvelopeSchema.parse({
+      ...event, type: "😀".repeat(EVENT_TYPE_MAX_LENGTH + 1),
+    })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({
+      ...event, aggregateType: "🚀".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
+    })).toThrow();
   });
 });

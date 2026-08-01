@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { workflowEventSchema, workflowEventTypeSchema } from "./events.js";
+import { unicodeBoundedStringSchema } from "./unicode.js";
 import {
   cursorPageInfoSchema,
   cursorSchema,
@@ -16,10 +17,10 @@ export const NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH = 64;
 export const NOTIFICATION_PERSISTENCE_TOKEN_PATTERN = "^[a-z0-9][a-z0-9._-]{0,63}$";
 export const NOTIFICATION_SEVERITIES = ["INFO", "WARNING", "CRITICAL"] as const;
 
-const notificationPersistenceTokenSchema = z
-  .string()
-  .min(NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH)
-  .max(NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH)
+const notificationPersistenceTokenSchema = unicodeBoundedStringSchema(
+  NOTIFICATION_PERSISTENCE_TOKEN_MIN_LENGTH,
+  NOTIFICATION_PERSISTENCE_TOKEN_MAX_LENGTH,
+)
   .regex(new RegExp(NOTIFICATION_PERSISTENCE_TOKEN_PATTERN));
 export const notificationTypeSchema = notificationPersistenceTokenSchema;
 export const notificationSeveritySchema = z.enum(NOTIFICATION_SEVERITIES);

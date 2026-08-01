@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
+import { unicodeBoundedStringSchema } from "./unicode.js";
 import { blockerCodeSchema, providerKeySchema } from "./task.js";
 import { safeVersionSchema, uuidSchema } from "./workflow-common.js";
 
@@ -66,29 +66,11 @@ export const baseProblemCodeSchema = problemCodeSchema.exclude([
 export const problemDetailsSchema = z
   .object({
     type: z.url(),
-    title: z
-      .string()
-      .refine((value) =>
-        hasUnicodeCodePointLengthWithin(
-          value,
-          PROBLEM_TITLE_MIN_LENGTH,
-          PROBLEM_TITLE_MAX_LENGTH,
-        ),
-      ),
+    title: unicodeBoundedStringSchema(PROBLEM_TITLE_MIN_LENGTH, PROBLEM_TITLE_MAX_LENGTH),
     status: z.number().int().min(PROBLEM_STATUS_MIN).max(PROBLEM_STATUS_MAX),
     code: baseProblemCodeSchema,
     correlationId: z.uuid(),
-    detail: z
-      .string()
-      .refine((value) =>
-        hasUnicodeCodePointLengthWithin(
-          value,
-          PROBLEM_DETAIL_MIN_LENGTH,
-          PROBLEM_DETAIL_MAX_LENGTH,
-        ),
-      )
-      .optional(),
-    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+    detail: unicodeBoundedStringSchema(PROBLEM_DETAIL_MIN_LENGTH, PROBLEM_DETAIL_MAX_LENGTH).optional(),
   })
   .strict();
 

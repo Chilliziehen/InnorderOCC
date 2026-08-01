@@ -313,12 +313,6 @@ describe("OCC Core OpenAPI system status", () => {
         minLength: PROBLEM_DETAIL_MIN_LENGTH,
         maxLength: PROBLEM_DETAIL_MAX_LENGTH,
       },
-      currentVersion: {
-        type: "integer",
-        format: "int64",
-        minimum: 0,
-        maximum: Number.MAX_SAFE_INTEGER,
-      },
     });
 
     expectStrictObjectParity(schemas.LoginRequest, loginRequestSchema.shape);

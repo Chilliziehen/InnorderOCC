@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { cohortManageableMemberRoleSchema, cohortStatusSchema } from "./cohort.js";
 import { blockerCodeSchema } from "./task.js";
+import { unicodeBoundedStringSchema } from "./unicode.js";
 import {
   activityKeySchema,
   safeVersionSchema,
@@ -25,16 +26,16 @@ export const eventEnvelopeSchema = z
   .object({
     id: z.uuid(),
     customerInstanceId: z.uuid(),
-    type: z.string().min(EVENT_TYPE_MIN_LENGTH).max(EVENT_TYPE_MAX_LENGTH),
+    type: unicodeBoundedStringSchema(EVENT_TYPE_MIN_LENGTH, EVENT_TYPE_MAX_LENGTH),
     schemaVersion: z
       .number()
       .int()
       .min(EVENT_SCHEMA_VERSION_MIN)
       .max(EVENT_SCHEMA_VERSION_MAX),
-    aggregateType: z
-      .string()
-      .min(EVENT_AGGREGATE_TYPE_MIN_LENGTH)
-      .max(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
+    aggregateType: unicodeBoundedStringSchema(
+      EVENT_AGGREGATE_TYPE_MIN_LENGTH,
+      EVENT_AGGREGATE_TYPE_MAX_LENGTH,
+    ),
     aggregateId: z.uuid(),
     aggregateVersion: z
       .number()
