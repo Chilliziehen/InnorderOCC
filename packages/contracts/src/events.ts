@@ -53,17 +53,9 @@ export const knowledgeIngestionRequestedPayloadSchema = z
   })
   .strict();
 
-export const aiGuidanceRoutingSchema = z
-  .object({
-    routingKey: z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/u),
-    attempt: z.number().int().min(0).max(100),
-  })
-  .strict();
-
 export const aiGuidanceRequestedPayloadSchema = z
   .object({
     operationId: uuidSchema,
-    routing: aiGuidanceRoutingSchema,
   })
   .strict();
 

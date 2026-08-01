@@ -4,17 +4,52 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
 import {
+  aiGrantClaimsSchema,
+  aiGuidanceRequestedPayloadSchema,
+  aiOperationDeadLetteredPayloadSchema,
+  aiRecommendationProposedPayloadSchema,
+  capabilityProbeRequestSchema,
+  capabilityProbeSchema,
+  capabilitySnapshotSchema,
+  citationSchema,
   generatedRecommendationSchema,
   guidanceRequestSchema,
+  guidanceStatusSchema,
+  guidanceStepSchema,
   knowledgeActivationRequestSchema,
+  knowledgeGateMetricsSchema,
+  knowledgeGateResultSchema,
+  knowledgeIngestionJobSchema,
+  knowledgeIngestionRequestedPayloadSchema,
+  knowledgeRollbackRequestSchema,
+  knowledgeUploadMetadataSchema,
+  providerConfigCreateSchema,
+  providerConfigListSchema,
   providerConfigSchema,
+  providerConfigUpdateSchema,
+  providerCostRuleSchema,
+  providerProfileCreateSchema,
+  providerProfileListSchema,
+  providerProfileSchema,
+  providerProfileUpdateSchema,
+  providerRateLimitSchema,
+  providerTimeoutsSchema,
+  recommendationDetailSchema,
+  recommendationItemSchema,
+  recommendationListSchema,
   recommendationReviewRequestSchema,
+  requiredProviderCapabilitiesSchema,
   serviceGrantClaimSchema,
+  serviceGrantExchangeSchema,
+  serviceIngestionOutcomeSchema,
+  serviceOperationOutcomeSchema,
+  serviceProviderProbeOutcomeSchema,
+  serviceRecommendationSubmissionSchema,
 } from "../src/index.js";
 
 type Schema = {
   additionalProperties?: boolean;
-  properties?: Record<string, unknown>;
+  properties?: Record<string, Record<string, unknown>>;
   required?: string[];
   type?: string;
 };
@@ -37,11 +72,16 @@ type Document = {
 };
 
 const PATHS = [
+  ["/api/v1/admin/ai/providers", "get"],
   ["/api/v1/admin/ai/providers", "post"],
+  ["/api/v1/admin/ai/providers/{providerId}", "get"],
   ["/api/v1/admin/ai/providers/{providerId}", "patch"],
+  ["/api/v1/admin/ai/provider-profiles", "get"],
   ["/api/v1/admin/ai/provider-profiles", "post"],
+  ["/api/v1/admin/ai/provider-profiles/{profileId}", "get"],
   ["/api/v1/admin/ai/provider-profiles/{profileId}", "patch"],
   ["/api/v1/admin/ai/providers/{providerId}/probes", "post"],
+  ["/api/v1/admin/ai/providers/{providerId}/probes/{probeId}", "get"],
   ["/api/v1/admin/ai/knowledge/uploads", "post"],
   ["/api/v1/admin/ai/knowledge/ingestions/{jobId}", "get"],
   ["/api/v1/admin/ai/knowledge/spaces/{spaceId}/activate", "post"],
@@ -53,7 +93,53 @@ const PATHS = [
   ["/api/v1/ai/recommendations/{recommendationId}/review", "post"],
   ["/internal/v1/ai/grants/claim", "post"],
   ["/internal/v1/ai/recommendations", "post"],
+  ["/internal/v1/ai/knowledge/ingestions/{jobId}/outcome", "post"],
+  ["/internal/v1/ai/providers/probes/{probeId}/outcome", "post"],
   ["/internal/v1/ai/operations/{operationId}/outcome", "post"],
+] as const;
+
+const OBJECT_SCHEMA_PARITY = [
+  ["AiGrantClaims", aiGrantClaimsSchema],
+  ["ProviderConfig", providerConfigSchema],
+  ["ProviderConfigCreate", providerConfigCreateSchema],
+  ["ProviderConfigList", providerConfigListSchema],
+  ["ProviderConfigUpdate", providerConfigUpdateSchema],
+  ["ProviderTimeouts", providerTimeoutsSchema],
+  ["ProviderRateLimit", providerRateLimitSchema],
+  ["ProviderCostRule", providerCostRuleSchema],
+  ["RequiredProviderCapabilities", requiredProviderCapabilitiesSchema],
+  ["CapabilitySnapshot", capabilitySnapshotSchema],
+  ["ProviderProfile", providerProfileSchema],
+  ["ProviderProfileCreate", providerProfileCreateSchema],
+  ["ProviderProfileList", providerProfileListSchema],
+  ["ProviderProfileUpdate", providerProfileUpdateSchema],
+  ["CapabilityProbeRequest", capabilityProbeRequestSchema],
+  ["CapabilityProbe", capabilityProbeSchema],
+  ["KnowledgeUploadMetadata", knowledgeUploadMetadataSchema],
+  ["KnowledgeIngestionJob", knowledgeIngestionJobSchema],
+  ["KnowledgeGateMetrics", knowledgeGateMetricsSchema],
+  ["KnowledgeGateResult", knowledgeGateResultSchema],
+  ["KnowledgeActivationRequest", knowledgeActivationRequestSchema],
+  ["KnowledgeRollbackRequest", knowledgeRollbackRequestSchema],
+  ["GuidanceRequest", guidanceRequestSchema],
+  ["GuidanceStatus", guidanceStatusSchema],
+  ["Citation", citationSchema],
+  ["GuidanceStep", guidanceStepSchema],
+  ["GeneratedRecommendation", generatedRecommendationSchema],
+  ["RecommendationItem", recommendationItemSchema],
+  ["RecommendationList", recommendationListSchema],
+  ["RecommendationDetail", recommendationDetailSchema],
+  ["RecommendationReviewRequest", recommendationReviewRequestSchema],
+  ["ServiceGrantClaim", serviceGrantClaimSchema],
+  ["ServiceGrantExchange", serviceGrantExchangeSchema],
+  ["ServiceRecommendationSubmission", serviceRecommendationSubmissionSchema],
+  ["ServiceOperationOutcome", serviceOperationOutcomeSchema],
+  ["ServiceIngestionOutcome", serviceIngestionOutcomeSchema],
+  ["ServiceProviderProbeOutcome", serviceProviderProbeOutcomeSchema],
+  ["KnowledgeIngestionRequestedPayload", knowledgeIngestionRequestedPayloadSchema],
+  ["AiGuidanceRequestedPayload", aiGuidanceRequestedPayloadSchema],
+  ["AiRecommendationProposedPayload", aiRecommendationProposedPayloadSchema],
+  ["AiOperationDeadLetteredPayload", aiOperationDeadLetteredPayloadSchema],
 ] as const;
 
 const requiredKeys = (shape: Record<string, { isOptional: () => boolean }>): string[] =>
@@ -87,6 +173,9 @@ describe("OCC Core governed AI OpenAPI", () => {
       ["/api/v1/admin/ai/knowledge/spaces/{spaceId}/activate", "post"],
       ["/api/v1/admin/ai/knowledge/spaces/{spaceId}/rollback", "post"],
       ["/api/v1/ai/recommendations/{recommendationId}/review", "post"],
+      ["/internal/v1/ai/knowledge/ingestions/{jobId}/outcome", "post"],
+      ["/internal/v1/ai/providers/probes/{probeId}/outcome", "post"],
+      ["/internal/v1/ai/operations/{operationId}/outcome", "post"],
     ] as const) {
       const schemaRef = document.paths[path]?.[method]?.requestBody?.content?.["application/json"]?.schema?.$ref;
       const schema = document.components.schemas[schemaRef?.split("/").at(-1) ?? ""];
@@ -95,17 +184,23 @@ describe("OCC Core governed AI OpenAPI", () => {
     }
   });
 
-  it("bounds recommendation cursors", () => {
-    const parameters = document.paths["/api/v1/ai/recommendations"]?.get?.parameters ?? [];
-    expect(parameters.find((parameter) => parameter.name === "cursor")).toMatchObject({
-      in: "query",
-      required: false,
-      schema: { type: "string", minLength: 1, maxLength: 1024 },
-    });
-    expect(parameters.find((parameter) => parameter.name === "limit")).toMatchObject({
-      in: "query",
-      schema: { type: "integer", minimum: 1, maximum: 100 },
-    });
+  it("bounds every governed list cursor", () => {
+    for (const path of [
+      "/api/v1/admin/ai/providers",
+      "/api/v1/admin/ai/provider-profiles",
+      "/api/v1/ai/recommendations",
+    ]) {
+      const parameters = document.paths[path]?.get?.parameters ?? [];
+      expect(parameters.find((parameter) => parameter.name === "cursor")).toMatchObject({
+        in: "query",
+        required: false,
+        schema: { type: "string", minLength: 1, maxLength: 1024 },
+      });
+      expect(parameters.find((parameter) => parameter.name === "limit")).toMatchObject({
+        in: "query",
+        schema: { type: "integer", minimum: 1, maximum: 100 },
+      });
+    }
   });
 
   it("marks service routes mTLS-only and explicitly rejects bearer credentials", () => {
@@ -128,20 +223,47 @@ describe("OCC Core governed AI OpenAPI", () => {
     }
   });
 
-  it("keeps key OpenAPI object fields strict and aligned with Zod", () => {
-    for (const [name, shape] of [
-      ["ProviderConfig", providerConfigSchema.shape],
-      ["KnowledgeActivationRequest", knowledgeActivationRequestSchema.shape],
-      ["GuidanceRequest", guidanceRequestSchema.shape],
-      ["GeneratedRecommendation", generatedRecommendationSchema.shape],
-      ["RecommendationReviewRequest", recommendationReviewRequestSchema.shape],
-      ["ServiceGrantClaim", serviceGrantClaimSchema.shape],
-    ] as const) {
+  it("keeps every governed OpenAPI object strict and aligned with Zod", () => {
+    for (const [name, zodSchema] of OBJECT_SCHEMA_PARITY) {
       const schema = document.components.schemas[name];
       expect(schema?.type).toBe("object");
       expect(schema?.additionalProperties).toBe(false);
-      expect(Object.keys(schema?.properties ?? {})).toEqual(Object.keys(shape));
-      expect(schema?.required).toEqual(requiredKeys(shape));
+      expect(Object.keys(schema?.properties ?? {})).toEqual(Object.keys(zodSchema.shape));
+      expect(schema?.required).toEqual(requiredKeys(zodSchema.shape));
+    }
+  });
+
+  it("preserves provider and profile scalar bounds and patterns", () => {
+    const expectedFields = {
+      ProviderConfig: {
+        name: { type: "string", minLength: 1, maxLength: 128 },
+        origin: { type: "string", format: "uri", minLength: 9, maxLength: 2048, pattern: "^https://[^/?#]+$" },
+        apiPrefix: { type: "string", minLength: 1, maxLength: 256, pattern: "^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?$" },
+        credentialFile: { type: "string", minLength: 1, maxLength: 1024, pattern: "^(?:/|[A-Za-z]:\\\\)" },
+      },
+      ProviderProfile: {
+        name: { type: "string", minLength: 1, maxLength: 128 },
+        model: { type: "string", minLength: 1, maxLength: 256 },
+      },
+    } as const;
+    for (const [name, fields] of Object.entries(expectedFields)) {
+      for (const [field, expected] of Object.entries(fields)) {
+        expect(document.components.schemas[name]?.properties?.[field]).toMatchObject(expected);
+      }
+    }
+    for (const name of ["ProviderConfigCreate", "ProviderConfigUpdate"]) {
+      for (const field of ["name", "origin", "apiPrefix", "credentialFile"]) {
+        expect(document.components.schemas[name]?.properties?.[field]).toEqual(
+          document.components.schemas.ProviderConfig?.properties?.[field],
+        );
+      }
+    }
+    for (const name of ["ProviderProfileCreate", "ProviderProfileUpdate"]) {
+      for (const field of ["name", "model"]) {
+        expect(document.components.schemas[name]?.properties?.[field]).toEqual(
+          document.components.schemas.ProviderProfile?.properties?.[field],
+        );
+      }
     }
   });
 });

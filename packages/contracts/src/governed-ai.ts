@@ -5,6 +5,7 @@ export const CURSOR_MAX_LENGTH = 1024;
 export const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
 export const JWT_MAX_LENGTH = 8192;
 export const SHA256_PATTERN = "^[a-f0-9]{64}$";
+export const STABLE_AI_ERROR_CODE_PATTERN = "^OCC-AI-[A-Z0-9]+(?:-[A-Z0-9]+)*$";
 
 export const uuidSchema = z.uuid();
 export const sha256Schema = z.string().regex(new RegExp(SHA256_PATTERN));
@@ -12,6 +13,11 @@ export const versionSchema = z.number().int().min(0).max(MAX_SAFE_INTEGER);
 export const timestampSchema = z.iso.datetime({ offset: true });
 export const boundedCursorSchema = z.string().min(1).max(CURSOR_MAX_LENGTH);
 export const idempotencyKeySchema = z.string().min(1).max(IDEMPOTENCY_KEY_MAX_LENGTH);
+export const stableAiErrorCodeSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(new RegExp(STABLE_AI_ERROR_CODE_PATTERN));
 
 export const DATA_CLASSIFICATION_ORDER = [
   "PUBLIC",
@@ -62,7 +68,17 @@ export const providerConfigSchema = z
   .strict();
 
 export const providerConfigCreateSchema = providerConfigSchema.omit({ id: true, version: true });
-export const providerConfigUpdateSchema = providerConfigCreateSchema.partial().extend({ expectedVersion: versionSchema }).strict();
+export const providerConfigListSchema = z
+  .object({
+    items: z.array(providerConfigSchema).max(100),
+    nextCursor: boundedCursorSchema.optional(),
+  })
+  .strict();
+export const providerConfigUpdateSchema = providerConfigCreateSchema
+  .partial()
+  .extend({ expectedVersion: versionSchema })
+  .strict()
+  .refine((value) => Object.keys(value).some((key) => key !== "expectedVersion"));
 
 export const providerTimeoutsSchema = z
   .object({
@@ -107,9 +123,9 @@ export const capabilitySnapshotSchema = z
     snapshotHash: sha256Schema,
   })
   .strict()
-  .refine(({ embeddings, embeddingDimensions }) => embeddings || embeddingDimensions === undefined);
+  .refine(({ embeddings, embeddingDimensions }) => embeddings === (embeddingDimensions !== undefined));
 
-export const providerProfileSchema = z
+const providerProfileObjectSchema = z
   .object({
     id: uuidSchema,
     providerId: uuidSchema,
@@ -127,8 +143,57 @@ export const providerProfileSchema = z
   })
   .strict();
 
-export const providerProfileCreateSchema = providerProfileSchema.omit({ id: true, version: true });
-export const providerProfileUpdateSchema = providerProfileCreateSchema.partial().extend({ expectedVersion: versionSchema }).strict();
+const refineProviderProfile = (
+  { purpose, requiredCapabilities, capabilitySnapshot }: Pick<
+    z.infer<typeof providerProfileObjectSchema>,
+    "purpose" | "requiredCapabilities" | "capabilitySnapshot"
+  >,
+  context: z.RefinementCtx,
+): void => {
+    if (purpose === "CHAT" && !capabilitySnapshot.chat) {
+      context.addIssue({ code: "custom", message: "Chat profiles require chat capability", path: ["capabilitySnapshot", "chat"] });
+    }
+    if (purpose === "EMBEDDING" && (!capabilitySnapshot.embeddings || capabilitySnapshot.embeddingDimensions === undefined)) {
+      context.addIssue({ code: "custom", message: "Embedding profiles require embedding dimensions", path: ["capabilitySnapshot"] });
+    }
+    if (requiredCapabilities.structuredOutput && !capabilitySnapshot.structuredOutput) {
+      context.addIssue({ code: "custom", message: "Structured output capability is required", path: ["capabilitySnapshot", "structuredOutput"] });
+    }
+    if (
+      requiredCapabilities.embeddingDimensions !== undefined &&
+      requiredCapabilities.embeddingDimensions !== capabilitySnapshot.embeddingDimensions
+    ) {
+      context.addIssue({ code: "custom", message: "Embedding dimensions do not match", path: ["capabilitySnapshot", "embeddingDimensions"] });
+    }
+  };
+
+export const providerProfileSchema = providerProfileObjectSchema.superRefine(refineProviderProfile);
+
+const providerProfileCreateObjectSchema = providerProfileObjectSchema.omit({ id: true, version: true });
+export const providerProfileCreateSchema = providerProfileCreateObjectSchema.superRefine(refineProviderProfile);
+export const providerProfileListSchema = z
+  .object({
+    items: z.array(providerProfileSchema).max(100),
+    nextCursor: boundedCursorSchema.optional(),
+  })
+  .strict();
+export const providerProfileUpdateSchema = providerProfileCreateObjectSchema
+  .partial()
+  .extend({ expectedVersion: versionSchema })
+  .strict()
+  .refine((value) => Object.keys(value).some((key) => key !== "expectedVersion"))
+  .superRefine((value, context) => {
+    const compatibilityValues = [value.purpose, value.requiredCapabilities, value.capabilitySnapshot];
+    const present = compatibilityValues.filter((item) => item !== undefined).length;
+    if (present > 0 && present < compatibilityValues.length) {
+      context.addIssue({ code: "custom", message: "Compatibility changes require purpose, requirements, and snapshot", path: [] });
+    } else if (present === compatibilityValues.length) {
+      refineProviderProfile(value as Required<Pick<
+        z.infer<typeof providerProfileCreateObjectSchema>,
+        "purpose" | "requiredCapabilities" | "capabilitySnapshot"
+      >>, context);
+    }
+  });
 export const capabilityProbeRequestSchema = z.object({ providerId: uuidSchema }).strict();
 export const capabilityProbeStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]);
 export const capabilityProbeSchema = z
@@ -139,9 +204,51 @@ export const capabilityProbeSchema = z
     requestedAt: timestampSchema,
     completedAt: timestampSchema.optional(),
     snapshot: capabilitySnapshotSchema.optional(),
-    errorCode: z.string().min(1).max(128).optional(),
+    errorCode: stableAiErrorCodeSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(({ status, completedAt, snapshot, errorCode }, context) => {
+    const success = status === "SUCCEEDED";
+    const failure = status === "FAILED";
+    if (success && (completedAt === undefined || snapshot === undefined || errorCode !== undefined)) {
+      context.addIssue({ code: "custom", message: "Successful probes require completion and a snapshot", path: ["status"] });
+    }
+    if (failure && (completedAt === undefined || errorCode === undefined || snapshot !== undefined)) {
+      context.addIssue({ code: "custom", message: "Failed probes require completion and an error code", path: ["status"] });
+    }
+    if (!success && !failure && (completedAt !== undefined || snapshot !== undefined || errorCode !== undefined)) {
+      context.addIssue({ code: "custom", message: "Incomplete probes cannot contain outcomes", path: ["status"] });
+    }
+  });
+
+export const jwtNumericDateSchema = z.number().int().min(0).max(MAX_SAFE_INTEGER);
+export const aiGrantClaimsSchema = z
+  .object({
+    iss: z.literal("innorder-core"),
+    aud: z.literal("innorder-ai"),
+    typ: z.literal("ai_authorization_grant"),
+    jti: uuidSchema,
+    eventId: uuidSchema,
+    operationId: uuidSchema,
+    principalId: uuidSchema,
+    targetId: uuidSchema,
+    purpose: z.literal("PARTICIPANT_GUIDANCE"),
+    authorizationRevision: versionSchema,
+    policyReleaseDigest: sha256Schema,
+    authorizedSetDigest: sha256Schema,
+    contextDigest: sha256Schema,
+    classificationCeiling: dataClassificationSchema,
+    iat: jwtNumericDateSchema,
+    nbf: jwtNumericDateSchema,
+    exp: jwtNumericDateSchema,
+    agentVersionId: uuidSchema,
+    modelProfileId: uuidSchema,
+    promptVersionId: uuidSchema,
+    packageVersionId: uuidSchema,
+    candidateEmbeddingSpaceId: uuidSchema,
+  })
+  .strict()
+  .refine(({ iat, nbf, exp }) => nbf <= exp && exp > iat && exp - iat <= 300);
 
 export const knowledgeFormatSchema = z.enum(["TEXT", "MARKDOWN", "PDF", "DOCX", "XLSX"]);
 export const knowledgeUploadMetadataSchema = z
@@ -157,50 +264,141 @@ export const knowledgeUploadMetadataSchema = z
   .strict();
 
 export const knowledgeIngestionStageSchema = z.enum([
-  "QUARANTINE",
-  "MALWARE_SCAN",
+  "DISCOVER",
+  "FETCH",
   "PARSE",
-  "NORMALIZE",
   "CHUNK",
   "EMBED",
-  "QUALITY_GATE",
   "COMPLETE",
 ]);
-export const knowledgeIngestionStatusSchema = z.enum(["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]);
+export const knowledgeIngestionStatusSchema = z.enum(["PENDING", "PROCESSING", "RETRY", "COMPLETED", "FAILED"]);
+export const knowledgeCheckpointSchema = z
+  .record(z.string().min(1).max(128), z.json())
+  .refine((value) => JSON.stringify(value).length <= 32_768);
 export const knowledgeIngestionJobSchema = z
   .object({
     id: uuidSchema,
-    documentVersionId: uuidSchema,
+    sourceId: uuidSchema,
+    documentId: uuidSchema.optional(),
+    producedDocumentVersionId: uuidSchema.optional(),
+    sourceVersion: z.string().min(1).max(256),
+    sourceObjectHash: sha256Schema,
+    normalizedContentHash: sha256Schema,
+    parserVersion: z.string().min(1).max(128).regex(/^[^\x00-\x1F\x7F]+$/u),
+    chunkerVersion: z.string().min(1).max(128).regex(/^[^\x00-\x1F\x7F]+$/u),
+    candidateEmbeddingSpaceId: uuidSchema,
+    corpusManifestDigest: sha256Schema,
+    checkpoint: knowledgeCheckpointSchema,
     stage: knowledgeIngestionStageSchema,
     status: knowledgeIngestionStatusSchema,
-    progressPercent: z.number().int().min(0).max(100),
-    attempt: z.number().int().min(0).max(100),
+    attempts: z.number().int().min(0).max(100),
+    maxAttempts: z.number().int().min(1).max(100),
+    nextAttemptAt: timestampSchema,
+    leaseOwner: z.string().min(1).max(256).optional(),
+    leaseExpiresAt: timestampSchema.optional(),
+    sanitizedError: z.string().min(1).max(2048).regex(/^[^\x00-\x1F\x7F]+$/u).optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
-    errorCode: z.string().min(1).max(128).optional(),
+    completedAt: timestampSchema.optional(),
+  })
+  .strict()
+  .superRefine((job, context) => {
+    if (job.attempts > job.maxAttempts) {
+      context.addIssue({ code: "custom", message: "Attempts exceed maximum", path: ["attempts"] });
+    }
+    const leased = job.leaseOwner !== undefined && job.leaseExpiresAt !== undefined;
+    if ((job.status === "PROCESSING") !== leased) {
+      context.addIssue({ code: "custom", message: "Processing jobs require a complete lease", path: ["status"] });
+    }
+    if ((job.leaseOwner === undefined) !== (job.leaseExpiresAt === undefined)) {
+      context.addIssue({ code: "custom", message: "Lease owner and expiry must appear together", path: ["leaseOwner"] });
+    }
+    if (job.leaseExpiresAt !== undefined && Date.parse(job.leaseExpiresAt) <= Date.parse(job.createdAt)) {
+      context.addIssue({ code: "custom", message: "Lease expiry must follow job creation", path: ["leaseExpiresAt"] });
+    }
+    if (job.status === "COMPLETED" && (job.producedDocumentVersionId === undefined || job.completedAt === undefined || job.stage !== "COMPLETE")) {
+      context.addIssue({ code: "custom", message: "Completed jobs require their produced version", path: ["status"] });
+    }
+    if (job.status === "FAILED" && (job.sanitizedError === undefined || job.completedAt === undefined)) {
+      context.addIssue({ code: "custom", message: "Failed jobs require a sanitized error", path: ["status"] });
+    }
+    if (job.status !== "COMPLETED" && job.status !== "FAILED" && job.completedAt !== undefined) {
+      context.addIssue({ code: "custom", message: "Only terminal jobs have completion times", path: ["completedAt"] });
+    }
+  });
+
+const knowledgeGateMetricsObjectSchema = z
+  .object({
+    eligibleCount: z.number().int().min(1).max(MAX_SAFE_INTEGER),
+    embeddedCount: z.number().int().min(0).max(MAX_SAFE_INTEGER),
+    coverage: z.number().min(0).max(1),
+    leakageCount: z.number().int().min(0).max(MAX_SAFE_INTEGER),
+    citationSupportedCount: z.number().int().min(0).max(MAX_SAFE_INTEGER),
+    citationTotalCount: z.number().int().min(1).max(MAX_SAFE_INTEGER),
+    citationPrecision: z.number().min(0).max(1),
+    recallAt10Sum: z.number().min(0).max(MAX_SAFE_INTEGER),
+    recallAt10CaseCount: z.number().int().min(1).max(MAX_SAFE_INTEGER),
+    recallAt10Mean: z.number().min(0).max(1),
+    minimumCoverage: z.literal(1),
+    maximumLeakage: z.literal(0),
+    minimumCitationPrecision: z.literal(0.95),
+    minimumRecallAt10: z.literal(0.85),
+    decision: z.enum(["PASS", "FAIL"]),
   })
   .strict();
 
-export const knowledgeGateMetricsSchema = z
-  .object({
-    coverage: z.number().min(0).max(1),
-    unauthorizedHits: z.number().int().min(0).max(MAX_SAFE_INTEGER),
-    citationPrecision: z.number().min(0).max(1),
-    recallAt10: z.number().min(0).max(1),
-  })
-  .strict();
+const refineKnowledgeGateMetrics = (
+  gate: z.infer<typeof knowledgeGateMetricsObjectSchema>,
+  context: z.RefinementCtx,
+): void => {
+  const close = (left: number, right: number): boolean => Math.abs(left - right) <= 1e-12;
+  const ratiosMatch =
+    gate.embeddedCount <= gate.eligibleCount &&
+    gate.citationSupportedCount <= gate.citationTotalCount &&
+    gate.recallAt10Sum <= gate.recallAt10CaseCount &&
+    close(gate.coverage, gate.embeddedCount / gate.eligibleCount) &&
+    close(gate.citationPrecision, gate.citationSupportedCount / gate.citationTotalCount) &&
+    close(gate.recallAt10Mean, gate.recallAt10Sum / gate.recallAt10CaseCount);
+  const passes =
+    ratiosMatch &&
+    gate.coverage >= gate.minimumCoverage &&
+    gate.leakageCount <= gate.maximumLeakage &&
+    gate.citationPrecision >= gate.minimumCitationPrecision &&
+    gate.recallAt10Mean >= gate.minimumRecallAt10;
+  if (!ratiosMatch || (gate.decision === "PASS") !== passes) {
+    context.addIssue({ code: "custom", message: "Gate metrics and decision are inconsistent", path: ["decision"] });
+  }
+};
+
+export const knowledgeGateMetricsSchema = knowledgeGateMetricsObjectSchema.superRefine(refineKnowledgeGateMetrics);
 export const knowledgeGateDecisionSchema = z.enum(["PASS", "FAIL"]);
 export const knowledgeGateResultSchema = z
   .object({
     id: uuidSchema,
-    embeddingSpaceId: uuidSchema,
-    corpusManifestHash: sha256Schema,
-    metrics: knowledgeGateMetricsSchema,
-    decision: knowledgeGateDecisionSchema,
+    status: z.literal("COMPLETED"),
+    datasetVersionId: uuidSchema,
+    datasetContentHash: sha256Schema,
+    corpusManifestDigest: sha256Schema,
+    documentManifest: z.string().min(1).max(65_536),
+    candidateEmbeddingSpaceId: uuidSchema,
+    expectedActiveSpaceId: uuidSchema,
+    ...knowledgeGateMetricsObjectSchema.shape,
+    evidenceHash: sha256Schema,
     evaluatedAt: timestampSchema,
   })
+  .strict()
+  .superRefine(refineKnowledgeGateMetrics);
+export const knowledgeActivationRequestSchema = z
+  .object({
+    gateResultId: uuidSchema,
+    evidenceHash: sha256Schema,
+    datasetVersionId: uuidSchema,
+    corpusManifestDigest: sha256Schema,
+    candidateEmbeddingSpaceId: uuidSchema,
+    expectedActiveSpaceId: uuidSchema,
+    expectedVersion: versionSchema,
+  })
   .strict();
-export const knowledgeActivationRequestSchema = z.object({ gateResultId: uuidSchema, expectedVersion: versionSchema }).strict();
 export const knowledgeRollbackRequestSchema = z.object({ targetVersionId: uuidSchema, expectedVersion: versionSchema }).strict();
 
 export const guidanceRequestSchema = z
@@ -217,11 +415,22 @@ export const guidanceStatusSchema = z
     operationId: uuidSchema,
     status: guidanceOperationStatusSchema,
     recommendationId: uuidSchema.optional(),
-    errorCode: z.string().min(1).max(128).optional(),
+    errorCode: stableAiErrorCodeSchema.optional(),
     requestedAt: timestampSchema,
     updatedAt: timestampSchema,
   })
-  .strict();
+  .strict()
+  .superRefine(({ status, recommendationId, errorCode }, context) => {
+    if (status === "SUCCEEDED" && (recommendationId === undefined || errorCode !== undefined)) {
+      context.addIssue({ code: "custom", message: "Successful guidance requires a recommendation", path: ["status"] });
+    }
+    if (status === "FAILED" && (errorCode === undefined || recommendationId !== undefined)) {
+      context.addIssue({ code: "custom", message: "Failed guidance requires an error code", path: ["status"] });
+    }
+    if (status !== "SUCCEEDED" && status !== "FAILED" && (recommendationId !== undefined || errorCode !== undefined)) {
+      context.addIssue({ code: "custom", message: "Incomplete guidance cannot contain an outcome", path: ["status"] });
+    }
+  });
 
 export const serviceGrantClaimSchema = z.object({ operationId: uuidSchema }).strict();
 export const serviceGrantExchangeSchema = z
@@ -322,12 +531,46 @@ export const serviceOperationOutcomeSchema = z
   .object({
     operationId: uuidSchema,
     status: z.enum(["SUCCEEDED", "FAILED"]),
-    errorCode: z.string().min(1).max(128).optional(),
+    errorCode: stableAiErrorCodeSchema.optional(),
+    expectedVersion: versionSchema,
   })
-  .strict();
+  .strict()
+  .refine(({ status, errorCode }) => (status === "FAILED") === (errorCode !== undefined));
+export const serviceIngestionOutcomeSchema = z
+  .object({
+    operationId: uuidSchema,
+    jobId: uuidSchema,
+    status: z.enum(["COMPLETED", "FAILED"]),
+    producedDocumentVersionId: uuidSchema.optional(),
+    errorCode: stableAiErrorCodeSchema.optional(),
+    expectedVersion: versionSchema,
+  })
+  .strict()
+  .refine(({ status, producedDocumentVersionId, errorCode }) =>
+    status === "COMPLETED"
+      ? producedDocumentVersionId !== undefined && errorCode === undefined
+      : producedDocumentVersionId === undefined && errorCode !== undefined,
+  );
+export const serviceProviderProbeOutcomeSchema = z
+  .object({
+    operationId: uuidSchema,
+    probeId: uuidSchema,
+    status: z.enum(["SUCCEEDED", "FAILED"]),
+    completedAt: timestampSchema,
+    snapshot: capabilitySnapshotSchema.optional(),
+    errorCode: stableAiErrorCodeSchema.optional(),
+    expectedVersion: versionSchema,
+  })
+  .strict()
+  .refine(({ status, snapshot, errorCode }) =>
+    status === "SUCCEEDED"
+      ? snapshot !== undefined && errorCode === undefined
+      : snapshot === undefined && errorCode !== undefined,
+  );
 
 export type DataClassification = z.infer<typeof dataClassificationSchema>;
 export type ProviderPurpose = z.infer<typeof providerPurposeSchema>;
+export type AiGrantClaims = z.infer<typeof aiGrantClaimsSchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export type ProviderProfile = z.infer<typeof providerProfileSchema>;
 export type CapabilitySnapshot = z.infer<typeof capabilitySnapshotSchema>;
@@ -343,3 +586,5 @@ export type RecommendationDetail = z.infer<typeof recommendationDetailSchema>;
 export type RecommendationReviewRequest = z.infer<typeof recommendationReviewRequestSchema>;
 export type ServiceGrantClaim = z.infer<typeof serviceGrantClaimSchema>;
 export type ServiceGrantExchange = z.infer<typeof serviceGrantExchangeSchema>;
+export type ServiceIngestionOutcome = z.infer<typeof serviceIngestionOutcomeSchema>;
+export type ServiceProviderProbeOutcome = z.infer<typeof serviceProviderProbeOutcomeSchema>;

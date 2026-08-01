@@ -33,7 +33,6 @@ export * from "./governed-ai.js";
 export {
   aiGuidanceRequestedEventSchema,
   aiGuidanceRequestedPayloadSchema,
-  aiGuidanceRoutingSchema,
   aiOperationDeadLetteredEventSchema,
   aiOperationDeadLetteredPayloadSchema,
   aiRecommendationProposedEventSchema,
