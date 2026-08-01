@@ -156,10 +156,35 @@ describe("desktop IPC", () => {
     const command = { workspace: "risks", operation: "resolve", payload: {}, intentHandle: profileId };
 
     await expect(handler(event, command)).resolves.toEqual({ state: "conflict", currentVersion: 12, correlationId: profileId });
-    expect(deps.commands.execute).toHaveBeenCalledWith(command);
+    expect(deps.commands.execute).toHaveBeenCalledWith({
+      workspace: "risks",
+      operation: "resolve",
+      payload: {},
+      idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    });
+    expect(deps.commands.execute.mock.calls[0]![0]).not.toHaveProperty("intentHandle");
     await expect(handler(event, { ...command, intentHandle: undefined, idempotencyKey: profileId })).rejects.toThrow("IPC request rejected");
     deps.commands.execute.mockResolvedValueOnce({ state: "conflict", correlationId: profileId });
     await expect(handler(event, command)).rejects.toThrow("IPC request failed");
+  });
+
+  it("reuses main command keys after transport failure and rejects changed retained intents", async () => {
+    const deps = dependencies();
+    deps.commands.execute
+      .mockRejectedValueOnce(new Error("transport timeout"))
+      .mockResolvedValueOnce({ state: "accepted", commandId: profileId, correlationId: profileId });
+    registerDesktopIpc(rendererUrl, deps);
+    const handler = registeredHandler(DESKTOP_CHANNELS.commands.execute);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+    const command = { workspace: "risks", operation: "resolve", payload: { expectedVersion: 2 }, intentHandle: profileId };
+
+    await expect(handler(event, command)).rejects.toThrow("IPC request failed");
+    await expect(handler(event, command)).resolves.toMatchObject({ state: "accepted" });
+    expect(deps.commands.execute.mock.calls[1]![0].idempotencyKey).toBe(
+      deps.commands.execute.mock.calls[0]![0].idempotencyKey,
+    );
+    await expect(handler(event, { ...command, payload: { expectedVersion: 3 } })).rejects.toThrow("IPC request failed");
+    expect(deps.commands.execute).toHaveBeenCalledTimes(2);
   });
 
   it("sizes all received arguments and rejects arity other than one", async () => {

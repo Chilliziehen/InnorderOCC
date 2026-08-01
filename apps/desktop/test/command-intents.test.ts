@@ -1,0 +1,134 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { canonicalizeCommandPayload, prepareCommandPayload } from "../src/command-payload";
+import { createCommandIntentRegistry, type InternalWorkspaceCommand } from "../src/command-intents";
+import { workspaceCommandSchema, type CommandReceipt, type WorkspaceCommand } from "../src/desktop-contract";
+
+const handle = "11111111-1111-4111-8111-111111111111";
+const keyA = "22222222-2222-4222-8222-222222222222";
+const keyB = "33333333-3333-4333-8333-333333333333";
+const correlationId = "44444444-4444-4444-8444-444444444444";
+
+function command(overrides: Partial<WorkspaceCommand> = {}): WorkspaceCommand {
+  return {
+    workspace: "risks",
+    operation: "resolve",
+    payload: { version: 2, nested: { b: true, a: [null, "x"] } },
+    intentHandle: handle,
+    ...overrides,
+  };
+}
+
+describe("strict command JSON payloads", () => {
+  it("canonicalizes equivalent JSON objects deterministically", () => {
+    const left = { z: 1, nested: { b: true, a: [null, "x"] } };
+    const right = { nested: { a: [null, "x"], b: true }, z: 1 };
+    expect(canonicalizeCommandPayload(left)).toBe(canonicalizeCommandPayload(right));
+    expect(prepareCommandPayload(left)).toEqual({
+      success: true,
+      payload: left,
+      canonical: '{"nested":{"a":[null,"x"],"b":true},"z":1}',
+    });
+  });
+
+  it.each([
+    ["bigint", { value: 1n }],
+    ["undefined", { value: undefined }],
+    ["function", { value: () => undefined }],
+    ["infinity", { value: Number.POSITIVE_INFINITY }],
+  ])("cleanly rejects %s values", (_name, payload) => {
+    expect(prepareCommandPayload(payload)).toEqual({ success: false });
+    expect(() => canonicalizeCommandPayload(payload)).toThrow("Command payload must be strict JSON");
+  });
+
+  it("cleanly rejects cyclic values", () => {
+    const payload: Record<string, unknown> = {};
+    payload.self = payload;
+    expect(prepareCommandPayload(payload)).toEqual({ success: false });
+    expect(() => canonicalizeCommandPayload(payload)).toThrow("Command payload must be strict JSON");
+  });
+
+  it("enforces strict JSON at the renderer IPC input schema", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(workspaceCommandSchema.safeParse({ ...command(), payload: { value: 1n } }).success).toBe(false);
+    expect(workspaceCommandSchema.safeParse({ ...command(), payload: cyclic }).success).toBe(false);
+  });
+});
+
+describe("main command intent registry", () => {
+  function registry() {
+    const keys = [keyA, keyB];
+    return createCommandIntentRegistry({ createIdempotencyKey: () => keys.shift()! });
+  }
+
+  it("binds an intent to a main key and hides renderer handles from dependencies", async () => {
+    const execute = vi.fn(async (_input: InternalWorkspaceCommand): Promise<CommandReceipt> => ({
+      state: "completed", commandId: keyA, correlationId,
+    }));
+    await registry().execute(command(), execute);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      workspace: "risks",
+      operation: "resolve",
+      payload: command().payload,
+      idempotencyKey: keyA,
+    }));
+    const internal = execute.mock.calls[0]![0] as InternalWorkspaceCommand;
+    expect(internal).not.toHaveProperty("intentHandle");
+  });
+
+  it("reuses the key after transport failure for the exact canonical payload", async () => {
+    const execute = vi.fn()
+      .mockRejectedValueOnce(new Error("timeout"))
+      .mockResolvedValueOnce({ state: "completed", commandId: keyA, correlationId });
+    const intents = registry();
+    await expect(intents.execute(command(), execute)).rejects.toThrow("timeout");
+    await intents.execute(command({ payload: { nested: { a: [null, "x"], b: true }, version: 2 } }), execute);
+    expect(execute.mock.calls[0]![0].idempotencyKey).toBe(keyA);
+    expect(execute.mock.calls[1]![0].idempotencyKey).toBe(keyA);
+  });
+
+  it("rejects operation or payload changes under the same handle", async () => {
+    const execute = vi.fn().mockRejectedValue(new Error("timeout"));
+    const intents = registry();
+    await expect(intents.execute(command(), execute)).rejects.toThrow("timeout");
+    await expect(intents.execute(command({ payload: { version: 3 } }), execute)).rejects.toThrow("Command intent mismatch");
+    await expect(intents.execute(command({ operation: "assign" }), execute)).rejects.toThrow("Command intent mismatch");
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("retains accepted and retryable problem intents", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ state: "accepted", commandId: keyA, correlationId })
+      .mockResolvedValueOnce({ state: "problem", problem: { title: "Timeout", code: "TIMEOUT", status: 504, retryable: true } })
+      .mockResolvedValueOnce({ state: "completed", commandId: keyA, correlationId });
+    const intents = registry();
+    await intents.execute(command(), execute);
+    await intents.execute(command(), execute);
+    await intents.execute(command(), execute);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyA, keyA]);
+  });
+
+  it.each([
+    { state: "completed", commandId: keyA, correlationId },
+    { state: "problem", problem: { title: "Rejected", code: "REJECTED", status: 422, retryable: false } },
+    { state: "conflict", currentVersion: 3, correlationId },
+    { state: "unavailable", reason: "UNAVAILABLE_CONTRACT", resourceGroups: ["/risks"], message: "Risk commands unavailable" },
+  ] as CommandReceipt[])("releases terminal $state intents", async (receipt) => {
+    const execute = vi.fn().mockResolvedValueOnce(receipt).mockResolvedValueOnce(receipt);
+    const intents = registry();
+    await intents.execute(command(), execute);
+    await intents.execute(command(), execute);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
+  });
+
+  it("retains an intent when a dependency returns an invalid receipt", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ state: "accepted" })
+      .mockResolvedValueOnce({ state: "completed", commandId: keyA, correlationId });
+    const intents = registry();
+    await expect(intents.execute(command(), execute)).rejects.toThrow();
+    await intents.execute(command(), execute);
+    expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyA]);
+  });
+});

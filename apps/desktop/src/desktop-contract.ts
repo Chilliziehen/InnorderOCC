@@ -6,6 +6,8 @@ import {
 } from "@innorder/contracts";
 import { z } from "zod";
 
+import { commandPayloadSchema } from "./command-payload";
+
 const environmentSchema = z.enum(["production", "pilot", "development"]);
 const caFingerprintSchema = z
   .string()
@@ -154,6 +156,7 @@ export const problemReceiptSchema = z
     title: z.string().min(1),
     detail: z.string().optional(),
     code: z.string().trim().min(1).max(128).optional(),
+    retryable: z.boolean().optional(),
     status: z.number().int().min(400).max(599),
     correlationId: z.uuid().optional(),
   })
@@ -212,7 +215,7 @@ export const workspaceCommandSchema = z
     workspace: z.string().trim().min(1).max(128),
     operation: z.string().trim().min(1).max(128),
     targetId: z.string().min(1).max(256).optional(),
-    payload: z.record(z.string(), z.unknown()).default({}),
+    payload: commandPayloadSchema.default({}),
     intentHandle: z.uuid(),
   })
   .strict();

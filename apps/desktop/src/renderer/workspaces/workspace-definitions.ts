@@ -188,7 +188,7 @@ const definitions: Record<WorkspaceId, WorkspaceDefinition> = {
       { operation: "profiles.save", label: "保存配置", capability: "occ.read", availability: available() },
       { operation: "profiles.remove", label: "移除配置", capability: "occ.read", availability: available() },
       { operation: "session.logout", label: "退出登录", capability: "occ.read", availability: available() },
-      operation("preferences.update", "更新偏好", "preferences.update", ["/api/v1/me"], "个人偏好 API 合同尚未集成"),
+      operation("preferences.update", "更新偏好", "preferences.update", ["/me"], "个人偏好 API 合同尚未集成"),
     ],
   },
 };

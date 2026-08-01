@@ -16,12 +16,15 @@ import {
 import type { ProfileStore } from "./profile-store";
 import type { CredentialVault, SessionManager, VaultCredential } from "./session-manager";
 import { serializedSize } from "./serialized-size";
+import { createCommandIntentRegistry, type InternalWorkspaceCommand } from "./command-intents";
+import type { CommandReceipt } from "./desktop-contract";
 
 export const MAX_REQUEST_BYTES = 1024 * 1024;
 export const MAX_UPLOAD_REQUEST_BYTES = 100 * 1024 * 1024 + 64 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const profileListSchema = serverProfileSchema.array();
-type InvokeApi = Omit<OccApi, "notifications"> & {
+type InvokeApi = Omit<OccApi, "notifications" | "commands"> & {
+  commands: { execute(input: InternalWorkspaceCommand): Promise<CommandReceipt> };
   notifications: Pick<OccApi["notifications"], "list">;
 };
 
@@ -295,6 +298,7 @@ export function registerDesktopIpc(
   options: DesktopIpcOptions = {},
 ): () => void {
   activeRegistration?.();
+  const commandIntents = createCommandIntentRegistry();
   const definitions: HandlerDefinition<any, any>[] = [
     { channel: DESKTOP_CHANNELS.profiles.list, input: noInputSchema, output: profileListSchema, invoke: () => api.profiles.list() },
     { channel: DESKTOP_CHANNELS.profiles.current, input: noInputSchema, output: selectedServerProfileSchema, invoke: () => api.profiles.current() },
@@ -306,7 +310,7 @@ export function registerDesktopIpc(
     { channel: DESKTOP_CHANNELS.session.logout, input: noInputSchema, output: voidOutputSchema, invoke: () => api.session.logout() },
     { channel: DESKTOP_CHANNELS.runtime.statuses, input: noInputSchema, output: systemStatusesSchema, invoke: () => api.runtime.statuses() },
     { channel: DESKTOP_CHANNELS.workspaces.query, input: workspaceQuerySchema, output: workspaceResultSchema, invoke: (input) => api.workspaces.query(input) },
-    { channel: DESKTOP_CHANNELS.commands.execute, input: workspaceCommandSchema, output: commandReceiptSchema, invoke: (input) => api.commands.execute(input) },
+    { channel: DESKTOP_CHANNELS.commands.execute, input: workspaceCommandSchema, output: commandReceiptSchema, invoke: (input) => commandIntents.execute(input, (command) => api.commands.execute(command)) },
     { channel: DESKTOP_CHANNELS.uploads.start, input: evidenceUploadInputSchema, output: uploadReceiptSchema, invoke: (input) => api.uploads.start(input), maxRequestBytes: MAX_UPLOAD_REQUEST_BYTES },
     { channel: DESKTOP_CHANNELS.uploads.cancel, input: idInputSchema, output: voidOutputSchema, invoke: (id) => api.uploads.cancel(id) },
     { channel: DESKTOP_CHANNELS.notifications.list, input: optionalCursorSchema, output: notificationPageSchema, invoke: (cursor) => api.notifications.list(cursor) },
