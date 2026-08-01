@@ -23,6 +23,8 @@ class MinioObjectStore(
     private val client: MinioClient = client(properties.validate()),
 ) : ObjectStore {
     private val bucket = properties.bucket
+    private val cleanupBudget = minOf(properties.requestTimeout, Duration.ofSeconds(2))
+    private val cleanupClient = client(properties, minOf(properties.requestTimeout, Duration.ofMillis(500)))
 
     override fun putQuarantine(request: ObjectPut): StoredObject {
         validateKey(request.key, ObjectStore.QUARANTINE_PREFIX)
@@ -33,7 +35,6 @@ class MinioObjectStore(
         }
 
         val guarded = ExactHashingInputStream(request.source, request.size)
-        var uploaded = false
         try {
             client.putObject(
                 PutObjectArgs.builder()
@@ -41,10 +42,10 @@ class MinioObjectStore(
                     .`object`(request.key)
                     .stream(guarded, request.size, MULTIPART_PART_SIZE)
                     .contentType(request.contentType)
+                    .headers(mapOf("If-None-Match" to "*"))
                     .userMetadata(mapOf(SHA256_METADATA to request.sha256))
                     .build(),
             )
-            uploaded = true
             if (!guarded.complete(request.sha256)) {
                 removeQuietly(request.key)
                 throw ObjectIntegrityException()
@@ -56,10 +57,14 @@ class MinioObjectStore(
                 }
             }
         } catch (exception: ObjectStoreException) {
-            if (uploaded) removeQuietly(request.key)
+            cleanupAmbiguousPut(request.key)
             throw exception
+        } catch (exception: ErrorResponseException) {
+            if (exception.errorResponse().code() in ALREADY_EXISTS_CODES) throw ObjectAlreadyExistsException()
+            cleanupAmbiguousPut(request.key)
+            throw ObjectStoreException("Object storage operation failed")
         } catch (_: Exception) {
-            if (uploaded) removeQuietly(request.key)
+            cleanupAmbiguousPut(request.key)
             throw ObjectStoreException("Object storage operation failed")
         }
     }
@@ -174,7 +179,7 @@ class MinioObjectStore(
                 .includeUserMetadata(true)
                 .maxKeys(limit)
             if (startAfter != null) builder.startAfter(startAfter)
-            return client.listObjects(builder.build()).map { result ->
+            return client.listObjects(builder.build()).take(limit).map { result ->
                 val item = result.get()
                 StoredObject(
                     key = item.objectName(),
@@ -209,6 +214,25 @@ class MinioObjectStore(
         } catch (_: Exception) {
             // The original operation remains the caller-visible failure.
         }
+    }
+
+    private fun cleanupAmbiguousPut(key: String) {
+        val deadline = System.nanoTime() + cleanupBudget.toNanos()
+        do {
+            try {
+                cleanupClient.removeObject(RemoveObjectArgs.builder().bucket(bucket).`object`(key).build())
+                return
+            } catch (_: Exception) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return
+                try {
+                    TimeUnit.NANOSECONDS.sleep(minOf(remaining, CLEANUP_RETRY_DELAY.toNanos()))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return
+                }
+            }
+        } while (System.nanoTime() < deadline)
     }
 
     private fun stored(key: String, response: StatObjectResponse): StoredObject = StoredObject(
@@ -288,6 +312,7 @@ class MinioObjectStore(
         const val MULTIPART_PART_SIZE = 5L * 1024 * 1024
         const val MAX_KEY_LENGTH = 1_024
         const val SHA256_METADATA = "sha256"
+        val CLEANUP_RETRY_DELAY: Duration = Duration.ofMillis(50)
         val KEY_PATTERN = Regex("^[A-Za-z0-9][A-Za-z0-9._/-]*$")
         val SHA256_PATTERN = Regex("^[0-9a-f]{64}$")
         val NOT_FOUND_CODES = setOf("NoSuchKey", "NoSuchObject", "NotFound")
@@ -296,8 +321,11 @@ class MinioObjectStore(
         fun metadataHash(metadata: Map<String, String>): String? =
             metadata.entries.firstOrNull { it.key.equals(SHA256_METADATA, ignoreCase = true) }?.value
 
-        fun client(properties: EvidenceStorageProperties): MinioClient {
-            val timeoutMillis = properties.requestTimeout.toMillis()
+        fun client(
+            properties: EvidenceStorageProperties,
+            timeout: Duration = properties.requestTimeout,
+        ): MinioClient {
+            val timeoutMillis = timeout.toMillis()
             val httpClient = OkHttpClient.Builder()
                 .connectTimeout(minOf(timeoutMillis, Duration.ofSeconds(2).toMillis()), TimeUnit.MILLISECONDS)
                 .readTimeout(timeoutMillis, TimeUnit.MILLISECONDS)

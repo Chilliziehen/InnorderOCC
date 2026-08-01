@@ -92,5 +92,3 @@ occ:
   object-storage:
     endpoint: ${OBJECT_STORAGE_ENDPOINT:http://localhost:9000}
     bucket: ${OBJECT_STORAGE_BUCKET:innorder-occ}
-    access-key: ${OBJECT_STORAGE_ACCESS_KEY:}
-    secret-key: ${OBJECT_STORAGE_SECRET_KEY:}

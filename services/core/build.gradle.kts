@@ -50,6 +50,7 @@ dependencies {
     testImplementation("org.testcontainers:postgresql")
     testImplementation("org.testcontainers:kafka")
     testImplementation("org.testcontainers:junit-jupiter")
+    testImplementation("org.testcontainers:toxiproxy")
     testRuntimeOnly("com.h2database:h2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

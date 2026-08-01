@@ -2,9 +2,12 @@ package com.innorder.occ.evidence
 
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
+import org.springframework.boot.context.properties.source.ConfigurationPropertySources
+import org.springframework.boot.env.ConfigTreePropertySource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
+import org.springframework.core.env.ConfigurableEnvironment
 import java.net.URI
 import java.time.Duration
 
@@ -32,10 +35,10 @@ class EvidenceStorageProperties(
         require(BUCKET_PATTERN.matches(bucket) && bucket.length in 3..63 && !bucket.contains("..")) {
             "Invalid object storage configuration"
         }
-        require(accessKey.length in 3..64 && accessKey.none(Char::isWhitespace)) {
+        require(accessKey.length in 16..64 && accessKey.none(Char::isWhitespace)) {
             "Invalid object storage configuration"
         }
-        require(secretKey.length in 8..128 && secretKey.none(Char::isWhitespace)) {
+        require(secretKey.length in 32..128 && secretKey.none(Char::isWhitespace)) {
             "Invalid object storage configuration"
         }
         require(requestTimeout > Duration.ZERO && requestTimeout <= Duration.ofSeconds(30)) {
@@ -56,5 +59,24 @@ class EvidenceStorageProperties(
 @EnableConfigurationProperties(EvidenceStorageProperties::class)
 class EvidenceStorageConfiguration {
     @Bean
-    fun objectStore(properties: EvidenceStorageProperties): ObjectStore = MinioObjectStore(properties.validate())
+    fun objectStore(
+        properties: EvidenceStorageProperties,
+        environment: ConfigurableEnvironment,
+    ): ObjectStore {
+        requireConfigTreeProperty(environment, ACCESS_KEY_PROPERTY)
+        requireConfigTreeProperty(environment, SECRET_KEY_PROPERTY)
+        return MinioObjectStore(properties.validate())
+    }
+
+    private fun requireConfigTreeProperty(environment: ConfigurableEnvironment, name: String) {
+        val source = environment.propertySources.firstOrNull {
+            !ConfigurationPropertySources.isAttachedConfigurationPropertySource(it) && it.containsProperty(name)
+        }
+        require(source is ConfigTreePropertySource) { "Invalid object storage configuration" }
+    }
+
+    private companion object {
+        const val ACCESS_KEY_PROPERTY = "occ.object-storage.access-key"
+        const val SECRET_KEY_PROPERTY = "occ.object-storage.secret-key"
+    }
 }
