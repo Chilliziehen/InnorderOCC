@@ -307,6 +307,50 @@ class OutboxPublisherIntegrationTest {
     }
 
     @Test
+    fun `locked exhausted rows do not block another publisher claiming due work or create attempt eleven`() {
+        val exhausted = listOf(stalePublishing(attempts = 10), stalePublishing(attempts = 10))
+        val due = insert(nextAttemptAt = Instant.now().minusSeconds(1))
+        val lockConnection = adminDataSource().connection
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            lockConnection.autoCommit = false
+            lockConnection.prepareStatement(
+                "SELECT id FROM audit.outbox_event WHERE id IN (?, ?) ORDER BY id FOR UPDATE",
+            ).use { statement ->
+                statement.setObject(1, exhausted[0])
+                statement.setObject(2, exhausted[1])
+                statement.executeQuery().use { rows -> assertThat(rows.next()).isTrue() }
+            }
+            val otherJdbc = JdbcTemplate(runtimeDataSource())
+            val otherRepository = OutboxPublishingRepository(
+                otherJdbc, DataSourceTransactionManager(otherJdbc.dataSource!!), OutboxProperties(),
+            )
+
+            val claimed = pool.submit<List<ClaimedOutboxEvent>> { otherRepository.claim() }
+                .get(2, TimeUnit.SECONDS)
+
+            assertThat(claimed.map { it.id }).containsExactly(due)
+            assertThat(claimed.single().attempts).isEqualTo(1)
+            assertThat(exhausted.map { admin.queryForMap("SELECT status, attempts FROM audit.outbox_event WHERE id = ?", it) })
+                .allSatisfy { assertThat(it).containsEntry("status", "PUBLISHING").containsEntry("attempts", 10) }
+        } finally {
+            lockConnection.rollback()
+            lockConnection.close()
+            pool.shutdownNow()
+        }
+
+        repository.claim()
+
+        assertThat(exhausted.map { admin.queryForMap("SELECT status, attempts, last_error FROM audit.outbox_event WHERE id = ?", it) })
+            .allSatisfy {
+                assertThat(it)
+                    .containsEntry("status", "DEAD")
+                    .containsEntry("attempts", 10)
+                    .containsEntry("last_error", "STALE_ATTEMPT_LIMIT")
+            }
+    }
+
+    @Test
     fun `corrupt secret-bearing event fails without send and follows retry path`() {
         val id = insert(payload = """{"password":"must-not-send"}""", nextAttemptAt = Instant.now().minusSeconds(1))
         val sends = AtomicInteger()

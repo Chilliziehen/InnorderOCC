@@ -43,15 +43,22 @@ class OutboxPublishingRepository(
     fun claim(limit: Int = properties.batchSize): List<ClaimedOutboxEvent> {
         require(limit in 1..properties.batchSize && limit <= 100)
         return transactions.execute {
-            jdbc.update(
-                """UPDATE audit.outbox_event
-                   SET status = 'DEAD', claimed_at = NULL, last_error = 'STALE_ATTEMPT_LIMIT'
-                   WHERE status = 'PUBLISHING' AND attempts >= ?
-                     AND claimed_at <= statement_timestamp() - interval '5 minutes'""",
-                properties.maxAttempts,
-            )
             jdbc.query(
-                """WITH candidates AS (
+                """WITH exhausted_candidates AS MATERIALIZED (
+                       SELECT id
+                       FROM audit.outbox_event
+                       WHERE status = 'PUBLISHING' AND attempts >= ?
+                         AND claimed_at <= statement_timestamp() - interval '5 minutes'
+                       ORDER BY claimed_at, created_at, id
+                       FOR UPDATE SKIP LOCKED
+                       LIMIT ?
+                   ), exhausted AS (
+                       UPDATE audit.outbox_event event
+                       SET status = 'DEAD', claimed_at = NULL, last_error = 'STALE_ATTEMPT_LIMIT'
+                       FROM exhausted_candidates
+                       WHERE event.id = exhausted_candidates.id
+                       RETURNING event.id
+                   ), candidates AS MATERIALIZED (
                        SELECT id
                        FROM audit.outbox_event
                        WHERE attempts < ? AND (
@@ -71,7 +78,7 @@ class OutboxPublishingRepository(
                    )
                    SELECT * FROM claimed ORDER BY next_attempt_at, created_at, id""",
                 ::mapClaim,
-                properties.maxAttempts, limit,
+                properties.maxAttempts, limit, properties.maxAttempts, limit,
             )
         } ?: emptyList()
     }
