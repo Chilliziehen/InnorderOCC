@@ -188,6 +188,52 @@ describe("secure provider transport", () => {
     expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-TELEMETRY" });
     expect(JSON.stringify(error)).not.toContain("raw telemetry secret");
   });
+
+  it("cancels credential reads and zeroes a secret that resolves after cancellation", async () => {
+    let resolveCredential!: (value: Buffer) => void;
+    let readerSignal: AbortSignal | undefined;
+    let readerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { readerStarted = resolve; });
+    const secret = Buffer.from("late-known-secret");
+    const controller = new AbortController();
+    const transport = new SecureTransport({
+      policy: { resolve: async () => target() },
+      credentialReader: async (_path, signal) => {
+        readerSignal = signal;
+        readerStarted();
+        return new Promise((resolve) => { resolveCredential = resolve; });
+      },
+      requestFactory: vi.fn(),
+    });
+    const pending = transport.request({ operationId: "op", profileId: profile.id, model: profile.model, path: "/v1/models", method: "GET", connectMs: 100, totalMs: 1_000, maxResponseBytes: 100, signal: controller.signal });
+
+    await started;
+    controller.abort(new Error("cancel credential read"));
+    await expect(pending).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CANCELLED" });
+    resolveCredential(secret);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(readerSignal?.aborted).toBe(true);
+    expect([...secret]).toEqual(new Array(secret.length).fill(0));
+  });
+
+  it("keeps required telemetry inside the operation cancellation boundary", async () => {
+    let telemetrySignal: AbortSignal | undefined;
+    let telemetryStarted!: () => void;
+    const started = new Promise<void>((resolve) => { telemetryStarted = resolve; });
+    const controller = new AbortController();
+    const transport = new SecureTransport({
+      policy: { resolve: async () => target() }, credentialReader: async () => Buffer.from("credential"),
+      requestFactory: async () => response({ ok: true }),
+      telemetry: async (_event, signal) => { telemetrySignal = signal; telemetryStarted(); return new Promise(() => undefined); },
+    });
+    const pending = transport.request({ operationId: "op", profileId: profile.id, model: profile.model, path: "/v1/models", method: "GET", connectMs: 100, totalMs: 1_000, maxResponseBytes: 100, signal: controller.signal });
+
+    await started;
+    controller.abort(new Error("cancel telemetry"));
+    await expect(Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("hung"), 100))]))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CANCELLED" });
+    expect(telemetrySignal?.aborted).toBe(true);
+  });
 });
 
 describe("real Node HTTPS provider transport", () => {
@@ -370,8 +416,10 @@ describe("OpenAI-compatible adapter", () => {
       .mockResolvedValueOnce(response(standardChatResponse("{\"answer\":\"yes\"}", { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 })))
       .mockResolvedValueOnce(response(standardEmbeddingResponse([[1, 2, 3], [4, 5, 6]], { prompt_tokens: 2, total_tokens: 2 }))), };
     const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined }, operationId: () => "operation" });
-    await expect(adapter.chat({ messages: [{ role: "user", content: "question" }], schema: { type: "object" } }, new AbortController().signal))
-      .resolves.toMatchObject({ output: { answer: "yes" }, usage: { inputTokens: 3, outputTokens: 2 } });
+    const chat = await adapter.chat({ messages: [{ role: "user", content: "question" }], schema: { type: "object" } }, new AbortController().signal);
+    expect(chat).toMatchObject({ output: { answer: "yes" }, accounting: { estimated: true } });
+    expect(chat.usage.inputTokens).toBeGreaterThan(3);
+    expect(chat.usage.outputTokens).toBeGreaterThan(2);
     await expect(adapter.embed({ inputs: ["one", "two"], dimensions: 3 }, new AbortController().signal))
       .resolves.toMatchObject({ embeddings: [[1, 2, 3], [4, 5, 6]] });
   });
@@ -390,6 +438,42 @@ describe("OpenAI-compatible adapter", () => {
     const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response(body) }, capabilityRepository: { save: async () => undefined } });
     await expect(adapter.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal))
       .resolves.toMatchObject({ output: {} });
+  });
+
+  it.each([
+    { finish_reason: "length" },
+    { finish_reason: "content_filter" },
+    { finish_reason: "tool_calls" },
+    { finish_reason: "function_call" },
+    { finish_reason: "stop", refusal: "blocked" },
+    { finish_reason: "stop", tool_calls: [] },
+    { finish_reason: "stop", function_call: { name: "unsafe", arguments: "{}" } },
+  ])("requires an unrefused terminal stop completion", async ({ finish_reason, refusal, tool_calls, function_call }) => {
+    const message = {
+      role: "assistant", content: "{}",
+      ...(refusal === undefined ? {} : { refusal }),
+      ...(tool_calls === undefined ? {} : { tool_calls }),
+      ...(function_call === undefined ? {} : { function_call }),
+    };
+    const body = { ...standardChatResponse("{}"), choices: [{ index: 0, finish_reason, message }] };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response(body) }, capabilityRepository: { save: async () => undefined } });
+    await expect(adapter.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-MALFORMED" });
+  });
+
+  it("allows chat-only capability snapshots without requiring embedding dimensions", async () => {
+    const chatOnlyProfile = {
+      ...profile,
+      capabilitySnapshot: { ...profile.capabilitySnapshot, embeddings: false, embeddingDimensions: undefined },
+    };
+    const transport = { request: vi.fn(async () => response(standardChatResponse("{}"))) };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile: chatOnlyProfile, transport, capabilityRepository: { save: async () => undefined } });
+
+    await expect(adapter.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal))
+      .resolves.toMatchObject({ output: {} });
+    await expect(adapter.embed({ inputs: ["x"], dimensions: 3 }, new AbortController().signal))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
+    expect(transport.request).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -563,7 +647,7 @@ describe("OpenAI-compatible adapter", () => {
     expect(duplicateTransport.request).toHaveBeenCalledTimes(1);
   });
 
-  it("marks accounting estimated only when validated provider usage is absent", async () => {
+  it("marks accounting estimated when usage is absent or corrected by local floors", async () => {
     const withoutUsage = { request: vi.fn()
       .mockResolvedValueOnce(response(standardChatResponse("{}")))
       .mockResolvedValueOnce(response(standardEmbeddingResponse([[1, 2, 3]]))), };
@@ -573,7 +657,11 @@ describe("OpenAI-compatible adapter", () => {
     await expect(adapter.embed({ inputs: ["x"], dimensions: 3 }, new AbortController().signal))
       .resolves.toMatchObject({ accounting: { estimated: true } });
 
-    const withUsage = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response(standardChatResponse("{}", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })) }, capabilityRepository: { save: async () => undefined } });
+    const underReported = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response(standardChatResponse("{}", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })) }, capabilityRepository: { save: async () => undefined } });
+    await expect(underReported.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal))
+      .resolves.toMatchObject({ accounting: { estimated: true } });
+
+    const withUsage = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response(standardChatResponse("{}", { prompt_tokens: 1_000, completion_tokens: 1_000, total_tokens: 2_000 })) }, capabilityRepository: { save: async () => undefined } });
     await expect(withUsage.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal))
       .resolves.toMatchObject({ accounting: { estimated: false } });
   });
@@ -591,7 +679,9 @@ describe("OpenAI-compatible adapter", () => {
     expect(transport.request.mock.calls.map(([input]) => input.operationId)).toEqual(["stable-operation", "stable-operation"]);
     expect(limiter.acquire).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(2);
-    expect(accounting).toEqual([expect.objectContaining({ operationId: "stable-operation", profileId: profile.id, model: profile.model, inputTokens: 1, outputTokens: 1, costMicros: expect.any(String) })]);
+    expect(accounting).toEqual([expect.objectContaining({ operationId: "stable-operation", profileId: profile.id, model: profile.model, estimated: true, costMicros: expect.any(String) })]);
+    expect((accounting[0] as { inputTokens: number }).inputTokens).toBeGreaterThan(1);
+    expect((accounting[0] as { outputTokens: number }).outputTokens).toBeGreaterThan(1);
     expect(JSON.stringify(accounting)).not.toMatch(/question|credential|response|authorization/i);
   });
 
@@ -652,5 +742,53 @@ describe("OpenAI-compatible adapter", () => {
     const capabilityError = await capabilityAdapter.probe(new AbortController().signal).catch((caught: unknown) => caught);
     expect(capabilityError).toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
     expect(JSON.stringify(capabilityError)).not.toContain("raw repository secret");
+  });
+
+  it("fails closed when required accounting persistence hangs after provider success", async () => {
+    let sinkSignal: AbortSignal | undefined;
+    let sinkStarted!: () => void;
+    const started = new Promise<void>((resolve) => { sinkStarted = resolve; });
+    const controller = new AbortController();
+    const adapter = new OpenAiCompatibleAdapter({
+      provider, profile, transport: { request: async () => response(standardChatResponse("{}")) }, capabilityRepository: { save: async () => undefined },
+      accountingSink: async (_event, signal) => { sinkSignal = signal; sinkStarted(); return new Promise(() => undefined); },
+    });
+    const pending = adapter.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, controller.signal);
+
+    await started;
+    controller.abort(new Error("cancel accounting"));
+    await expect(Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("hung"), 100))]))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CANCELLED" });
+    expect(sinkSignal?.aborted).toBe(true);
+  });
+
+  it("fails closed when required capability persistence exceeds the original deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      let repositorySignal: AbortSignal | undefined;
+      let saveStarted!: () => void;
+      const started = new Promise<void>((resolve) => { saveStarted = resolve; });
+      const shortProfile = { ...profile, timeouts: { connectMs: 100, totalMs: 1_000 } };
+      const transport = { request: vi.fn()
+        .mockResolvedValueOnce(response(standardModelsResponse))
+        .mockResolvedValueOnce(response(standardChatResponse("{\"probe\":true}")))
+        .mockResolvedValueOnce(response(standardEmbeddingResponse([[1, 2, 3]]))), };
+      const adapter = new OpenAiCompatibleAdapter({
+        provider, profile: shortProfile, transport,
+        capabilityRepository: { save: async (_providerId, _model, _snapshot, signal) => { repositorySignal = signal; saveStarted(); return new Promise(() => undefined); } },
+      });
+      const pending = adapter.probe(new AbortController().signal);
+
+      await started;
+      expect(vi.getTimerCount()).toBe(1);
+      const rejection = expect(pending).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await rejection;
+      expect(repositorySignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

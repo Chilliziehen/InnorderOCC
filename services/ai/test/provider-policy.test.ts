@@ -276,9 +276,41 @@ describe("rate, retry, and accounting", () => {
     const limiter = new ProfileRateLimiter({ maxConcurrency: 2, requestsPerMinute: 1, tokensPerMinute: 10 }, () => now);
     const release = await limiter.acquire(10, new AbortController().signal);
     release();
-    await expect(limiter.acquire(1, new AbortController().signal)).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-RATE-LIMIT" });
+    const controller = new AbortController();
+    const queued = limiter.acquire(1, controller.signal);
+    controller.abort();
+    await expect(queued).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CANCELLED" });
     now = 60_000;
-    await expect(limiter.acquire(10, new AbortController().signal)).resolves.toBeTypeOf("function");
+  });
+
+  it("wakes FIFO bucket waiters on deterministic replenishment and cleans cancelled timers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const limiter = new ProfileRateLimiter({ maxConcurrency: 2, requestsPerMinute: 60, tokensPerMinute: 600 });
+      const firstRelease = await limiter.acquire(600, new AbortController().signal);
+      firstRelease();
+      const order: string[] = [];
+      const secondController = new AbortController();
+      const removeAbortListener = vi.spyOn(secondController.signal, "removeEventListener");
+      const firstWaiter = limiter.acquire(10, new AbortController().signal).then((release) => { order.push("first"); return release; });
+      const secondWaiter = limiter.acquire(10, secondController.signal).then((release) => { order.push("second"); return release; });
+
+      expect(order).toEqual([]);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const releaseFirstWaiter = await firstWaiter;
+      expect(order).toEqual(["first"]);
+      releaseFirstWaiter();
+      expect(vi.getTimerCount()).toBe(1);
+
+      secondController.abort(new Error("cancel queued waiter"));
+      await expect(secondWaiter).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CANCELLED" });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(removeAbortListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retries only classified safe failures with 100/500ms backoff and a stable operation ID", async () => {
@@ -355,7 +387,11 @@ describe("rate, retry, and accounting", () => {
 
   it("uses validated usage or a deterministic conservative estimate without floating undercharge", () => {
     expect(calculateAccounting({ requestBytes: 8, responseBytes: 5, usage: { inputTokens: 2, outputTokens: 3 }, cost: { currency: "USD", inputMicrosPerMillionTokens: 500_001, outputMicrosPerMillionTokens: 1_000_001 } }))
-      .toEqual({ inputTokens: 2, outputTokens: 3, costMicros: 6n, currency: "USD", estimated: false });
+      .toEqual({ inputTokens: 8, outputTokens: 5, costMicros: 11n, currency: "USD", estimated: true });
+    expect(calculateAccounting({ requestBytes: 8, responseBytes: 5, usage: { inputTokens: 10, outputTokens: 7 }, cost: { currency: "USD", inputMicrosPerMillionTokens: 500_001, outputMicrosPerMillionTokens: 1_000_001 } }))
+      .toEqual({ inputTokens: 10, outputTokens: 7, costMicros: 14n, currency: "USD", estimated: false });
+    expect(calculateAccounting({ requestBytes: 8, responseBytes: 5, usage: { inputTokens: 0, outputTokens: 0 }, cost: { currency: "USD", inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 } }))
+      .toEqual({ inputTokens: 8, outputTokens: 5, costMicros: 2n, currency: "USD", estimated: true });
     expect(calculateAccounting({ requestBytes: 8, responseBytes: 5, cost: { currency: "USD", inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 } }))
       .toEqual({ inputTokens: 8, outputTokens: 5, costMicros: 2n, currency: "USD", estimated: true });
     expect(() => calculateAccounting({ requestBytes: 1, responseBytes: 1, usage: { inputTokens: -1, outputTokens: 0 }, cost: { currency: "USD", inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 } })).toThrow();

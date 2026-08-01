@@ -3,7 +3,7 @@ import { request as httpsRequest, type RequestOptions } from "node:https";
 
 import { readCredentialFile } from "./credential-reader.js";
 import { ProviderError, type ProviderPolicy, type ResolvedProviderTarget } from "./provider-policy.js";
-import { abortProviderError, createOperationDeadline } from "./retry-policy.js";
+import { abortProviderError, createOperationDeadline, raceWithSignal } from "./retry-policy.js";
 
 export type ProviderTransportRequest = Readonly<{
   operationId: string;
@@ -54,10 +54,10 @@ type PolicyPort = Pick<ProviderPolicy, "resolve">;
 type SecureTransportDependencies = Readonly<{
   policy: PolicyPort;
   requestFactory?: RawRequestFactory;
-  credentialReader?: (path: string) => Promise<Buffer>;
+  credentialReader?: (path: string, signal: AbortSignal) => Promise<Buffer>;
   credentialPath?: string;
   tlsCa?: string | Buffer;
-  telemetry?: (event: TransportTelemetry) => void | Promise<void>;
+  telemetry?: (event: TransportTelemetry, signal: AbortSignal) => void | Promise<void>;
   now?: () => number;
 }>;
 
@@ -180,7 +180,8 @@ export class SecureTransport implements ProviderTransport {
     try {
       if (operationSignal.aborted) throw abortProviderError(operationSignal);
       const target = await Promise.race([this.dependencies.policy.resolve(input.path), abortPromise]);
-      credential = await Promise.race([(this.dependencies.credentialReader ?? readCredentialFile)(this.dependencies.credentialPath ?? ""), abortPromise]);
+      const readCredential = this.dependencies.credentialReader ?? ((path: string, signal: AbortSignal) => readCredentialFile(path, { signal }));
+      credential = await raceWithSignal((signal) => readCredential(this.dependencies.credentialPath ?? "", signal), operationSignal, (late) => late.fill(0));
       const headers: Record<string, string> = { accept: "application/json", authorization: `Bearer ${credential.toString("utf8")}`, host: target.hostHeader };
       if (input.body !== undefined) {
         headers["content-type"] = "application/json";
@@ -207,8 +208,6 @@ export class SecureTransport implements ProviderTransport {
       code = safe.code;
       throw safe;
     } finally {
-      operationSignal.removeEventListener("abort", onCombinedAbort);
-      ownedDeadline?.dispose();
       credential?.fill(0);
       const event: TransportTelemetry = {
         operationId: input.operationId, profileId: input.profileId, model: input.model, requestHash,
@@ -217,9 +216,12 @@ export class SecureTransport implements ProviderTransport {
         ...(providerRequestIdHash === undefined ? {} : { providerRequestIdHash }),
       };
       try {
-        await this.dependencies.telemetry?.(event);
-      } catch {
-        if (code === "OK") throw new ProviderError("OCC-AI-PROVIDER-TELEMETRY");
+        if (this.dependencies.telemetry !== undefined) await raceWithSignal((signal) => Promise.resolve(this.dependencies.telemetry!(event, signal)), operationSignal);
+      } catch (error) {
+        if (code === "OK") throw error instanceof ProviderError ? error : new ProviderError("OCC-AI-PROVIDER-TELEMETRY");
+      } finally {
+        operationSignal.removeEventListener("abort", onCombinedAbort);
+        ownedDeadline?.dispose();
       }
     }
   }

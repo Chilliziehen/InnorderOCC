@@ -24,10 +24,10 @@ export function calculateAccounting(input: AccountingInput): AccountingResult {
   if (!safeCount(input.requestBytes) || !safeCount(input.responseBytes) || !safeCount(input.cost.inputMicrosPerMillionTokens) || !safeCount(input.cost.outputMicrosPerMillionTokens) || !/^[A-Z]{3}$/u.test(input.cost.currency)) {
     throw new ProviderError("OCC-AI-PROVIDER-ACCOUNTING");
   }
-  const estimated = input.usage === undefined;
-  const inputTokens = input.usage?.inputTokens ?? input.requestBytes;
-  const outputTokens = input.usage?.outputTokens ?? input.responseBytes;
-  if (!safeCount(inputTokens) || !safeCount(outputTokens)) throw new ProviderError("OCC-AI-PROVIDER-ACCOUNTING");
+  if (input.usage !== undefined && (!safeCount(input.usage.inputTokens) || !safeCount(input.usage.outputTokens))) throw new ProviderError("OCC-AI-PROVIDER-ACCOUNTING");
+  const inputTokens = Math.max(input.usage?.inputTokens ?? 0, input.requestBytes);
+  const outputTokens = Math.max(input.usage?.outputTokens ?? 0, input.responseBytes);
+  const estimated = input.usage === undefined || inputTokens !== input.usage.inputTokens || outputTokens !== input.usage.outputTokens;
   return {
     inputTokens,
     outputTokens,

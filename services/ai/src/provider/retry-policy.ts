@@ -23,6 +23,49 @@ export function abortProviderError(signal: AbortSignal): ProviderError {
     : new ProviderError("OCC-AI-PROVIDER-CANCELLED", false, { cause: signal.reason });
 }
 
+export function raceWithSignal<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  signal: AbortSignal,
+  onLateValue?: (value: T) => void,
+): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortProviderError(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      reject(abortProviderError(signal));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    let pending: Promise<T>;
+    try {
+      pending = operation(signal);
+    } catch (error) {
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      reject(error);
+      return;
+    }
+    pending.then(
+      (value) => {
+        if (settled) {
+          try { onLateValue?.(value); } catch { /* Cleanup cannot change an already-settled operation. */ }
+          return;
+        }
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export function createOperationDeadline(totalMs: number, caller: AbortSignal, now: () => number = Date.now): OperationDeadline {
   if (!Number.isSafeInteger(totalMs) || totalMs < 1) throw new ProviderError("OCC-AI-PROVIDER-POLICY");
   const controller = new AbortController();

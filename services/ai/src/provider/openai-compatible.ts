@@ -7,11 +7,11 @@ import { z } from "zod";
 import { calculateAccounting, type AccountingResult } from "./accounting.js";
 import { ProviderError } from "./provider-policy.js";
 import { ProfileRateLimiter } from "./rate-limiter.js";
-import { createOperationDeadline, executeWithRetry, type OperationDeadline } from "./retry-policy.js";
+import { createOperationDeadline, executeWithRetry, raceWithSignal, type OperationDeadline } from "./retry-policy.js";
 import type { ProviderTransport, ProviderTransportResponse } from "./secure-transport.js";
 
 export interface CapabilityRepository {
-  save(providerId: string, model: string, snapshot: CapabilitySnapshot): Promise<void>;
+  save(providerId: string, model: string, snapshot: CapabilitySnapshot, signal: AbortSignal): Promise<void>;
 }
 const chatMessageSchema = z.object({ role: z.enum(["system", "user", "assistant"]), content: z.string().min(1).max(1_000_000) }).strict();
 const outputSchemaInputSchema = z.record(z.string().min(1).max(128), z.unknown()).refine((value) => Object.keys(value).length <= 256);
@@ -53,7 +53,7 @@ type Dependencies = Readonly<{
   operationId?: () => string;
   sleep?: (milliseconds: number) => Promise<void>;
   limiter?: Limiter;
-  accountingSink?: (event: InvocationAccounting) => void | Promise<void>;
+  accountingSink?: (event: InvocationAccounting, signal: AbortSignal) => void | Promise<void>;
   maxRequestBytes?: number;
 }>;
 
@@ -87,7 +87,7 @@ const chatSchema = z.object({
   id: z.string().min(1).max(256), object: z.literal("chat.completion"), created: tokenCountSchema, model: z.string().min(1).max(256),
   choices: z.array(z.object({
     index: tokenCountSchema,
-    finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "function_call"]),
+    finish_reason: z.literal("stop"),
     logprobs: z.null().optional(),
     message: z.object({
       role: z.literal("assistant"), content: z.string().min(1).max(1_048_576),
@@ -275,9 +275,9 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     };
     const result: CapabilitySnapshot = { ...base, snapshotHash: createHash("sha256").update(canonical(base)).digest("hex") };
     try {
-      await this.dependencies.capabilityRepository.save(this.provider.id, this.profile.model, result);
-    } catch {
-      throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
+      await raceWithSignal((signal) => this.dependencies.capabilityRepository.save(this.provider.id, this.profile.model, result, signal), operation.deadline.signal);
+    } catch (error) {
+      throw error instanceof ProviderError ? error : new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     }
     return result;
   }
@@ -289,7 +289,6 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
   }
 
   private async chatWithin(input: ChatRequest, operation: AdapterOperation): Promise<ChatResult> {
-    this.activeDimensions();
     if (!this.profile.capabilitySnapshot.chat || !this.profile.capabilitySnapshot.structuredOutput) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     const request = { model: this.profile.model, messages: input.messages, response_format: { type: "json_schema", json_schema: { name: "response", strict: true, schema: input.schema } }, max_tokens: this.profile.capabilitySnapshot.maxOutputTokens };
     new InputBudget(this.maxRequestBytes, this.profile.capabilitySnapshot.maxInputTokens).addJson(request);
@@ -298,14 +297,14 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     const startedAt = this.now().getTime();
     const response = await this.call("POST", "/chat/completions", body, operation);
     const parsed = chatSchema.safeParse(parseJson(response.body));
-    if (!parsed.success || parsed.data.model !== this.profile.model || parsed.data.choices[0]!.index !== 0) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
+    if (!parsed.success || parsed.data.model !== this.profile.model || parsed.data.choices[0]!.index !== 0 || (parsed.data.choices[0]!.message.refusal !== undefined && parsed.data.choices[0]!.message.refusal !== null)) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
     let output: unknown;
     try { output = JSON.parse(parsed.data.choices[0]!.message.content); } catch { throw new ProviderError("OCC-AI-PROVIDER-MALFORMED"); }
     if (output === null || typeof output !== "object" || Array.isArray(output) || !validateOutput(output)) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
     const providerUsage = parsed.data.usage === undefined ? undefined : { inputTokens: parsed.data.usage.prompt_tokens, outputTokens: parsed.data.usage.completion_tokens };
     const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.profile.cost });
     const usage = { inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens };
-    await this.emitAccounting(operation.operationId, accounting, startedAt);
+    await this.emitAccounting(operation, accounting, startedAt);
     return { output, usage, accounting };
   }
 
@@ -331,7 +330,7 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     const providerUsage = parsed.data.usage === undefined ? undefined : { inputTokens: parsed.data.usage.prompt_tokens, outputTokens: 0 };
     const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.profile.cost });
     const usage = { inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens };
-    await this.emitAccounting(operation.operationId, accounting, startedAt);
+    await this.emitAccounting(operation, accounting, startedAt);
     return { embeddings, usage, accounting };
   }
 
@@ -360,16 +359,18 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     });
   }
 
-  private async emitAccounting(operationId: string, accounting: AccountingResult, startedAt: number): Promise<void> {
+  private async emitAccounting(operation: AdapterOperation, accounting: AccountingResult, startedAt: number): Promise<void> {
     try {
-      await this.dependencies.accountingSink?.({
-        operationId, profileId: this.profile.id, model: this.profile.model,
+      if (this.dependencies.accountingSink === undefined) return;
+      const event: InvocationAccounting = {
+        operationId: operation.operationId, profileId: this.profile.id, model: this.profile.model,
         inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens,
         costMicros: accounting.costMicros.toString(), currency: accounting.currency, estimated: accounting.estimated,
         durationMs: Math.max(0, this.now().getTime() - startedAt), status: "SUCCEEDED", code: "OK",
-      });
-    } catch {
-      throw new ProviderError("OCC-AI-PROVIDER-ACCOUNTING");
+      };
+      await raceWithSignal((signal) => Promise.resolve(this.dependencies.accountingSink!(event, signal)), operation.deadline.signal);
+    } catch (error) {
+      throw error instanceof ProviderError ? error : new ProviderError("OCC-AI-PROVIDER-ACCOUNTING");
     }
   }
 

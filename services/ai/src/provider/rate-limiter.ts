@@ -10,6 +10,7 @@ export class ProfileRateLimiter {
   private tokens: number;
   private updatedAt: number;
   private readonly queue: Waiter[] = [];
+  private wakeup: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly limit: RateLimit, private readonly now: () => number = Date.now) {
     this.requests = limit.requestsPerMinute;
@@ -21,8 +22,7 @@ export class ProfileRateLimiter {
     if (!Number.isSafeInteger(tokens) || tokens < 0 || tokens > this.limit.tokensPerMinute) return Promise.reject(new ProviderError("OCC-AI-PROVIDER-RATE-LIMIT"));
     if (signal.aborted) return Promise.reject(abortProviderError(signal));
     this.refill();
-    if (this.active < this.limit.maxConcurrency && this.requests >= 1 && this.tokens >= tokens) return Promise.resolve(this.grant(tokens));
-    if (this.requests < 1 || this.tokens < tokens) return Promise.reject(new ProviderError("OCC-AI-PROVIDER-RATE-LIMIT"));
+    if (this.queue.length === 0 && this.active < this.limit.maxConcurrency && this.requests >= 1 && this.tokens >= tokens) return Promise.resolve(this.grant(tokens));
     return new Promise((resolve, reject) => {
       const waiter: Waiter = {
         tokens, signal, resolve, reject,
@@ -31,10 +31,12 @@ export class ProfileRateLimiter {
           if (index >= 0) this.queue.splice(index, 1);
           signal.removeEventListener("abort", waiter.cancel);
           reject(abortProviderError(signal));
+          this.schedule();
         },
       };
       signal.addEventListener("abort", waiter.cancel, { once: true });
       this.queue.push(waiter);
+      this.drain();
     });
   }
 
@@ -60,13 +62,35 @@ export class ProfileRateLimiter {
   }
 
   private drain(): void {
+    if (this.wakeup !== undefined) {
+      clearTimeout(this.wakeup);
+      this.wakeup = undefined;
+    }
     this.refill();
     while (this.active < this.limit.maxConcurrency && this.queue.length > 0) {
       const waiter = this.queue[0]!;
-      if (this.requests < 1 || this.tokens < waiter.tokens) return;
+      if (this.requests < 1 || this.tokens < waiter.tokens) break;
       this.queue.shift();
       waiter.signal.removeEventListener("abort", waiter.cancel);
       waiter.resolve(this.grant(waiter.tokens));
     }
+    this.schedule();
+  }
+
+  private schedule(): void {
+    if (this.wakeup !== undefined) {
+      clearTimeout(this.wakeup);
+      this.wakeup = undefined;
+    }
+    if (this.queue.length === 0 || this.active >= this.limit.maxConcurrency) return;
+    this.refill();
+    const waiter = this.queue[0]!;
+    const requestWait = this.requests >= 1 ? 0 : (1 - this.requests) * 60_000 / this.limit.requestsPerMinute;
+    const tokenWait = this.tokens >= waiter.tokens ? 0 : (waiter.tokens - this.tokens) * 60_000 / this.limit.tokensPerMinute;
+    const delay = Math.max(1, Math.ceil(Math.max(requestWait, tokenWait)));
+    this.wakeup = setTimeout(() => {
+      this.wakeup = undefined;
+      this.drain();
+    }, delay);
   }
 }

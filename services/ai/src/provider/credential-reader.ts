@@ -32,6 +32,7 @@ export type CredentialReaderOptions = Readonly<{
   fileSystem?: CredentialFileSystem;
   trustedOwnerIds?: readonly number[];
   serviceUid?: number;
+  signal?: AbortSignal;
 }>;
 
 type NodeBigIntMetadata = Readonly<{
@@ -120,27 +121,33 @@ export async function readCredentialFile(path: string, options: CredentialReader
   let raw: Buffer | undefined;
   let value: Buffer | undefined;
   try {
+    options.signal?.throwIfAborted();
     if (fileSystem.platform === "windows-unverified") throw new Error("unverified Windows ACLs");
     const paths = trustedPaths(options.trustedRoot ?? "/run/secrets", path);
     const before: CredentialMetadata[] = [];
     for (let index = 0; index < paths.length; index += 1) {
       const item = await fileSystem.inspect(paths[index]!);
+      options.signal?.throwIfAborted();
       validateMetadata(item, index === paths.length - 1 ? "file" : "directory", fileSystem, trustedOwners, serviceUid);
       before.push(item);
     }
     const fileBefore = before[before.length - 1]!;
     if (fileBefore.size < 1n || fileBefore.size > BigInt(maxBytes)) throw new Error("invalid size");
     handle = await fileSystem.openNoFollow(paths[paths.length - 1]!);
+    options.signal?.throwIfAborted();
     const descriptor = await handle.inspect();
+    options.signal?.throwIfAborted();
     validateMetadata(descriptor, "file", fileSystem, trustedOwners, serviceUid);
     if (!sameIdentity(fileBefore, descriptor)) throw new Error("file changed before open");
     for (let index = 0; index < paths.length; index += 1) {
       const after = await fileSystem.inspect(paths[index]!);
+      options.signal?.throwIfAborted();
       validateMetadata(after, index === paths.length - 1 ? "file" : "directory", fileSystem, trustedOwners, serviceUid);
       if (!sameIdentity(before[index]!, after)) throw new Error("trusted path changed");
     }
     raw = Buffer.alloc(maxBytes + 1);
     const bytesRead = await handle.read(raw);
+    options.signal?.throwIfAborted();
     if (bytesRead < 1 || bytesRead > maxBytes) throw new Error("invalid size");
     let end = bytesRead;
     if (raw[end - 1] === 0x0a) {
