@@ -59,6 +59,10 @@ tasks.processResources {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    val fullEvidenceIntegration = providers.gradleProperty("fullEvidenceIntegration")
+        .orElse(providers.systemProperty("innorder.fullIntegration"))
+        .orElse("false")
+    systemProperty("innorder.fullIntegration", fullEvidenceIntegration.get())
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

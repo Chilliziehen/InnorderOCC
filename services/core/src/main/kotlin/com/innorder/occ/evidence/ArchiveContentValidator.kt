@@ -11,7 +11,9 @@ import java.time.Clock
 import java.time.Instant
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
+import java.util.zip.GZIPInputStream
 import javax.xml.XMLConstants
+import javax.xml.namespace.QName
 import javax.xml.stream.XMLInputFactory
 import javax.xml.stream.XMLStreamConstants
 import javax.xml.stream.XMLStreamException
@@ -48,25 +50,32 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                     if (entry.name.substringAfterLast('.', "").lowercase() in ARCHIVE_EXTENSIONS) {
                         reject(EvidenceRejectionCode.NESTED_ARCHIVE)
                     }
-                    val nestedArchiveDetector = NestedArchiveDetector()
-                    archive.getInputStream(entry).buffered().use { input ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        while (true) {
-                            checkDeadline(request.deadline)
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            entryBytes += count
-                            expandedBytes += count
-                            if (expandedBytes > request.policy.archiveLimits.maximumExpandedBytes) reject(EvidenceRejectionCode.ARCHIVE_EXPANDED_SIZE_LIMIT)
-                            if (ratio(entryBytes, compressed) > request.policy.archiveLimits.maximumCompressionRatio ||
-                                ratio(expandedBytes, compressedBytes) > request.policy.archiveLimits.maximumCompressionRatio
-                            ) reject(EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
-                            if (nestedArchiveDetector.accept(buffer, count)) reject(EvidenceRejectionCode.NESTED_ARCHIVE)
-                            captured?.let {
-                                if (it.size() + count > MAXIMUM_XML_BYTES) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
-                                it.write(buffer, 0, count)
+                    val probePath = Files.createTempFile("occ-evidence-nested-", ".bin")
+                    try {
+                        Files.newOutputStream(probePath).buffered().use { probeOutput ->
+                            archive.getInputStream(entry).buffered().use { input ->
+                                val buffer = ByteArray(BUFFER_SIZE)
+                                while (true) {
+                                    checkDeadline(request.deadline)
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    entryBytes += count
+                                    expandedBytes += count
+                                    if (expandedBytes > request.policy.archiveLimits.maximumExpandedBytes) reject(EvidenceRejectionCode.ARCHIVE_EXPANDED_SIZE_LIMIT)
+                                    if (ratio(entryBytes, compressed) > request.policy.archiveLimits.maximumCompressionRatio ||
+                                        ratio(expandedBytes, compressedBytes) > request.policy.archiveLimits.maximumCompressionRatio
+                                    ) reject(EvidenceRejectionCode.ARCHIVE_COMPRESSION_RATIO_LIMIT)
+                                    probeOutput.write(buffer, 0, count)
+                                    captured?.let {
+                                        if (it.size() + count > MAXIMUM_XML_BYTES) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                                        it.write(buffer, 0, count)
+                                    }
+                                }
                             }
                         }
+                        if (isValidNestedContainer(probePath, request.deadline)) reject(EvidenceRejectionCode.NESTED_ARCHIVE)
+                    } finally {
+                        Files.deleteIfExists(probePath)
                     }
                     inspectPartName(entry.name)
                     captured?.toByteArray()?.let { xmlParts[entry.name] = it }
@@ -76,7 +85,11 @@ internal class ArchiveContentValidator(private val clock: Clock) {
             officeRoot?.let { root ->
                 val requiredPart = OOXML_MAIN_PART_BY_ROOT.getValue(root)
                 if (requiredPart !in names) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
-                validateXml(xmlParts[requiredPart] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE), request.deadline)
+                validateXml(
+                    xmlParts[requiredPart] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE),
+                    request.deadline,
+                    OOXML_MAIN_ROOT_BY_ROOT.getValue(root),
+                )
                 val rootRelationships = xmlParts[ROOT_RELATIONSHIPS] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
                 val relationships = inspectRelationships(rootRelationships, request.deadline)
                 val officeRelationships = relationships.filter { it.type.endsWith("/officeDocument") }
@@ -106,13 +119,18 @@ internal class ArchiveContentValidator(private val clock: Clock) {
     private fun inspectContentTypes(xml: ByteArray, deadline: Instant): String? {
         var root: String? = null
         val rootElement = parseXml(xml, deadline) { name, attributes ->
-            if (name == "Default" || name == "Override") {
-                rejectActiveDeclaration(attributes["ContentType"] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE), null)
+            if (name.namespaceURI != CONTENT_TYPES_NAMESPACE) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            if (name.localPart !in CONTENT_TYPES_ELEMENTS) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            if (name.localPart == "Default" || name.localPart == "Override") {
+                rejectNamespacedAttributes(attributes)
+                rejectActiveDeclaration(requiredUnqualified(attributes, "ContentType"), null)
             }
-            if (name == "Override") {
-                val type = attributes.getValue("ContentType")
+            if (name.localPart == "Default") requiredUnqualified(attributes, "Extension")
+            if (name.localPart == "Override") requiredUnqualified(attributes, "PartName")
+            if (name.localPart == "Override") {
+                val type = requiredUnqualified(attributes, "ContentType")
                 OOXML_MAIN_TYPES[type]?.let { detected ->
-                    if (attributes["PartName"]?.removePrefix("/") != OOXML_MAIN_PART_BY_ROOT.getValue(detected)) {
+                    if (requiredUnqualified(attributes, "PartName").removePrefix("/") != OOXML_MAIN_PART_BY_ROOT.getValue(detected)) {
                         reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
                     }
                     if (root != null && root != detected) reject(EvidenceRejectionCode.POLYGLOT)
@@ -120,24 +138,28 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                 }
             }
         }
-        if (rootElement != "Types" || root == null) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        if (rootElement != QName(CONTENT_TYPES_NAMESPACE, "Types") || root == null) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
         return root
     }
 
     private fun inspectRelationships(xml: ByteArray, deadline: Instant): List<PackageRelationship> {
         val relationships = mutableListOf<PackageRelationship>()
         val rootElement = parseXml(xml, deadline) { name, attributes ->
-            if (name == "Relationship") {
-                val target = attributes["Target"] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
-                if (attributes["TargetMode"].equals("External", ignoreCase = true) || isExternalTarget(target)) {
+            if (name.namespaceURI != RELATIONSHIPS_NAMESPACE) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            if (name.localPart !in RELATIONSHIP_ELEMENTS) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+            if (name.localPart == "Relationship") {
+                rejectNamespacedAttributes(attributes)
+                requiredUnqualified(attributes, "Id")
+                val target = requiredUnqualified(attributes, "Target")
+                if (optionalUnqualified(attributes, "TargetMode").equals("External", ignoreCase = true) || isExternalTarget(target)) {
                     reject(EvidenceRejectionCode.OOXML_ACTIVE_CONTENT)
                 }
-                val type = attributes["Type"] ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+                val type = requiredUnqualified(attributes, "Type")
                 rejectActiveDeclaration(type, target)
                 relationships += PackageRelationship(type, target)
             }
         }
-        if (rootElement != "Relationships") reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+        if (rootElement != QName(RELATIONSHIPS_NAMESPACE, "Relationships")) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
         return relationships
     }
 
@@ -148,11 +170,11 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         if (OOXML_ACTIVE_DECLARATIONS.any { it in normalizedType || it in normalizedTarget }) reject(EvidenceRejectionCode.OOXML_ACTIVE_CONTENT)
     }
 
-    private fun validateXml(xml: ByteArray, deadline: Instant) {
-        parseXml(xml, deadline) { _, _ -> }
+    private fun validateXml(xml: ByteArray, deadline: Instant, expectedRoot: QName) {
+        if (parseXml(xml, deadline) { _, _ -> } != expectedRoot) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
     }
 
-    private fun parseXml(xml: ByteArray, deadline: Instant, onStart: (String, Map<String, String>) -> Unit): String {
+    private fun parseXml(xml: ByteArray, deadline: Instant, onStart: (QName, List<XmlAttribute>) -> Unit): QName {
         try {
             checkDeadline(deadline)
             val factory = XMLInputFactory.newFactory().apply {
@@ -166,7 +188,7 @@ internal class ArchiveContentValidator(private val clock: Clock) {
             var depth = 0
             var events = 0
             var textCharacters = 0L
-            var root: String? = null
+            var root: QName? = null
             try {
                 while (reader.hasNext()) {
                     checkDeadline(deadline)
@@ -175,11 +197,13 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                         XMLStreamConstants.START_ELEMENT -> {
                             depth++
                             if (depth > MAXIMUM_XML_DEPTH || reader.attributeCount > MAXIMUM_XML_ATTRIBUTES) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
-                            if (root == null) root = reader.localName
-                            val attributes = buildMap {
-                                for (index in 0 until reader.attributeCount) put(reader.getAttributeLocalName(index), reader.getAttributeValue(index))
+                            if (root == null) root = reader.name
+                            val attributes = buildList {
+                                for (index in 0 until reader.attributeCount) add(
+                                    XmlAttribute(reader.getAttributeName(index), reader.getAttributeValue(index)),
+                                )
                             }
-                            onStart(reader.localName, attributes)
+                            onStart(reader.name, attributes)
                         }
                         XMLStreamConstants.END_ELEMENT -> depth--
                         XMLStreamConstants.CHARACTERS, XMLStreamConstants.CDATA -> {
@@ -201,6 +225,23 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         } catch (failure: IllegalArgumentException) {
             throw EvidenceRejectedException(EvidenceRejectionCode.MALFORMED_ARCHIVE, failure)
         }
+    }
+
+    private fun requiredUnqualified(attributes: List<XmlAttribute>, localName: String): String =
+        attributes.filter { it.name.localPart == localName }.singleOrNull()
+            ?.takeIf { it.name.namespaceURI.isEmpty() }
+            ?.value
+            ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+
+    private fun optionalUnqualified(attributes: List<XmlAttribute>, localName: String): String? {
+        val matches = attributes.filter { it.name.localPart == localName }
+        if (matches.isEmpty()) return null
+        return matches.singleOrNull()?.takeIf { it.name.namespaceURI.isEmpty() }?.value
+            ?: reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
+    }
+
+    private fun rejectNamespacedAttributes(attributes: List<XmlAttribute>) {
+        if (attributes.any { it.name.namespaceURI.isNotEmpty() }) reject(EvidenceRejectionCode.MALFORMED_ARCHIVE)
     }
 
     private fun validateCentralDirectory(request: ParserSandboxRequest) {
@@ -334,6 +375,115 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         if (!clock.instant().isBefore(deadline)) reject(EvidenceRejectionCode.DEADLINE_EXCEEDED)
     }
 
+    private fun isValidNestedContainer(path: java.nio.file.Path, deadline: Instant): Boolean {
+        checkDeadline(deadline)
+        val size = Files.size(path)
+        if (size < 4) return false
+        if (isValidZip(path, deadline)) return true
+        val prefix = Files.newInputStream(path).use { it.readNBytes(minOf(size, 512L).toInt()) }
+        if (prefix.matchesAt(0, GZIP_MAGIC) && isValidGzip(path, deadline)) return true
+        if (prefix.size >= 512 && isValidTar(path, deadline)) return true
+        if (prefix.matchesAt(0, OLE_MAGIC) && prefix.size >= 512 &&
+            prefix[28] == 0xfe.toByte() && prefix[29] == 0xff.toByte() &&
+            unsignedShort(prefix, 30) in setOf(9, 12)
+        ) return true
+        if (prefix.matchesAt(0, SEVEN_Z_MAGIC) && prefix.size >= 32 && crc32(prefix, 12, 20) == unsignedInt(prefix, 8)) return true
+        if (prefix.matchesAt(0, XZ_MAGIC) && prefix.size >= 12 && crc32(prefix, 6, 2) == unsignedInt(prefix, 8)) return true
+        if (prefix.matchesAt(0, BZIP_MAGIC) && prefix.size >= 10 && prefix[3].toInt().toChar() in '1'..'9' &&
+            (prefix.matchesAt(4, BZIP_BLOCK_MAGIC) || prefix.matchesAt(4, BZIP_END_MAGIC))
+        ) return true
+        if (prefix.matchesAt(0, RAR4_MAGIC) && prefix.size >= 14 && prefix[9] == 0x73.toByte() &&
+            (crc32(prefix, 9, 5) and 0xffff) == unsignedShort(prefix, 7).toLong()
+        ) return true
+        return false
+    }
+
+    private fun isValidZip(path: java.nio.file.Path, deadline: Instant): Boolean = try {
+        ZipFile(path.toFile()).use { zip ->
+            val entries = zip.entries()
+            var expanded = 0L
+            while (entries.hasMoreElements()) {
+                checkDeadline(deadline)
+                val entry = entries.nextElement()
+                if (!entry.isDirectory) zip.getInputStream(entry).use { input ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    while (true) {
+                        checkDeadline(deadline)
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        expanded += count
+                        if (expanded > MAXIMUM_NESTED_PROBE_EXPANDED_BYTES) return true
+                    }
+                }
+            }
+        }
+        true
+    } catch (_: IOException) {
+        false
+    }
+
+    private fun isValidGzip(path: java.nio.file.Path, deadline: Instant): Boolean = try {
+        GZIPInputStream(Files.newInputStream(path).buffered()).use { input ->
+            val buffer = ByteArray(BUFFER_SIZE)
+            var expanded = 0L
+            while (true) {
+                checkDeadline(deadline)
+                val count = input.read(buffer)
+                if (count < 0) break
+                expanded += count
+                if (expanded > MAXIMUM_NESTED_PROBE_EXPANDED_BYTES) return true
+            }
+        }
+        true
+    } catch (_: IOException) {
+        false
+    }
+
+    private fun isValidTar(path: java.nio.file.Path, deadline: Instant): Boolean {
+        return try {
+            Files.newInputStream(path).buffered().use { input ->
+                val header = ByteArray(512)
+                var sawEntry = false
+                while (true) {
+                    checkDeadline(deadline)
+                    val count = input.readNBytes(header, 0, header.size)
+                    if (count == 0) return@use sawEntry
+                    if (count != header.size) return@use false
+                    if (header.all { it == 0.toByte() }) {
+                        val second = input.readNBytes(512)
+                        return@use sawEntry || (second.size == 512 && second.all { it == 0.toByte() } && input.read() < 0)
+                    }
+                    if (!header.matchesAt(257, USTAR_MAGIC) || tarChecksum(header) != tarStoredChecksum(header)) return@use false
+                    sawEntry = true
+                    val entrySize = String(header, 124, 12, StandardCharsets.US_ASCII).trim('\u0000', ' ').toLongOrNull(8) ?: return@use false
+                    var remaining = ((entrySize + 511) / 512) * 512
+                    while (remaining > 0) {
+                        checkDeadline(deadline)
+                        val skipped = input.skip(remaining)
+                        if (skipped <= 0) return@use false
+                        remaining -= skipped
+                    }
+                }
+                @Suppress("UNREACHABLE_CODE")
+                false
+            }
+        } catch (_: IOException) {
+            false
+        }
+    }
+
+    private fun tarChecksum(header: ByteArray): Long = header.indices.sumOf { index ->
+        if (index in 148 until 156) 32L else (header[index].toInt() and 0xff).toLong()
+    }
+
+    private fun tarStoredChecksum(header: ByteArray): Long =
+        String(header, 148, 8, StandardCharsets.US_ASCII).trim('\u0000', ' ').toLongOrNull(8) ?: -1
+
+    private fun crc32(bytes: ByteArray, offset: Int, length: Int): Long = java.util.zip.CRC32().run {
+        update(bytes, offset, length)
+        value
+    }
+
     private fun ratio(expanded: Long, compressed: Long) = if (expanded == 0L) 0.0 else if (compressed <= 0L) Double.POSITIVE_INFINITY else expanded.toDouble() / compressed
     private fun addBounded(current: Long, value: Long, code: EvidenceRejectionCode): Long {
         if (value > Long.MAX_VALUE - current) reject(code)
@@ -345,35 +495,11 @@ internal class ArchiveContentValidator(private val clock: Clock) {
     private fun reject(code: EvidenceRejectionCode): Nothing = throw EvidenceRejectedException(code)
 
     private data class PackageRelationship(val type: String, val target: String)
-
-    private class NestedArchiveDetector {
-        private var processedBytes = 0L
-        private var overlap = ByteArray(0)
-
-        fun accept(buffer: ByteArray, count: Int): Boolean {
-            val window = overlap + buffer.copyOfRange(0, count)
-            val absoluteWindowStart = processedBytes - overlap.size
-            if (ARCHIVE_MAGICS.any { window.indexOfBytes(it) >= 0 }) return true
-            val tarMarker = window.indexOfBytes(USTAR_MAGIC)
-            if (tarMarker >= 0 && absoluteWindowStart + tarMarker >= TAR_MAGIC_OFFSET) return true
-            processedBytes += count
-            overlap = window.copyOfRange(maxOf(0, window.size - MAXIMUM_SIGNATURE_OVERLAP), window.size)
-            return false
-        }
-
-        private fun ByteArray.indexOfBytes(expected: ByteArray): Int {
-            if (expected.size > size) return -1
-            for (offset in 0..size - expected.size) {
-                if (expected.indices.all { this[offset + it] == expected[it] }) return offset
-            }
-            return -1
-        }
-    }
+    private data class XmlAttribute(val name: QName, val value: String)
 
     companion object {
         private const val BUFFER_SIZE = 8192
-        private const val TAR_MAGIC_OFFSET = 257L
-        private const val MAXIMUM_SIGNATURE_OVERLAP = 7
+        private const val MAXIMUM_NESTED_PROBE_EXPANDED_BYTES = 16L * 1024 * 1024
         private const val MAXIMUM_XML_BYTES = 1024 * 1024
         private const val MAXIMUM_XML_EVENTS = 20_000
         private const val MAXIMUM_XML_DEPTH = 64
@@ -386,17 +512,21 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private const val ZIP64_SENTINEL = 0xffff_ffffL
         private const val CONTENT_TYPES = "[Content_Types].xml"
         private const val ROOT_RELATIONSHIPS = "_rels/.rels"
+        private const val CONTENT_TYPES_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/content-types"
+        private const val RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
+        private val CONTENT_TYPES_ELEMENTS = setOf("Types", "Default", "Override")
+        private val RELATIONSHIP_ELEMENTS = setOf("Relationships", "Relationship")
         private val ZIP_LOCAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x03, 0x04)
         private val ZIP_END_MAGIC = byteArrayOf(0x50, 0x4b, 0x05, 0x06)
         private val ZIP_CENTRAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x01, 0x02)
         private val OLE_MAGIC = byteArrayOf(0xd0.toByte(), 0xcf.toByte(), 0x11, 0xe0.toByte(), 0xa1.toByte(), 0xb1.toByte(), 0x1a, 0xe1.toByte())
-        private val ARCHIVE_MAGICS = listOf(
-            ZIP_LOCAL_MAGIC, ZIP_END_MAGIC, OLE_MAGIC, byteArrayOf(0x1f, 0x8b.toByte()),
-            byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c),
-            "Rar!\u001a\u0007".toByteArray(StandardCharsets.ISO_8859_1),
-            byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00),
-            "BZh".toByteArray(StandardCharsets.ISO_8859_1), byteArrayOf(0x28, 0xb5.toByte(), 0x2f, 0xfd.toByte()),
-        )
+        private val GZIP_MAGIC = byteArrayOf(0x1f, 0x8b.toByte())
+        private val SEVEN_Z_MAGIC = byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)
+        private val XZ_MAGIC = byteArrayOf(0xfd.toByte(), 0x37, 0x7a, 0x58, 0x5a, 0x00)
+        private val BZIP_MAGIC = "BZh".toByteArray(StandardCharsets.ISO_8859_1)
+        private val BZIP_BLOCK_MAGIC = byteArrayOf(0x31, 0x41, 0x59, 0x26, 0x53, 0x59)
+        private val BZIP_END_MAGIC = byteArrayOf(0x17, 0x72, 0x45, 0x38, 0x50, 0x90.toByte())
+        private val RAR4_MAGIC = "Rar!\u001a\u0007\u0000".toByteArray(StandardCharsets.ISO_8859_1)
         private val USTAR_MAGIC = "ustar".toByteArray(StandardCharsets.ISO_8859_1)
         private val ZIP_LEGACY_CHARSET = Charset.forName("IBM437")
         private val ARCHIVE_EXTENSIONS = setOf("zip", "jar", "docx", "xlsx", "pptx", "odt", "ods", "odp", "7z", "rar", "gz", "tar")
@@ -414,5 +544,10 @@ internal class ArchiveContentValidator(private val clock: Clock) {
             "ppt" to "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
         private val OOXML_MAIN_PART_BY_ROOT = mapOf("word" to "word/document.xml", "xl" to "xl/workbook.xml", "ppt" to "ppt/presentation.xml")
+        private val OOXML_MAIN_ROOT_BY_ROOT = mapOf(
+            "word" to QName("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "document"),
+            "xl" to QName("http://schemas.openxmlformats.org/spreadsheetml/2006/main", "workbook"),
+            "ppt" to QName("http://schemas.openxmlformats.org/presentationml/2006/main", "presentation"),
+        )
     }
 }

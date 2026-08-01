@@ -10,6 +10,8 @@ import org.junit.jupiter.params.provider.MethodSource
 import org.junit.jupiter.params.provider.ValueSource
 import java.nio.file.Files
 import java.nio.file.Path
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -66,7 +68,7 @@ class ProcessParserSandboxTest {
         assertThat(runCommand).doesNotContain(ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER)
         assertThat(runCommand.single { it.startsWith("--name=") })
             .matches("--name=occ-evidence-[a-f0-9]{24}")
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
     }
 
     @Test
@@ -130,7 +132,7 @@ class ProcessParserSandboxTest {
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
     }
 
     @Test
@@ -146,7 +148,7 @@ class ProcessParserSandboxTest {
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
     }
 
     @Test
@@ -192,7 +194,7 @@ class ProcessParserSandboxTest {
             assertThat(sandbox.inspect(parserRequest(path)))
                 .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
             assertThat(Thread.interrupted()).isTrue()
-            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
         } finally {
             Thread.interrupted()
             interrupter.shutdownNow()
@@ -207,7 +209,7 @@ class ProcessParserSandboxTest {
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
-        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "ps", "rm", "ps")
     }
 
     @Test
@@ -250,11 +252,6 @@ class ProcessParserSandboxTest {
             argumentFile,
             "-cp\n${System.getProperty("java.class.path")}\n${ParserWorkerFixture::class.java.name}\n$mode\n$pidFile\n",
         )
-        val controlArgumentFile = tempDirectory.resolve("docker-control-$mode-$verificationExitCode.args")
-        Files.writeString(
-            controlArgumentFile,
-            "-cp\n${System.getProperty("java.class.path")}\n${DockerControlFixture::class.java.name}\n",
-        )
         return ProcessParserSandbox(
             configuration(maximumRuntime = maximumRuntime, maximumRequestBytes = maximumRequestBytes),
             Clock.systemUTC(),
@@ -267,13 +264,8 @@ class ProcessParserSandboxTest {
                     val exitCode = if (verifiesAbsence) verificationExitCode else 0
                     val output = if (verifiesAbsence) verificationOutput else ""
                     val delayMillis = if (verifiesAbsence) verificationDelayMillis else 0
-                    listOf(
-                        javaExecutable.toString(),
-                        "@$controlArgumentFile",
-                        exitCode.toString(),
-                        output,
-                        delayMillis.toString(),
-                    )
+                    if (delayMillis > 0) return@ProcessStarter HangingProcess()
+                    else return@ProcessStarter CompletedProcess(exitCode, output.toByteArray())
                 }
                 ProcessBuilder(processArguments)
                     .redirectErrorStream(true)
@@ -363,15 +355,6 @@ class ProcessParserSandboxTest {
     }
 }
 
-object DockerControlFixture {
-    @JvmStatic
-    fun main(args: Array<String>) {
-        Thread.sleep(args[2].toLong())
-        print(args[1])
-        exitProcess(args[0].toInt())
-    }
-}
-
 object ParserWorkerFixture {
     @JvmStatic
     fun main(args: Array<String>) {
@@ -389,4 +372,33 @@ object ParserWorkerFixture {
             else -> ParserSandboxProtocol.writeResult(System.out, ParserSandboxResult.Accepted("application/pdf"))
         }
     }
+}
+
+internal class CompletedProcess(private val code: Int, output: ByteArray) : Process() {
+    private val standardInput = ByteArrayOutputStream()
+    private val standardOutput = ByteArrayInputStream(output)
+
+    override fun getOutputStream() = standardInput
+    override fun getInputStream() = standardOutput
+    override fun getErrorStream() = ByteArrayInputStream(ByteArray(0))
+    override fun waitFor() = code
+    override fun waitFor(timeout: Long, unit: TimeUnit) = true
+    override fun exitValue() = code
+    override fun destroy() = Unit
+    override fun isAlive() = false
+    override fun destroyForcibly(): Process = this
+}
+
+internal class HangingProcess : Process() {
+    private var alive = true
+
+    override fun getOutputStream() = ByteArrayOutputStream()
+    override fun getInputStream() = ByteArrayInputStream(ByteArray(0))
+    override fun getErrorStream() = ByteArrayInputStream(ByteArray(0))
+    override fun waitFor(): Int = throw InterruptedException()
+    override fun waitFor(timeout: Long, unit: TimeUnit) = false
+    override fun exitValue(): Int = if (alive) throw IllegalThreadStateException() else -1
+    override fun destroy() { alive = false }
+    override fun isAlive() = alive
+    override fun destroyForcibly(): Process = apply { alive = false }
 }

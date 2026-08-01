@@ -9,12 +9,7 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Clock
-import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 
 data class InspectionRequest(
     val path: Path,
@@ -78,7 +73,7 @@ class EvidenceRejectedException(
 ) : RuntimeException(code.name, cause)
 
 class EvidenceContentInspector(
-    private val malwareScanner: MalwareScanner,
+    private val scannerSandbox: ScannerSandbox,
     private val parserSandbox: ParserSandbox,
     private val clock: Clock = Clock.systemUTC(),
 ) {
@@ -89,10 +84,6 @@ class EvidenceContentInspector(
         val observation = observe(request)
         if (observation.sizeBytes != request.expectedSizeBytes) reject(EvidenceRejectionCode.SIZE_MISMATCH)
         if (observation.sha256 != request.expectedSha256) reject(EvidenceRejectionCode.HASH_MISMATCH)
-        if (observation.magic.startsWith(PDF_MAGIC) && (observation.sawZip || observation.sawUnsupportedSignature) ||
-            observation.magic.hasUnsupportedMagic() && (observation.sawPdf || observation.sawZip)
-        ) reject(EvidenceRejectionCode.POLYGLOT)
-
         val mediaType = when {
             observation.magic.startsWith(PDF_MAGIC) -> inspectInSandbox(request, ParserFormat.PDF)
             observation.magic.isZipMagic() -> inspectInSandbox(request, ParserFormat.ZIP)
@@ -136,10 +127,6 @@ class EvidenceContentInspector(
         val digest = MessageDigest.getInstance("SHA-256")
         var size = 0L
         var magic = ByteArray(0)
-        var tail = ByteArray(0)
-        var sawPdf = false
-        var sawZip = false
-        var sawUnsupportedSignature = false
         try {
             Files.newInputStream(request.path).buffered().use { input ->
                 val buffer = ByteArray(BUFFER_SIZE)
@@ -155,12 +142,6 @@ class EvidenceContentInspector(
                         val needed = minOf(MAGIC_BYTES - magic.size, count)
                         magic += buffer.copyOfRange(0, needed)
                     }
-                    val window = tail + buffer.copyOfRange(0, count)
-                    val text = String(window, StandardCharsets.ISO_8859_1)
-                    sawPdf = sawPdf || text.contains(PDF_SIGNATURE)
-                    sawZip = sawZip || ZIP_SIGNATURES.any(text::contains)
-                    sawUnsupportedSignature = sawUnsupportedSignature || UNSUPPORTED_SIGNATURES.any(text::contains)
-                    tail = window.takeLastBytes(SCAN_OVERLAP)
                 }
             }
         } catch (rejected: EvidenceRejectedException) {
@@ -168,7 +149,7 @@ class EvidenceContentInspector(
         } catch (failure: IOException) {
             throw EvidenceRejectedException(EvidenceRejectionCode.CONTENT_READ_ERROR, failure)
         }
-        return Observation(size, digest.digest().toHex(), magic, sawPdf, sawZip, sawUnsupportedSignature)
+        return Observation(size, digest.digest().toHex(), magic)
     }
 
     private fun isUtf8Text(path: Path, deadline: Instant): Boolean = try {
@@ -193,21 +174,10 @@ class EvidenceContentInspector(
 
     private fun scanWithDeadline(request: ScanRequest): ScanResult {
         checkDeadline(request.deadline)
-        val remaining = Duration.between(clock.instant(), request.deadline).toMillis()
-        if (remaining <= 0) reject(EvidenceRejectionCode.DEADLINE_EXCEEDED)
-        val executor = Executors.newSingleThreadExecutor { work -> Thread(work, "evidence-malware-scan").apply { isDaemon = true } }
         return try {
-            executor.submit<ScanResult> { malwareScanner.scan(request) }.get(remaining, TimeUnit.MILLISECONDS)
-                ?: reject(EvidenceRejectionCode.SCANNER_ERROR)
-        } catch (_: ExecutionException) {
+            scannerSandbox.scan(request)
+        } catch (_: Exception) {
             reject(EvidenceRejectionCode.SCANNER_ERROR)
-        } catch (_: TimeoutException) {
-            reject(EvidenceRejectionCode.SCANNER_ERROR)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            reject(EvidenceRejectionCode.SCANNER_ERROR)
-        } finally {
-            executor.shutdownNow()
         }
     }
 
@@ -221,20 +191,14 @@ class EvidenceContentInspector(
         val sizeBytes: Long,
         val sha256: String,
         val magic: ByteArray,
-        val sawPdf: Boolean,
-        val sawZip: Boolean,
-        val sawUnsupportedSignature: Boolean,
     )
 
     companion object {
         private const val BUFFER_SIZE = 8 * 1024
         private const val MAGIC_BYTES = 16
-        private const val SCAN_OVERLAP = 64
         private val PDF_MAGIC = "%PDF-".toByteArray(StandardCharsets.ISO_8859_1)
-        private const val PDF_SIGNATURE = "%PDF-"
         private val ZIP_MAGIC = byteArrayOf(0x50, 0x4b, 0x03, 0x04)
         private val ZIP_END_MAGIC = byteArrayOf(0x50, 0x4b, 0x05, 0x06)
-        private val ZIP_SIGNATURES = listOf("PK\u0003\u0004", "PK\u0005\u0006", "PK\u0007\u0008")
         private val UNSUPPORTED_SIGNATURE_BYTES = listOf(
             byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a),
             "GIF87a".toByteArray(StandardCharsets.ISO_8859_1),
@@ -246,14 +210,12 @@ class EvidenceContentInspector(
             byteArrayOf(0x7f, 0x45, 0x4c, 0x46),
             byteArrayOf(0x4d, 0x5a),
         )
-        private val UNSUPPORTED_SIGNATURES = UNSUPPORTED_SIGNATURE_BYTES.map { String(it, StandardCharsets.ISO_8859_1) }
         private val OLE_MAGIC = byteArrayOf(0xd0.toByte(), 0xcf.toByte(), 0x11, 0xe0.toByte(), 0xa1.toByte(), 0xb1.toByte(), 0x1a, 0xe1.toByte())
         private val OOXML_EXTENSIONS = setOf("docx", "xlsx", "pptx")
 
         private fun ByteArray.startsWith(prefix: ByteArray): Boolean = size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }
         private fun ByteArray.isZipMagic(): Boolean = startsWith(ZIP_MAGIC) || startsWith(ZIP_END_MAGIC)
         private fun ByteArray.hasUnsupportedMagic(): Boolean = UNSUPPORTED_SIGNATURE_BYTES.any { startsWith(it) }
-        private fun ByteArray.takeLastBytes(count: Int): ByteArray = copyOfRange(maxOf(0, size - count), size)
         private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
     }
 }
