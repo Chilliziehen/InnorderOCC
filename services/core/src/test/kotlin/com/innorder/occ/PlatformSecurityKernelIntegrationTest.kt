@@ -136,7 +136,7 @@ class PlatformSecurityKernelIntegrationTest(
         assertCommandState(version = 4, allows = 2, audit = 1, outbox = 1, idempotency = 1)
 
         command(accessToken, administratorId, "kernel-first", 3, """{"value":"different"}""", 409)
-        command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 409)
+        command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 503)
         command(accessToken, administratorId, "kernel-first", 4, """{"value":"first","secret":"journey-request-only"}""", 409)
         command(accessToken, administratorId, "kernel-stale", 3, """{"value":"stale"}""", 409)
         val second = command(accessToken, administratorId, "kernel-second", 4, """{"value":"second"}""", 200)
