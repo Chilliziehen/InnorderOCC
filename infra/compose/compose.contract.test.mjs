@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { DockerfileParser } from "dockerfile-ast";
 import { parse } from "yaml";
@@ -268,6 +270,9 @@ test("Compose wiring follows application config and completion gates", () => {
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
     "OBJECT_STORAGE_ENDPOINT",
+    "OCC_JWT_ISSUER",
+    "OCC_JWT_PRIVATE_KEY_FILE",
+    "OCC_JWT_PUBLIC_KEY_FILE",
     "OPA_BASE_URL",
     "REDIS_HOST",
     "REDIS_PORT",
@@ -319,6 +324,8 @@ test("Compose wiring follows application config and completion gates", () => {
 test("Compose enforces least-privilege file-backed secret boundaries", () => {
   const compose = parse(read(composePath));
   const secretNames = [
+    "jwt_private_key",
+    "jwt_public_key",
     "minio_app_password",
     "minio_app_user",
     "minio_root_password",
@@ -334,6 +341,8 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   }
 
   assert.deepEqual(secretTargets(compose.services.core), {
+    jwt_private_key: "occ-jwt-private-key.pem",
+    jwt_public_key: "occ-jwt-public-key.pem",
     minio_app_password: "occ.object-storage.secret-key",
     minio_app_user: "occ.object-storage.access-key",
     postgres_flyway_password: "spring.flyway.password",
@@ -359,6 +368,8 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     redis_password: "redis_password",
   });
   assert.deepEqual(secretTargets(compose.services["flowable-init"]), {
+    jwt_private_key: "occ-jwt-private-key.pem",
+    jwt_public_key: "occ-jwt-public-key.pem",
     postgres_flyway_password: "spring.flyway.password",
     postgres_runtime_password: "spring.datasource.password",
   });
@@ -372,6 +383,8 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   }
   for (const names of Object.values(consumers)) names.sort();
   assert.deepEqual(consumers, {
+    jwt_private_key: ["core", "flowable-init"],
+    jwt_public_key: ["core", "flowable-init"],
     minio_app_password: ["core", "minio-init"],
     minio_app_user: ["core", "minio-init"],
     minio_root_password: ["minio", "minio-init"],
@@ -386,6 +399,11 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.equal(compose.services.minio.environment.MINIO_ROOT_USER_FILE, "/run/secrets/minio_root_user");
   assert.equal(compose.services.minio.environment.MINIO_ROOT_PASSWORD_FILE, "/run/secrets/minio_root_password");
   assert.equal(compose.services.core.environment.SPRING_CONFIG_IMPORT, "configtree:/run/secrets/");
+  for (const name of ["core", "flowable-init"]) {
+    assert.equal(compose.services[name].environment.OCC_JWT_ISSUER, "${OCC_JWT_ISSUER:?Set OCC_JWT_ISSUER}");
+    assert.equal(compose.services[name].environment.OCC_JWT_PRIVATE_KEY_FILE, "/run/secrets/occ-jwt-private-key.pem");
+    assert.equal(compose.services[name].environment.OCC_JWT_PUBLIC_KEY_FILE, "/run/secrets/occ-jwt-public-key.pem");
+  }
   assert.equal(compose.services.core.environment.DATABASE_USERNAME, "innorder_runtime");
   assert.equal(compose.services.core.environment.FLYWAY_USERNAME, "innorder_flyway");
   assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_RETRIES, 0);
@@ -415,6 +433,8 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
 
   const example = read("infra/compose/.env.example");
   const expectedSecretPaths = [
+    "OCC_JWT_PRIVATE_KEY_FILE",
+    "OCC_JWT_PUBLIC_KEY_FILE",
     "MINIO_APP_PASSWORD_FILE",
     "MINIO_APP_USER_FILE",
     "MINIO_ROOT_PASSWORD_FILE",
@@ -429,8 +449,46 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     assert.match(line, /^[A-Z][A-Z0-9_]*=$/u, `environment value must be blank: ${line}`);
   }
   for (const name of expectedSecretPaths) assert.match(example, new RegExp(`^${name}=$`, "mu"));
+  assert.match(example, /^OCC_JWT_ISSUER=$/mu);
   assert.doesNotMatch(example, /^(?:POSTGRES_PASSWORD|REDIS_PASSWORD|MINIO_ROOT_USER|MINIO_ROOT_PASSWORD)=$/mu);
   assert.doesNotMatch(example, /changeme|example123|replace[-_ ]me|dummy/iu);
+});
+
+test("rendered Compose gives only Core runtimes readable production JWT paths", { skip: spawnSync("docker", ["compose", "version"], { encoding: "utf8" }).status !== 0 }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "innorder-compose-jwt-"));
+  try {
+    const secretFiles = Object.fromEntries([
+      "POSTGRES_ADMIN_PASSWORD_FILE", "POSTGRES_FLYWAY_PASSWORD_FILE", "POSTGRES_RUNTIME_PASSWORD_FILE",
+      "REDIS_PASSWORD_FILE", "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE",
+      "MINIO_APP_USER_FILE", "MINIO_APP_PASSWORD_FILE", "OCC_JWT_PRIVATE_KEY_FILE", "OCC_JWT_PUBLIC_KEY_FILE",
+    ].map((name) => {
+      const path = join(directory, name.toLowerCase()).replaceAll("\\", "/");
+      writeFileSync(path, name.startsWith("OCC_JWT") ? "-----BEGIN TEST KEY-----\nproduction-compose-only\n-----END TEST KEY-----\n" : `${name}-value\n`, "utf8");
+      return [name, path];
+    }));
+    const result = spawnSync("docker", ["compose", "-f", composePath, "config", "--format", "json"], {
+      encoding: "utf8",
+      env: { ...process.env, ...secretFiles, OCC_JWT_ISSUER: "https://issuer.production.example" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const rendered = JSON.parse(result.stdout);
+    for (const name of ["core", "flowable-init"]) {
+      assert.equal(rendered.services[name].environment.OCC_JWT_ISSUER, "https://issuer.production.example");
+      assert.equal(rendered.services[name].environment.OCC_JWT_PRIVATE_KEY_FILE, "/run/secrets/occ-jwt-private-key.pem");
+      assert.equal(rendered.services[name].environment.OCC_JWT_PUBLIC_KEY_FILE, "/run/secrets/occ-jwt-public-key.pem");
+    }
+    assert.equal(rendered.secrets.jwt_private_key.file, secretFiles.OCC_JWT_PRIVATE_KEY_FILE);
+    assert.equal(rendered.secrets.jwt_public_key.file, secretFiles.OCC_JWT_PUBLIC_KEY_FILE);
+    assert.equal(readFileSync(rendered.secrets.jwt_private_key.file, "utf8").includes("production-compose-only"), true);
+    for (const [name, service] of Object.entries(rendered.services)) {
+      if (!["core", "flowable-init"].includes(name)) {
+        assert.equal((service.secrets ?? []).some((secret) => ["jwt_private_key", "jwt_public_key"].includes(secret.source)), false);
+      }
+    }
+    assert.doesNotMatch(JSON.stringify(rendered), /test-only-jwt|src[\\/]test|classpath:/iu);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Dockerfile AST enforces pinned stages, lifecycle ordering, users, and entrypoints", () => {

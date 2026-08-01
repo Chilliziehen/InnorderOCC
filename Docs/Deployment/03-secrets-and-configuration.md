@@ -1,16 +1,16 @@
 # 密钥与配置管理
 
-本章给出当前 Compose 所需的八个文件型密钥、`.env.example` 的全部变量与默认值、权限、生成、验证和协调轮换方法。`.env` 只能保存密钥文件路径及非敏感覆盖值，不能保存密钥内容。
+本章给出当前 Compose 所需的十个文件型密钥、JWT issuer、`.env.example` 的全部变量与默认值、权限、生成、验证和协调轮换方法。`.env` 只能保存密钥文件路径及非敏感值，不能保存密钥内容。
 
 ## 配置模型
 
-Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?message}`，未设置或空值会使配置失败。其余变量使用 `${VAR:-default}`，未设置或空字符串都采用 Compose 默认值。
+Compose 从 `infra/compose/.env` 插值，十个密钥路径和 `OCC_JWT_ISSUER` 使用 `${VAR:?message}`，未设置或空值会使配置失败。其余变量使用 `${VAR:-default}`，未设置或空字符串都采用 Compose 默认值。
 
 **安全：** 密钥文件位于仓库外；每个文件只包含一个部署专用非空值，不带引号。文件路径应为稳定的绝对路径。
 
 ## `.env.example` 全部变量与默认值
 
-### 八个必填密钥路径
+### 十个必填密钥路径
 
 | 变量 | `.env.example` 值 | Compose 行为 |
 |---|---|---|
@@ -22,6 +22,14 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 | `MINIO_ROOT_PASSWORD_FILE` | 空 | 必填，无默认值 |
 | `MINIO_APP_USER_FILE` | 空 | 必填，无默认值 |
 | `MINIO_APP_PASSWORD_FILE` | 空 | 必填，无默认值 |
+| `OCC_JWT_PRIVATE_KEY_FILE` | 空 | 必填，PKCS#8 RSA 私钥文件 |
+| `OCC_JWT_PUBLIC_KEY_FILE` | 空 | 必填，X.509 RSA 公钥文件 |
+
+### 必填非敏感身份配置
+
+| 变量 | `.env.example` 值 | Compose 行为 |
+|---|---|---|
+| `OCC_JWT_ISSUER` | 空 | 必填、无默认值，必须是部署专用 HTTPS URI |
 
 ### 十二个可选非敏感覆盖
 
@@ -44,7 +52,7 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 
 桶名必须为小写 S3 风格名称，不得以点开头或结尾，只能使用小写字母、数字、点和连字符。更改桶名不会迁移旧桶中的对象。
 
-## 八个文件、唯一性和消费者
+## 十个文件、唯一性和消费者
 
 | 主机文件用途 | Compose secret | 消费者 | 最终目标 |
 |---|---|---|---|
@@ -56,13 +64,16 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 | MinIO root 密码 | `minio_root_password` | `minio`、`minio-init` | `/run/secrets/minio_root_password` |
 | MinIO 应用用户名 | `minio_app_user` | `minio-init`、`core` | 初始化文件；`occ.object-storage.access-key` |
 | MinIO 应用密码 | `minio_app_password` | `minio-init`、`core` | 初始化文件；`occ.object-storage.secret-key` |
+| JWT PKCS#8 私钥 | `jwt_private_key` | `core`、`flowable-init` | `/run/secrets/occ-jwt-private-key.pem` |
+| JWT X.509 公钥 | `jwt_public_key` | `core`、`flowable-init` | `/run/secrets/occ-jwt-public-key.pem` |
 
 唯一性规则：
 
 - 三个 PostgreSQL 密码必须两两不同；初始化脚本会强制检查。
 - MinIO root 用户名与应用用户名必须不同。
 - MinIO root 密码与应用密码必须不同。
-- 运维基线要求八个值全部独立，禁止跨 PostgreSQL、Redis 和 MinIO 复用。
+- 运维基线要求八个标量值全部独立，禁止跨 PostgreSQL、Redis 和 MinIO 复用。
+- JWT 文件必须是匹配的至少 3072 位 RSA 密钥对；私钥只能由 `core` 和受控 `flowable-init` 消费，其他服务不得挂载私钥或公钥。
 - 用户名也按不可猜测密钥保管，不写入工单或命令历史。
 
 ## 安全创建目录和权限
@@ -144,6 +155,11 @@ try {
 } finally {
   $rng.Dispose()
 }
+$openssl = (Get-Command openssl.exe -ErrorAction Stop).Source
+& $openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out (Join-Path $secretRoot 'occ-jwt-private-key.pem')
+if ($LASTEXITCODE -ne 0) { throw 'JWT 私钥生成失败' }
+& $openssl pkey -in (Join-Path $secretRoot 'occ-jwt-private-key.pem') -pubout -out (Join-Path $secretRoot 'occ-jwt-public-key.pem')
+if ($LASTEXITCODE -ne 0) { throw 'JWT 公钥生成失败' }
 ```
 
 ### Linux Bash
@@ -161,22 +177,24 @@ openssl rand -hex 10 >"$secret_root/minio-root-user"
 openssl rand -hex 32 >"$secret_root/minio-root-password"
 openssl rand -hex 10 >"$secret_root/minio-app-user"
 openssl rand -hex 32 >"$secret_root/minio-app-password"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$secret_root/occ-jwt-private-key.pem"
+openssl pkey -in "$secret_root/occ-jwt-private-key.pem" -pubout -out "$secret_root/occ-jwt-public-key.pem"
 chmod 0600 "$secret_root"/*
 ```
 
-**验证：** 预期文件名必须精确匹配以下八个名称，不能有缺项、额外项、目录或符号链接：`postgres-admin-password`、`postgres-flyway-password`、`postgres-runtime-password`、`redis-password`、`minio-root-user`、`minio-root-password`、`minio-app-user`、`minio-app-password`。每个文件只能有一个非空逻辑值；拒绝首尾空白、换行形成的多行值以及首尾单引号/双引号。两个 MinIO 用户名至少 16 个字符，六个密码至少 32 个字符；八个值全部互异。检查只输出通过结论，不输出值或散列。
+**验证：** 预期目录必须精确包含八个标量文件以及 `occ-jwt-private-key.pem`、`occ-jwt-public-key.pem`。标量文件只能有一个非空逻辑值；两个 MinIO 用户名至少 16 个字符，六个密码至少 32 个字符，八个标量值全部互异。JWT 文件允许 PEM 多行格式，但必须是匹配的 PKCS#8/X.509 至少 3072 位 RSA 密钥对。检查只输出通过结论，不输出值、密钥或散列。
 
 Windows 目录与文件 ACL 应关闭继承，只允许当前部署身份、`SYSTEM` 和本机 Administrators；目录可由当前身份或本机 Administrators 所有。若 Docker 使用另一个已批准服务 SID，应先将该 SID 加入脚本的允许列表并记录审批，不能放宽为普通用户组。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
-$expectedNames = @('postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password')
+$expectedNames = @('postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password','occ-jwt-private-key.pem','occ-jwt-public-key.pem')
 $minimumLengths = @(32,32,32,32,16,32,16,32)
 $minimumByName = @{}
 for ($index = 0; $index -lt $expectedNames.Count; $index++) { $minimumByName[$expectedNames[$index]] = $minimumLengths[$index] }
 $entries = @(Get-ChildItem -LiteralPath $secretRoot -Force)
-if ($entries.Count -ne 8 -or (Compare-Object $expectedNames @($entries.Name))) { throw '密钥目录必须精确包含八个预期文件' }
+if ($entries.Count -ne 10 -or (Compare-Object $expectedNames @($entries.Name))) { throw '密钥目录必须精确包含十个预期文件' }
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $systemSid = 'S-1-5-18'
 $adminSid = 'S-1-5-32-544'
@@ -195,6 +213,18 @@ try {
     $path = Join-Path $secretRoot $name
     $item = Get-Item -LiteralPath $path -Force
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "$name 不是普通文件" }
+    if ($name -like 'occ-jwt-*.pem') {
+      $pem = [IO.File]::ReadAllText($path)
+      $expectedHeader = if ($name -eq 'occ-jwt-private-key.pem') { '-----BEGIN ' + 'PRIVATE KEY-----' } else { '-----BEGIN PUBLIC KEY-----' }
+      if (-not $pem.Contains($expectedHeader)) { throw "$name 不是预期 PEM 类型" }
+      $acl = Get-Acl -LiteralPath $path
+      if (-not $acl.AreAccessRulesProtected) { throw "$name 仍继承 ACL" }
+      $allowSids = @($acl.Access | Where-Object AccessControlType -eq 'Allow' | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
+      if ($allowSids | Where-Object { $allowedSids -notcontains $_ }) { throw "$name 向未批准身份授予访问" }
+      foreach ($sid in $allowedSids) { if ($allowSids -notcontains $sid) { throw "$name 缺少批准 ACL" } }
+      $pem = $null
+      continue
+    }
     $value = [IO.File]::ReadAllText($path)
     if ([string]::IsNullOrWhiteSpace($value) -or $value -match '[\r\n]' -or $value -ne $value.Trim()) { throw "$name 必须只有一个无首尾空白的非空值" }
     if ($value.StartsWith("'") -or $value.EndsWith("'") -or $value.StartsWith('"') -or $value.EndsWith('"')) { throw "$name 不能带包围引号" }
@@ -211,21 +241,21 @@ try {
 } finally {
   $sha.Dispose()
 }
-if (($hashes | Sort-Object -Unique).Count -ne 8) { throw '八个密钥值必须全部互异' }
-Write-Output '八个 Windows 密钥文件及 ACL 验证通过'
+if (($hashes | Sort-Object -Unique).Count -ne 8) { throw '八个标量密钥值必须全部互异' }
+Write-Output '十个 Windows 密钥文件及 ACL 验证通过'
 ```
 
 ```bash
 set -euo pipefail
 : "${OCC_SECRET_ROOT:?必须设置 OCC_SECRET_ROOT}"
 secret_root=$(realpath "$OCC_SECRET_ROOT")
-expected=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+expected=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password occ-jwt-private-key.pem occ-jwt-public-key.pem)
 minimum=(32 32 32 32 16 32 16 32)
 test "$(stat -c '%u' "$secret_root")" -eq "$(id -u)"
 test "$(stat -c '%a' "$secret_root")" = 700
 mapfile -t entries < <(find "$secret_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
-test "${#entries[@]}" -eq 8
+test "${#entries[@]}" -eq 10
 test "$(printf '%s\n' "${entries[@]}")" = "$(printf '%s\n' "${wanted[@]}")"
 hashes=()
 for index in "${!expected[@]}"; do
@@ -234,6 +264,8 @@ for index in "${!expected[@]}"; do
   test ! -L "$path"
   test "$(stat -c '%u' "$path")" -eq "$(id -u)"
   test "$(stat -c '%a' "$path")" = 600
+  if [ "${expected[$index]}" = occ-jwt-private-key.pem ]; then openssl pkey -in "$path" -check -noout >/dev/null; continue; fi
+  if [ "${expected[$index]}" = occ-jwt-public-key.pem ]; then openssl pkey -pubin -in "$path" -noout >/dev/null; continue; fi
   test "$(awk 'END { print NR }' "$path")" -eq 1
   IFS= read -r value <"$path" || test -n "$value"
   test -n "$value"
@@ -246,7 +278,7 @@ for index in "${!expected[@]}"; do
   unset value trimmed
 done
 test "$(printf '%s\n' "${hashes[@]}" | sort -u | wc -l)" -eq 8
-printf '八个 Linux 密钥文件、所有者和 0600 权限验证通过\n'
+printf '十个 Linux 密钥文件、所有者和 0600 权限验证通过\n'
 ```
 
 散列也属于敏感元数据，不应打印或长期写入普通工单。Compose `config` 只完成插值和结构渲染，不证明这些源文件存在、是普通文件、内容有效或权限安全；必须先运行本节验证。
@@ -268,6 +300,9 @@ $lines = @(
   'MINIO_ROOT_PASSWORD_FILE=' + (Join-Path $secretRoot 'minio-root-password')
   'MINIO_APP_USER_FILE=' + (Join-Path $secretRoot 'minio-app-user')
   'MINIO_APP_PASSWORD_FILE=' + (Join-Path $secretRoot 'minio-app-password')
+  'OCC_JWT_PRIVATE_KEY_FILE=' + (Join-Path $secretRoot 'occ-jwt-private-key.pem')
+  'OCC_JWT_PUBLIC_KEY_FILE=' + (Join-Path $secretRoot 'occ-jwt-public-key.pem')
+  'OCC_JWT_ISSUER=' + $env:OCC_JWT_ISSUER
   'POSTGRES_DB='
   'POSTGRES_PORT='
   'KAFKA_PORT='
@@ -299,6 +334,9 @@ umask 077
   printf 'MINIO_ROOT_PASSWORD_FILE=%s/minio-root-password\n' "$secret_root"
   printf 'MINIO_APP_USER_FILE=%s/minio-app-user\n' "$secret_root"
   printf 'MINIO_APP_PASSWORD_FILE=%s/minio-app-password\n' "$secret_root"
+  printf 'OCC_JWT_PRIVATE_KEY_FILE=%s/occ-jwt-private-key.pem\n' "$secret_root"
+  printf 'OCC_JWT_PUBLIC_KEY_FILE=%s/occ-jwt-public-key.pem\n' "$secret_root"
+  printf 'OCC_JWT_ISSUER=%s\n' "$OCC_JWT_ISSUER"
   printf '%s\n' 'POSTGRES_DB=' 'POSTGRES_PORT=' 'KAFKA_PORT=' 'REDIS_PORT=' 'MINIO_API_PORT=' 'MINIO_CONSOLE_PORT=' 'OPA_PORT=' 'AI_PORT=' 'CORE_PORT=' 'AI_LOG_LEVEL=' 'APP_VERSION=' 'OBJECT_STORAGE_BUCKET='
 } >infra/compose/.env
 chmod 0600 infra/compose/.env
@@ -310,20 +348,21 @@ chmod 0600 infra/compose/.env
 
 ### 非敏感值约束
 
-Compose 插值只选择字符串和默认值，不验证端口范围、端口冲突、AI 日志级别、数据库名、版本或完整桶规则。以下 Windows/Bash 验证器还把 `.env.example` 的 20 个变量作为精确允许集合：八个路径 key 必须出现，十二个可选 key 可以缺失或为空，重复 key、未知 key 和 literal credential key 一律失败。应用/初始化脚本会在不同阶段拒绝部分错误值，因此必须在启动前统一验证：
+Compose 插值只选择字符串和默认值，不验证端口范围、端口冲突、AI 日志级别、数据库名、版本或完整桶规则。以下 Windows/Bash 验证器还把 `.env.example` 的 23 个变量作为精确允许集合：十个路径 key 和 `OCC_JWT_ISSUER` 必须出现，十二个可选 key 可以缺失或为空，重复 key、未知 key 和 literal credential key 一律失败。应用/初始化脚本会在不同阶段拒绝部分错误值，因此必须在启动前统一验证：
 
 - `AI_LOG_LEVEL` 只能是 `fatal`、`error`、`warn`、`info`、`debug`、`trace`，默认 `info`，区分大小写。
 - 八个主机端口必须是 `1-65535` 的十进制整数，彼此不同，并在启动前未被监听。
 - `POSTGRES_DB` 使用保守标识符规则：小写字母开头，后续仅小写字母、数字或下划线，总长不超过 63；默认 `innorder_occ`。
 - `OBJECT_STORAGE_BUCKET` 长度为 3-63，只含小写字母、数字、点和连字符，以字母或数字开头/结尾，不含连续点，也不能是 IPv4 地址形式；默认 `innorder-occ`。
 - `APP_VERSION` 去除首尾空白后必须非空；默认 `0.1.0`。它只用于状态标识，不验证镜像身份。
+- `OCC_JWT_ISSUER` 必须是无用户信息、query 或 fragment 的显式 HTTPS URI。
 
 Windows PowerShell 5.1 的预启动验证：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
-$requiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$requiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE')
 $config = @{}
 Get-Content -LiteralPath 'infra/compose/.env' | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -337,6 +376,7 @@ Get-Content -LiteralPath 'infra/compose/.env' | ForEach-Object {
   }
 }
 foreach ($key in $requiredPathKeys) { if (-not $config.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($config[$key])) { throw "缺少必填路径 key: $key" } }
+if (-not $config.ContainsKey('OCC_JWT_ISSUER') -or $config.OCC_JWT_ISSUER -notmatch '^https://[^/?#]+(?:/[^?#]*)?$') { throw 'OCC_JWT_ISSUER 必须是显式 HTTPS URI' }
 function Effective([string]$Name, [string]$Default) { if ([string]::IsNullOrEmpty($config[$Name])) { $Default } else { $config[$Name] } }
 $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
 $secretPathNames = [ordered]@{
@@ -344,6 +384,7 @@ $secretPathNames = [ordered]@{
   POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; REDIS_PASSWORD_FILE='redis-password'
   MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'
   MINIO_APP_USER_FILE='minio-app-user'; MINIO_APP_PASSWORD_FILE='minio-app-password'
+  OCC_JWT_PRIVATE_KEY_FILE='occ-jwt-private-key.pem'; OCC_JWT_PUBLIC_KEY_FILE='occ-jwt-public-key.pem'
 }
 foreach ($entry in $secretPathNames.GetEnumerator()) {
   $expectedPath = Join-Path $secretRoot $entry.Value
@@ -378,8 +419,8 @@ Linux Bash 的预启动验证：
 set -euo pipefail
 declare -A config=()
 declare -A allowed=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
-required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue
@@ -391,9 +432,10 @@ while IFS='=' read -r key value || [ -n "$key" ]; do
   config[$key]=$value
 done <infra/compose/.env
 for key in "${required_paths[@]}"; do [ -n "${config[$key]:-}" ] || exit 1; done
+[[ ${config[OCC_JWT_ISSUER]:-} =~ ^https://[^/?#]+(/[^?#]*)?$ ]] || exit 1
 secret_root=$(realpath "$OCC_SECRET_ROOT")
-path_names=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
-file_names=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+path_names=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
+file_names=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password occ-jwt-private-key.pem occ-jwt-public-key.pem)
 for index in "${!path_names[@]}"; do
   name=${path_names[$index]}
   [ "${config[$name]:-}" = "$secret_root/${file_names[$index]}" ] || exit 1
@@ -450,9 +492,9 @@ npm run test:infra
 - 服务恰好为十一个，三个一次性服务保留 `restart: "no"`。
 - 只有 `host-gateway` 有 `ports`，且八个绑定都以 `127.0.0.1` 开头。
 - `backend` 仍为 internal，只有网关还连接 `host-access`。
-- 四个卷名不变；八个 secret 的 `file` 指向预期绝对路径。
+- 四个卷名不变；十个 secret 的 `file` 指向预期绝对路径。
 - Core 的数据库用户是 `innorder_runtime`，Flyway 用户是 `innorder_flyway`。
-- Core config tree 的五个目标文件名与 Spring 属性完全一致。
+- Core config tree 的五个属性目标文件名与 Spring 属性完全一致；Core 与 `flowable-init` 的 JWT 路径精确为 Option A 两个 `/run/secrets/occ-jwt-*.pem` 文件。
 - `APP_VERSION`、日志级别、桶名和端口覆盖符合变更单。
 
 **安全：** 展开配置不应含密钥值，但会包含主机密钥路径；证据归档前对路径做必要脱敏。

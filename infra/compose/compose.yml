@@ -195,7 +195,14 @@ services:
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-innorder-occ}
       FLOWABLE_DATABASE_SCHEMA_UPDATE: "false"
+      OCC_JWT_ISSUER: ${OCC_JWT_ISSUER:?Set OCC_JWT_ISSUER}
+      OCC_JWT_PRIVATE_KEY_FILE: /run/secrets/occ-jwt-private-key.pem
+      OCC_JWT_PUBLIC_KEY_FILE: /run/secrets/occ-jwt-public-key.pem
     secrets:
+      - source: jwt_private_key
+        target: occ-jwt-private-key.pem
+      - source: jwt_public_key
+        target: occ-jwt-public-key.pem
       - source: postgres_runtime_password
         target: spring.datasource.password
       - source: postgres_flyway_password
@@ -234,7 +241,14 @@ services:
       FLOWABLE_DATABASE_SCHEMA_UPDATE: "true"
       OCC_OUTBOX_ENABLED: "false"
       STATUS_EXTERNAL_PROBES_ENABLED: "false"
+      OCC_JWT_ISSUER: ${OCC_JWT_ISSUER:?Set OCC_JWT_ISSUER}
+      OCC_JWT_PRIVATE_KEY_FILE: /run/secrets/occ-jwt-private-key.pem
+      OCC_JWT_PUBLIC_KEY_FILE: /run/secrets/occ-jwt-public-key.pem
     secrets:
+      - source: jwt_private_key
+        target: occ-jwt-private-key.pem
+      - source: jwt_public_key
+        target: occ-jwt-public-key.pem
       - source: postgres_runtime_password
         target: spring.datasource.password
       - source: postgres_flyway_password
@@ -284,6 +298,10 @@ networks:
     driver: bridge
 
 secrets:
+  jwt_private_key:
+    file: ${OCC_JWT_PRIVATE_KEY_FILE:?Set OCC_JWT_PRIVATE_KEY_FILE}
+  jwt_public_key:
+    file: ${OCC_JWT_PUBLIC_KEY_FILE:?Set OCC_JWT_PUBLIC_KEY_FILE}
   postgres_admin_password:
     file: ${POSTGRES_ADMIN_PASSWORD_FILE:?Set POSTGRES_ADMIN_PASSWORD_FILE}
   postgres_flyway_password:

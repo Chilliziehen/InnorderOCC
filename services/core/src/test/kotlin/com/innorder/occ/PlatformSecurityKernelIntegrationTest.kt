@@ -26,6 +26,7 @@ import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
@@ -73,6 +74,7 @@ import jakarta.servlet.http.HttpServletResponse
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
+@EnabledIfEnvironmentVariable(named = "OPA_PATH", matches = ".+")
 @ActiveProfiles("test")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Import(PlatformSecurityKernelIntegrationTest.KernelTestConfiguration::class)
@@ -471,7 +473,7 @@ class PlatformSecurityKernelIntegrationTest(
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val PASSWORD = "platform-kernel-bootstrap-test-only"
-        private val opa = OpaProcess()
+        private val opa by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OpaProcess() }
 
         @Container
         @JvmStatic

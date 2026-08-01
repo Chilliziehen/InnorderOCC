@@ -173,7 +173,7 @@ async function main() {
   await run("database static contracts", npm, ["run", "test:database"]);
 
   if (testsOnly) {
-    await run("Core Kotlin tests", gradle, [":services:core:test", "--dependency-verification", "strict"]);
+    await run("Core Kotlin tests", gradle, [":services:core:test", "--rerun-tasks", "--dependency-verification", "strict"]);
     return;
   }
 

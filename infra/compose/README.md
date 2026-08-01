@@ -6,8 +6,8 @@ Install Docker Engine with Docker Compose v2. The stack requires Linux
 containers and enough memory for PostgreSQL, Kafka, Core, and supporting
 services.
 
-Create eight files outside the repository. Each file must contain one unique,
-non-empty value without surrounding quotes. Create `infra/compose/.env` from
+Create ten files outside the repository: eight scalar credential files and one
+PKCS#8 private/X.509 public RSA key pair. Create `infra/compose/.env` from
 `.env.example` and set these variables to the corresponding absolute paths:
 
 - `POSTGRES_ADMIN_PASSWORD_FILE`
@@ -18,6 +18,10 @@ non-empty value without surrounding quotes. Create `infra/compose/.env` from
 - `MINIO_ROOT_PASSWORD_FILE`
 - `MINIO_APP_USER_FILE`
 - `MINIO_APP_PASSWORD_FILE`
+- `OCC_JWT_PRIVATE_KEY_FILE`
+- `OCC_JWT_PUBLIC_KEY_FILE`
+
+Set required `OCC_JWT_ISSUER` to the deployment's explicit HTTPS issuer URI.
 
 The three PostgreSQL passwords must differ. The MinIO application username and
 password must differ from the root credentials. Blank paths stop Compose
@@ -69,7 +73,9 @@ independent of Core readiness.
 Spring imports mounted secrets with
 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/`. Secret target filenames are
 exact Spring properties, including `spring.datasource.password`,
-`spring.flyway.password`, and `occ.object-storage.secret-key`.
+`spring.flyway.password`, and `occ.object-storage.secret-key`. Core and
+`flowable-init` alone receive the JWT private/public files at
+`/run/secrets/occ-jwt-private-key.pem` and `/run/secrets/occ-jwt-public-key.pem`.
 
 ## Immutable Images
 

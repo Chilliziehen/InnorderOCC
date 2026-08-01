@@ -7,7 +7,7 @@
 ### 管理员与日常操作员边界
 
 - Windows 管理员负责安装/升级 Docker Desktop、启用 WSL2、配置开机或登录启动、主机防火墙、磁盘、时间同步、受保护目录 ACL 和批准 Docker Desktop 文件共享。管理员权限也等价于能控制 Docker Engine、读取挂载文件和替换容器，必须按高权限账号管理。
-- 部署操作员负责经过审批的源码 revision、`npm run install:verified`、OPA 来源、严格验证、Compose 构建/启动和验收。账号必须能访问 Docker Desktop Engine、仓库、证据目录及八个密钥文件，但不应因此获得其他业务目录权限。
+- 部署操作员负责经过审批的源码 revision、`npm run install:verified`、OPA 来源、严格验证、Compose 构建/启动和验收。账号必须能访问 Docker Desktop Engine、仓库、证据目录及十个密钥文件，但不应因此获得其他业务目录权限。
 - 日常值班人员只执行状态、HTTP/TCP 探测和经批准的日志收集。停止、重启、镜像重建和数据删除会影响可用性，不能仅因拥有 Docker 权限就自行执行。
 - 需要提升权限时，关闭普通窗口后显式启动批准的管理员 PowerShell；不要在同一窗口临时混用身份。记录执行身份和变更单，不记录环境转储或密钥路径清单。
 
@@ -82,7 +82,7 @@ Invoke-CheckedNative -FilePath './gradlew.bat' -ArgumentList @('--version') -Fai
 
 ## 密钥准备与第 03 章门禁
 
-严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建八个互异文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建只保存八个绝对文件路径和十二个非敏感覆盖项的 `infra/compose/.env`。
+严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建八个互异标量文件和一对 JWT PEM 文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建只保存十个绝对文件路径、必填 issuer 和十二个可选非敏感覆盖项的 `infra/compose/.env`。
 
 **安全：** 不在命令、工单、截图、PowerShell history、进程参数、`.env`、Compose YAML 或日志中放置密钥值。三个 PostgreSQL 密码必须互异，MinIO root 与应用用户名/密码必须不同。密钥生成与内容/ACL 检验直接使用第 03 章脚本，不另造较弱版本。
 
@@ -92,14 +92,14 @@ if (-not (Test-Path -LiteralPath $SecretRoot -PathType Container)) { throw '密�
 if ($SecretRoot.StartsWith($RepositoryRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '密钥目录不能位于仓库内' }
 $ignored = git check-ignore infra/compose/.env
 if ($LASTEXITCODE -ne 0 -or $ignored -notcontains 'infra/compose/.env') { throw '.env 未被 Git 忽略' }
-$expected = 'postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password'
+$expected = 'postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password','occ-jwt-private-key.pem','occ-jwt-public-key.pem'
 $actual = @(Get-ChildItem -LiteralPath $SecretRoot -Force)
-if ($actual.Count -ne 8 -or (Compare-Object $expected @($actual.Name))) { throw '密钥目录内容不符合第 03 章要求' }
+if ($actual.Count -ne 10 -or (Compare-Object $expected @($actual.Name))) { throw '密钥目录内容不符合第 03 章要求' }
 if (-not (Test-Path -LiteralPath $ComposeEnv -PathType Leaf)) { throw 'infra/compose/.env 不存在' }
 Write-Output '密钥目录文件名、外部位置和 .env 忽略规则门禁通过；继续运行第 03 章完整内容与 ACL 验证'
 ```
 
-**验证：** 第 03 章完整验证器必须只输出通过结论，不输出值或散列；八个 `.env` 路径必须分别指向预期普通文件。Compose 插值成功不能替代文件内容、唯一性和 ACL 检查。
+**验证：** 第 03 章完整验证器必须只输出通过结论，不输出值或散列；十个 `.env` 路径必须分别指向预期普通文件。Compose 插值成功不能替代文件内容、唯一性、JWT 配对和 ACL 检查。
 
 ## 配置解析、依赖安装与严格验证
 
@@ -110,7 +110,7 @@ Write-Output '密钥目录文件名、外部位置和 .env 忽略规则门禁通
 ```powershell
 $ErrorActionPreference = 'Stop'
 $Config = @{}
-$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
     $parts = $_ -split '=', 2
@@ -339,7 +339,7 @@ if ($LASTEXITCODE -ne 0) { throw '容器内 Kafka 替代检查失败' }
 
 ## 可选的网关上游隔离验证
 
-此步骤只允许在非生产、无业务流量的受控验收环境执行。它会停止 AI，造成 AI HTTP/TCP 路径短时不可用，但不改变持久数据；前提是八长运行/两一次性检查已通过、日志已留存、维护窗口和恢复责任人已确认。生产环境跳过并依赖仓库网关契约测试。
+此步骤只允许在非生产、无业务流量的受控验收环境执行。它会停止 AI，造成 AI HTTP/TCP 路径短时不可用，但不改变持久数据；前提是八个长运行服务/三个一次性服务检查已通过、日志已留存、维护窗口和恢复责任人已确认。生产环境跳过并依赖仓库网关契约测试。
 
 **注意：** 执行前由审批流程在当前会话设置 `OCC_CONFIRM_GATEWAY_ISOLATION=NON_PRODUCTION_APPROVED`。以下命令不会接受其他值。
 
