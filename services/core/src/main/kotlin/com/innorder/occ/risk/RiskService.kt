@@ -132,16 +132,20 @@ class RiskService(
         val after = cursor?.let { decodeTuple(cursors.decode(it, context)) }
         return transactions.execute {
             val authorized = mutableListOf<RiskQueueItem>()
-            for (risk in risks.queue(filters, at, MAX_QUEUE_SCAN)) {
-                if (after != null && compare(tuple(risk), after) <= 0) continue
-                if (!allowed(principalId, correlationId, "risk.read", risk)) continue
-                val reason = if (allowed(principalId, correlationId, "risk.reason.read", risk)) risk.reason else null
-                authorized += RiskQueueItem(
-                    risk.id, risk.targetEntityId, risk.severity, risk.state, reason, risk.dueAt,
-                    risk.ownerRelationshipId, risk.rowVersion,
-                )
-                if (authorized.size > limit) break
-            }
+            var position = after?.let { RiskRepository.QueuePosition(it.dueAt, it.severityRank, it.id) }
+            do {
+                val candidates = risks.queue(filters, at, QUEUE_BATCH_SIZE, position)
+                for (risk in candidates) {
+                    position = RiskRepository.QueuePosition(risk.dueAt, rank(risk.severity), risk.id)
+                    if (!allowed(principalId, correlationId, "risk.read", risk)) continue
+                    val reason = if (allowed(principalId, correlationId, "risk.reason.read", risk)) risk.reason else null
+                    authorized += RiskQueueItem(
+                        risk.id, risk.targetEntityId, risk.severity, risk.state, reason, risk.dueAt,
+                        risk.ownerRelationshipId, risk.rowVersion,
+                    )
+                    if (authorized.size > limit) break
+                }
+            } while (authorized.size <= limit && candidates.size == QUEUE_BATCH_SIZE)
             val items = authorized.take(limit)
             val next = if (authorized.size > limit && items.isNotEmpty()) {
                 cursors.encode(context, encodeTuple(items.last()))
@@ -224,21 +228,6 @@ class RiskService(
     )
 
     private data class QueueTuple(val dueAt: Instant?, val severityRank: Int, val id: UUID)
-
-    private fun tuple(risk: RiskRecord) = QueueTuple(risk.dueAt, rank(risk.severity), risk.id)
-    private fun tuple(item: RiskQueueItem) = QueueTuple(item.dueAt, rank(item.severity), item.id)
-
-    private fun compare(left: QueueTuple, right: QueueTuple): Int {
-        val due = when {
-            left.dueAt == null && right.dueAt == null -> 0
-            left.dueAt == null -> 1
-            right.dueAt == null -> -1
-            else -> left.dueAt.compareTo(right.dueAt)
-        }
-        if (due != 0) return due
-        val severity = right.severityRank.compareTo(left.severityRank)
-        return if (severity != 0) severity else left.id.toString().compareTo(right.id.toString())
-    }
 
     private fun encodeTuple(item: RiskQueueItem): ArrayNode = MAPPER.createArrayNode().apply {
         item.dueAt?.let { add(it.toString()) } ?: addNull()
@@ -416,7 +405,7 @@ class RiskService(
     private fun json(fields: Map<String, Any?>): CanonicalJsonObject = CanonicalJsonObject.from(MAPPER.valueToTree(fields))
 
     companion object {
-        private const val MAX_QUEUE_SCAN = 512
+        private const val QUEUE_BATCH_SIZE = 128
         private val DEFAULT_CUSTOMER_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
         private val TERMINAL_STATES = setOf(RiskState.RESOLVED, RiskState.DISMISSED)
         private val MAPPER = ObjectMapper().findAndRegisterModules()

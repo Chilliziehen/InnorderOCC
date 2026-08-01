@@ -162,7 +162,9 @@ class RiskRepository(private val jdbc: JdbcOperations) {
         ) }, Timestamp.from(at), limit,
     )
 
-    fun queue(filters: RiskQueueFilters, at: Instant, limit: Int): List<RiskRecord> {
+    data class QueuePosition(val dueAt: Instant?, val severityRank: Int, val id: UUID)
+
+    fun queue(filters: RiskQueueFilters, at: Instant, limit: Int, after: QueuePosition? = null): List<RiskRecord> {
         val sql = StringBuilder("SELECT * FROM occ.risk WHERE severity = ANY (?::text[]) AND state = ANY (?::text[])")
         val arguments = mutableListOf<Any>(
             filters.severities.map(Enum<*>::name).toTypedArray(), filters.states.map(Enum<*>::name).toTypedArray(),
@@ -175,6 +177,22 @@ class RiskRepository(private val jdbc: JdbcOperations) {
             RiskSlaStatus.NOT_DUE -> { sql.append(" AND due_at > ?"); arguments += Timestamp.from(at) }
             RiskSlaStatus.NONE -> sql.append(" AND due_at IS NULL")
             null -> Unit
+        }
+        after?.let { position ->
+            val rank = "CASE severity WHEN 'RED' THEN 2 WHEN 'YELLOW' THEN 1 ELSE 0 END"
+            if (position.dueAt == null) {
+                sql.append(" AND due_at IS NULL AND ($rank < ? OR ($rank = ? AND id > ?))")
+                arguments += position.severityRank
+                arguments += position.severityRank
+                arguments += position.id
+            } else {
+                sql.append(" AND (due_at > ? OR due_at IS NULL OR (due_at = ? AND ($rank < ? OR ($rank = ? AND id > ?))))")
+                arguments += Timestamp.from(position.dueAt)
+                arguments += Timestamp.from(position.dueAt)
+                arguments += position.severityRank
+                arguments += position.severityRank
+                arguments += position.id
+            }
         }
         sql.append(" ORDER BY due_at ASC NULLS LAST, CASE severity WHEN 'RED' THEN 2 WHEN 'YELLOW' THEN 1 ELSE 0 END DESC, id LIMIT ?")
         arguments += limit
