@@ -222,7 +222,7 @@ try {
 }
 console.log('passed sequential idempotency terminal transition coverage');
 
-for (const testFile of ['000_assert.sql', '001_schema_contract.sql', '002_constraints.sql']) {
+for (const testFile of ['000_assert.sql', '001_schema_contract.sql', '002_constraints.sql', '003_process_task_workflow.sql']) {
   const sql = readFileSync(resolve('database/tests', testFile), 'utf8')
     .split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('\\'))

@@ -478,7 +478,12 @@ BEGIN
           ON provider.task_id = requirement.task_id
          AND provider.provider_key = requirement.provider_key
         WHERE requirement.task_id = NEW.id
-          AND coalesce(provider.status, 'UNAVAILABLE') <> 'READY'
+          AND (
+              provider.status IS DISTINCT FROM 'READY'
+              OR provider.source_entity_id IS NULL
+              OR provider.source_row_version IS DISTINCT FROM
+                  occ.task_gate_source_row_version(requirement.provider_key, provider.source_entity_id)
+          )
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate provider is unavailable';
     END IF;
@@ -500,7 +505,7 @@ CREATE UNIQUE INDEX uq_task_blocker_active
 ON occ.task_blocker (task_id, source_entity_id, blocker_code)
 WHERE resolved_at IS NULL;
 
-CREATE FUNCTION occ.authoritative_entity_row_version(p_entity_id uuid)
+CREATE FUNCTION occ.task_gate_source_row_version(p_provider_key text, p_entity_id uuid)
 RETURNS bigint
 LANGUAGE plpgsql
 STABLE
@@ -508,21 +513,15 @@ AS $$
 DECLARE
     current_version bigint;
 BEGIN
-    SELECT row_version INTO current_version FROM occ.evidence WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM occ.managed_resource WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM occ.business_object WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM occ.task_projection WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM occ.process_instance WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM occ.cohort WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM occ.risk WHERE id = p_entity_id;
-    IF FOUND THEN RETURN current_version; END IF;
-    SELECT row_version INTO current_version FROM authz.entity WHERE id = p_entity_id;
+    IF p_provider_key = 'evidence' OR p_provider_key LIKE 'evidence.%' THEN
+        SELECT row_version INTO current_version FROM occ.evidence WHERE id = p_entity_id;
+    ELSIF p_provider_key = 'resource' OR p_provider_key LIKE 'resource.%' THEN
+        SELECT row_version INTO current_version FROM occ.managed_resource WHERE id = p_entity_id;
+    ELSIF p_provider_key = 'process' OR p_provider_key LIKE 'process.%' THEN
+        SELECT row_version INTO current_version FROM occ.process_instance WHERE id = p_entity_id;
+    ELSE
+        RETURN NULL;
+    END IF;
     RETURN current_version;
 END;
 $$;
@@ -569,7 +568,7 @@ BEGIN
         IF NEW.source_entity_id IS NULL OR NEW.source_row_version IS NULL THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'READY gate provider requires a source entity and version';
         END IF;
-        authoritative_version := occ.authoritative_entity_row_version(NEW.source_entity_id);
+        authoritative_version := occ.task_gate_source_row_version(NEW.provider_key, NEW.source_entity_id);
         IF authoritative_version IS NULL OR authoritative_version IS DISTINCT FROM NEW.source_row_version THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'READY gate provider source version is not authoritative';
         END IF;
@@ -584,6 +583,34 @@ FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_gate_provider_state();
 CREATE TRIGGER trg_task_gate_provider_state_no_truncate
 BEFORE TRUNCATE ON occ.task_gate_provider_state
 FOR EACH STATEMENT EXECUTE FUNCTION occ.enforce_task_gate_provider_state();
+
+CREATE FUNCTION occ.mark_task_gate_sources_stale()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.row_version > OLD.row_version THEN
+        UPDATE occ.task_gate_provider_state provider
+        SET status = 'STALE',
+            safe_failure_code = NULL,
+            refreshed_at = greatest(provider.refreshed_at, transaction_timestamp())
+        WHERE provider.source_entity_id = NEW.id
+          AND provider.source_row_version IS DISTINCT FROM NEW.row_version
+          AND provider.status = 'READY';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_evidence_gate_source_stale
+AFTER UPDATE ON occ.evidence
+FOR EACH ROW EXECUTE FUNCTION occ.mark_task_gate_sources_stale();
+CREATE TRIGGER trg_managed_resource_gate_source_stale
+AFTER UPDATE ON occ.managed_resource
+FOR EACH ROW EXECUTE FUNCTION occ.mark_task_gate_sources_stale();
+CREATE TRIGGER trg_process_instance_gate_source_stale
+AFTER UPDATE ON occ.process_instance
+FOR EACH ROW EXECUTE FUNCTION occ.mark_task_gate_sources_stale();
 
 CREATE FUNCTION occ.enforce_task_blocker_lifecycle()
 RETURNS trigger
@@ -633,6 +660,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     submission occ.task_review_projection_fact%ROWTYPE;
+    task_state text;
+    task_assignee_id uuid;
 BEGIN
     IF NEW.fact_kind = 'DECIDED' THEN
         SELECT * INTO STRICT submission
@@ -642,11 +671,21 @@ BEGIN
            OR submission.review_sequence IS DISTINCT FROM NEW.review_sequence THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'decision must match its submission task and sequence';
         END IF;
-    ELSIF EXISTS (
-        SELECT 1 FROM occ.task_review_projection_fact fact
-        WHERE fact.task_id = NEW.task_id AND fact.review_sequence >= NEW.review_sequence
-    ) THEN
-        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review sequence must increase monotonically';
+    ELSE
+        SELECT state, assignee_id INTO STRICT task_state, task_assignee_id
+        FROM occ.task_projection
+        WHERE id = NEW.task_id
+        FOR SHARE;
+        IF task_state <> 'CLAIMED' OR task_assignee_id IS NULL
+           OR NEW.prior_assignee_id IS DISTINCT FROM task_assignee_id THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'submission requires the claimed task assignee';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM occ.task_review_projection_fact fact
+            WHERE fact.task_id = NEW.task_id AND fact.review_sequence >= NEW.review_sequence
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review sequence must increase monotonically';
+        END IF;
     END IF;
     RETURN NEW;
 END;
