@@ -316,6 +316,27 @@ describe("Session manager", () => {
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
   });
 
+  it("revokes a stale session even when its vault removal fails", async () => {
+    const h = harness("O".repeat(43));
+    let resolveMe!: (value: typeof user) => void;
+    vi.mocked(h.core.refresh).mockResolvedValue(token("N"));
+    vi.mocked(h.core.me).mockReturnValue(new Promise((resolve) => { resolveMe = resolve; }));
+    vi.mocked(h.core.logout).mockResolvedValue();
+    const restore = h.manager.restore();
+    await vi.waitFor(() => expect(h.core.me).toHaveBeenCalledOnce());
+
+    vi.mocked(h.core.login).mockResolvedValue(token("C"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    vi.mocked(h.vault.remove).mockRejectedValue(new Error("vault remove failed"));
+    const restoreFailure = expect(restore).rejects.toThrow("vault remove failed");
+    resolveMe(user);
+    await restoreFailure;
+
+    expect(h.core.logout).toHaveBeenCalledWith("N".repeat(43), "access-N");
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-C");
+  });
+
   it("a rejecting refresh from profile A cannot clear authenticated profile B", async () => {
     const h = harness("A".repeat(43));
     let rejectA!: (error: Error) => void;
@@ -451,6 +472,20 @@ describe("Session manager", () => {
 
     expect(h.core.logout).toHaveBeenCalledWith("R".repeat(43), "access-R");
     expect(h.stored).toBeNull();
+    expect(h.accessToken).toBeNull();
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+  });
+
+  it("attempts logout revocation when vault removal fails", async () => {
+    const h = harness();
+    vi.mocked(h.core.login).mockResolvedValue(token("R"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    vi.mocked(h.vault.remove).mockRejectedValue(new Error("vault remove failed"));
+    vi.mocked(h.core.logout).mockResolvedValue();
+
+    await expect(h.manager.logout()).rejects.toThrow("vault remove failed");
+
+    expect(h.core.logout).toHaveBeenCalledWith("R".repeat(43), "access-R");
     expect(h.accessToken).toBeNull();
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
   });

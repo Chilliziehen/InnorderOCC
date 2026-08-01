@@ -47,6 +47,8 @@ interface RefreshFlight {
   promise: Promise<SessionSnapshot>;
 }
 
+type RevocableTokens = Pick<TokenResponse, "accessToken" | "refreshToken">;
+
 export function createSessionManager(options: SessionManagerOptions): SessionManager {
   const now = options.now ?? Date.now;
   const schedule = options.setTimeout ?? globalThis.setTimeout;
@@ -204,32 +206,62 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     }
     try {
       await writeCredential(profileId, credential);
-      if (generation !== expectedGeneration) {
-        await removeCredential(profileId, credential.version);
-        await revoke(tokens);
-        return current;
-      }
-      options.setAccessToken(tokens.accessToken);
-      const verifiedUser = verifyMe ? await options.core.me() : tokens.user;
-      if (generation !== expectedGeneration) {
-        await removeCredential(profileId, credential.version);
-        await revoke(tokens);
-        return current;
-      }
-      return activate(profileId, credential.version, tokens, verifiedUser);
     } catch (error) {
-      await clearOwned(profileId, expectedGeneration, credential.version);
-      await revoke(tokens);
+      await settleCleanupAndRevoke(
+        clearOwned(profileId, expectedGeneration, credential.version),
+        tokens,
+      );
       throw error;
     }
+    if (generation !== expectedGeneration) {
+      await cleanupAndRevoke(
+        removeCredential(profileId, credential.version),
+        tokens,
+      );
+      return current;
+    }
+    options.setAccessToken(tokens.accessToken);
+    let verifiedUser: TokenResponse["user"];
+    try {
+      verifiedUser = verifyMe ? await options.core.me() : tokens.user;
+    } catch (error) {
+      await settleCleanupAndRevoke(
+        clearOwned(profileId, expectedGeneration, credential.version),
+        tokens,
+      );
+      throw error;
+    }
+    if (generation !== expectedGeneration) {
+      await cleanupAndRevoke(
+        removeCredential(profileId, credential.version),
+        tokens,
+      );
+      return current;
+    }
+    return activate(profileId, credential.version, tokens, verifiedUser);
   }
 
-  async function revoke(tokens: TokenResponse): Promise<void> {
+  async function revoke(tokens: RevocableTokens): Promise<void> {
     try {
       await options.core.logout(tokens.refreshToken, tokens.accessToken);
     } catch {
       // Discarded server sessions are revoked on a best-effort basis.
     }
+  }
+
+  async function cleanupAndRevoke(
+    cleanup: Promise<void>,
+    tokens: RevocableTokens,
+  ): Promise<void> {
+    const [cleanupResult] = await Promise.allSettled([cleanup, revoke(tokens)]);
+    if (cleanupResult.status === "rejected") throw cleanupResult.reason;
+  }
+
+  async function settleCleanupAndRevoke(
+    cleanup: Promise<void>,
+    tokens: RevocableTokens,
+  ): Promise<void> {
+    await Promise.allSettled([cleanup, revoke(tokens)]);
   }
 
   async function doRefresh(
@@ -305,13 +337,13 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
         clearMemory();
       }
       const credential = await credentialPromise;
-      if (credential) await removeCredential(profileId, credential.version);
-      if (!credential || !accessToken) return;
-      try {
-        await options.core.logout(credential.refreshToken, accessToken);
-      } catch {
-        // Local logout succeeds even when revocation cannot reach Core.
-      }
+      if (!credential) return;
+      const cleanup = removeCredential(profileId, credential.version);
+      if (!accessToken) return await cleanup;
+      await cleanupAndRevoke(cleanup, {
+        refreshToken: credential.refreshToken,
+        accessToken,
+      });
     },
   };
 
