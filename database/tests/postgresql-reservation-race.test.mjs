@@ -6,11 +6,23 @@ import { after, test } from 'node:test';
 
 const strict = process.env.INNORDER_STRICT_DATABASE_TESTS === '1';
 const localSkip = process.env.INNORDER_SKIP_POSTGRESQL_RESERVATION_RACE === '1';
+const externalDisposable = process.env.INNORDER_POSTGRESQL_RACE_DISPOSABLE_DATABASE === '1';
+const docker = process.env.DOCKER_PATH ?? (process.platform === 'win32' ? 'docker.exe' : 'docker');
+const PROCESS_TIMEOUT_MS = 20_000;
+const MARKER_TIMEOUT_MS = 10_000;
 let databaseUrl = process.env.DATABASE_URL;
 let command = process.env.PSQL_PATH ?? (process.platform === 'win32' ? 'psql.exe' : 'psql');
 let prefixArgs = [];
 let provisionedContainer;
 let provisioningError;
+let teardownStarted = false;
+const activeChildren = new Set();
+
+if (databaseUrl && !externalDisposable) {
+  throw new Error(
+    'DATABASE_URL is rejected unless INNORDER_POSTGRESQL_RACE_DISPOSABLE_DATABASE=1 confirms a disposable database',
+  );
+}
 
 if (process.env.PSQL_PREFIX_ARGS_JSON) {
   const parsed = JSON.parse(process.env.PSQL_PREFIX_ARGS_JSON);
@@ -20,21 +32,52 @@ if (process.env.PSQL_PREFIX_ARGS_JSON) {
   prefixArgs = parsed;
 }
 
-function spawnChecked(executable, args) {
+function spawnChecked(executable, args, { timeout = 120_000 } = {}) {
   const result = spawnSync(executable, args, {
     encoding: 'utf8',
     windowsHide: true,
     maxBuffer: 10 * 1024 * 1024,
+    timeout,
   });
+  if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(result.stderr || result.stdout || `${executable} exited with ${result.status}`);
   }
   return result.stdout.trim();
 }
 
-function provisionPostgreSql() {
-  const docker = process.env.DOCKER_PATH ?? (process.platform === 'win32' ? 'docker.exe' : 'docker');
-  spawnChecked(docker, ['version', '--format', '{{.Server.Version}}']);
+function postgresDockerEnvironment() {
+  return [
+    '--env', 'PGCONNECT_TIMEOUT=5',
+    '--env', 'PGOPTIONS=-c statement_timeout=15s -c lock_timeout=5s',
+  ];
+}
+
+async function waitForFinalPostgreSql(container) {
+  const deadline = Date.now() + 60_000;
+  const finalEntryPointMarker = 'PostgreSQL init process complete; ready for start up.';
+  while (Date.now() < deadline) {
+    const logs = spawnSync(docker, ['logs', container], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5_000,
+    });
+    const output = `${logs.stdout ?? ''}\n${logs.stderr ?? ''}`;
+    if (output.includes(finalEntryPointMarker)) {
+      const probe = await spawnTracked(docker, [
+        'exec', ...postgresDockerEnvironment(), container,
+        'psql', '-U', 'innorder_admin', '-d', 'innorder_occ',
+        '--no-psqlrc', '--set', 'ON_ERROR_STOP=1', '--command', 'SELECT 1',
+      ], { timeoutMs: 5_000 }).result;
+      if (probe.code === 0) return;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+  }
+  throw new Error('self-provisioned PostgreSQL did not reach final entrypoint readiness within 60 seconds');
+}
+
+async function provisionPostgreSql() {
+  spawnChecked(docker, ['version', '--format', '{{.Server.Version}}'], { timeout: 10_000 });
   const container = `innorder-reservation-race-${randomUUID()}`;
   const image = 'pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9';
   spawnChecked(docker, [
@@ -45,30 +88,19 @@ function provisionPostgreSql() {
     image,
   ]);
   provisionedContainer = container;
-
-  let ready = false;
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const result = spawnSync(docker, [
-      'exec', container, 'pg_isready', '-U', 'innorder_admin', '-d', 'innorder_occ',
-    ], { encoding: 'utf8', windowsHide: true });
-    if (result.status === 0) {
-      ready = true;
-      break;
-    }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
-  }
-  if (!ready) throw new Error('self-provisioned PostgreSQL did not become ready within 30 seconds');
+  await waitForFinalPostgreSql(container);
 
   const initScript = fileURLToPath(new URL('../../services/core/src/test/resources/postgres-test-init.sql', import.meta.url));
   const databaseDirectory = fileURLToPath(new URL('../', import.meta.url));
   spawnChecked(docker, ['cp', initScript, `${container}:/tmp/postgres-test-init.sql`]);
   spawnChecked(docker, ['cp', databaseDirectory, `${container}:/tmp/database`]);
-  spawnChecked(docker, [
-    'exec', container, 'psql', '-U', 'innorder_admin', '-d', 'innorder_occ',
+  await spawnCheckedAsync(docker, [
+    'exec', ...postgresDockerEnvironment(), container,
+    'psql', '-U', 'innorder_admin', '-d', 'innorder_occ',
     '--set', 'ON_ERROR_STOP=1', '-f', '/tmp/postgres-test-init.sql',
   ]);
-  spawnChecked(docker, [
-    'exec', '--env', 'PGPASSWORD=admin-test-only', container,
+  await spawnCheckedAsync(docker, [
+    'exec', ...postgresDockerEnvironment(), '--env', 'PGPASSWORD=admin-test-only', container,
     'psql', '-U', 'innorder_admin', '-d', 'innorder_occ',
     '--set', 'ON_ERROR_STOP=1', '-f', '/tmp/database/innorder_occ_full_schema.sql',
   ]);
@@ -77,6 +109,7 @@ function provisionPostgreSql() {
   command = docker;
   prefixArgs = [
     'exec', '-i',
+    ...postgresDockerEnvironment(),
     '--env', 'PGHOST=127.0.0.1',
     '--env', 'PGDATABASE=innorder_occ',
     '--env', 'PGUSER=innorder_admin',
@@ -85,19 +118,43 @@ function provisionPostgreSql() {
   ];
 }
 
-if (strict && !databaseUrl) {
+function teardown() {
+  if (teardownStarted) return;
+  teardownStarted = true;
+  killActiveChildren();
+  activeChildren.clear();
+  if (provisionedContainer) {
+    spawnSync(docker, ['rm', '--force', provisionedContainer], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15_000,
+    });
+    provisionedContainer = undefined;
+  }
+}
+
+function killActiveChildren() {
+  for (const child of activeChildren) child.kill('SIGKILL');
+}
+
+after(teardown);
+process.once('exit', teardown);
+process.once('SIGINT', () => {
+  teardown();
+  process.exit(130);
+});
+process.once('SIGTERM', () => {
+  teardown();
+  process.exit(143);
+});
+
+if (!databaseUrl && (!localSkip || strict)) {
   try {
-    provisionPostgreSql();
+    await provisionPostgreSql();
   } catch (error) {
     provisioningError = error instanceof Error ? error.message : String(error);
   }
 }
-
-after(() => {
-  if (!provisionedContainer) return;
-  const docker = process.env.DOCKER_PATH ?? (process.platform === 'win32' ? 'docker.exe' : 'docker');
-  spawnSync(docker, ['rm', '--force', provisionedContainer], { encoding: 'utf8', windowsHide: true });
-});
 
 function parseConnectionEnvironment() {
   if (!databaseUrl) return undefined;
@@ -132,33 +189,36 @@ try {
   connectionError = error instanceof Error ? error.message : String(error);
 }
 
-const probe = spawnSync(command, [...prefixArgs, '--version'], {
-  encoding: 'utf8',
-  windowsHide: true,
-});
+let probeError;
+if (databaseUrl) {
+  try {
+    const probe = await spawnTracked(command, [...prefixArgs, '--version'], { timeoutMs: 10_000 }).result;
+    if (probe.code !== 0) probeError = `psql is unavailable through ${command}`;
+  } catch (error) {
+    probeError = error instanceof Error ? error.message : String(error);
+  }
+}
 const missingReason = provisioningError
   ?? connectionError
   ?? (!databaseUrl
     ? 'DATABASE_URL is not set'
-    : probe.status !== 0
-      ? `psql is unavailable through ${command}`
-      : undefined);
+    : probeError);
 
-function runPsql(sql, { onStdout } = {}) {
-  const child = spawn(command, [
-    ...prefixArgs,
-    '--no-psqlrc',
-    '--set', 'ON_ERROR_STOP=1',
-    '--set', 'VERBOSITY=verbose',
-    '--tuples-only',
-    '--no-align',
-  ], {
-    env: connectionEnvironment,
+function spawnTracked(executable, args, {
+  env = process.env,
+  input,
+  onStdout,
+  timeoutMs = PROCESS_TIMEOUT_MS,
+} = {}) {
+  const child = spawn(executable, args, {
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  activeChildren.add(child);
   let stdout = '';
   let stderr = '';
+  let timedOut = false;
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -168,13 +228,54 @@ function runPsql(sql, { onStdout } = {}) {
   child.stderr.on('data', (chunk) => {
     stderr += chunk;
   });
-  child.stdin.end(sql);
+  child.stdin.end(input);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, timeoutMs);
+  timer.unref();
   return {
     result: new Promise((resolve, reject) => {
       child.on('error', reject);
-      child.on('close', (code) => resolve({ code, stdout, stderr }));
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        activeChildren.delete(child);
+        if (timedOut) {
+          reject(new Error(`${executable} exceeded ${timeoutMs}ms wall-clock timeout: ${stderr || stdout}`));
+          return;
+        }
+        resolve({ code, stdout, stderr });
+      });
     }),
   };
+}
+
+async function spawnCheckedAsync(executable, args, options) {
+  const result = await spawnTracked(executable, args, options).result;
+  if (result.code !== 0) {
+    throw new Error(result.stderr || result.stdout || `${executable} exited with ${result.code}`);
+  }
+  return result.stdout.trim();
+}
+
+function runPsql(sql, { onStdout, timeoutMs = PROCESS_TIMEOUT_MS } = {}) {
+  return spawnTracked(command, [
+    ...prefixArgs,
+    '--no-psqlrc',
+    '--set', 'ON_ERROR_STOP=1',
+    '--set', 'VERBOSITY=verbose',
+    '--tuples-only',
+    '--no-align',
+  ], {
+    env: {
+      ...connectionEnvironment,
+      PGCONNECT_TIMEOUT: '5',
+      PGOPTIONS: '-c statement_timeout=15s -c lock_timeout=5s',
+    },
+    input: sql,
+    onStdout,
+    timeoutMs,
+  });
 }
 
 async function execPsql(sql) {
@@ -183,8 +284,8 @@ async function execPsql(sql) {
   return result.stdout.trim();
 }
 
-async function createFixture(baselineCapacity = 0) {
-  const ids = {
+function newFixtureIds() {
+  return {
     package: randomUUID(),
     packageVersion: randomUUID(),
     entityType: randomUUID(),
@@ -195,8 +296,12 @@ async function createFixture(baselineCapacity = 0) {
     contenderA: randomUUID(),
     contenderB: randomUUID(),
   };
+}
+
+async function createFixture(ids, baselineCapacity = 0) {
   const fixtureKey = ids.resource;
   await execPsql(`
+    BEGIN;
     INSERT INTO catalog.domain_package (id, package_key, name, status)
     VALUES ('${ids.package}', 'reservation-race.${fixtureKey}', 'Reservation race', 'ACTIVE');
     INSERT INTO catalog.package_version (id, package_id, semver, status)
@@ -219,35 +324,27 @@ async function createFixture(baselineCapacity = 0) {
     VALUES ('${ids.baseline}', '${ids.resource}', '${ids.requester}',
             '[2035-01-01 10:00:00+00,2035-01-01 11:00:00+00)'::tstzrange,
             ${baselineCapacity}, false, 'PENDING');` : ''}
+    COMMIT;
   `);
-  return ids;
 }
 
 async function cleanupFixture(ids) {
-  const ownsReservationTable = await execPsql(`
-    SELECT pg_has_role(current_user, c.relowner, 'USAGE')
-    FROM pg_class c
-    WHERE c.oid = 'occ.resource_reservation'::regclass
-  `);
-  if (ownsReservationTable !== 't') {
-    await execPsql(`
+  await execPsql(`
+      BEGIN;
       UPDATE occ.resource_reservation
       SET state = 'CANCELLED', cancelled_at = now()
       WHERE resource_id = '${ids.resource}' AND state IN ('PENDING', 'CONFIRMED');
-    `);
-    return;
-  }
-  await execPsql(`
-    ALTER TABLE occ.resource_reservation DISABLE TRIGGER trg_resource_reservation_no_delete;
-    DELETE FROM occ.resource_reservation WHERE resource_id = '${ids.resource}';
-    ALTER TABLE occ.resource_reservation ENABLE TRIGGER trg_resource_reservation_no_delete;
-    DELETE FROM occ.managed_resource WHERE id = '${ids.resource}';
-    DELETE FROM authz.entity WHERE id IN ('${ids.resource}', '${ids.requester}');
-    DELETE FROM catalog.entity_type_version WHERE id = '${ids.entityTypeVersion}';
-    DELETE FROM catalog.entity_type WHERE id = '${ids.entityType}';
-    DELETE FROM catalog.package_version WHERE id = '${ids.packageVersion}';
-    DELETE FROM catalog.domain_package WHERE id = '${ids.package}';
+      COMMIT;
   `);
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function runConcurrentContenders(ids, contenderA, contenderB) {
@@ -271,14 +368,25 @@ async function runConcurrentContenders(ids, contenderA, contenderB) {
       if (stdout.includes('A_INSERTED')) markInserted();
     },
   });
-  await Promise.race([
-    inserted,
-    workerA.result.then((result) => {
-      assert.fail(`first contender exited before taking the resource lock: ${result.stderr || result.stdout}`);
-    }),
-  ]);
-  const workerB = runPsql(contenderSql(ids.contenderB, 'B_INSERTED', contenderB, false));
-  return Promise.all([workerA.result, workerB.result]);
+  let workerB;
+  try {
+    await withTimeout(
+      Promise.race([
+        inserted,
+        workerA.result.then((result) => {
+          assert.fail(`first contender exited before taking the resource lock: ${result.stderr || result.stdout}`);
+        }),
+      ]),
+      MARKER_TIMEOUT_MS,
+      `first contender did not emit its lock marker within ${MARKER_TIMEOUT_MS}ms`,
+    );
+    workerB = runPsql(contenderSql(ids.contenderB, 'B_INSERTED', contenderB, false));
+    return await Promise.all([workerA.result, workerB.result]);
+  } catch (error) {
+    killActiveChildren();
+    await Promise.allSettled([workerA.result, workerB?.result].filter(Boolean));
+    throw error;
+  }
 }
 
 function raceOptions() {
@@ -307,7 +415,7 @@ function assertOneConflict(results, messagePattern) {
 
 test('concurrent capacity contenders cannot overbook one resource', raceOptions(), async (t) => {
   requirePrerequisites();
-  const ids = await createFixture(4);
+  const ids = newFixtureIds();
   let cleaned = false;
   const cleanup = async () => {
     if (cleaned) return;
@@ -316,6 +424,7 @@ test('concurrent capacity contenders cannot overbook one resource', raceOptions(
   };
   t.after(cleanup);
   try {
+    await createFixture(ids, 4);
     const results = await runConcurrentContenders(
       ids,
       { capacity: 6, exclusive: false },
@@ -337,7 +446,7 @@ test('concurrent capacity contenders cannot overbook one resource', raceOptions(
 
 test('concurrent exclusive and capacity contenders cannot overlap', raceOptions(), async (t) => {
   requirePrerequisites();
-  const ids = await createFixture();
+  const ids = newFixtureIds();
   let cleaned = false;
   const cleanup = async () => {
     if (cleaned) return;
@@ -346,6 +455,7 @@ test('concurrent exclusive and capacity contenders cannot overlap', raceOptions(
   };
   t.after(cleanup);
   try {
+    await createFixture(ids);
     const results = await runConcurrentContenders(
       ids,
       { capacity: 1, exclusive: true },

@@ -42,13 +42,13 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
     fun `evidence facts are immutable segregated and protected from cleanup by legal hold`() {
         val fixture = seedEvidence()
 
-        assertDatabaseRejects {
+        assertPostgresRejects("55000", "occ.evidence_version row is immutable") {
             runtimeJdbc.update("UPDATE occ.evidence_version SET mime_type = 'text/plain' WHERE id = ?", fixture.version)
         }
-        assertDatabaseRejects {
+        assertPostgresRejects("55000", "occ.evidence_version row is immutable") {
             runtimeJdbc.update("DELETE FROM occ.evidence_version WHERE id = ?", fixture.version)
         }
-        assertDatabaseRejects {
+        assertPostgresRejects("42501", "reviewer must differ from submitter and evidence creator") {
             runtimeJdbc.update(
                 """INSERT INTO occ.evidence_review
                    (id, evidence_version_id, reviewer_id, decision, gate_satisfied)
@@ -56,7 +56,7 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
                 UUID.randomUUID(), fixture.version, fixture.submitter,
             )
         }
-        assertDatabaseRejects {
+        assertPostgresRejects("42501", "reviewer must differ from submitter and evidence creator") {
             runtimeJdbc.update(
                 """INSERT INTO occ.evidence_review
                    (id, evidence_version_id, reviewer_id, decision, gate_satisfied)
@@ -72,10 +72,10 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
                VALUES (?, ?, ?, 'ACCEPTED', true)""",
             review, fixture.version, fixture.reviewer,
         )
-        assertDatabaseRejects {
+        assertPostgresRejects("55000", "occ.evidence_review row is immutable") {
             runtimeJdbc.update("UPDATE occ.evidence_review SET reason = 'changed' WHERE id = ?", review)
         }
-        assertDatabaseRejects {
+        assertPostgresRejects("55000", "occ.evidence_review row is immutable") {
             runtimeJdbc.update("DELETE FROM occ.evidence_review WHERE id = ?", review)
         }
 
@@ -90,7 +90,7 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
                VALUES (?, ?, ?, ?, 'RETAINED')""",
             disposition, fixture.version, fixture.upload, fixture.objectKey,
         )
-        assertDatabaseRejects {
+        assertPostgresRejects("55000", "legal hold or backup snapshot prevents object cleanup") {
             runtimeJdbc.update(
                 "UPDATE occ.evidence_object_disposition SET disposition_state = 'CLEANUP_PENDING' WHERE id = ?",
                 disposition,
@@ -131,12 +131,22 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
             action, risk, actor,
         )
 
-        assertDatabaseRejects { runtimeJdbc.update("UPDATE occ.risk_occurrence SET calendar_version = 'v2' WHERE id = ?", occurrence) }
-        assertDatabaseRejects { runtimeJdbc.update("DELETE FROM occ.risk_occurrence WHERE id = ?", occurrence) }
-        assertDatabaseRejects { runtimeJdbc.update("UPDATE occ.risk_action SET reason = 'changed' WHERE id = ?", action) }
-        assertDatabaseRejects { runtimeJdbc.update("DELETE FROM occ.risk_action WHERE id = ?", action) }
+        assertPostgresRejects("55000", "occ.risk_occurrence row is immutable") {
+            runtimeJdbc.update("UPDATE occ.risk_occurrence SET calendar_version = 'v2' WHERE id = ?", occurrence)
+        }
+        assertPostgresRejects("55000", "occ.risk_occurrence row is immutable") {
+            runtimeJdbc.update("DELETE FROM occ.risk_occurrence WHERE id = ?", occurrence)
+        }
+        assertPostgresRejects("55000", "occ.risk_action row is immutable") {
+            runtimeJdbc.update("UPDATE occ.risk_action SET reason = 'changed' WHERE id = ?", action)
+        }
+        assertPostgresRejects("55000", "occ.risk_action row is immutable") {
+            runtimeJdbc.update("DELETE FROM occ.risk_action WHERE id = ?", action)
+        }
         runtimeJdbc.update("UPDATE occ.risk SET state = 'ACKNOWLEDGED' WHERE id = ?", risk)
-        assertDatabaseRejects { runtimeJdbc.update("UPDATE occ.risk SET state = 'OPEN' WHERE id = ?", risk) }
+        assertPostgresRejects("23514", "invalid risk state transition") {
+            runtimeJdbc.update("UPDATE occ.risk SET state = 'OPEN' WHERE id = ?", risk)
+        }
     }
 
     @Test
@@ -147,17 +157,17 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         val capacityResource = fixture.resource("capacity-resource", 10)
 
         reserve(exclusiveResource, requester, "[2035-01-01 09:00:00+00,2035-01-01 10:00:00+00)", 2, false)
-        assertSqlState("23P01") {
+        assertPostgresRejects("23P01", "reservation conflicts with exclusivity") {
             reserve(exclusiveResource, requester, "[2035-01-01 09:30:00+00,2035-01-01 09:45:00+00)", 1, true)
         }
-        assertDatabaseRejects {
+        assertPostgresRejects("22000", "reservation range must be finite and canonical [)") {
             reserve(capacityResource, requester, "[2035-01-01 09:00:00+00,2035-01-01 10:00:00+00]", 1, false)
         }
 
         reserve(capacityResource, requester, "[2035-01-01 09:00:00+00,2035-01-01 10:00:00+00)", 6, false)
         reserve(capacityResource, requester, "[2035-01-01 09:30:00+00,2035-01-01 10:30:00+00)", 4, false)
         reserve(capacityResource, requester, "[2035-01-01 10:00:00+00,2035-01-01 11:00:00+00)", 6, false)
-        assertSqlState("23P01") {
+        assertPostgresRejects("23P01", "reservation exceeds peak resource capacity") {
             reserve(capacityResource, requester, "[2035-01-01 09:45:00+00,2035-01-01 10:15:00+00)", 1, false)
         }
         val reservation = reserve(
@@ -167,7 +177,7 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
             1,
             false,
         )
-        assertDatabaseRejects {
+        assertPostgresRejects("23514", "invalid reservation state transition") {
             runtimeJdbc.update(
                 "UPDATE occ.resource_reservation SET state = 'COMPLETED', completed_at = now() WHERE id = ?",
                 reservation,
@@ -323,16 +333,14 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
         }
     }
 
-    private fun assertDatabaseRejects(action: () -> Unit) {
+    private fun assertPostgresRejects(expectedState: String, expectedMessage: String, action: () -> Unit) {
         val thrown = runCatching(action).exceptionOrNull()
         assertThat(thrown).isInstanceOf(DataAccessException::class.java)
-        assertThat(postgresException(thrown)?.sqlState).describedAs("nested PostgreSQL exception SQLSTATE").isNotNull()
-    }
-
-    private fun assertSqlState(expected: String, action: () -> Unit) {
-        val thrown = runCatching(action).exceptionOrNull()
-        assertThat(thrown).isInstanceOf(DataAccessException::class.java)
-        assertThat(postgresException(thrown)?.sqlState).describedAs("nested PostgreSQL exception SQLSTATE").isEqualTo(expected)
+        val postgres = postgresException(thrown)
+        assertThat(postgres?.sqlState).describedAs("nested PostgreSQL exception SQLSTATE").isEqualTo(expectedState)
+        assertThat(postgres?.serverErrorMessage?.message)
+            .describedAs("PostgreSQL server error message")
+            .isEqualTo(expectedMessage)
     }
 
     private fun postgresException(error: Throwable?): PSQLException? {
@@ -364,11 +372,9 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
 
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
-        private const val REQUIRED_PROPERTY = "innorder.evidence-risk-resource-postgresql.required"
-
         @JvmStatic
         fun dockerAvailableOrRequired(): Boolean =
-            System.getProperty(REQUIRED_PROPERTY) == "true" || DockerClientFactory.instance().isDockerAvailable
+            System.getenv("INNORDER_STRICT_DATABASE_TESTS") == "1" || DockerClientFactory.instance().isDockerAvailable
 
         @Container
         @JvmStatic
