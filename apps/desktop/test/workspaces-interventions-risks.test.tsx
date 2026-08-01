@@ -114,14 +114,37 @@ describe("Interventions", () => {
     expect(onTabChange).toHaveBeenLastCalledWith("reviews");
   });
 
-  it("selects validated rows and exposes operation-specific review forms", () => {
+  it("selects validated rows and derives immutable review versions from the selected item", () => {
     const onSelectItem = vi.fn();
     render(<Interventions {...interventionProps({ result: interventionItems, selectedItemId: "i-1", onSelectItem })} />);
     const selector = screen.getByRole("button", { name: "选择介入事项：检查供应商" });
     fireEvent.click(selector);
     expect(onSelectItem).toHaveBeenCalledWith("i-2");
     expect(screen.getByRole("button", { name: "选择介入事项：核验发票" })).toHaveAttribute("aria-pressed", "true");
-    for (const label of ["证据版本", "预期版本", "有条件接受后续要求", "有条件接受到期日", "退回原因"]) expect(screen.getByLabelText(label)).toBeInTheDocument();
+    expect(screen.getByText("证据版本：3")).toBeInTheDocument();
+    expect(screen.getByText("预期版本：7")).toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "证据版本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "预期版本" })).not.toBeInTheDocument();
+    for (const label of ["有条件接受后续要求", "有条件接受到期日", "退回原因"]) expect(screen.getByLabelText(label)).toBeInTheDocument();
+  });
+
+  it("gates every review command to a selected validated review before any submit handler exists", () => {
+    const onExecute = vi.fn();
+    const { container } = render(<Interventions {...interventionProps({
+      result: interventionItems,
+      selectedItemId: "i-2",
+      capabilities: ["evidence.review", "interventions.resolve"],
+      onExecute,
+    })} />);
+    const actions = screen.getByLabelText("介入操作");
+    for (const label of ["接受", "有条件接受", "拒绝", "退回"]) {
+      const button = within(actions).getByRole("button", { name: label });
+      expect(button).toBeDisabled();
+      expect(document.getElementById(button.getAttribute("aria-describedby")!)).toHaveTextContent("仅证据审核事项可执行审核操作");
+    }
+    expect(container.querySelectorAll("section[aria-label='介入操作'] form.command-panel")).toHaveLength(0);
+    fireEvent.submit(actions);
+    expect(onExecute).not.toHaveBeenCalled();
   });
 
   it("strictly validates each intervention operation payload", () => {
@@ -164,11 +187,11 @@ describe("Interventions", () => {
   it("keeps refresh enabled while stale or offline and locks mutations", () => {
     const onRefresh = vi.fn();
     const stale: WorkspaceResult = { state: "stale", count: 1, fetchedAt, items: [interventionItems.items[0]!] };
-    const { rerender } = render(<Interventions {...interventionProps({ result: stale, capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
+    const { rerender } = render(<Interventions {...interventionProps({ result: stale, selectedItemId: "i-1", capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(onRefresh).toHaveBeenCalledOnce();
     expect(screen.getByRole("button", { name: "接受" })).toBeDisabled();
-    rerender(<Interventions {...interventionProps({ result: { ...stale, state: "offline" }, online: false, capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
+    rerender(<Interventions {...interventionProps({ result: { ...stale, state: "offline" }, selectedItemId: "i-1", online: false, capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(onRefresh).toHaveBeenCalledTimes(2);
     expect(screen.getAllByText("离线时更改操作已锁定")).toHaveLength(4);
@@ -176,7 +199,7 @@ describe("Interventions", () => {
 
   it("retains exact unavailable and shared error/conflict reasons", () => {
     const onRefresh = vi.fn();
-    const { rerender } = render(<Interventions {...interventionProps({ capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
+    const { rerender } = render(<Interventions {...interventionProps({ result: interventionItems, selectedItemId: "i-1", capabilities: ["evidence.review", "interventions.resolve"], onRefresh })} />);
     expect(document.getElementById(screen.getByRole("button", { name: "接受" }).getAttribute("aria-describedby")!)).toHaveTextContent("证据审核 API 合同尚未集成");
     rerender(<Interventions {...interventionProps({ result: { state: "error", problem: { title: "查询失败", code: "QUERY_FAILED", status: 503, correlationId } }, onRefresh })} />);
     fireEvent.click(screen.getByRole("button", { name: "重试" }));

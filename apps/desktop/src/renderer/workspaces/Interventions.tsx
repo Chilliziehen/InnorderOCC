@@ -100,13 +100,14 @@ export function Interventions({ result, query, activeTab, selectedItemId, capabi
   const definition = WORKSPACE_DEFINITIONS.interventions;
   const tabs = definition.tabs as readonly { readonly id: InterventionTab; readonly label: string }[];
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [evidenceVersion, setEvidenceVersion] = useState("");
-  const [expectedVersion, setExpectedVersion] = useState("");
   const [followUp, setFollowUp] = useState("");
   const [dueAt, setDueAt] = useState("");
   const [returnReason, setReturnReason] = useState("");
   const mutationOnline = online && result.state !== "offline" && result.state !== "stale";
-  const numberValue = (value: string) => value === "" ? Number.NaN : Number(value);
+  const selectedItem = result.state === "ready" || result.state === "stale" || result.state === "offline"
+    ? result.items.map((item) => interventionItemSchema.safeParse(item)).find((entry) => entry.success && entry.data.id === selectedItemId)?.data
+    : undefined;
+  const selectedReview = selectedItem?.type === "review" && selectedItem.evidenceVersion !== undefined ? selectedItem : undefined;
   const selectTab = (index: number) => {
     const tab = tabs[index];
     if (!tab) return;
@@ -130,9 +131,17 @@ export function Interventions({ result, query, activeTab, selectedItemId, capabi
   );
   const action = (operation: keyof typeof interventionCommandPayloadSchemas, payload: Record<string, unknown>) => {
     const command = definition.commands.find((entry) => entry.operation === operation)!;
-    return <WorkspaceAction key={operation} command={command} schema={interventionCommandPayloadSchemas[operation]} payload={payload} {...(selectedItemId ? { targetId: selectedItemId } : {})} capabilities={capabilities} online={mutationOnline} authenticated={authenticated} onExecute={onExecute} onRefresh={onRefresh} />;
+    if (!selectedReview) {
+      const reasonId = `interventions-${operation}-review-target-reason`;
+      const reason = selectedItem ? "仅证据审核事项可执行审核操作" : "请选择证据审核事项";
+      return <div key={operation}><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{reason}</p></div>;
+    }
+    return <WorkspaceAction key={operation} command={command} schema={interventionCommandPayloadSchemas[operation]} payload={payload} targetId={selectedReview.id} capabilities={capabilities} online={mutationOnline} authenticated={authenticated} onExecute={onExecute} onRefresh={onRefresh} />;
   };
-  const reviewPayload = { evidenceVersion: numberValue(evidenceVersion), expectedVersion: numberValue(expectedVersion) };
+  const reviewPayload = {
+    evidenceVersion: selectedReview?.evidenceVersion ?? Number.NaN,
+    expectedVersion: selectedReview?.version ?? Number.NaN,
+  };
 
   return (
     <section aria-labelledby="interventions-title">
@@ -145,13 +154,13 @@ export function Interventions({ result, query, activeTab, selectedItemId, capabi
         <WorkspaceState result={result} itemSchema={interventionItemSchema} onRetry={onRefresh} onRefresh={onRefresh} renderItem={renderItem} />
       </div>
       <section aria-label="介入操作">
-        <fieldset disabled={!mutationOnline}><legend>证据审核版本</legend><label>证据版本<input type="number" min="0" value={evidenceVersion} onChange={(event) => setEvidenceVersion(event.currentTarget.value)} /></label><label>预期版本<input type="number" min="0" value={expectedVersion} onChange={(event) => setExpectedVersion(event.currentTarget.value)} /></label></fieldset>
+        <section aria-label="证据审核版本"><h2>证据审核版本</h2>{selectedReview ? <><p>证据版本：{selectedReview.evidenceVersion}</p><p>预期版本：{selectedReview.version}</p></> : <p>版本由选中的证据审核事项提供</p>}</section>
         {action("accept", reviewPayload)}
         <fieldset disabled={!mutationOnline}><legend>有条件接受要求</legend><label>有条件接受后续要求<textarea value={followUp} onChange={(event) => setFollowUp(event.currentTarget.value)} /></label><label>有条件接受到期日<input type="date" value={dueAt} onChange={(event) => setDueAt(event.currentTarget.value)} /></label></fieldset>
         {action("conditional", { ...reviewPayload, followUp, dueAt })}
         {action("reject", reviewPayload)}
         <fieldset disabled={!mutationOnline}><legend>退回要求</legend><label>退回原因<textarea value={returnReason} onChange={(event) => setReturnReason(event.currentTarget.value)} /></label></fieldset>
-        {action("return", { expectedVersion: numberValue(expectedVersion), reason: returnReason })}
+        {action("return", { expectedVersion: selectedReview?.version ?? Number.NaN, reason: returnReason })}
       </section>
     </section>
   );
