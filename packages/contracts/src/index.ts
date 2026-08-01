@@ -12,8 +12,18 @@ export type {
   SystemStatus,
 } from "./system-status.js";
 
-export { problemDetailsSchema } from "./problem-details.js";
-export type { ProblemDetails } from "./problem-details.js";
+export {
+  problemDetailsSchema,
+  taskBlockedProblemDetailsSchema,
+  taskGateUnavailableProblemDetailsSchema,
+  workflowErrorCodeSchema,
+} from "./problem-details.js";
+export type {
+  ProblemDetails,
+  TaskBlockedProblemDetails,
+  TaskGateUnavailableProblemDetails,
+  WorkflowErrorCode,
+} from "./problem-details.js";
 
 export {
   currentUserSchema,
@@ -28,8 +38,8 @@ export type {
   TokenResponse,
 } from "./auth.js";
 
-export { eventEnvelopeSchema } from "./events.js";
-export type { EventEnvelope } from "./events.js";
+export { eventEnvelopeSchema, workflowEventSchema, workflowEventSchemas } from "./events.js";
+export type { EventEnvelope, WorkflowEvent, WorkflowEventType } from "./events.js";
 
 export {
   authorizationDecisionSchema,
@@ -39,3 +49,9 @@ export type {
   AuthorizationDecision,
   AuthorizationInput,
 } from "./authorization.js";
+
+export * from "./workflow-common.js";
+export * from "./cohort.js";
+export * from "./process.js";
+export * from "./task.js";
+export * from "./notifications.js";
