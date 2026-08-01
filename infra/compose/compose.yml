@@ -13,6 +13,8 @@ services:
     secrets:
       - source: postgres_admin_password
         target: postgres_admin_password
+      - source: postgres_ai_runtime_password
+        target: postgres_ai_runtime_password
       - source: postgres_flyway_password
         target: postgres_flyway_password
       - source: postgres_runtime_password
@@ -277,6 +279,8 @@ networks:
 secrets:
   postgres_admin_password:
     file: ${POSTGRES_ADMIN_PASSWORD_FILE:?Set POSTGRES_ADMIN_PASSWORD_FILE}
+  postgres_ai_runtime_password:
+    file: ${AI_DATABASE_PASSWORD_FILE:?Set AI_DATABASE_PASSWORD_FILE}
   postgres_flyway_password:
     file: ${POSTGRES_FLYWAY_PASSWORD_FILE:?Set POSTGRES_FLYWAY_PASSWORD_FILE}
   postgres_runtime_password:

@@ -320,6 +320,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     "minio_root_password",
     "minio_root_user",
     "postgres_admin_password",
+    "postgres_ai_runtime_password",
     "postgres_flyway_password",
     "postgres_runtime_password",
     "redis_password",
@@ -338,6 +339,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   });
   assert.deepEqual(secretTargets(compose.services.postgres), {
     postgres_admin_password: "postgres_admin_password",
+    postgres_ai_runtime_password: "postgres_ai_runtime_password",
     postgres_flyway_password: "postgres_flyway_password",
     postgres_runtime_password: "postgres_runtime_password",
   });
@@ -370,6 +372,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     minio_root_password: ["minio", "minio-init"],
     minio_root_user: ["minio", "minio-init"],
     postgres_admin_password: ["postgres"],
+    postgres_ai_runtime_password: ["postgres"],
     postgres_flyway_password: ["core", "flowable-init", "postgres"],
     postgres_runtime_password: ["core", "flowable-init", "postgres"],
     redis_password: ["core", "redis"],
@@ -413,6 +416,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     "MINIO_ROOT_PASSWORD_FILE",
     "MINIO_ROOT_USER_FILE",
     "POSTGRES_ADMIN_PASSWORD_FILE",
+    "AI_DATABASE_PASSWORD_FILE",
     "POSTGRES_FLYWAY_PASSWORD_FILE",
     "POSTGRES_RUNTIME_PASSWORD_FILE",
     "REDIS_PASSWORD_FILE",

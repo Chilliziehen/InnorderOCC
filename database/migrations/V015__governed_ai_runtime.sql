@@ -101,7 +101,7 @@ CREATE TABLE ai.ingestion_job (
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
     checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(checkpoint)),
     stage text NOT NULL CHECK (stage IN ('DISCOVER', 'FETCH', 'PARSE', 'CHUNK', 'EMBED', 'COMPLETE')),
-    status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'DEAD')),
+    status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'FAILED')),
     attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     max_attempts integer NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 100),
     next_attempt_at timestamptz NOT NULL DEFAULT statement_timestamp(),
@@ -112,11 +112,13 @@ CREATE TABLE ai.ingestion_job (
     )),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    completed_at timestamptz,
     UNIQUE (source_id, source_version, content_hash, parser_version),
     CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
     CHECK (lease_expires_at IS NULL OR lease_expires_at > created_at),
-    CHECK (status <> 'DEAD' OR sanitized_error IS NOT NULL),
-    CHECK (status <> 'COMPLETED' OR produced_document_version_id IS NOT NULL)
+    CHECK (status <> 'FAILED' OR (sanitized_error IS NOT NULL AND completed_at IS NOT NULL)),
+    CHECK (status <> 'COMPLETED' OR (produced_document_version_id IS NOT NULL AND completed_at IS NOT NULL)),
+    CHECK (status IN ('COMPLETED', 'FAILED') OR completed_at IS NULL)
 );
 
 CREATE TABLE ai.ingestion_attempt (
@@ -128,6 +130,7 @@ CREATE TABLE ai.ingestion_attempt (
     checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(checkpoint)),
     status text NOT NULL CHECK (status IN ('RUNNING', 'SUCCEEDED', 'FAILED')),
     sanitized_error text CHECK (sanitized_error IS NULL OR octet_length(sanitized_error) BETWEEN 1 AND 2048),
+    lease_expires_at timestamptz NOT NULL,
     started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     completed_at timestamptz,
     UNIQUE (job_id, attempt_number),
@@ -156,10 +159,12 @@ CREATE TABLE ai.event_consumption (
     )),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     completed_at timestamptz,
+    dead_at timestamptz,
     UNIQUE (consumer_key, event_id),
     CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
-    CHECK (status <> 'DEAD' OR sanitized_terminal_error IS NOT NULL),
-    CHECK (status <> 'COMPLETED' OR completed_at IS NOT NULL)
+    CHECK (status <> 'DEAD' OR (sanitized_terminal_error IS NOT NULL AND dead_at IS NOT NULL)),
+    CHECK (status <> 'COMPLETED' OR completed_at IS NOT NULL),
+    CHECK (status = 'DEAD' OR dead_at IS NULL)
 );
 
 CREATE TABLE ai.retention_policy (
@@ -368,15 +373,15 @@ BEGIN
        AND NEW.produced_document_version_id IS DISTINCT FROM OLD.produced_document_version_id THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'produced ingestion document version is immutable';
     END IF;
-    IF OLD.status IN ('COMPLETED', 'DEAD') THEN
+    IF OLD.status IN ('COMPLETED', 'FAILED') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal ingestion job is immutable';
     END IF;
     IF NEW.attempts < OLD.attempts OR NEW.attempts > NEW.max_attempts THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempts cannot decrease or exceed the retry bound';
     END IF;
     IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
-        (OLD.status IN ('PENDING', 'RETRY') AND NEW.status IN ('PROCESSING', 'DEAD'))
-        OR (OLD.status = 'PROCESSING' AND NEW.status IN ('RETRY', 'COMPLETED', 'DEAD'))
+        (OLD.status IN ('PENDING', 'RETRY') AND NEW.status IN ('PROCESSING', 'FAILED'))
+        OR (OLD.status = 'PROCESSING' AND NEW.status IN ('RETRY', 'COMPLETED', 'FAILED'))
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid ingestion job lifecycle transition';
     END IF;
@@ -635,21 +640,61 @@ BEGIN
        OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion claim bounds';
     END IF;
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+        completed_at = statement_timestamp()
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.status = 'PROCESSING'
+      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts >= job.max_attempts;
+
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_RETRY',
+        completed_at = statement_timestamp()
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.status = 'PROCESSING'
+      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts < job.max_attempts;
+
+    UPDATE ai.ingestion_job
+    SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+        completed_at = statement_timestamp(), lease_owner = NULL, lease_expires_at = NULL,
+        updated_at = statement_timestamp()
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts >= max_attempts;
+
+    UPDATE ai.ingestion_job
+    SET status = 'RETRY', sanitized_error = 'LEASE_EXPIRED_RETRY',
+        lease_owner = NULL, lease_expires_at = NULL, updated_at = statement_timestamp()
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts < max_attempts;
+
     RETURN QUERY
     WITH candidates AS (
         SELECT id FROM ai.ingestion_job
-        WHERE ((status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp())
-               OR (status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()))
+        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp()
           AND attempts < max_attempts
         ORDER BY next_attempt_at, created_at
         FOR UPDATE SKIP LOCKED
         LIMIT p_limit
-    )
+    ), claimed AS (
     UPDATE ai.ingestion_job job
     SET status = 'PROCESSING', lease_owner = p_worker_id,
         lease_expires_at = transaction_timestamp() + p_lease,
-        attempts = job.attempts + 1, updated_at = statement_timestamp()
-    FROM candidates WHERE job.id = candidates.id RETURNING job.*;
+        attempts = job.attempts + 1, sanitized_error = NULL,
+        updated_at = statement_timestamp()
+    FROM candidates WHERE job.id = candidates.id RETURNING job.*
+    ), attempts AS (
+        INSERT INTO ai.ingestion_attempt
+            (id, job_id, attempt_number, worker_id, stage, checkpoint, status,
+             lease_expires_at, started_at)
+        SELECT md5(claimed.id::text || ':' || claimed.attempts::text)::uuid,
+               claimed.id, claimed.attempts, p_worker_id, claimed.stage, claimed.checkpoint,
+               'RUNNING', claimed.lease_expires_at, statement_timestamp()
+        FROM claimed
+        RETURNING job_id
+    )
+    SELECT claimed.* FROM claimed JOIN attempts ON attempts.job_id = claimed.id;
 END;
 $$;
 
@@ -664,11 +709,23 @@ BEGIN
        OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid event claim bounds';
     END IF;
+    UPDATE ai.event_consumption
+    SET status = 'DEAD', sanitized_terminal_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+        completed_at = statement_timestamp(), dead_at = statement_timestamp(),
+        lease_owner = NULL, lease_expires_at = NULL
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts >= max_attempts;
+
+    UPDATE ai.event_consumption
+    SET status = 'RETRY', sanitized_terminal_error = NULL,
+        lease_owner = NULL, lease_expires_at = NULL
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts < max_attempts;
+
     RETURN QUERY
     WITH candidates AS (
         SELECT id FROM ai.event_consumption
-        WHERE ((status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp())
-               OR (status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()))
+        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp()
           AND attempts < max_attempts
         ORDER BY next_attempt_at, created_at
         FOR UPDATE SKIP LOCKED
@@ -726,18 +783,26 @@ DECLARE
     job ai.ingestion_job%ROWTYPE;
     version_document_id uuid;
     space_manifest text;
+    space_status text;
 BEGIN
     SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
     IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
        OR job.lease_expires_at <= transaction_timestamp() THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
     END IF;
+    IF p_document_version_id <> job.produced_document_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'chunk must use the produced document version for the claimed job';
+    END IF;
     SELECT document_id INTO STRICT version_document_id
     FROM ai.knowledge_document_version WHERE id = p_document_version_id;
     IF version_document_id <> job.document_id THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'ingestion document version does not belong to claimed job';
     END IF;
-    SELECT corpus_version INTO STRICT space_manifest FROM ai.embedding_space WHERE id = p_embedding_space_id;
+    SELECT corpus_version, status INTO STRICT space_manifest, space_status
+    FROM ai.embedding_space WHERE id = p_embedding_space_id;
+    IF space_status <> 'BUILDING' THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space is not BUILDING';
+    END IF;
     IF space_manifest <> job.corpus_manifest_digest THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space corpus manifest does not match claimed job';
     END IF;
@@ -750,6 +815,30 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION ai.checkpoint_ingestion_attempt(
+    p_job_id uuid, p_worker_id text, p_stage text, p_checkpoint jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    UPDATE ai.ingestion_attempt attempt
+    SET stage = p_stage, checkpoint = p_checkpoint
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_job SET stage = p_stage, checkpoint = p_checkpoint,
+        updated_at = statement_timestamp() WHERE id = p_job_id;
+END;
+$$;
+
 CREATE FUNCTION ai.finalize_ingestion_job(p_job_id uuid, p_worker_id text, p_checkpoint jsonb)
 RETURNS void
 LANGUAGE plpgsql
@@ -757,10 +846,21 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'SUCCEEDED', stage = 'COMPLETE', checkpoint = p_checkpoint,
+        completed_at = statement_timestamp(), sanitized_error = NULL
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
     UPDATE ai.ingestion_job
     SET status = 'COMPLETED', stage = 'COMPLETE', checkpoint = p_checkpoint,
         lease_owner = NULL, lease_expires_at = NULL, sanitized_error = NULL,
-        updated_at = statement_timestamp()
+        updated_at = statement_timestamp(), completed_at = statement_timestamp()
     WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
       AND lease_expires_at > transaction_timestamp();
     IF NOT FOUND THEN
@@ -783,11 +883,23 @@ BEGIN
     IF p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion retry bound';
     END IF;
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'FAILED', sanitized_error = p_sanitized_error,
+        completed_at = statement_timestamp()
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
     UPDATE ai.ingestion_job
-    SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'RETRY' END,
+    SET status = CASE WHEN attempts >= max_attempts THEN 'FAILED' ELSE 'RETRY' END,
         next_attempt_at = transaction_timestamp() + p_retry_after,
         lease_owner = NULL, lease_expires_at = NULL, sanitized_error = p_sanitized_error,
-        updated_at = statement_timestamp()
+        updated_at = statement_timestamp(),
+        completed_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END
     WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
       AND lease_expires_at > transaction_timestamp()
     RETURNING status INTO next_status;
@@ -867,7 +979,9 @@ BEGIN
     SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'RETRY' END,
         next_attempt_at = transaction_timestamp() + p_retry_after,
         lease_owner = NULL, lease_expires_at = NULL,
-        sanitized_terminal_error = CASE WHEN attempts >= max_attempts THEN p_sanitized_error ELSE NULL END
+        sanitized_terminal_error = CASE WHEN attempts >= max_attempts THEN p_sanitized_error ELSE NULL END,
+        completed_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END,
+        dead_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END
     WHERE id = p_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
       AND lease_expires_at > transaction_timestamp()
     RETURNING status INTO next_status;
@@ -1088,12 +1202,20 @@ AS $$
 DECLARE
     expected_dataset uuid;
     case_dataset uuid;
+    case_input jsonb;
+    case_expected_properties jsonb;
 BEGIN
     SELECT dataset_version_id INTO STRICT expected_dataset
     FROM ai.embedding_space_gate_evaluation WHERE id = p_evaluation_id;
-    SELECT dataset_version_id INTO STRICT case_dataset FROM ai.evaluation_case WHERE id = p_case_id;
+    SELECT dataset_version_id, input, expected_properties
+    INTO STRICT case_dataset, case_input, case_expected_properties
+    FROM ai.evaluation_case WHERE id = p_case_id;
     IF case_dataset <> expected_dataset THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'gate case is outside evaluation dataset';
+    END IF;
+    IF NOT (jsonb_typeof(case_input) = 'object' AND case_input <> '{}'::jsonb)
+       OR NOT (jsonb_typeof(case_expected_properties) = 'object' AND case_expected_properties <> '{}'::jsonb) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation case must contain non-empty input and expected properties';
     END IF;
     INSERT INTO ai.embedding_space_gate_case_evidence
         (evaluation_id, case_id, citation_numerator, citation_denominator, recall_at_10, evidence_hash)
@@ -1116,6 +1238,8 @@ DECLARE
     citation_den bigint;
     recall_total numeric;
     cases bigint;
+    dataset_cases bigint;
+    empty_cases bigint;
     gate_decision text;
 BEGIN
     SELECT * INTO STRICT evaluation FROM ai.embedding_space_gate_evaluation
@@ -1127,12 +1251,23 @@ BEGIN
     IF current_manifest <> evaluation.corpus_manifest_digest OR active_status <> 'ACTIVE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
     END IF;
-    SELECT coalesce(sum(citation_numerator), 0), coalesce(sum(citation_denominator), 0),
-           coalesce(sum(recall_at_10), 0), count(*)
+    SELECT count(*), count(*) FILTER (WHERE input = '{}'::jsonb OR expected_properties = '{}'::jsonb)
+    INTO dataset_cases, empty_cases
+    FROM ai.evaluation_case WHERE dataset_version_id = evaluation.dataset_version_id;
+    IF empty_cases > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation dataset contains empty cases';
+    END IF;
+    SELECT coalesce(sum(evidence.citation_numerator), 0), coalesce(sum(evidence.citation_denominator), 0),
+           coalesce(sum(evidence.recall_at_10), 0), count(*)
     INTO citation_num, citation_den, recall_total, cases
-    FROM ai.embedding_space_gate_case_evidence WHERE evaluation_id = p_evaluation_id;
-    IF citation_den = 0 OR cases = 0 THEN
-        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: citation and recall evidence are required';
+    FROM ai.embedding_space_gate_case_evidence evidence
+    JOIN ai.evaluation_case evaluation_case ON evaluation_case.id = evidence.case_id
+    WHERE evidence.evaluation_id = p_evaluation_id;
+    IF dataset_cases < 20 OR cases < 20 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'at least 20 meaningful evaluation cases are required';
+    END IF;
+    IF citation_den = 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: citation evidence is required';
     END IF;
     gate_decision := CASE WHEN evaluation.embedded_count = evaluation.eligible_count
         AND evaluation.leakage_count = 0
@@ -1242,8 +1377,7 @@ GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime;
 GRANT USAGE ON SCHEMA authz TO innorder_ai_runtime;
 
 GRANT SELECT ON ai.model_provider, ai.model_profile, ai.prompt_template_version, ai.agent_definition_version,
-    ai.tool_definition, ai.agent_tool_grant, ai.embedding_space,
-    ai.evaluation_dataset_version, ai.evaluation_case, ai.knowledge_document_version,
+    ai.embedding_space, ai.evaluation_dataset_version, ai.evaluation_case, ai.knowledge_document_version,
     ai.knowledge_chunk, ai.chunk_embedding, ai.ingestion_job, ai.ingestion_attempt,
     ai.event_consumption, ai.model_invocation, ai.retrieval_trace, ai.retrieval_hit,
     ai.embedding_space_gate_evaluation, ai.embedding_space_gate_case_evidence,
@@ -1262,6 +1396,7 @@ GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) T
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_chunk_embedding(uuid, text, uuid, uuid, integer, text, text, integer, jsonb, uuid, public.vector) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.checkpoint_ingestion_attempt(uuid, text, text, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.finalize_ingestion_job(uuid, text, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.fail_ingestion_job(uuid, text, text, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.register_event_consumption(uuid, text, uuid, text, integer, text, uuid, bigint) TO innorder_ai_runtime;

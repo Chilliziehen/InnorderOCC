@@ -227,6 +227,7 @@ for (const routine of [
   'ai.authorized_hybrid_retrieval',
   'ai.persist_ingestion_document_version',
   'ai.persist_ingestion_chunk_embedding',
+  'ai.checkpoint_ingestion_attempt',
   'ai.finalize_ingestion_job',
   'ai.register_event_consumption',
   'ai.finalize_event_consumption',

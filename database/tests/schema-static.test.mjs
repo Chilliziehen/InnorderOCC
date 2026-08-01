@@ -509,7 +509,52 @@ test('requires live LOGIN, denial, concurrency, vector, event, and gate coverage
     'audit.outbox_event', 'flowable', 'expired', 'stale authorization revision',
     'authorized-set digest mismatch', 'grant token event mismatch', 'grant token run mismatch',
     'claim_event_consumptions', 'stale event lease', 'hnsw', 'vector retrieval',
-    'empty gate evidence', 'stale corpus manifest', 'positive path',
+    'at least 20', 'stale corpus manifest', 'positive path',
   ]) assert.match(source, new RegExp(marker, 'iu'), marker);
   assert.doesNotMatch(source, /'--dbname',\s*databaseUrl/iu);
+});
+
+test('requires twenty meaningful versioned cases before gate finalization', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const record = sql.match(/CREATE FUNCTION ai\.record_embedding_gate_case\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  const finalize = sql.match(/CREATE FUNCTION ai\.finalize_embedding_space_gate\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(record, /case_input <> '\{\}'::jsonb/iu);
+  assert.match(record, /case_expected_properties <> '\{\}'::jsonb/iu);
+  assert.match(finalize, /cases < 20/iu);
+  assert.match(finalize, /evaluation dataset contains empty cases/iu);
+  assert.match(finalize, /JOIN ai\.evaluation_case/iu);
+});
+
+test('binds chunk persistence to the produced version and BUILDING space', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const fn = sql.match(/CREATE FUNCTION ai\.persist_ingestion_chunk_embedding\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(fn, /p_document_version_id <> job\.produced_document_version_id/iu);
+  assert.match(fn, /space_status <> 'BUILDING'/iu);
+  assert.match(fn, /embedding space is not BUILDING/iu);
+});
+
+test('persists bounded ingestion attempt history and terminalizes exhausted leases', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  const claim = sql.match(/CREATE FUNCTION ai\.claim_ingestion_jobs\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(sql, /lease_expires_at timestamptz/iu);
+  assert.match(claim, /INSERT INTO ai\.ingestion_attempt/iu);
+  assert.match(claim, /LEASE_EXPIRED_MAX_ATTEMPTS/iu);
+  assert.match(claim, /status = 'FAILED'/iu);
+  assert.match(claim, /completed_at = statement_timestamp\(\)/iu);
+  for (const fn of ['checkpoint_ingestion_attempt', 'finalize_ingestion_job', 'fail_ingestion_job']) {
+    const definition = sql.match(new RegExp(`CREATE FUNCTION ai\\.${fn}\\([\\s\\S]*?\\$\\$;`, 'iu'))?.[0] ?? '';
+    assert.match(definition, /ai\.ingestion_attempt/iu, fn);
+  }
+  const eventClaim = sql.match(/CREATE FUNCTION ai\.claim_event_consumptions\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(eventClaim, /LEASE_EXPIRED_MAX_ATTEMPTS/iu);
+  assert.match(eventClaim, /status = 'DEAD'/iu);
+  assert.match(eventClaim, /dead_at = statement_timestamp\(\)/iu);
+});
+
+test('keeps first-release tool metadata inaccessible to AI', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.doesNotMatch(sql, /GRANT SELECT ON[^;]*(?:ai\.tool_definition|ai\.agent_tool_grant)/iu);
+  const live = readFileSync(governedPostgresqlTestPath, 'utf8');
+  assert.match(live, /SELECT \* FROM ai\.tool_definition/iu);
+  assert.match(live, /SELECT \* FROM ai\.agent_tool_grant/iu);
 });

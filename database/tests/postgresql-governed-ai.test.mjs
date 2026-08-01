@@ -99,6 +99,12 @@ function expectAiFailure(sql, pattern) {
 
 function fixtureSql(prefix) {
   const id = (suffix) => `${prefix}-0000-7000-8000-${suffix}`;
+  const cases = (datasetVersion, start, count, emptyIndex = -1) => Array.from({ length: count }, (_, index) => {
+    const caseId = String(start + index).padStart(12, '0');
+    const input = index === emptyIndex ? '{}' : `{"question":${index + 1}}`;
+    const expected = index === emptyIndex ? '{}' : `{"answer":${index + 1}}`;
+    return `('${id(caseId)}', '${id(datasetVersion)}', 'case-${start + index}', '${input}', '${expected}')`;
+  }).join(',\n      ');
   return `
     INSERT INTO catalog.domain_package (id, package_key, name, status)
     VALUES ('${id('000000000001')}', 'governed.${prefix}', 'Governed AI', 'ACTIVE');
@@ -159,14 +165,24 @@ function fixtureSql(prefix) {
     VALUES ('${id('00000000000c')}', 'test.${prefix}', 'Test dataset');
     INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status)
     VALUES ('${id('000000000013')}', '${id('00000000000c')}', 1, repeat('1', 64), 'DRAFT');
-    INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties)
-    VALUES ('${id('000000000034')}', '${id('000000000013')}', 'case-pass', '{}', '{}');
     INSERT INTO ai.evaluation_dataset (id, dataset_key, name)
     VALUES ('${id('00000000003a')}', 'test.fail.${prefix}', 'Fail dataset');
     INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status)
     VALUES ('${id('00000000003b')}', '${id('00000000003a')}', 1, repeat('a', 64), 'DRAFT');
-    INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties)
-    VALUES ('${id('00000000003c')}', '${id('00000000003b')}', 'case-fail', '{}', '{}');
+    INSERT INTO ai.evaluation_dataset (id, dataset_key, name) VALUES
+      ('${id('000000000060')}', 'test.one.${prefix}', 'One-case dataset'),
+      ('${id('000000000061')}', 'test.nineteen.${prefix}', 'Nineteen-case dataset'),
+      ('${id('000000000062')}', 'test.empty.${prefix}', 'Empty-case dataset');
+    INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status) VALUES
+      ('${id('000000000063')}', '${id('000000000060')}', 1, repeat('3', 64), 'DRAFT'),
+      ('${id('000000000064')}', '${id('000000000061')}', 1, repeat('4', 64), 'DRAFT'),
+      ('${id('000000000065')}', '${id('000000000062')}', 1, repeat('5', 64), 'DRAFT');
+    INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties) VALUES
+      ${cases('000000000013', 100, 20)},
+      ${cases('00000000003b', 120, 20)},
+      ${cases('000000000063', 200, 1)},
+      ${cases('000000000064', 300, 19)},
+      ${cases('000000000065', 400, 20, 19)};
 
     INSERT INTO ai.knowledge_source
       (id, source_type, sync_config, state, sync_cursor)
@@ -223,6 +239,17 @@ function fixtureSql(prefix) {
     VALUES ('${id('000000000026')}', '${id('000000000014')}', '${id('000000000036')}', 'v1',
             repeat('8', 64), '1', repeat('9', 64), '{}', 'FETCH', 'PENDING',
             now() - interval '1 hour', now() - interval '1 hour');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, source_version, content_hash, parser_version,
+       corpus_manifest_digest, checkpoint, stage, status, attempts, max_attempts,
+       lease_owner, lease_expires_at, created_at, updated_at)
+    VALUES ('${id('000000000058')}', '${id('000000000014')}', '${id('000000000036')}', 'crashed',
+            repeat('d', 64), '1', repeat('9', 64), '{}', 'FETCH', 'PROCESSING', 1, 1,
+            'crashed-worker', now() - interval '1 minute', now() - interval '1 hour', now() - interval '1 hour');
+    INSERT INTO ai.ingestion_attempt
+      (id, job_id, attempt_number, worker_id, stage, checkpoint, status, lease_expires_at, started_at)
+    VALUES ('${id('000000000059')}', '${id('000000000058')}', 1, 'crashed-worker', 'FETCH', '{}',
+            'RUNNING', now() - interval '1 minute', now() - interval '1 hour');
     CREATE TABLE flowable.governed_secret (id integer PRIMARY KEY);
     INSERT INTO flowable.governed_secret VALUES (1);
   `;
@@ -272,6 +299,7 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     'SELECT * FROM occ.business_object;', 'SELECT * FROM audit.outbox_event;',
     'SELECT * FROM flowable.governed_secret;', 'SELECT * FROM ai.knowledge_source;',
     'SELECT * FROM ai.knowledge_document;', 'SELECT * FROM ai.recommendation;',
+    'SELECT * FROM ai.tool_definition;', 'SELECT * FROM ai.agent_tool_grant;',
   ]) expectAiFailure(sql, /permission denied/iu);
   for (const sql of [
     "INSERT INTO flowable.governed_secret VALUES (2);",
@@ -339,19 +367,52 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
 
   const claimed = execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('worker-a', 10, interval '30 seconds');`);
   assert.equal(claimed, '1');
+  assert.equal(execAiSql(`SELECT status || '|' || worker_id FROM ai.ingestion_attempt
+    WHERE job_id = '${id('000000000026')}' AND attempt_number = 1;`), 'RUNNING|worker-a');
+  assert.equal(execAiSql(`SELECT status || '|' || sanitized_error || '|' || (completed_at IS NOT NULL)
+    FROM ai.ingestion_job WHERE id = '${id('000000000058')}';`),
+  'FAILED|LEASE_EXPIRED_MAX_ATTEMPTS|true');
+  assert.equal(execAiSql(`SELECT status || '|' || sanitized_error || '|' || (completed_at IS NOT NULL)
+    FROM ai.ingestion_attempt WHERE job_id = '${id('000000000058')}';`),
+  'FAILED|LEASE_EXPIRED_MAX_ATTEMPTS|true');
   execSql(`UPDATE ai.ingestion_job SET lease_expires_at = now() - interval '1 second'
            WHERE lease_owner = 'worker-a';`);
   const reclaimed = execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('worker-b', 10, interval '30 seconds');`);
   assert.equal(reclaimed, '1');
+  assert.equal(execAiSql(`SELECT string_agg(attempt_number || ':' || status || ':' || worker_id, ',' ORDER BY attempt_number)
+    FROM ai.ingestion_attempt WHERE job_id = '${id('000000000026')}';`),
+  '1:FAILED:worker-a,2:RUNNING:worker-b');
+  execAiSql(`SELECT ai.checkpoint_ingestion_attempt('${id('000000000026')}', 'worker-b', 'PARSE', '{"page":1}');`);
   expectAiFailure(`SELECT ai.persist_ingestion_document_version('${id('000000000026')}', 'worker-b',
     '${id('00000000004a')}', 2, 'wrong-${fixture}', repeat('f',64), 'text/plain', 'PUBLIC');`,
   /content hash does not match claimed job/iu);
   execAiSql(`SELECT ai.persist_ingestion_document_version('${id('000000000026')}', 'worker-b',
     '${id('000000000037')}', 2, 'ingested-${fixture}', repeat('8',64), 'text/plain', 'PUBLIC');`);
+  expectAiFailure(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
+    '${id('00000000004b')}', '${id('00000000004d')}', 0, 'old', repeat('d',64), 1,
+    '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`, /produced document version/iu);
+  expectAiFailure(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', '${id('00000000004e')}', 0, 'active', repeat('e',64), 1,
+    '{}', '${id('000000000009')}', '[1,0,0]'::public.vector);`, /embedding space is not BUILDING/iu);
   execAiSql(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
     '${id('000000000037')}', '${id('000000000038')}', 0, 'candidate knowledge', repeat('9',64),
     2, '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`);
   execAiSql(`SELECT ai.finalize_ingestion_job('${id('000000000026')}', 'worker-b', '{"done":true}');`);
+  assert.equal(execAiSql(`SELECT status || '|' || stage || '|' || (completed_at IS NOT NULL)
+    FROM ai.ingestion_attempt WHERE job_id = '${id('000000000026')}' AND attempt_number = 2;`),
+  'SUCCEEDED|COMPLETE|true');
+
+  execSql(`INSERT INTO ai.ingestion_job
+    (id, source_id, document_id, source_version, content_hash, parser_version,
+     corpus_manifest_digest, checkpoint, stage, status, created_at, updated_at)
+    VALUES ('${id('000000000070')}', '${id('000000000014')}', '${id('000000000036')}', 'failure',
+      repeat('f',64), '1', repeat('9',64), '{}', 'FETCH', 'PENDING', now(), now());`);
+  assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('failure-worker', 1, interval '30 seconds');`), '1');
+  assert.equal(execAiSql(`SELECT ai.fail_ingestion_job('${id('000000000070')}', 'failure-worker',
+    'sanitized failure', interval '1 minute');`), 'RETRY');
+  assert.equal(execAiSql(`SELECT status || '|' || sanitized_error || '|' || (completed_at IS NOT NULL)
+    FROM ai.ingestion_attempt WHERE job_id = '${id('000000000070')}';`),
+  'FAILED|sanitized failure|true');
   expectAiFailure(`SELECT * FROM ai.authorized_hybrid_retrieval('${id('000000000030')}',
     '${id('000000000029')}', 'candidate', '[1,0,0]'::public.vector, 10, 10, 10);`,
   /retrieval embedding space is not active/iu);
@@ -362,7 +423,16 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   assert.equal(execAiSql(`SELECT ai.register_event_consumption('${id('00000000002f')}', 'consumer',
     '${id('000000000028')}', 'test.event', 1, 'document', '${id('000000000036')}', 1);`), eventId,
   'event dedup positive path');
+  execSql(`INSERT INTO ai.event_consumption
+    (id, consumer_key, event_id, event_type, schema_version, aggregate_type, aggregate_id,
+     aggregate_version, status, attempts, max_attempts, lease_owner, lease_expires_at, created_at)
+    VALUES ('${id('000000000072')}', 'crashed-consumer', '${id('000000000073')}', 'crashed.event', 1,
+      'document', '${id('000000000036')}', 1, 'PROCESSING', 1, 1, 'crashed-event-worker',
+      now() - interval '1 minute', now() - interval '1 hour');`);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_event_consumptions('event-worker-a', 10, interval '30 seconds');`), '1');
+  assert.equal(execAiSql(`SELECT status || '|' || sanitized_terminal_error || '|' || (dead_at IS NOT NULL)
+    FROM ai.event_consumption WHERE id = '${id('000000000072')}';`),
+  'DEAD|LEASE_EXPIRED_MAX_ATTEMPTS|true');
   execSql(`UPDATE ai.event_consumption SET lease_expires_at = now() - interval '1 second'
            WHERE lease_owner = 'event-worker-a';`);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_event_consumptions('event-worker-b', 10, interval '30 seconds');`), '1',
@@ -372,19 +442,39 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     '${id('000000000028')}', 'test.event', 1, 'document', '${id('000000000036')}', 1);`), eventId,
   'terminal event dedup returns the durable record');
 
+  const gateEvidence = (evaluationId, start, count, numerator, denominator, recall) =>
+    Array.from({ length: count }, (_, index) => `SELECT ai.record_embedding_gate_case('${evaluationId}',
+      '${id(String(start + index).padStart(12, '0'))}', ${numerator}, ${denominator}, ${recall}, repeat('b',64));`).join('\n');
+
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000046')}', '${id('000000000013')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('a',64));`);
-  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`, /empty gate evidence/iu);
-  expectAiFailure(`SELECT ai.record_embedding_gate_case('${id('000000000046')}', '${id('000000000034')}',
-    0, 0, 0.85, repeat('b',64));`, /check constraint/iu);
-  execAiSql(`SELECT ai.record_embedding_gate_case('${id('000000000046')}', '${id('000000000034')}',
-    19, 20, 0.85, repeat('b',64));`);
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`, /at least 20/iu);
+
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000066')}', '${id('000000000063')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('1',64));`);
+  execAiSql(gateEvidence(id('000000000066'), 200, 1, 1, 1, 1));
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000066')}');`, /at least 20/iu);
+
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000067')}', '${id('000000000064')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('2',64));`);
+  execAiSql(gateEvidence(id('000000000067'), 300, 19, 1, 1, 1));
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000067')}');`, /at least 20/iu);
+
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000068')}', '${id('000000000065')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('3',64));`);
+  execAiSql(gateEvidence(id('000000000068'), 400, 19, 1, 1, 1));
+  expectAiFailure(gateEvidence(id('000000000068'), 419, 1, 1, 1, 1), /evaluation case must contain non-empty input and expected properties/iu);
+  execSql(`INSERT INTO ai.embedding_space_gate_case_evidence
+    (evaluation_id, case_id, citation_numerator, citation_denominator, recall_at_10, evidence_hash)
+    VALUES ('${id('000000000068')}', '${id('000000000419')}', 1, 1, 1, repeat('4',64));`);
+  expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000068')}');`, /evaluation dataset contains empty cases/iu);
+
+  execAiSql(gateEvidence(id('000000000046'), 100, 20, 19, 20, 0.85));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`), 'PASS');
 
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000047')}', '${id('00000000003b')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('c',64));`);
-  execAiSql(`SELECT ai.record_embedding_gate_case('${id('000000000047')}', '${id('00000000003c')}',
-    18, 20, 0.84, repeat('d',64));`);
+  execAiSql(gateEvidence(id('000000000047'), 120, 20, 18, 20, 0.84));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000047')}');`), 'FAIL');
   expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('000000000048')}', '${id('000000000013')}',
     '${id('000000000029')}', repeat('8',64), '${id('000000000009')}', repeat('e',64));`, /stale corpus manifest/iu);
