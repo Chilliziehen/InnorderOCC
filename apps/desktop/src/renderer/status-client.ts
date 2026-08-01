@@ -30,10 +30,11 @@ export async function getSystemStatuses(): Promise<StatusPollSample> {
   try {
     const statuses = (await window.occ.runtime.statuses())
       .map((status) => SystemStatusSchema.parse(status));
+    const core = statuses.find(({ service }) => service === "occ-core");
     return {
       statuses,
       successful: true,
-      coreReachable: statuses.find(({ service }) => service === "occ-core")?.state !== "UNREACHABLE",
+      coreReachable: core !== undefined && core.state !== "UNREACHABLE",
       polledAt,
     };
   } catch {

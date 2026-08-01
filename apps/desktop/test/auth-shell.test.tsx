@@ -58,7 +58,18 @@ function createOcc(overrides: Partial<{
       ...overrides.session,
     },
     runtime: {
-      statuses: vi.fn().mockResolvedValue([]),
+      statuses: vi.fn().mockResolvedValue([{
+        service: "occ-core",
+        version: "0.1.0",
+        state: "READY",
+        checkedAt: "2026-08-01T12:00:00.000Z",
+        components: [{
+          id: "core-runtime",
+          label: "Core Runtime",
+          state: "READY",
+          checkedAt: "2026-08-01T12:00:00.000Z",
+        }],
+      }]),
       ...overrides.runtime,
     },
     workspaces: {

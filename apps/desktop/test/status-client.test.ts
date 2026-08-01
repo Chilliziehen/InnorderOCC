@@ -51,6 +51,27 @@ describe("status client", () => {
     });
   });
 
+  it.each([
+    ["empty", []],
+    ["AI-only", [{
+      service: "occ-ai",
+      version: "0.1.0",
+      state: "READY" as const,
+      checkedAt: "2026-08-01T12:00:00.000Z",
+      components: [],
+    }]],
+  ])("fails closed when a successful %s response omits Core", async (_name, statuses) => {
+    Object.defineProperty(window, "occ", {
+      configurable: true,
+      value: { runtime: { statuses: vi.fn().mockResolvedValue(statuses) } },
+    });
+
+    await expect(getSystemStatuses()).resolves.toMatchObject({
+      successful: true,
+      coreReachable: false,
+    });
+  });
+
   it("does not overlap requests or notify after disposal", async () => {
     vi.useFakeTimers();
     let resolveRequest: ((value: []) => void) | undefined;
@@ -76,7 +97,7 @@ describe("status client", () => {
     expect(onStatuses).toHaveBeenCalledWith(expect.objectContaining({
       statuses: [],
       successful: true,
-      coreReachable: true,
+      coreReachable: false,
     }));
 
     await vi.advanceTimersByTimeAsync(1_000);
