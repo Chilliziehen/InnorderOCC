@@ -1,4 +1,5 @@
 import { SystemStatusSchema, type ServiceState, type SystemStatus } from "@innorder/contracts";
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
 import { z } from "zod";
 
 import type { WorkspaceResult } from "../../desktop-contract";
@@ -24,7 +25,7 @@ const METRICS = [
   { type: "attention", label: "关注事项" },
   { type: "deadline", label: "时限" },
   { type: "risk", label: "风险" },
-  { type: "process", label: "流程" },
+  { type: "process", label: "进行中流程" },
 ] as const;
 
 export interface OverviewProps {
@@ -32,11 +33,61 @@ export interface OverviewProps {
   readonly result: WorkspaceResult;
   readonly statuses: readonly unknown[];
   readonly query: WorkspaceQueryValue;
+  readonly activeTab: string;
   readonly environment: string;
+  readonly onTabChange: (tabId: string) => void;
   readonly onQueryChange: (value: WorkspaceQueryValue) => void;
   readonly onRefresh: () => void;
   readonly onRetry?: () => void;
   readonly onConflictRefresh?: () => void;
+}
+
+function WorkspaceTabs({ definition, activeTab, label, onTabChange, children }: {
+  readonly definition: WorkspaceDefinition;
+  readonly activeTab: string;
+  readonly label: string;
+  readonly onTabChange: (tabId: string) => void;
+  readonly children: ReactNode;
+}) {
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const selectedTab = definition.tabs.some(({ id }) => id === activeTab)
+    ? activeTab
+    : definition.tabs[0]?.id;
+  const moveFocus = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | undefined;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % definition.tabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + definition.tabs.length) % definition.tabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = definition.tabs.length - 1;
+    if (nextIndex === undefined) return;
+    event.preventDefault();
+    tabs.current[nextIndex]?.focus();
+    const nextTab = definition.tabs[nextIndex];
+    if (nextTab) onTabChange(nextTab.id);
+  };
+
+  return (
+    <>
+      <div role="tablist" aria-label={label}>
+        {definition.tabs.map((tab, index) => {
+          const selected = tab.id === selectedTab;
+          return <button
+            type="button"
+            role="tab"
+            id={`${definition.id}-tab-${tab.id}`}
+            aria-controls={`${definition.id}-panel-${tab.id}`}
+            aria-selected={selected}
+            tabIndex={selected ? 0 : -1}
+            ref={(element) => { tabs.current[index] = element; }}
+            onClick={() => onTabChange(tab.id)}
+            onKeyDown={(event) => moveFocus(event, index)}
+            key={tab.id}
+          >{tab.label}</button>;
+        })}
+      </div>
+      {selectedTab ? <div role="tabpanel" id={`${definition.id}-panel-${selectedTab}`} aria-labelledby={`${definition.id}-tab-${selectedTab}`} tabIndex={0}>{children}</div> : null}
+    </>
+  );
 }
 
 function validatedStatuses(statuses: readonly unknown[]): SystemStatus[] {
@@ -52,11 +103,13 @@ function metricCounts(result: WorkspaceResult): Readonly<Record<(typeof METRICS)
   if (parsed.some((entry) => !entry.success)) return undefined;
   return Object.fromEntries(METRICS.map(({ type }) => [
     type,
-    parsed.filter((entry) => entry.success && entry.data.type === type).length,
+    parsed.filter((entry) => entry.success && entry.data.type === type && (
+      type !== "process" || entry.data.status === "ACTIVE" || entry.data.status === "RUNNING"
+    )).length,
   ])) as Record<(typeof METRICS)[number]["type"], number>;
 }
 
-export function Overview({ definition, result, statuses, query, environment, onQueryChange, onRefresh, onRetry, onConflictRefresh }: OverviewProps) {
+export function Overview({ definition, result, statuses, query, activeTab, environment, onTabChange, onQueryChange, onRefresh, onRetry, onConflictRefresh }: OverviewProps) {
   const health = validatedStatuses(statuses);
   const counts = metricCounts(result);
 
@@ -66,43 +119,45 @@ export function Overview({ definition, result, statuses, query, environment, onQ
         <h1 id="overview-title">运行总览</h1>
         <p>环境：{environment}</p>
       </header>
-      <QueryToolbar definition={definition} value={query} disabled={result.state === "loading"} onChange={onQueryChange} onRefresh={onRefresh} />
+      <WorkspaceTabs definition={definition} activeTab={activeTab} label="运行总览视图" onTabChange={onTabChange}>
+        <QueryToolbar definition={definition} value={query} disabled={result.state === "loading"} onChange={onQueryChange} onRefresh={onRefresh} />
 
-      <section aria-label="运行指标">
-        {METRICS.map(({ type, label }) => (
-          <article key={type}>
-            <h2>{label}</h2>
-            <strong>{counts?.[type] ?? "--"}</strong>
-            <span>{counts ? "已验证数据" : "不可用"}</span>
-          </article>
-        ))}
-      </section>
+        <section aria-label="运行指标">
+          {METRICS.map(({ type, label }) => (
+            <article key={type}>
+              <h2>{label}</h2>
+              <strong>{counts?.[type] ?? "--"}</strong>
+              <span>{counts ? "已验证数据" : "不可用"}</span>
+            </article>
+          ))}
+        </section>
 
-      <section aria-labelledby="overview-health-title">
-        <h2 id="overview-health-title">服务健康</h2>
-        <table aria-label="服务健康">
-          <thead><tr><th scope="col">服务</th><th scope="col">状态</th><th scope="col">版本</th><th scope="col">环境</th><th scope="col">新鲜度</th></tr></thead>
-          <tbody>
-            {health.length > 0 ? health.map((status) => (
-              <tr key={status.service}>
-                <td>{status.service}</td>
-                <td>{STATE_LABELS[status.state]}</td>
-                <td>{status.version}</td>
-                <td>{environment}</td>
-                <td><time dateTime={status.checkedAt}>{new Date(status.checkedAt).toLocaleString("zh-CN")}</time></td>
-              </tr>
-            )) : <tr><td>--</td><td>--</td><td>--</td><td>{environment}</td><td>--</td></tr>}
-          </tbody>
-        </table>
-      </section>
+        <section aria-labelledby="overview-health-title">
+          <h2 id="overview-health-title">服务健康</h2>
+          <table aria-label="服务健康">
+            <thead><tr><th scope="col">服务</th><th scope="col">状态</th><th scope="col">版本</th><th scope="col">环境</th><th scope="col">新鲜度</th></tr></thead>
+            <tbody>
+              {health.length > 0 ? health.map((status) => (
+                <tr key={status.service}>
+                  <td>{status.service}</td>
+                  <td>{STATE_LABELS[status.state]}</td>
+                  <td>{status.version}</td>
+                  <td>{environment}</td>
+                  <td><time dateTime={status.checkedAt}>{new Date(status.checkedAt).toLocaleString("zh-CN")}</time></td>
+                </tr>
+              )) : <tr><td>--</td><td>--</td><td>--</td><td>{environment}</td><td>--</td></tr>}
+            </tbody>
+          </table>
+        </section>
 
-      <WorkspaceState
-        result={result}
-        itemSchema={overviewItemSchema}
-        columns={definition.columns}
-        onRetry={onRetry ?? onRefresh}
-        onRefresh={onConflictRefresh ?? onRefresh}
-      />
+        <WorkspaceState
+          result={result}
+          itemSchema={overviewItemSchema}
+          columns={definition.columns}
+          onRetry={onRetry ?? onRefresh}
+          onRefresh={onConflictRefresh ?? onRefresh}
+        />
+      </WorkspaceTabs>
     </main>
   );
 }

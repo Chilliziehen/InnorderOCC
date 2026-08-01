@@ -38,14 +38,16 @@ describe("Overview", () => {
       result={unavailable}
       statuses={[...statuses, { service: "raw-secret" } as unknown as SystemStatus]}
       query={query}
+      activeTab="attention"
       environment="试点环境"
+      onTabChange={vi.fn()}
       onQueryChange={vi.fn()}
       onRefresh={vi.fn()}
     />);
 
     expect(screen.getByRole("heading", { level: 1, name: "运行总览" })).toBeInTheDocument();
     const metrics = screen.getByRole("region", { name: "运行指标" });
-    for (const label of ["关注事项", "时限", "风险", "流程"]) {
+    for (const label of ["关注事项", "时限", "风险", "进行中流程"]) {
       expect(within(metrics).getByRole("heading", { level: 2, name: label })).toBeInTheDocument();
     }
     expect(within(metrics).getAllByText("--")).toHaveLength(4);
@@ -72,25 +74,67 @@ describe("Overview", () => {
           { item: "待审核证据", type: "attention", status: "open", dueAt: fetchedAt },
           { item: "今日截止", type: "deadline", status: "open", dueAt: fetchedAt },
           { item: "供应风险", type: "risk", status: "open", dueAt: fetchedAt },
-          { item: "入职流程", type: "process", status: "active" },
+          { item: "入职流程", type: "process", status: "ACTIVE" },
+          { item: "采购流程", type: "process", status: "RUNNING" },
+          { item: "暂停流程", type: "process", status: "PAUSED" },
+          { item: "大小写不匹配", type: "process", status: "active" },
         ],
-        count: 4,
+        count: 7,
         fetchedAt,
       }}
       statuses={statuses}
       query={query}
+      activeTab="attention"
       environment="试点环境"
+      onTabChange={vi.fn()}
       onQueryChange={onQueryChange}
       onRefresh={onRefresh}
     />);
 
     const metrics = screen.getByRole("region", { name: "运行指标" });
-    expect(within(metrics).getAllByText("1")).toHaveLength(4);
+    expect(within(metrics).getAllByText("1")).toHaveLength(3);
+    expect(within(metrics).getByRole("heading", { level: 2, name: "进行中流程" }).parentElement).toHaveTextContent("2");
     expect(screen.getByRole("table", { name: "工作区数据" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "供应" } });
     expect(onQueryChange).toHaveBeenCalledWith(expect.objectContaining({ search: "供应" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
     expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("renders controlled tabs and supports roving keyboard focus", () => {
+    const onTabChange = vi.fn();
+    render(<Overview
+      definition={WORKSPACE_DEFINITIONS.overview}
+      result={unavailable}
+      statuses={statuses}
+      query={query}
+      activeTab="attention"
+      environment="试点环境"
+      onTabChange={onTabChange}
+      onQueryChange={vi.fn()}
+      onRefresh={vi.fn()}
+    />);
+
+    const tabs = within(screen.getByRole("tablist", { name: "运行总览视图" })).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["关注事项", "时限", "风险", "服务健康"]);
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+    expect(tabs[0]).toHaveAttribute("tabindex", "0");
+    expect(tabs[1]).toHaveAttribute("tabindex", "-1");
+    expect(tabs[0]).toHaveAttribute("aria-controls", "overview-panel-attention");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "overview-tab-attention");
+
+    tabs[0]!.focus();
+    fireEvent.keyDown(tabs[0]!, { key: "ArrowRight" });
+    expect(tabs[1]).toHaveFocus();
+    expect(onTabChange).toHaveBeenLastCalledWith("deadlines");
+    fireEvent.keyDown(tabs[1]!, { key: "End" });
+    expect(tabs[3]).toHaveFocus();
+    expect(onTabChange).toHaveBeenLastCalledWith("health");
+    fireEvent.keyDown(tabs[3]!, { key: "Home" });
+    expect(tabs[0]).toHaveFocus();
+    expect(onTabChange).toHaveBeenLastCalledWith("attention");
+    fireEvent.click(tabs[2]!);
+    expect(onTabChange).toHaveBeenLastCalledWith("risks");
   });
 });
 
@@ -101,7 +145,9 @@ describe("SystemOperations", () => {
       result={{ state: "empty", fetchedAt }}
       statuses={statuses}
       query={{ ...query, sort: "service-asc" }}
+      activeTab="services"
       environment="试点环境"
+      onTabChange={vi.fn()}
       onQueryChange={vi.fn()}
       onRefresh={vi.fn()}
     />);
@@ -122,6 +168,51 @@ describe("SystemOperations", () => {
     }
   });
 
+  it("renders controlled tabs and wraps roving focus with arrow keys", () => {
+    const onTabChange = vi.fn();
+    render(<SystemOperations
+      definition={WORKSPACE_DEFINITIONS.system}
+      result={{ state: "empty", fetchedAt }}
+      statuses={statuses}
+      query={{ ...query, sort: "service-asc" }}
+      activeTab="services"
+      environment="试点环境"
+      onTabChange={onTabChange}
+      onQueryChange={vi.fn()}
+      onRefresh={vi.fn()}
+    />);
+
+    const tabs = within(screen.getByRole("tablist", { name: "系统运行视图" })).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["服务", "依赖", "事件投递"]);
+    tabs[0]!.focus();
+    fireEvent.keyDown(tabs[0]!, { key: "ArrowLeft" });
+    expect(tabs[2]).toHaveFocus();
+    expect(onTabChange).toHaveBeenCalledWith("delivery");
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("id", "system-panel-services");
+  });
+
+  it("renders only validated ISO configuration freshness", () => {
+    const props = {
+      definition: WORKSPACE_DEFINITIONS.system,
+      result: { state: "empty" as const, fetchedAt },
+      statuses,
+      query: { ...query, sort: "service-asc" },
+      activeTab: "services",
+      environment: "试点环境",
+      onTabChange: vi.fn(),
+      onQueryChange: vi.fn(),
+      onRefresh: vi.fn(),
+    };
+    const { rerender } = render(<SystemOperations {...props} configurationFreshness="not-a-date" />);
+
+    expect(within(screen.getByText("配置新鲜度").parentElement!).getByText("--")).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent("Invalid Date");
+
+    rerender(<SystemOperations {...props} configurationFreshness={fetchedAt} />);
+    expect(within(screen.getByText("配置新鲜度").parentElement!).getByRole("time")).toHaveAttribute("datetime", fetchedAt);
+  });
+
   it.each([
     [{ state: "loading", label: "正在加载系统状态" } satisfies WorkspaceResult, "正在加载系统状态"],
     [{ state: "error", problem: { title: "系统状态查询失败", code: "SYSTEM_QUERY_FAILED", status: 503 } } satisfies WorkspaceResult, "SYSTEM_QUERY_FAILED"],
@@ -135,7 +226,9 @@ describe("SystemOperations", () => {
       result={result}
       statuses={[]}
       query={{ ...query, sort: "service-asc" }}
+      activeTab="services"
       environment="开发环境"
+      onTabChange={vi.fn()}
       onQueryChange={vi.fn()}
       onRefresh={vi.fn()}
     />);
