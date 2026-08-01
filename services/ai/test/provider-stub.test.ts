@@ -46,6 +46,8 @@ const modelMetadata = {
   max_output_tokens: 2048,
   embedding_dimensions: 3,
 } as const;
+const standardModel = { id: "model-1", object: "model", created: 1_722_470_400, owned_by: "openai" } as const;
+const standardModelsResponse = { object: "list", data: [standardModel] } as const;
 
 function target(): ResolvedProviderTarget {
   return { url: new URL("https://provider.example:8443/v1/chat/completions"), address: "93.184.216.34", family: 4, servername: "provider.example", hostHeader: "provider.example:8443" };
@@ -276,7 +278,7 @@ function response(body: unknown, status = 200, headers: Record<string, string> =
 describe("OpenAI-compatible adapter", () => {
   it("probes models, structured chat, and embeddings and persists one exact normalized snapshot", async () => {
     const transport = { request: vi.fn()
-      .mockResolvedValueOnce(response({ data: [modelMetadata] }))
+      .mockResolvedValueOnce(response(standardModelsResponse))
       .mockResolvedValueOnce(response({ choices: [{ message: { content: "{\"probe\":true}" } }], usage: { prompt_tokens: 2, completion_tokens: 1 } }))
       .mockResolvedValueOnce(response({ data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }], usage: { prompt_tokens: 1, total_tokens: 1 } })), };
     const saved: CapabilitySnapshot[] = [];
@@ -284,9 +286,10 @@ describe("OpenAI-compatible adapter", () => {
     const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: repository, now: () => new Date("2026-08-01T00:00:00.000Z"), operationId: () => "operation" });
 
     const result = await adapter.probe(new AbortController().signal);
-    expect(result).toMatchObject({ chat: true, embeddings: true, structuredOutput: true, embeddingDimensions: 3, maxInputTokens: 8192, maxOutputTokens: 2048 });
+    expect(result).toMatchObject({ chat: true, embeddings: true, structuredOutput: true, embeddingDimensions: 3, maxInputTokens: 4096, maxOutputTokens: 1024 });
     expect(result.snapshotHash).toMatch(/^[a-f0-9]{64}$/);
     expect(saved).toEqual([result]);
+    expect(transport.request.mock.calls.map(([input]) => input.path)).toEqual(["/v1/models", "/v1/chat/completions", "/v1/embeddings"]);
   });
 
   it("uses one operation ID, deadline timestamp, and signal across the complete probe", async () => {
@@ -306,6 +309,28 @@ describe("OpenAI-compatible adapter", () => {
     expect(calls.every(({ signal }) => signal === calls[0]!.signal)).toBe(true);
   });
 
+  it("accepts bounded compatible model extensions but persists local configured limits", async () => {
+    const transport = { request: vi.fn()
+      .mockResolvedValueOnce(response({ object: "list", vendor_trace: "stripped", data: [{ ...standardModel, ...modelMetadata, capabilities: { ...modelMetadata.capabilities, vision: true }, context_length: 16_384, max_completion_tokens: 4096, vendor_field: { ignored: true } }] }))
+      .mockResolvedValueOnce(response({ choices: [{ message: { content: "{\"probe\":true}" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      .mockResolvedValueOnce(response({ data: [{ index: 0, embedding: [1, 2, 3] }], usage: { prompt_tokens: 1, total_tokens: 1 } })), };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined } });
+    await expect(adapter.probe(new AbortController().signal)).resolves.toMatchObject({ maxInputTokens: 4096, maxOutputTokens: 1024, embeddingDimensions: 3 });
+  });
+
+  it.each([
+    { max_input_tokens: 4095 },
+    { max_output_tokens: 1023 },
+    { max_completion_tokens: 1000 },
+    { context_length: 5000 },
+    { embedding_dimensions: 4 },
+  ])("fails closed when model extension policy is below configured requirements", async (extension) => {
+    const transport = { request: vi.fn(async () => response({ object: "list", data: [{ ...standardModel, ...extension }] })) };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined } });
+    await expect(adapter.probe(new AbortController().signal)).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
+    expect(transport.request).toHaveBeenCalledTimes(1);
+  });
+
   it("returns strict chat JSON and exact finite embeddings", async () => {
     const transport = { request: vi.fn()
       .mockResolvedValueOnce(response({ choices: [{ message: { content: "{\"answer\":\"yes\"}" } }], usage: { prompt_tokens: 3, completion_tokens: 2 } }))
@@ -315,6 +340,75 @@ describe("OpenAI-compatible adapter", () => {
       .resolves.toMatchObject({ output: { answer: "yes" }, usage: { inputTokens: 3, outputTokens: 2 } });
     await expect(adapter.embed({ inputs: ["one", "two"], dimensions: 3 }, new AbortController().signal))
       .resolves.toMatchObject({ embeddings: [[1, 2, 3], [4, 5, 6]] });
+  });
+
+  it.each([
+    { messages: [{ role: "tool", content: "x" }], schema: { type: "object" } },
+    { messages: [{ role: "user", content: "" }], schema: { type: "object" } },
+    { messages: [{ role: "user", content: "x", extra: true }], schema: { type: "object" } },
+    { messages: [{ role: "user", content: "x" }], schema: { type: "object" }, extra: true },
+    { messages: [], schema: { type: "object" } },
+  ])("rejects malformed chat runtime input with a sanitized stable code", async (input) => {
+    const transport = { request: vi.fn() };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined } });
+    const error = await adapter.chat(input as never, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-INPUT" });
+    expect(JSON.stringify(error)).not.toContain(JSON.stringify(input));
+    expect(transport.request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { inputs: [], dimensions: 3 },
+    { inputs: [""], dimensions: 3 },
+    { inputs: ["x"], dimensions: 0 },
+    { inputs: ["x"], dimensions: 3, extra: true },
+  ])("rejects malformed embedding runtime input with a sanitized stable code", async (input) => {
+    const transport = { request: vi.fn() };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined } });
+    await expect(adapter.embed(input as never, new AbortController().signal)).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-INPUT" });
+    expect(transport.request).not.toHaveBeenCalled();
+  });
+
+  it("strictly validates bounded provider model and profile configuration at runtime", () => {
+    expect(() => new OpenAiCompatibleAdapter({ provider, profile: { ...profile, model: "x".repeat(257) }, transport: { request: vi.fn() }, capabilityRepository: { save: async () => undefined } }))
+      .toThrow(expect.objectContaining({ code: "OCC-AI-PROVIDER-CAPABILITY" }));
+    expect(() => new OpenAiCompatibleAdapter({ provider, profile: { ...profile, unexpected: true } as never, transport: { request: vi.fn() }, capabilityRepository: { save: async () => undefined } }))
+      .toThrow(expect.objectContaining({ code: "OCC-AI-PROVIDER-CAPABILITY" }));
+  });
+
+  it("rejects oversized chat aggregates before policy, credential, or provider dispatch", async () => {
+    const resolve = vi.fn(async () => target());
+    const credentialReader = vi.fn(async () => Buffer.from("must-not-read"));
+    const requestFactory = vi.fn();
+    const transport = new SecureTransport({ policy: { resolve }, credentialReader, requestFactory });
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined }, maxRequestBytes: 512 });
+    const messages = Array.from({ length: 20 }, () => ({ role: "user" as const, content: "x".repeat(100) }));
+
+    await expect(adapter.chat({ messages, schema: { type: "object", properties: { answer: { type: "string" } } } }, new AbortController().signal))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-LIMIT" });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(credentialReader).not.toHaveBeenCalled();
+    expect(requestFactory).not.toHaveBeenCalled();
+  });
+
+  it("enforces active input-token policy for embedding aggregates before dispatch", async () => {
+    const transport = { request: vi.fn() };
+    const constrainedProfile = { ...profile, capabilitySnapshot: { ...profile.capabilitySnapshot, maxInputTokens: 128 } };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile: constrainedProfile, transport, capabilityRepository: { save: async () => undefined }, maxRequestBytes: 10_000 });
+    await expect(adapter.embed({ inputs: ["x".repeat(80), "y".repeat(80)], dimensions: 3 }, new AbortController().signal))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-LIMIT" });
+    expect(transport.request).not.toHaveBeenCalled();
+  });
+
+  it("accepts normal aggregate boundaries and dispatches bounded request bodies", async () => {
+    const transport = { request: vi.fn()
+      .mockResolvedValueOnce(response({ choices: [{ message: { content: "{}" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+      .mockResolvedValueOnce(response({ data: [{ index: 0, embedding: [1, 2, 3] }, { index: 1, embedding: [4, 5, 6] }], usage: { prompt_tokens: 1, total_tokens: 1 } })), };
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined }, maxRequestBytes: 1024 });
+    await adapter.chat({ messages: [{ role: "system", content: "rules" }, { role: "user", content: "question" }, { role: "assistant", content: "context" }], schema: { type: "object" } }, new AbortController().signal);
+    await adapter.embed({ inputs: ["one", "two"], dimensions: 3 }, new AbortController().signal);
+    expect(transport.request).toHaveBeenCalledTimes(2);
+    for (const [input] of transport.request.mock.calls) expect(input.body.byteLength).toBeLessThanOrEqual(1024);
   });
 
   it("validates generated JSON against the requested schema without coercion or property removal", async () => {
@@ -343,9 +437,8 @@ describe("OpenAI-compatible adapter", () => {
     const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined } });
     await expect(adapter.embed({ inputs: ["x"], dimensions: 2 }, new AbortController().signal))
       .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
-    const inconsistent = new OpenAiCompatibleAdapter({ provider, profile: { ...profile, requiredCapabilities: { structuredOutput: true, embeddingDimensions: 2 } }, transport, capabilityRepository: { save: async () => undefined } });
-    await expect(inconsistent.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal))
-      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
+    expect(() => new OpenAiCompatibleAdapter({ provider, profile: { ...profile, requiredCapabilities: { structuredOutput: true, embeddingDimensions: 2 } }, transport, capabilityRepository: { save: async () => undefined } }))
+      .toThrow(expect.objectContaining({ code: "OCC-AI-PROVIDER-CAPABILITY" }));
     expect(transport.request).not.toHaveBeenCalled();
   });
 
@@ -373,12 +466,12 @@ describe("OpenAI-compatible adapter", () => {
     const missingModel = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response({ data: [{ id: "other" }] }) }, capabilityRepository: { save: async () => undefined }, operationId: () => "operation" });
     await expect(missingModel.probe(new AbortController().signal)).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
 
-    const missingMetadataTransport = { request: vi.fn()
+    const minimalMetadataTransport = { request: vi.fn()
       .mockResolvedValueOnce(response({ data: [{ id: "model-1" }] }))
       .mockResolvedValueOnce(response({ choices: [{ message: { content: "{\"probe\":true}" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
       .mockResolvedValueOnce(response({ data: [{ index: 0, embedding: [1, 2, 3] }], usage: { prompt_tokens: 1, total_tokens: 1 } })), };
-    const missingMetadata = new OpenAiCompatibleAdapter({ provider, profile, transport: missingMetadataTransport, capabilityRepository: { save: async () => undefined } });
-    await expect(missingMetadata.probe(new AbortController().signal)).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
+    const minimalMetadata = new OpenAiCompatibleAdapter({ provider, profile, transport: minimalMetadataTransport, capabilityRepository: { save: async () => undefined } });
+    await expect(minimalMetadata.probe(new AbortController().signal)).resolves.toMatchObject({ maxInputTokens: 4096, maxOutputTokens: 1024, embeddingDimensions: 3 });
 
     const mismatchedDimensions = new OpenAiCompatibleAdapter({ provider, profile, transport: { request: async () => response({ data: [{ ...modelMetadata, embedding_dimensions: 4 }] }) }, capabilityRepository: { save: async () => undefined } });
     await expect(mismatchedDimensions.probe(new AbortController().signal)).rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CAPABILITY" });
@@ -452,7 +545,7 @@ describe("OpenAI-compatible adapter", () => {
     const limiter = { acquire: vi.fn(async (_tokens: number, signal: AbortSignal) => new Promise<() => void>((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });
     })) };
-    const adapter = new OpenAiCompatibleAdapter({ provider, profile: { ...profile, timeouts: { connectMs: 10, totalMs: 20 } }, transport: { request: vi.fn() }, capabilityRepository: { save: async () => undefined }, limiter });
+    const adapter = new OpenAiCompatibleAdapter({ provider, profile: { ...profile, timeouts: { connectMs: 100, totalMs: 100 } }, transport: { request: vi.fn() }, capabilityRepository: { save: async () => undefined }, limiter });
     const error = await adapter.chat({ messages: [{ role: "user", content: "x" }], schema: { type: "object" } }, new AbortController().signal).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "OCC-AI-PROVIDER-TIMEOUT" });
   });

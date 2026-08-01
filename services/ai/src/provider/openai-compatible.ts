@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { CapabilitySnapshot, ProviderConfig, ProviderProfile } from "@innorder/contracts";
+import { providerConfigSchema, providerProfileSchema, type CapabilitySnapshot, type ProviderConfig, type ProviderProfile } from "@innorder/contracts";
 import Ajv2020, { type AnySchema, type ValidateFunction } from "ajv/dist/2020.js";
 import { z } from "zod";
 
@@ -13,9 +13,13 @@ import type { ProviderTransport, ProviderTransportResponse } from "./secure-tran
 export interface CapabilityRepository {
   save(providerId: string, model: string, snapshot: CapabilitySnapshot): Promise<void>;
 }
-export type ChatRequest = Readonly<{ messages: readonly Readonly<{ role: "system" | "user" | "assistant"; content: string }>[]; schema: Readonly<Record<string, unknown>> }>;
+const chatMessageSchema = z.object({ role: z.enum(["system", "user", "assistant"]), content: z.string().min(1).max(1_000_000) }).strict();
+const outputSchemaInputSchema = z.record(z.string().min(1).max(128), z.unknown()).refine((value) => Object.keys(value).length <= 256);
+export const chatRequestSchema = z.object({ messages: z.array(chatMessageSchema).min(1).max(100), schema: outputSchemaInputSchema }).strict();
+export const embeddingRequestSchema = z.object({ inputs: z.array(z.string().min(1).max(1_000_000)).min(1).max(1024), dimensions: z.number().int().min(1).max(1_000_000) }).strict();
+export type ChatRequest = Readonly<z.infer<typeof chatRequestSchema>>;
 export type ChatResult = Readonly<{ output: unknown; usage: Readonly<{ inputTokens: number; outputTokens: number }>; accounting: AccountingResult }>;
-export type EmbeddingRequest = Readonly<{ inputs: readonly string[]; dimensions: number }>;
+export type EmbeddingRequest = Readonly<z.infer<typeof embeddingRequestSchema>>;
 export type EmbeddingResult = Readonly<{ embeddings: readonly (readonly number[])[]; usage: Readonly<{ inputTokens: number; outputTokens: number }>; accounting: AccountingResult }>;
 export interface OpenAiCompatibleProvider {
   probe(signal: AbortSignal): Promise<CapabilitySnapshot>;
@@ -50,6 +54,7 @@ type Dependencies = Readonly<{
   sleep?: (milliseconds: number) => Promise<void>;
   limiter?: Limiter;
   accountingSink?: (event: InvocationAccounting) => void | Promise<void>;
+  maxRequestBytes?: number;
 }>;
 
 const chatUsageSchema = z.object({ prompt_tokens: z.number().int().nonnegative(), completion_tokens: z.number().int().nonnegative(), total_tokens: z.number().int().nonnegative().optional() }).strict()
@@ -58,12 +63,17 @@ const embeddingUsageSchema = z.object({ prompt_tokens: z.number().int().nonnegat
   .refine(({ prompt_tokens, total_tokens }) => total_tokens === prompt_tokens);
 const modelMetadataSchema = z.object({
   id: z.string().min(1).max(256),
-  capabilities: z.object({ chat: z.boolean(), embeddings: z.boolean(), structured_output: z.boolean() }).strict(),
-  max_input_tokens: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
-  max_output_tokens: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
-  embedding_dimensions: z.number().int().min(1).max(1_000_000),
-}).strict();
-const modelsSchema = z.object({ data: z.array(modelMetadataSchema).min(1).max(10_000) }).strict();
+  object: z.literal("model").optional(),
+  created: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  owned_by: z.string().min(1).max(256).optional(),
+  capabilities: z.object({ chat: z.boolean().optional(), embeddings: z.boolean().optional(), structured_output: z.boolean().optional() }).strip().optional(),
+  max_input_tokens: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  max_output_tokens: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  max_completion_tokens: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  context_length: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  embedding_dimensions: z.number().int().min(1).max(1_000_000).optional(),
+}).strip();
+const modelsSchema = z.object({ object: z.literal("list").optional(), data: z.array(modelMetadataSchema).min(1).max(10_000) }).strip();
 const chatSchema = z.object({ choices: z.array(z.object({ message: z.object({ content: z.string().min(1).max(1_048_576) }).strict() }).strict()).length(1), usage: chatUsageSchema.optional() }).strict();
 const embeddingItemSchema = z.object({ index: z.number().int().nonnegative(), embedding: z.array(z.number()).min(1).max(1_000_000) }).strict();
 const embeddingSchema = z.object({ data: z.array(embeddingItemSchema).min(1).max(1024), usage: embeddingUsageSchema.optional() }).strict();
@@ -103,6 +113,72 @@ function compileOutputSchema(schema: Readonly<Record<string, unknown>>): Validat
   }
 }
 
+class InputBudget {
+  private bytes = 0;
+  private readonly ancestors = new WeakSet<object>();
+
+  constructor(private readonly maxBytes: number, private readonly maxTokens: number) {}
+
+  addJson(value: unknown, depth = 0): void {
+    if (this.bytes > this.maxBytes || this.bytes > this.maxTokens) throw new ProviderError("OCC-AI-PROVIDER-LIMIT");
+    if (value === null) return this.add(4);
+    if (typeof value === "string") return this.addString(value);
+    if (typeof value === "boolean") return this.add(value ? 4 : 5);
+    if (typeof value === "number" && Number.isFinite(value)) return this.add(32);
+    if (typeof value !== "object" || depth > 20) throw new ProviderError("OCC-AI-PROVIDER-INPUT");
+    if (this.ancestors.has(value)) throw new ProviderError("OCC-AI-PROVIDER-INPUT");
+    this.ancestors.add(value);
+    try {
+      if (Array.isArray(value)) {
+        this.add(2 + Math.max(0, value.length - 1));
+        for (const item of value) this.addJson(item, depth + 1);
+        return;
+      }
+      const prototype = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) throw new ProviderError("OCC-AI-PROVIDER-INPUT");
+      this.add(1);
+      let first = true;
+      for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (!first) this.add(1);
+        first = false;
+        this.addString(key);
+        this.add(1);
+        this.addJson((value as Record<string, unknown>)[key], depth + 1);
+      }
+      this.add(1);
+    } finally {
+      this.ancestors.delete(value);
+    }
+  }
+
+  private addString(value: string): void {
+    this.add(2);
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code <= 0x1f || (code >= 0xd800 && code <= 0xdfff && !(code <= 0xdbff && index + 1 < value.length && value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff))) {
+        this.add(6);
+      } else if (code === 0x22 || code === 0x5c) {
+        this.add(2);
+      } else if (code <= 0x7f) {
+        this.add(1);
+      } else if (code <= 0x7ff) {
+        this.add(2);
+      } else if (code <= 0xdbff) {
+        this.add(4);
+        index += 1;
+      } else {
+        this.add(3);
+      }
+    }
+  }
+
+  private add(count: number): void {
+    this.bytes += count;
+    if (this.bytes > this.maxBytes || this.bytes > this.maxTokens) throw new ProviderError("OCC-AI-PROVIDER-LIMIT");
+  }
+}
+
 function parseJson(body: Uint8Array): unknown {
   try {
     return JSON.parse(Buffer.from(body).toString("utf8"));
@@ -128,11 +204,21 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
   private readonly now: () => Date;
   private readonly operationId: () => string;
   private readonly limiter: Limiter;
+  private readonly provider: ProviderConfig;
+  private readonly profile: ProviderProfile;
+  private readonly maxRequestBytes: number;
 
   constructor(private readonly dependencies: Dependencies) {
+    const provider = providerConfigSchema.safeParse(dependencies.provider);
+    const profile = providerProfileSchema.safeParse(dependencies.profile);
+    const maxRequestBytes = z.number().int().min(1).max(16 * 1024 * 1024).safeParse(dependencies.maxRequestBytes ?? 1024 * 1024);
+    if (!provider.success || !profile.success || !maxRequestBytes.success || profile.data.providerId !== provider.data.id) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
+    this.provider = provider.data;
+    this.profile = profile.data;
+    this.maxRequestBytes = maxRequestBytes.data;
     this.now = dependencies.now ?? (() => new Date());
     this.operationId = dependencies.operationId ?? randomUUID;
-    this.limiter = dependencies.limiter ?? new ProfileRateLimiter(dependencies.profile.rateLimit, () => this.now().getTime());
+    this.limiter = dependencies.limiter ?? new ProfileRateLimiter(this.profile.rateLimit, () => this.now().getTime());
   }
 
   async probe(signal: AbortSignal): Promise<CapabilitySnapshot> {
@@ -141,22 +227,32 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
 
   private async probeWithin(operation: AdapterOperation): Promise<CapabilitySnapshot> {
     const models = modelsSchema.safeParse(parseJson((await this.call("GET", "/models", undefined, operation)).body));
-    const matches = models.success ? models.data.data.filter(({ id }) => id === this.dependencies.profile.model) : [];
+    const matches = models.success ? models.data.data.filter(({ id }) => id === this.profile.model) : [];
     const metadata = matches.length === 1 ? matches[0] : undefined;
     const expectedDimensions = this.activeDimensions();
-    if (metadata === undefined || !metadata.capabilities.chat || !metadata.capabilities.embeddings || !metadata.capabilities.structured_output || metadata.embedding_dimensions !== expectedDimensions) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
+    const localInputLimit = this.profile.capabilitySnapshot.maxInputTokens;
+    const localOutputLimit = this.profile.capabilitySnapshot.maxOutputTokens;
+    if (
+      metadata === undefined ||
+      metadata.capabilities?.chat === false || metadata.capabilities?.embeddings === false || metadata.capabilities?.structured_output === false ||
+      (metadata.embedding_dimensions !== undefined && metadata.embedding_dimensions !== expectedDimensions) ||
+      (metadata.max_input_tokens !== undefined && metadata.max_input_tokens < localInputLimit) ||
+      (metadata.max_output_tokens !== undefined && metadata.max_output_tokens < localOutputLimit) ||
+      (metadata.max_completion_tokens !== undefined && metadata.max_completion_tokens < localOutputLimit) ||
+      (metadata.context_length !== undefined && metadata.context_length < localInputLimit + localOutputLimit)
+    ) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     const chat = await this.chatWithin({ messages: [{ role: "user", content: "Return the probe object." }], schema: { type: "object", required: ["probe"], properties: { probe: { const: true } }, additionalProperties: false } }, operation);
     if (typeof chat.output !== "object" || chat.output === null || (chat.output as { probe?: unknown }).probe !== true) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     await this.embedWithin({ inputs: ["capability probe"], dimensions: expectedDimensions }, operation);
     const base = {
       chat: true, embeddings: true, structuredOutput: true, embeddingDimensions: expectedDimensions,
-      maxInputTokens: metadata.max_input_tokens,
-      maxOutputTokens: metadata.max_output_tokens,
+      maxInputTokens: localInputLimit,
+      maxOutputTokens: localOutputLimit,
       probedAt: this.now().toISOString(),
     };
     const result: CapabilitySnapshot = { ...base, snapshotHash: createHash("sha256").update(canonical(base)).digest("hex") };
     try {
-      await this.dependencies.capabilityRepository.save(this.dependencies.provider.id, this.dependencies.profile.model, result);
+      await this.dependencies.capabilityRepository.save(this.provider.id, this.profile.model, result);
     } catch {
       throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     }
@@ -164,15 +260,18 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
   }
 
   async chat(input: ChatRequest, signal: AbortSignal): Promise<ChatResult> {
-    return this.withOperation(signal, async (operation) => this.chatWithin(input, operation));
+    const parsed = chatRequestSchema.safeParse(input);
+    if (!parsed.success) throw new ProviderError("OCC-AI-PROVIDER-INPUT");
+    return this.withOperation(signal, async (operation) => this.chatWithin(parsed.data, operation));
   }
 
   private async chatWithin(input: ChatRequest, operation: AdapterOperation): Promise<ChatResult> {
     this.activeDimensions();
-    if (!this.dependencies.profile.capabilitySnapshot.chat || !this.dependencies.profile.capabilitySnapshot.structuredOutput) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
-    if (input.messages.length < 1 || input.messages.length > 100 || input.messages.some(({ content }) => content.length < 1 || content.length > 1_000_000)) throw new ProviderError("OCC-AI-PROVIDER-LIMIT");
+    if (!this.profile.capabilitySnapshot.chat || !this.profile.capabilitySnapshot.structuredOutput) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
+    const request = { model: this.profile.model, messages: input.messages, response_format: { type: "json_schema", json_schema: { name: "response", strict: true, schema: input.schema } }, max_tokens: this.profile.capabilitySnapshot.maxOutputTokens };
+    new InputBudget(this.maxRequestBytes, this.profile.capabilitySnapshot.maxInputTokens).addJson(request);
     const validateOutput = compileOutputSchema(input.schema);
-    const body = Buffer.from(JSON.stringify({ model: this.dependencies.profile.model, messages: input.messages, response_format: { type: "json_schema", json_schema: { name: "response", strict: true, schema: input.schema } }, max_tokens: this.dependencies.profile.capabilitySnapshot.maxOutputTokens }));
+    const body = Buffer.from(JSON.stringify(request));
     const startedAt = this.now().getTime();
     const response = await this.call("POST", "/chat/completions", body, operation);
     const parsed = chatSchema.safeParse(parseJson(response.body));
@@ -181,21 +280,24 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     try { output = JSON.parse(parsed.data.choices[0]!.message.content); } catch { throw new ProviderError("OCC-AI-PROVIDER-MALFORMED"); }
     if (output === null || typeof output !== "object" || Array.isArray(output) || !validateOutput(output)) throw new ProviderError("OCC-AI-PROVIDER-MALFORMED");
     const providerUsage = parsed.data.usage === undefined ? undefined : { inputTokens: parsed.data.usage.prompt_tokens, outputTokens: parsed.data.usage.completion_tokens };
-    const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.dependencies.profile.cost });
+    const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.profile.cost });
     const usage = { inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens };
     await this.emitAccounting(operation.operationId, accounting, startedAt);
     return { output, usage, accounting };
   }
 
   async embed(input: EmbeddingRequest, signal: AbortSignal): Promise<EmbeddingResult> {
-    return this.withOperation(signal, async (operation) => this.embedWithin(input, operation));
+    const parsed = embeddingRequestSchema.safeParse(input);
+    if (!parsed.success) throw new ProviderError("OCC-AI-PROVIDER-INPUT");
+    return this.withOperation(signal, async (operation) => this.embedWithin(parsed.data, operation));
   }
 
   private async embedWithin(input: EmbeddingRequest, operation: AdapterOperation): Promise<EmbeddingResult> {
     const activeDimensions = this.activeDimensions();
-    if (!this.dependencies.profile.capabilitySnapshot.embeddings || input.dimensions !== activeDimensions) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
-    if (input.inputs.length < 1 || input.inputs.length > 1024 || !Number.isSafeInteger(input.dimensions) || input.dimensions < 1 || input.inputs.some((value) => value.length < 1 || value.length > 1_000_000)) throw new ProviderError("OCC-AI-PROVIDER-LIMIT");
-    const body = Buffer.from(JSON.stringify({ model: this.dependencies.profile.model, input: input.inputs, dimensions: input.dimensions }));
+    if (!this.profile.capabilitySnapshot.embeddings || input.dimensions !== activeDimensions) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
+    const request = { model: this.profile.model, input: input.inputs, dimensions: input.dimensions };
+    new InputBudget(this.maxRequestBytes, this.profile.capabilitySnapshot.maxInputTokens).addJson(request);
+    const body = Buffer.from(JSON.stringify(request));
     const startedAt = this.now().getTime();
     const response = await this.call("POST", "/embeddings", body, operation);
     const parsed = embeddingSchema.safeParse(parseJson(response.body));
@@ -204,7 +306,7 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     }
     const embeddings = [...parsed.data.data].sort((left, right) => left.index - right.index).map(({ embedding }) => embedding);
     const providerUsage = parsed.data.usage === undefined ? undefined : { inputTokens: parsed.data.usage.prompt_tokens, outputTokens: 0 };
-    const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.dependencies.profile.cost });
+    const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.profile.cost });
     const usage = { inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens };
     await this.emitAccounting(operation.operationId, accounting, startedAt);
     return { embeddings, usage, accounting };
@@ -212,14 +314,14 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
 
   private async call(method: "GET" | "POST", suffix: string, body: Buffer | undefined, operation: AdapterOperation): Promise<ProviderTransportResponse> {
     return executeWithRetry({ operationId: operation.operationId, deadline: operation.deadline.expiresAt, now: () => this.now().getTime(), signal: operation.deadline.signal, ...(this.dependencies.sleep === undefined ? {} : { sleep: this.dependencies.sleep }) }, async ({ operationId: stableId }) => {
-      const estimatedTokens = (body?.byteLength ?? 0) + (suffix === "/chat/completions" ? this.dependencies.profile.capabilitySnapshot.maxOutputTokens : 0);
+      const estimatedTokens = (body?.byteLength ?? 0) + (suffix === "/chat/completions" ? this.profile.capabilitySnapshot.maxOutputTokens : 0);
       const release = await this.limiter.acquire(estimatedTokens, operation.deadline.signal);
       try {
         const remaining = Math.max(1, operation.deadline.expiresAt - this.now().getTime());
         const response = await this.dependencies.transport.request({
-          operationId: stableId, profileId: this.dependencies.profile.id, model: this.dependencies.profile.model,
-          path: `${this.dependencies.provider.apiPrefix}${suffix}`, method,
-          connectMs: Math.min(this.dependencies.profile.timeouts.connectMs, remaining),
+          operationId: stableId, profileId: this.profile.id, model: this.profile.model,
+          path: `${this.provider.apiPrefix}${suffix}`, method,
+          connectMs: Math.min(this.profile.timeouts.connectMs, remaining),
           deadline: operation.deadline.expiresAt, maxResponseBytes: 2 * 1024 * 1024, signal: operation.deadline.signal,
           ...(body === undefined ? {} : { body }),
         });
@@ -238,7 +340,7 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
   private async emitAccounting(operationId: string, accounting: AccountingResult, startedAt: number): Promise<void> {
     try {
       await this.dependencies.accountingSink?.({
-        operationId, profileId: this.dependencies.profile.id, model: this.dependencies.profile.model,
+        operationId, profileId: this.profile.id, model: this.profile.model,
         inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens,
         costMicros: accounting.costMicros.toString(), currency: accounting.currency, estimated: accounting.estimated,
         durationMs: Math.max(0, this.now().getTime() - startedAt), status: "SUCCEEDED", code: "OK",
@@ -249,14 +351,14 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
   }
 
   private activeDimensions(): number {
-    const snapshot = this.dependencies.profile.capabilitySnapshot;
-    const required = this.dependencies.profile.requiredCapabilities.embeddingDimensions;
+    const snapshot = this.profile.capabilitySnapshot;
+    const required = this.profile.requiredCapabilities.embeddingDimensions;
     if (!snapshot.embeddings || snapshot.embeddingDimensions === undefined || (required !== undefined && required !== snapshot.embeddingDimensions)) throw new ProviderError("OCC-AI-PROVIDER-CAPABILITY");
     return snapshot.embeddingDimensions;
   }
 
   private async withOperation<T>(signal: AbortSignal, action: (operation: AdapterOperation) => Promise<T>): Promise<T> {
-    const deadline = createOperationDeadline(this.dependencies.profile.timeouts.totalMs, signal, () => this.now().getTime());
+    const deadline = createOperationDeadline(this.profile.timeouts.totalMs, signal, () => this.now().getTime());
     try {
       return await action({ operationId: this.operationId(), deadline });
     } finally {

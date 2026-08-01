@@ -34,7 +34,7 @@ const dns = (...addresses: string[]) => async () =>
 function metadata(stat: Awaited<ReturnType<typeof lstat>>, trustedAcl = true): CredentialMetadata {
   return {
     type: stat.isSymbolicLink() ? "symlink" : stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other",
-    mode: stat.mode, uid: stat.uid, dev: stat.dev, ino: stat.ino, size: stat.size, trustedAcl,
+    mode: stat.mode, uid: stat.uid, dev: BigInt(stat.dev), ino: BigInt(stat.ino), size: BigInt(stat.size), trustedAcl,
   };
 }
 
@@ -190,11 +190,11 @@ describe("credential reader", () => {
   it("rejects writable trusted ancestors and ancestor identity changes after open", async () => {
     const root = process.platform === "win32" ? "C:\\run\\secrets" : "/run/secrets";
     const path = join(root, "provider", "credential");
-    const base: CredentialMetadata = { type: "directory", mode: 0o755, uid: 0, dev: 1, ino: 1, size: 0, trustedAcl: true };
-    const file: CredentialMetadata = { ...base, type: "file", mode: 0o600, ino: 3, size: 12 };
+    const base: CredentialMetadata = { type: "directory", mode: 0o755, uid: 0, dev: 1n, ino: 1n, size: 0n, trustedAcl: true };
+    const file: CredentialMetadata = { ...base, type: "file", mode: 0o600, ino: 3n, size: 12n };
     const writable: CredentialFileSystem = {
       platform: "posix",
-      inspect: async (candidate) => candidate === join(root, "provider") ? { ...base, mode: 0o775, ino: 2 } : candidate === path ? file : base,
+      inspect: async (candidate) => candidate === join(root, "provider") ? { ...base, mode: 0o775, ino: 2n } : candidate === path ? file : base,
       openNoFollow: async () => ({ inspect: async () => file, read: async () => 12, close: async () => undefined }),
     };
     await expect(readCredentialFile(path, { trustedRoot: root, fileSystem: writable, trustedOwnerIds: [0], serviceUid: 1000 }))
@@ -204,8 +204,8 @@ describe("credential reader", () => {
     const swapped: CredentialFileSystem = {
       platform: "posix",
       inspect: async (candidate) => {
-        if (candidate === root) return { ...base, ino: ++rootChecks === 1 ? 1 : 99 };
-        return candidate === path ? file : { ...base, ino: 2 };
+        if (candidate === root) return { ...base, ino: ++rootChecks === 1 ? 1n : 99n };
+        return candidate === path ? file : { ...base, ino: 2n };
       },
       openNoFollow: async () => ({ inspect: async () => file, read: async (buffer) => { buffer.write("dummy-secret"); return 12; }, close: async () => undefined }),
     };
@@ -221,6 +221,40 @@ describe("credential reader", () => {
       openNoFollow: async () => { throw new Error("must not open"); },
     };
     await expect(readCredentialFile("C:\\run\\secrets\\provider", { trustedRoot: root, fileSystem: unverified }))
+      .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
+  });
+
+  it("preserves exact bigint identities above Number.MAX_SAFE_INTEGER with deterministic Windows metadata", async () => {
+    const root = "C:\\run\\secrets";
+    const path = "C:\\run\\secrets\\provider";
+    const huge = BigInt(Number.MAX_SAFE_INTEGER) + 123_456_789n;
+    const directory: CredentialMetadata = { type: "directory", mode: 0, uid: 0, dev: huge, ino: huge + 1n, size: 0n, trustedAcl: true };
+    const file: CredentialMetadata = { type: "file", mode: 0, uid: 0, dev: huge, ino: huge + 2n, size: 12n, trustedAcl: true };
+    const fileSystem: CredentialFileSystem = {
+      platform: "windows-verified",
+      inspect: async (candidate) => candidate === path ? file : directory,
+      openNoFollow: async () => ({
+        inspect: async () => file,
+        read: async (buffer) => { buffer.write("dummy-secret"); return 12; },
+        close: async () => undefined,
+      }),
+    };
+
+    for (let run = 0; run < 20; run += 1) {
+      const credential = await readCredentialFile(path, { trustedRoot: root, fileSystem, maxBytes: 64 });
+      expect(credential.toString("utf8")).toBe("dummy-secret");
+      credential.fill(0);
+    }
+
+    const changedIdentity: CredentialFileSystem = {
+      ...fileSystem,
+      openNoFollow: async () => ({
+        inspect: async () => ({ ...file, ino: file.ino + 1n }),
+        read: async () => 0,
+        close: async () => undefined,
+      }),
+    };
+    await expect(readCredentialFile(path, { trustedRoot: root, fileSystem: changedIdentity, maxBytes: 64 }))
       .rejects.toMatchObject({ code: "OCC-AI-PROVIDER-CREDENTIAL" });
   });
 });

@@ -8,9 +8,9 @@ export type CredentialMetadata = Readonly<{
   type: "file" | "directory" | "symlink" | "other";
   mode: number;
   uid: number;
-  dev: number;
-  ino: number;
-  size: number;
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
   trustedAcl: boolean;
 }>;
 
@@ -34,26 +34,37 @@ export type CredentialReaderOptions = Readonly<{
   serviceUid?: number;
 }>;
 
-function nodeMetadata(stat: Awaited<ReturnType<typeof lstat>>): CredentialMetadata {
+type NodeBigIntMetadata = Readonly<{
+  mode: bigint;
+  uid: bigint;
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  isSymbolicLink(): boolean;
+  isFile(): boolean;
+  isDirectory(): boolean;
+}>;
+
+function nodeMetadata(stat: NodeBigIntMetadata): CredentialMetadata {
   return {
     type: stat.isSymbolicLink() ? "symlink" : stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other",
     mode: Number(stat.mode),
     uid: Number(stat.uid),
-    dev: Number(stat.dev),
-    ino: Number(stat.ino),
-    size: Number(stat.size),
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
     trustedAcl: process.platform !== "win32",
   };
 }
 
 const nodeFileSystem: CredentialFileSystem = {
   platform: process.platform === "win32" ? "windows-unverified" : "posix",
-  inspect: async (path) => nodeMetadata(await lstat(path)),
+  inspect: async (path) => nodeMetadata(await lstat(path, { bigint: true })),
   openNoFollow: async (path) => {
     const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
     const handle = await open(path, constants.O_RDONLY | noFollow);
     return {
-      inspect: async () => nodeMetadata(await handle.stat()),
+      inspect: async () => nodeMetadata(await handle.stat({ bigint: true })),
       read: async (buffer) => (await handle.read(buffer, 0, buffer.length, 0)).bytesRead,
       close: async () => handle.close(),
     };
@@ -72,7 +83,7 @@ function validateMetadata(
   trustedOwners: ReadonlySet<number>,
   serviceUid: number | undefined,
 ): void {
-  if (![item.mode, item.uid, item.dev, item.ino, item.size].every(Number.isSafeInteger)) throw new Error("invalid metadata");
+  if (![item.mode, item.uid].every(Number.isSafeInteger) || item.dev < 0n || item.ino < 0n || item.size < 0n) throw new Error("invalid metadata");
   if (item.type !== expectedType) throw new Error("invalid type");
   if (fileSystem.platform === "windows-unverified" || (fileSystem.platform === "windows-verified" && !item.trustedAcl)) throw new Error("untrusted ACL");
   if (fileSystem.platform === "posix") {
@@ -118,7 +129,7 @@ export async function readCredentialFile(path: string, options: CredentialReader
       before.push(item);
     }
     const fileBefore = before[before.length - 1]!;
-    if (fileBefore.size < 1 || fileBefore.size > maxBytes) throw new Error("invalid size");
+    if (fileBefore.size < 1n || fileBefore.size > BigInt(maxBytes)) throw new Error("invalid size");
     handle = await fileSystem.openNoFollow(paths[paths.length - 1]!);
     const descriptor = await handle.inspect();
     validateMetadata(descriptor, "file", fileSystem, trustedOwners, serviceUid);
