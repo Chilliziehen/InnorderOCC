@@ -18,15 +18,17 @@ class ProcessTaskSchemaIntegrationTest {
 
         assertThat(jdbc.queryForObject("SELECT to_regclass('occ.cohort')::text", String::class.java))
             .isEqualTo("occ.cohort")
-        assertThat(jdbc.queryForObject(
-            "SELECT has_table_privilege('innorder_runtime', 'occ.notification', 'SELECT,INSERT,UPDATE,DELETE')",
-            Boolean::class.java,
-        )).isTrue()
-        assertThat(jdbc.queryForObject(
-            """SELECT has_table_privilege('innorder_runtime', 'audit.dependency_failure_attempt', 'SELECT,INSERT')
-               AND NOT has_table_privilege('innorder_runtime', 'audit.dependency_failure_attempt', 'UPDATE,DELETE')""",
-            Boolean::class.java,
-        )).isTrue()
+        for (privilege in listOf("SELECT", "INSERT", "UPDATE")) {
+            assertThat(hasTablePrivilege(jdbc, "occ.notification", privilege)).isTrue()
+        }
+        assertThat(hasTablePrivilege(jdbc, "occ.notification", "DELETE")).isFalse()
+        for (privilege in listOf("SELECT", "INSERT")) {
+            assertThat(hasTablePrivilege(jdbc, "audit.dependency_failure_attempt", privilege)).isTrue()
+        }
+        for (privilege in listOf("UPDATE", "DELETE")) {
+            assertThat(hasTablePrivilege(jdbc, "audit.dependency_failure_attempt", privilege)).isFalse()
+        }
+        assertThat(hasTablePrivilege(jdbc, "authz.relationship", "TRUNCATE")).isFalse()
     }
 
     @Test
@@ -91,6 +93,14 @@ class ProcessTaskSchemaIntegrationTest {
         if (target != null) configuration.target(MigrationVersion.fromVersion(target))
         return configuration.load()
     }
+
+    private fun hasTablePrivilege(jdbc: JdbcTemplate, table: String, privilege: String): Boolean =
+        jdbc.queryForObject(
+            "SELECT has_table_privilege('innorder_runtime', ?, ?)",
+            Boolean::class.java,
+            table,
+            privilege,
+        )!!
 
     private fun withPostgres(block: (PostgreSQLContainer<*>, JdbcTemplate) -> Unit) {
         val postgres = PostgreSQLContainer(DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"))

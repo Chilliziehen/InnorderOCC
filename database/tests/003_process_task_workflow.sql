@@ -505,6 +505,9 @@ SELECT pg_temp.assert_raises(
 SELECT pg_temp.assert_raises(
   $$DELETE FROM occ.notification WHERE id = '5f000000-0000-7000-8000-000000000001'$$,
   '55000', 'notification history cannot be physically deleted');
+SELECT pg_temp.assert_raises(
+  $$TRUNCATE authz.relationship$$,
+  '55000', 'relationship and owner history cannot be truncated');
 
 SELECT pg_temp.assert_true(
   EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ex_relationship_effective_window'),
@@ -538,6 +541,7 @@ SELECT pg_temp.assert_true(
   AND NOT has_table_privilege('innorder_runtime', 'occ.task_gate_provider_state', 'DELETE')
   AND has_table_privilege('innorder_runtime', 'occ.task_blocker', 'SELECT,INSERT,UPDATE')
   AND NOT has_table_privilege('innorder_runtime', 'occ.task_blocker', 'DELETE')
+  AND NOT has_table_privilege('innorder_runtime', 'authz.relationship', 'TRUNCATE')
   AND has_table_privilege('innorder_runtime', 'audit.dependency_failure_attempt', 'SELECT,INSERT')
   AND NOT has_table_privilege('innorder_runtime', 'audit.dependency_failure_attempt', 'UPDATE,DELETE'),
   'runtime has bounded workflow DML');

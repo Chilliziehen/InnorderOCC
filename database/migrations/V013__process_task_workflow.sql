@@ -259,6 +259,10 @@ ALTER TABLE authz.relationship
         ) WITH &&
     );
 
+CREATE TRIGGER trg_relationship_no_truncate
+BEFORE TRUNCATE ON authz.relationship
+FOR EACH STATEMENT EXECUTE FUNCTION platform.reject_immutable_row();
+
 CREATE FUNCTION occ.enforce_process_definition_binding()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -543,13 +547,25 @@ CREATE FUNCTION occ.enforce_task_gate_requirement()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    task_state text;
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT state INTO STRICT task_state
+        FROM occ.task_projection
+        WHERE id = NEW.task_id
+        FOR UPDATE;
+        IF task_state IN ('COMPLETED', 'CANCELLED', 'FAILED') THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal task cannot acquire a gate requirement';
+        END IF;
+        RETURN NEW;
+    END IF;
     RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'task gate requirement is immutable';
 END;
 $$;
 
 CREATE TRIGGER trg_task_gate_requirement_immutable
-BEFORE UPDATE OR DELETE ON occ.task_gate_requirement
+BEFORE INSERT OR UPDATE OR DELETE ON occ.task_gate_requirement
 FOR EACH ROW EXECUTE FUNCTION occ.enforce_task_gate_requirement();
 CREATE TRIGGER trg_task_gate_requirement_no_truncate
 BEFORE TRUNCATE ON occ.task_gate_requirement
@@ -862,6 +878,7 @@ REVOKE DELETE, TRUNCATE ON
     occ.task_review_projection_fact,
     occ.notification
 FROM innorder_runtime;
+REVOKE TRUNCATE ON authz.relationship FROM innorder_runtime;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA occ TO innorder_runtime;
 GRANT SELECT, INSERT ON audit.dependency_failure_attempt TO innorder_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON audit.dependency_failure_attempt FROM innorder_runtime;

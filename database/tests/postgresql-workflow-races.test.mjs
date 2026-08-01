@@ -70,7 +70,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
         ('69000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:one', 'ACTIVE'),
         ('69000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000003', '64000000-0000-7000-8000-000000000003', 'process:two', 'ACTIVE'),
         ('6a000000-0000-7000-8000-000000000001', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:race', 'ACTIVE'),
-        ('6a000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:blocker-race', 'ACTIVE');
+        ('6a000000-0000-7000-8000-000000000002', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:blocker-race', 'ACTIVE'),
+        ('6a000000-0000-7000-8000-000000000003', '63000000-0000-7000-8000-000000000004', '64000000-0000-7000-8000-000000000004', 'task:requirement-race', 'ACTIVE');
       INSERT INTO iam.principal (id, principal_kind, display_name, status) VALUES
         ('67000000-0000-7000-8000-000000000001', 'USER', 'Owner', 'ACTIVE'),
         ('67000000-0000-7000-8000-000000000002', 'USER', 'Participant', 'ACTIVE');
@@ -96,6 +97,9 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     await pool.query(`INSERT INTO occ.task_projection
       (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
       VALUES ('6a000000-0000-7000-8000-000000000002', $1, 'blocked-work', 'Blocked work', 'blocker-race-task', 'blocker-race-execution', 'AVAILABLE')`, [processId]);
+    await pool.query(`INSERT INTO occ.task_projection
+      (id, process_instance_id, activity_key, activity_name, flowable_task_id, flowable_execution_id, state)
+      VALUES ('6a000000-0000-7000-8000-000000000003', $1, 'gated-work', 'Gated work', 'requirement-race-task', 'requirement-race-execution', 'AVAILABLE')`, [processId]);
     const claims = await Promise.all([
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
       pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000001', claimed_at=now() WHERE id='6a000000-0000-7000-8000-000000000001' AND row_version=0 RETURNING id`),
@@ -103,6 +107,8 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
     assert.deepEqual(claims.map((result) => result.rowCount).sort(), [0, 1], 'expected-version claim race admits one update');
     await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
       WHERE id='6a000000-0000-7000-8000-000000000002'`);
+    await pool.query(`UPDATE occ.task_projection SET state='CLAIMED', assignee_id='67000000-0000-7000-8000-000000000002', claimed_at=now()
+      WHERE id='6a000000-0000-7000-8000-000000000003'`);
     await pool.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
       VALUES ('6a000000-0000-7000-8000-000000000001', 'process.lifecycle')`);
     await pool.query(`INSERT INTO occ.task_gate_provider_state
@@ -164,6 +170,32 @@ test('workflow uniqueness, expected-version, and relationship windows serialize 
       WHERE task.id='6a000000-0000-7000-8000-000000000002' GROUP BY task.state`);
     assert.deepEqual(blockerRaceState.rows, [{ task_state: 'COMPLETED', active_hard_blockers: 0 }],
       'completion and blocker insert cannot commit COMPLETED plus active hard blocker');
+
+    const completeRequirement = await pool.connect();
+    const addRequirement = await pool.connect();
+    try {
+      await completeRequirement.query('BEGIN');
+      await completeRequirement.query(`UPDATE occ.task_projection SET state='COMPLETED', completed_at=now()
+        WHERE id='6a000000-0000-7000-8000-000000000003'`);
+      await addRequirement.query('BEGIN');
+      await addRequirement.query(`SET LOCAL application_name='workflow-gate-requirement'`);
+      const requirementInsert = addRequirement.query(`INSERT INTO occ.task_gate_requirement (task_id, provider_key)
+        VALUES ('6a000000-0000-7000-8000-000000000003', 'process.late')`);
+      await waitForBlockedApplications(pool, ['workflow-gate-requirement']);
+      await completeRequirement.query('COMMIT');
+      await assert.rejects(requirementInsert, /terminal|requirement|task/i);
+      await addRequirement.query('ROLLBACK');
+    } finally {
+      await completeRequirement.query('ROLLBACK').catch(() => {});
+      await addRequirement.query('ROLLBACK').catch(() => {});
+      completeRequirement.release();
+      addRequirement.release();
+    }
+    const requirementRaceState = await pool.query(`SELECT task.state AS task_state, count(requirement.*)::int AS requirement_count
+      FROM occ.task_projection task LEFT JOIN occ.task_gate_requirement requirement ON requirement.task_id=task.id
+      WHERE task.id='6a000000-0000-7000-8000-000000000003' GROUP BY task.state`);
+    assert.deepEqual(requirementRaceState.rows, [{ task_state: 'COMPLETED', requirement_count: 0 }],
+      'completion and requirement insert cannot commit a late gate requirement');
     const start = new Date(Date.now() - 60_000);
     const middle = new Date(Date.now() + 60_000);
     const end = new Date(middle.getTime() + 60_000);
