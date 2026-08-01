@@ -119,6 +119,57 @@ describe("Session manager", () => {
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
   });
 
+  it("a failed login cannot clear a restore started after it", async () => {
+    const h = harness("O".repeat(43));
+    let rejectLogin!: (error: Error) => void;
+    vi.mocked(h.core.login).mockReturnValue(new Promise((_resolve, reject) => { rejectLogin = reject; }));
+    vi.mocked(h.core.refresh).mockResolvedValue(token("N"));
+    vi.mocked(h.core.me).mockResolvedValue(user);
+    const login = h.manager.login({ username: "operator", password: "correct horse" });
+    const loginFailure = expect(login).rejects.toThrow("denied");
+
+    await expect(h.manager.restore()).resolves.toMatchObject({ state: "authenticated" });
+    rejectLogin(new Error("denied"));
+    await loginFailure;
+
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-N");
+    expect(h.storedFor("profile-a")).not.toBeNull();
+  });
+
+  it("a restore started before a successful login cannot overwrite that login", async () => {
+    const h = harness("O".repeat(43));
+    let resolveRestore!: (value: ReturnType<typeof token>) => void;
+    vi.mocked(h.core.refresh).mockReturnValue(new Promise((resolve) => { resolveRestore = resolve; }));
+    vi.mocked(h.core.me).mockResolvedValue(user);
+    const restore = h.manager.restore();
+    await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
+
+    vi.mocked(h.core.login).mockResolvedValue(token("L"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+    resolveRestore(token("N"));
+    await restore;
+
+    expect(h.manager.snapshot().state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-L");
+    expect(h.storedFor("profile-a")).not.toBeNull();
+  });
+
+  it("a successful same-profile login intentionally replaces the current session", async () => {
+    const h = harness();
+    vi.mocked(h.core.login).mockResolvedValueOnce(token("A")).mockResolvedValueOnce(token("L"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
+
+    const replacement = await h.manager.login({
+      username: "operator",
+      password: "different horse",
+    });
+
+    expect(replacement.state).toBe("authenticated");
+    expect(h.accessToken).toBe("access-L");
+    expect(h.vault.encrypt).toHaveBeenCalledTimes(2);
+  });
+
   it("restores with the encrypted vault refresh value, rotates it, and verifies /me", async () => {
     const h = harness("O".repeat(43));
     vi.mocked(h.core.refresh).mockResolvedValue(token("N"));

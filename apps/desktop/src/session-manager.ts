@@ -139,6 +139,25 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     }, Math.min(remaining, MAX_TIMEOUT_MS));
   }
 
+  function claimGeneration(): number {
+    generation += 1;
+    if (
+      current.state === "authenticated" &&
+      activeProfileId !== null &&
+      activeCredentialVersion !== null
+    ) {
+      if (expiryTimer !== undefined) cancel(expiryTimer);
+      expiryTimer = undefined;
+      armExpiry(
+        activeProfileId,
+        generation,
+        activeCredentialVersion,
+        Date.parse(current.expiresAt),
+      );
+    }
+    return generation;
+  }
+
   function activate(
     profileId: string,
     credentialVersion: string,
@@ -229,15 +248,9 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     },
     async login(input) {
       const profileId = options.getProfileId();
-      const expectedGeneration = generation;
-      const credentialVersion = activeCredentialVersion;
-      try {
-        const tokens = await options.core.login(input);
-        return await accept(profileId, tokens, false, expectedGeneration);
-      } catch (error) {
-        await clearOwned(profileId, expectedGeneration, credentialVersion);
-        throw error;
-      }
+      const expectedGeneration = claimGeneration();
+      const tokens = await options.core.login(input);
+      return await accept(profileId, tokens, false, expectedGeneration);
     },
     restore() {
       return manager.refresh();
