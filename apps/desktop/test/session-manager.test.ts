@@ -615,4 +615,22 @@ describe("Session manager", () => {
     });
     expect(delays).toEqual([2_147_483_647]);
   });
+
+  it("disposes background timers and memory without deleting the encrypted credential", async () => {
+    const timers = {
+      setTimeout: (() => 1 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout,
+      clearTimeout: vi.fn<typeof clearTimeout>(),
+    };
+    const h = harness(null, timers);
+    vi.mocked(h.core.login).mockResolvedValue(token("dispose"));
+
+    await h.manager.login({ username: "operator", password: "correct horse battery staple" });
+    const encrypted = h.stored;
+    h.manager.dispose();
+
+    expect(timers.clearTimeout).toHaveBeenCalled();
+    expect(h.accessToken).toBeNull();
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+    expect(h.stored).toBe(encrypted);
+  });
 });

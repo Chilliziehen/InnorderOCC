@@ -37,6 +37,7 @@ export interface SessionManager {
   refresh(): Promise<SessionSnapshot>;
   profileSwitched(previousProfileId: string): Promise<void>;
   logout(): Promise<void>;
+  dispose(): void;
 }
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -357,6 +358,9 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
         refreshToken: credential.refreshToken,
         accessToken,
       });
+    },
+    dispose() {
+      clearMemory();
     },
   };
 

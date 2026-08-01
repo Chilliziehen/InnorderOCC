@@ -2,7 +2,7 @@ import type { OccApi } from "./ipc-contract";
 
 declare global {
   interface Window {
-    occ: Pick<OccApi, "runtime">;
+    occ: OccApi;
   }
 
   const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;

@@ -4,7 +4,9 @@ import {
   PRODUCTION_CSP,
   applyWindowSecurity,
   createWindowOptions,
+  registerPermissionDenial,
   registerProductionCsp,
+  registerSingleInstanceLifecycle,
 } from "../src/electron-security";
 
 describe("Electron security configuration", () => {
@@ -68,5 +70,47 @@ describe("Electron security configuration", () => {
         "Content-Security-Policy": [PRODUCTION_CSP],
       },
     });
+  });
+
+  it("denies every permission request and check", () => {
+    const setPermissionRequestHandler = vi.fn();
+    const setPermissionCheckHandler = vi.fn();
+    registerPermissionDenial({ setPermissionRequestHandler, setPermissionCheckHandler });
+
+    const request = setPermissionRequestHandler.mock.calls[0]?.[0];
+    const callback = vi.fn();
+    request({}, "camera", callback);
+    expect(callback).toHaveBeenCalledWith(false);
+    expect(setPermissionCheckHandler.mock.calls[0]?.[0]({}, "clipboard-read")).toBe(false);
+  });
+
+  it("quits when the instance lock fails", () => {
+    const app = {
+      requestSingleInstanceLock: vi.fn(() => false),
+      quit: vi.fn(),
+      on: vi.fn(),
+    };
+    expect(registerSingleInstanceLifecycle(app, () => undefined)).toBe(false);
+    expect(app.quit).toHaveBeenCalledOnce();
+    expect(app.on).not.toHaveBeenCalled();
+  });
+
+  it("restores and focuses the existing window on a second instance", () => {
+    const app = {
+      requestSingleInstanceLock: vi.fn(() => true),
+      quit: vi.fn(),
+      on: vi.fn(),
+    };
+    const window = {
+      isDestroyed: vi.fn(() => false),
+      isMinimized: vi.fn(() => true),
+      restore: vi.fn(),
+      focus: vi.fn(),
+    };
+    expect(registerSingleInstanceLifecycle(app, () => window)).toBe(true);
+    const secondInstance = app.on.mock.calls[0]?.[1];
+    secondInstance();
+    expect(window.restore).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
   });
 });
