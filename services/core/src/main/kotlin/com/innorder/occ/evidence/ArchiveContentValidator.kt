@@ -417,6 +417,8 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                 legacyCentralSize == ZIP64_SENTINEL || legacyCentralOffset == ZIP64_SENTINEL
             ) {
                 zip64Layout(
+                    channel,
+                    deadline,
                     tail,
                     endIndex,
                     size - tailSize,
@@ -427,15 +429,19 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                 ) ?: return false
             } else {
                 if (legacyEntriesOnDisk != legacyEntries) return false
-                val prefixBytes = absoluteEnd - legacyCentralSize - legacyCentralOffset
+                val directCentralEnd = legacyCentralOffset + legacyCentralSize
+                val prefixBytes = if (directCentralEnd == absoluteEnd ||
+                    isDigitalSignatureRecord(channel, directCentralEnd, absoluteEnd, deadline)
+                ) 0L else absoluteEnd - legacyCentralSize - legacyCentralOffset
                 if (prefixBytes < 0) return false
                 ZipDirectoryLayout(legacyEntries, legacyCentralSize, legacyCentralOffset, prefixBytes, absoluteEnd)
             }
             if (layout.centralOffset > Long.MAX_VALUE - layout.prefixBytes) return false
             val absoluteCentral = layout.prefixBytes + layout.centralOffset
             if (absoluteCentral < 0 || absoluteCentral > layout.directoryEnd ||
-                layout.centralSize > layout.directoryEnd - absoluteCentral || absoluteCentral + layout.centralSize != layout.directoryEnd
+                layout.centralSize > layout.directoryEnd - absoluteCentral
             ) return false
+            val centralEnd = absoluteCentral + layout.centralSize
 
             var centralPosition = absoluteCentral
             var centralRemaining = layout.centralSize
@@ -526,6 +532,12 @@ internal class ArchiveContentValidator(private val clock: Clock) {
                 centralPosition += recordLength
                 centralRemaining -= recordLength
             }
+            if (centralRemaining != 0L || centralPosition != centralEnd) return false
+            val signatureRecordBytes = layout.directoryEnd - centralEnd
+            if (signatureRecordBytes > 0) {
+                if (!isDigitalSignatureRecord(channel, centralEnd, layout.directoryEnd, deadline)) return false
+                centralPosition = layout.directoryEnd
+            }
             centralRemaining == 0L && centralPosition == layout.directoryEnd
         }
     } catch (rejected: EvidenceRejectedException) {
@@ -534,7 +546,22 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         false
     }
 
+    private fun isDigitalSignatureRecord(
+        channel: java.nio.channels.SeekableByteChannel,
+        start: Long,
+        end: Long,
+        deadline: Instant,
+    ): Boolean {
+        if (start < 0 || end < start || end - start < ZIP_DIGITAL_SIGNATURE_HEADER_BYTES) return false
+        val header = probeRead(channel, start, ZIP_DIGITAL_SIGNATURE_HEADER_BYTES, deadline) ?: return false
+        if (!header.matchesAt(0, ZIP_DIGITAL_SIGNATURE_MAGIC)) return false
+        val recordLength = ZIP_DIGITAL_SIGNATURE_HEADER_BYTES.toLong() + unsignedShort(header, 4)
+        return recordLength == end - start && probeRead(channel, start, recordLength.toInt(), deadline) != null
+    }
+
     private fun zip64Layout(
+        channel: java.nio.channels.SeekableByteChannel,
+        deadline: Instant,
         tail: ByteArray,
         endIndex: Int,
         absoluteTailStart: Long,
@@ -548,29 +575,29 @@ internal class ArchiveContentValidator(private val clock: Clock) {
             unsignedInt(tail, locatorIndex + 16) != 1L
         ) return null
         val relativeRecordOffset = unsignedLong(tail, locatorIndex + 8) ?: return null
-        val minimumRecordIndex = maxOf(0, locatorIndex - MAXIMUM_ZIP64_END_BYTES)
-        val recordIndex = (locatorIndex - ZIP64_END_MINIMUM_BYTES downTo minimumRecordIndex).firstOrNull { candidate ->
-            if (!tail.matchesAt(candidate, ZIP64_END_MAGIC)) return@firstOrNull false
-            val recordSize = unsignedLong(tail, candidate + 4) ?: return@firstOrNull false
-            recordSize in ZIP64_END_MINIMUM_DATA_BYTES.toLong()..(MAXIMUM_ZIP64_END_BYTES - 12).toLong() &&
-                candidate.toLong() + 12 + recordSize == locatorIndex.toLong()
-        } ?: return null
-        val absoluteRecord = absoluteTailStart + recordIndex
-        val prefixBytes = absoluteRecord - relativeRecordOffset
-        if (prefixBytes < 0 || unsignedShort(tail, recordIndex + 14) < ZIP64_VERSION ||
-            unsignedInt(tail, recordIndex + 16) != 0L || unsignedInt(tail, recordIndex + 20) != 0L
+        val absoluteLocator = absoluteTailStart + locatorIndex
+        if (relativeRecordOffset > absoluteLocator || absoluteLocator - relativeRecordOffset < ZIP64_END_MINIMUM_BYTES) return null
+        val record = probeRead(channel, relativeRecordOffset, ZIP64_END_MINIMUM_BYTES, deadline) ?: return null
+        if (!record.matchesAt(0, ZIP64_END_MAGIC)) return null
+        val recordSize = unsignedLong(record, 4) ?: return null
+        if (recordSize < ZIP64_END_MINIMUM_DATA_BYTES || recordSize > absoluteLocator - relativeRecordOffset - 12 ||
+            relativeRecordOffset + 12 + recordSize != absoluteLocator
         ) return null
-        val entriesOnDisk = unsignedLong(tail, recordIndex + 24) ?: return null
-        val entries = unsignedLong(tail, recordIndex + 32) ?: return null
-        val centralSize = unsignedLong(tail, recordIndex + 40) ?: return null
-        val centralOffset = unsignedLong(tail, recordIndex + 48) ?: return null
+        val prefixBytes = 0L
+        if (unsignedShort(record, 14) < ZIP64_VERSION ||
+            unsignedInt(record, 16) != 0L || unsignedInt(record, 20) != 0L
+        ) return null
+        val entriesOnDisk = unsignedLong(record, 24) ?: return null
+        val entries = unsignedLong(record, 32) ?: return null
+        val centralSize = unsignedLong(record, 40) ?: return null
+        val centralOffset = unsignedLong(record, 48) ?: return null
         if (entries != entriesOnDisk || entries > Int.MAX_VALUE ||
             legacyEntriesOnDisk != ZIP64_SHORT_SENTINEL && legacyEntriesOnDisk.toLong() != entriesOnDisk ||
             legacyEntries != ZIP64_SHORT_SENTINEL && legacyEntries.toLong() != entries ||
             legacyCentralSize != ZIP64_SENTINEL && legacyCentralSize != centralSize ||
             legacyCentralOffset != ZIP64_SENTINEL && legacyCentralOffset != centralOffset
         ) return null
-        return ZipDirectoryLayout(entries.toInt(), centralSize, centralOffset, prefixBytes, absoluteRecord)
+        return ZipDirectoryLayout(entries.toInt(), centralSize, centralOffset, prefixBytes, relativeRecordOffset)
     }
 
     private fun zip64Extra(
@@ -738,9 +765,9 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private const val ZIP64_LOCATOR_BYTES = 20
         private const val ZIP64_END_MINIMUM_BYTES = 56
         private const val ZIP64_END_MINIMUM_DATA_BYTES = 44
-        private const val MAXIMUM_ZIP64_END_BYTES = 4096
-        private const val MAXIMUM_NESTED_ZIP_TAIL_BYTES = MAXIMUM_ZIP_END_BYTES + ZIP64_LOCATOR_BYTES + MAXIMUM_ZIP64_END_BYTES
+        private const val MAXIMUM_NESTED_ZIP_TAIL_BYTES = MAXIMUM_ZIP_END_BYTES + ZIP64_LOCATOR_BYTES
         private const val ZIP64_VERSION = 45
+        private const val ZIP_DIGITAL_SIGNATURE_HEADER_BYTES = 6
         private const val CONTENT_TYPES = "[Content_Types].xml"
         private const val ROOT_RELATIONSHIPS = "_rels/.rels"
         private const val CONTENT_TYPES_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -752,6 +779,7 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private val ZIP_CENTRAL_MAGIC = byteArrayOf(0x50, 0x4b, 0x01, 0x02)
         private val ZIP64_END_MAGIC = byteArrayOf(0x50, 0x4b, 0x06, 0x06)
         private val ZIP64_LOCATOR_MAGIC = byteArrayOf(0x50, 0x4b, 0x06, 0x07)
+        private val ZIP_DIGITAL_SIGNATURE_MAGIC = byteArrayOf(0x50, 0x4b, 0x05, 0x05)
         private val OLE_MAGIC = byteArrayOf(0xd0.toByte(), 0xcf.toByte(), 0x11, 0xe0.toByte(), 0xa1.toByte(), 0xb1.toByte(), 0x1a, 0xe1.toByte())
         private val GZIP_MAGIC = byteArrayOf(0x1f, 0x8b.toByte())
         private val SEVEN_Z_MAGIC = byteArrayOf(0x37, 0x7a, 0xbc.toByte(), 0xaf.toByte(), 0x27, 0x1c)
