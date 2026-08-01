@@ -35,7 +35,7 @@ export class CoreClientError extends Error {
 export interface CoreClient {
   login(input: LoginRequest): Promise<TokenResponse>;
   refresh(refreshToken: string): Promise<TokenResponse>;
-  logout(refreshToken: string): Promise<void>;
+  logout(refreshToken: string, accessToken: string): Promise<void>;
   me(): Promise<CurrentUser>;
   systemStatus(): Promise<SystemStatus>;
 }
@@ -123,7 +123,7 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
     method: "GET" | "POST",
     schema: ZodType<T> | null,
     body?: unknown,
-    authenticated = false,
+    authenticated: boolean | string = false,
   ): Promise<T> {
     const controller = new AbortController();
     let timedOut = false;
@@ -134,7 +134,9 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
     const headers = new Headers({ accept: "application/json" });
     if (body !== undefined) headers.set("content-type", "application/json");
     if (authenticated) {
-      const accessToken = options.getAccessToken();
+      const accessToken = typeof authenticated === "string"
+        ? authenticated
+        : options.getAccessToken();
       if (accessToken) headers.set("authorization", `Bearer ${accessToken}`);
     }
 
@@ -204,9 +206,9 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
       const input = refreshRequestSchema.parse({ refreshToken });
       return request("refresh", "/api/v1/auth/refresh", "POST", tokenResponseSchema, input);
     },
-    logout(refreshToken) {
+    logout(refreshToken, accessToken) {
       const input = refreshRequestSchema.parse({ refreshToken });
-      return request("logout", "/api/v1/auth/logout", "POST", null, input, true);
+      return request("logout", "/api/v1/auth/logout", "POST", null, input, accessToken);
     },
     me() {
       return request("me", "/api/v1/me", "GET", currentUserSchema, undefined, true);

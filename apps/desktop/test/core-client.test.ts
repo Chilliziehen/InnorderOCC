@@ -55,7 +55,7 @@ describe("Core client", () => {
 
     await api.login({ username: "operator", password: "correct horse" });
     await api.refresh(refreshToken);
-    await api.logout(refreshToken);
+    await api.logout(refreshToken, "captured-access");
     await api.me();
     await api.systemStatus();
 
@@ -73,6 +73,9 @@ describe("Core client", () => {
     expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).has("authorization")).toBe(false);
     expect(new Headers(fetchImpl.mock.calls[3]?.[1]?.headers).get("authorization")).toBe(
       "Bearer access-secret",
+    );
+    expect(new Headers(fetchImpl.mock.calls[2]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer captured-access",
     );
   });
 

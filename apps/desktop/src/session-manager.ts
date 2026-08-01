@@ -34,7 +34,7 @@ export interface SessionManager {
   login(input: LoginRequest): Promise<SessionSnapshot>;
   restore(): Promise<SessionSnapshot>;
   refresh(): Promise<SessionSnapshot>;
-  profileSwitched(): Promise<void>;
+  profileSwitched(previousProfileId: string): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -56,6 +56,7 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
   let refreshInFlight: RefreshFlight | null = null;
   let activeProfileId: string | null = null;
   let activeCredentialVersion: string | null = null;
+  let activeAccessToken: string | null = null;
   let generation = 0;
   const vaultTails = new Map<string, Promise<void>>();
 
@@ -95,12 +96,13 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     current = { state: "anonymous" };
     activeProfileId = null;
     activeCredentialVersion = null;
+    activeAccessToken = null;
     generation += 1;
   }
 
   async function clear(profileId: string): Promise<void> {
     const version = activeProfileId === profileId ? activeCredentialVersion : null;
-    clearMemory();
+    if (activeProfileId === null || activeProfileId === profileId) clearMemory();
     if (version) await removeCredential(profileId, version);
     else await removeCurrentCredential(profileId);
   }
@@ -174,6 +176,7 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
     options.setAccessToken(tokens.accessToken);
     activeProfileId = profileId;
     activeCredentialVersion = credentialVersion;
+    activeAccessToken = tokens.accessToken;
     current = {
       state: "authenticated",
       user,
@@ -195,23 +198,37 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
       refreshToken: tokens.refreshToken,
       version: crypto.randomUUID(),
     };
-    if (generation !== expectedGeneration) return current;
+    if (generation !== expectedGeneration) {
+      await revoke(tokens);
+      return current;
+    }
     try {
       await writeCredential(profileId, credential);
       if (generation !== expectedGeneration) {
         await removeCredential(profileId, credential.version);
+        await revoke(tokens);
         return current;
       }
       options.setAccessToken(tokens.accessToken);
       const verifiedUser = verifyMe ? await options.core.me() : tokens.user;
       if (generation !== expectedGeneration) {
         await removeCredential(profileId, credential.version);
+        await revoke(tokens);
         return current;
       }
       return activate(profileId, credential.version, tokens, verifiedUser);
     } catch (error) {
       await clearOwned(profileId, expectedGeneration, credential.version);
+      await revoke(tokens);
       throw error;
+    }
+  }
+
+  async function revoke(tokens: TokenResponse): Promise<void> {
+    try {
+      await options.core.logout(tokens.refreshToken, tokens.accessToken);
+    } catch {
+      // Discarded server sessions are revoked on a best-effort basis.
     }
   }
 
@@ -228,7 +245,10 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
         return current;
       }
       const tokens = await options.core.refresh(credential.refreshToken);
-      if (generation !== expectedGeneration) return current;
+      if (generation !== expectedGeneration) {
+        await revoke(tokens);
+        return current;
+      }
       return await accept(profileId, tokens, true, expectedGeneration);
     } catch (error) {
       await clearOwned(profileId, expectedGeneration, credential?.version ?? null);
@@ -270,24 +290,25 @@ export function createSessionManager(options: SessionManagerOptions): SessionMan
       refreshInFlight = { profileId, generation: expectedGeneration, promise };
       return promise;
     },
-    async profileSwitched() {
-      await clear(
-        activeProfileId ?? refreshInFlight?.profileId ?? options.getProfileId(),
-      );
+    async profileSwitched(previousProfileId) {
+      await clear(previousProfileId);
     },
     async logout() {
       const profileId = activeProfileId ?? options.getProfileId();
       const expectedGeneration = generation;
-      let credential: VaultCredential | null = null;
-      try {
-        credential = await readCredential(profileId);
-      } catch {
-        // Missing local credentials must not prevent logout.
+      const accessToken = activeAccessToken;
+      const credentialPromise = readCredential(profileId).catch(() => null);
+      if (
+        generation === expectedGeneration &&
+        (activeProfileId === null || activeProfileId === profileId)
+      ) {
+        clearMemory();
       }
-      await clearOwned(profileId, expectedGeneration, credential?.version ?? null);
-      if (!credential) return;
+      const credential = await credentialPromise;
+      if (credential) await removeCredential(profileId, credential.version);
+      if (!credential || !accessToken) return;
       try {
-        await options.core.logout(credential.refreshToken);
+        await options.core.logout(credential.refreshToken, accessToken);
       } catch {
         // Local logout succeeds even when revocation cannot reach Core.
       }

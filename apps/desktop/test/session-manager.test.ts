@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { CoreClient } from "../src/core-client";
+import { createCoreClient, type CoreClient } from "../src/core-client";
 import {
   createSessionManager,
   type CredentialVault,
@@ -248,11 +248,22 @@ describe("Session manager", () => {
     await h.manager.login({ username: "operator", password: "correct horse" });
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
 
     expect(h.vault.remove).toHaveBeenCalledWith("profile-a", expect.any(String));
     expect(h.accessToken).toBeNull();
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+  });
+
+  it("clears an explicit unrestored previous profile instead of the new selection", async () => {
+    const h = harness("A".repeat(43));
+    h.seedProfile("profile-b", "B".repeat(43));
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched("profile-a");
+
+    expect(h.storedFor("profile-a")).toBeNull();
+    expect(h.storedFor("profile-b")).not.toBeNull();
   });
 
   it("does not restore an old session when refresh finishes after a profile switch", async () => {
@@ -264,13 +275,45 @@ describe("Session manager", () => {
     await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     resolve(token("N"));
     await pending;
 
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
     expect(h.accessToken).toBeNull();
     expect(h.stored).toBeNull();
+  });
+
+  it("revokes a successful login discarded by a profile switch", async () => {
+    const h = harness();
+    let resolveLogin!: (value: ReturnType<typeof token>) => void;
+    vi.mocked(h.core.login).mockReturnValue(new Promise((resolve) => { resolveLogin = resolve; }));
+    vi.mocked(h.core.logout).mockResolvedValue();
+    const login = h.manager.login({ username: "operator", password: "correct horse" });
+
+    h.selectProfile("profile-b");
+    await h.manager.profileSwitched("profile-a");
+    resolveLogin(token("A"));
+    await login;
+
+    expect(h.core.logout).toHaveBeenCalledWith("A".repeat(43), "access-A");
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+  });
+
+  it("revokes a successful refresh discarded by logout", async () => {
+    const h = harness("O".repeat(43));
+    let resolveRefresh!: (value: ReturnType<typeof token>) => void;
+    vi.mocked(h.core.refresh).mockReturnValue(new Promise((resolve) => { resolveRefresh = resolve; }));
+    vi.mocked(h.core.logout).mockResolvedValue();
+    const restore = h.manager.restore();
+    await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
+
+    await h.manager.logout();
+    resolveRefresh(token("N"));
+    await restore;
+
+    expect(h.core.logout).toHaveBeenCalledWith("N".repeat(43), "access-N");
+    expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
   });
 
   it("a rejecting refresh from profile A cannot clear authenticated profile B", async () => {
@@ -281,7 +324,7 @@ describe("Session manager", () => {
     await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     vi.mocked(h.core.login).mockResolvedValue(token("B"));
     await h.manager.login({ username: "operator", password: "correct horse" });
     rejectA(new Error("A refresh failed"));
@@ -302,7 +345,7 @@ describe("Session manager", () => {
     await vi.waitFor(() => expect(h.core.me).toHaveBeenCalledOnce());
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     vi.mocked(h.core.login).mockResolvedValue(token("B"));
     await h.manager.login({ username: "operator", password: "correct horse" });
     rejectMeA(new Error("A me failed"));
@@ -322,9 +365,9 @@ describe("Session manager", () => {
     await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     h.selectProfile("profile-a");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-b");
     vi.mocked(h.core.login).mockResolvedValue(token("C"));
     await h.manager.login({ username: "operator", password: "correct horse" });
     rejectOldA(new Error("old A refresh failed"));
@@ -343,9 +386,9 @@ describe("Session manager", () => {
     await vi.waitFor(() => expect(h.core.me).toHaveBeenCalledOnce());
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     h.selectProfile("profile-a");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-b");
     vi.mocked(h.core.login).mockResolvedValue(token("C"));
     await h.manager.login({ username: "operator", password: "correct horse" });
     rejectOldMe(new Error("old A me failed"));
@@ -386,7 +429,7 @@ describe("Session manager", () => {
     await vi.waitFor(() => expect(h.core.refresh).toHaveBeenCalledOnce());
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     h.seedProfile("profile-b", "B".repeat(43));
     const restoreB = h.manager.restore();
 
@@ -399,15 +442,54 @@ describe("Session manager", () => {
   });
 
   it("attempts logout revocation but always clears local credentials", async () => {
-    const h = harness("R".repeat(43));
+    const h = harness();
+    vi.mocked(h.core.login).mockResolvedValue(token("R"));
+    await h.manager.login({ username: "operator", password: "correct horse" });
     vi.mocked(h.core.logout).mockRejectedValue(new Error("offline"));
 
     await expect(h.manager.logout()).resolves.toBeUndefined();
 
-    expect(h.core.logout).toHaveBeenCalledWith("R".repeat(43));
+    expect(h.core.logout).toHaveBeenCalledWith("R".repeat(43), "access-R");
     expect(h.stored).toBeNull();
     expect(h.accessToken).toBeNull();
     expect(h.manager.snapshot()).toEqual({ state: "anonymous" });
+  });
+
+  it("sends the captured bearer while clearing local access before logout", async () => {
+    let accessToken: string | null = null;
+    let stored: VaultCredential | null = null;
+    const vault: CredentialVault = {
+      decrypt: vi.fn(async () => stored),
+      encrypt: vi.fn(async (_profileId, credential) => { stored = credential; }),
+      remove: vi.fn(async (_profileId, version) => {
+        if (stored?.version === version) stored = null;
+      }),
+    };
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(token("A")), {
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const core = createCoreClient({
+      fetch: fetchImpl,
+      getOrigin: () => "https://core.example.test",
+      getAccessToken: () => accessToken,
+      timeoutMs: 250,
+    });
+    const manager = createSessionManager({
+      core,
+      vault,
+      getProfileId: () => "profile-a",
+      setAccessToken: (value) => { accessToken = value; },
+    });
+    await manager.login({ username: "operator", password: "correct horse" });
+
+    await manager.logout();
+
+    expect(accessToken).toBeNull();
+    expect(new Headers(fetchImpl.mock.calls[1]?.[1]?.headers).get("authorization")).toBe(
+      "Bearer access-A",
+    );
   });
 
   it("clears logout locally before revocation and cannot later clear profile B", async () => {
@@ -423,7 +505,7 @@ describe("Session manager", () => {
     expect(h.accessToken).toBeNull();
 
     h.selectProfile("profile-b");
-    await h.manager.profileSwitched();
+    await h.manager.profileSwitched("profile-a");
     await h.manager.login({ username: "operator", password: "correct horse" });
     rejectLogoutA(new Error("offline"));
     await logoutA;
