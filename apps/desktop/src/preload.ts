@@ -12,6 +12,7 @@ function freezeApi<T extends object>(value: T): Readonly<T> {
 const api: OccApi = freezeApi({
   profiles: {
     list: () => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.list, undefined),
+    current: () => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.current, undefined),
     save: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.save, input),
     select: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.select, id),
     remove: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.profiles.remove, id),

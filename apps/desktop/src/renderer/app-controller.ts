@@ -50,6 +50,7 @@ export interface ReconnectingState extends RoutedState {
   expiresAt: string;
   lastFreshAt: number;
   staleSince: number;
+  retryAvailable: boolean;
 }
 
 export type AppState =
@@ -74,6 +75,12 @@ export type AppEvent =
       generation: number;
     }
   | {
+      type: "SESSION_OPERATION_FAILED";
+      operation: SessionOperation;
+      profileId: string;
+      generation: number;
+    }
+  | {
       type: "SESSION_RESTORED";
       profileId: string;
       generation: number;
@@ -91,6 +98,8 @@ export type AppEvent =
   | { type: "SESSION_EXPIRED"; profileId: string; generation: number }
   | { type: "ONLINE"; at: number }
   | { type: "OFFLINE"; at: number }
+  | { type: "STATUS_REACHABLE"; profileId: string; generation: number; at: number }
+  | { type: "STATUS_UNREACHABLE"; profileId: string; generation: number; at: number }
   | { type: "ROUTE_CHANGED"; route: RouteLocation };
 
 export const initialAppState: AppState = {
@@ -221,7 +230,13 @@ export function reduceAppState(state: AppState, event: AppEvent): AppState {
         ...state,
         sessionGeneration: event.generation,
         sessionOperation: event.operation,
+        ...(state.mode === "reconnecting" ? { retryAvailable: false } : {}),
       };
+    case "SESSION_OPERATION_FAILED":
+      if (!matchesSessionResult(state, event, event.operation)) return state;
+      return state.mode === "reconnecting"
+        ? { ...state, sessionOperation: null, retryAvailable: event.operation === "restore" }
+        : { ...state, sessionOperation: null };
     case "SESSION_RESTORED":
       if (!matchesSessionResult(state, event, "restore")) return state;
       if (event.session.state === "anonymous") return loginFor(state, state.profile);
@@ -244,7 +259,7 @@ export function reduceAppState(state: AppState, event: AppEvent): AppState {
     case "OFFLINE":
       if (state.mode === "offline") return state;
       if (state.mode === "reconnecting") {
-        return { ...state, mode: "offline" };
+        return { ...state, mode: "offline", sessionOperation: null };
       }
       if (state.mode !== "authenticated") return state;
       return {
@@ -275,8 +290,17 @@ export function reduceAppState(state: AppState, event: AppEvent): AppState {
         staleSince: state.staleSince,
         sessionGeneration: state.sessionGeneration,
         sessionOperation: state.sessionOperation,
+        retryAvailable: false,
         ...(state.route ? { route: state.route } : {}),
       };
+    case "STATUS_UNREACHABLE":
+      return matchesCurrentSession(state, event)
+        ? reduceAppState(state, { type: "OFFLINE", at: event.at })
+        : state;
+    case "STATUS_REACHABLE":
+      return matchesCurrentSession(state, event)
+        ? reduceAppState(state, { type: "ONLINE", at: event.at })
+        : state;
     case "ROUTE_CHANGED":
       return { ...state, route: event.route };
     default:

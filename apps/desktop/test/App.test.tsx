@@ -35,6 +35,7 @@ function mockStatuses(statuses: SystemStatus[]): void {
   const api: OccApi = {
     profiles: {
       list: vi.fn().mockResolvedValue([profile]),
+      current: vi.fn().mockResolvedValue(profile),
       save: vi.fn().mockResolvedValue(profile),
       select: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),

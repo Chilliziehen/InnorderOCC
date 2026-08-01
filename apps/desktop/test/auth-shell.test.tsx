@@ -8,6 +8,7 @@ import { AppShell } from "../src/renderer/components/AppShell";
 import { Login } from "../src/renderer/components/Login";
 import { ProfileBootstrap } from "../src/renderer/components/ProfileBootstrap";
 import { StatusBanner } from "../src/renderer/components/StatusBanner";
+import { RendererErrorBoundary } from "../src/renderer/components/RendererErrorBoundary";
 import type { RouteLocation } from "../src/renderer/routes";
 
 const profileA: ServerProfile = {
@@ -40,6 +41,7 @@ function createOcc(overrides: Partial<{
   return {
     profiles: {
       list: vi.fn().mockResolvedValue([profileA]),
+      current: vi.fn().mockResolvedValue(profileA),
       save: vi.fn().mockResolvedValue(profileA),
       select: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),
@@ -92,6 +94,22 @@ function authenticatedState(
     expiresAt,
     lastFreshAt: Date.now() - 4_000,
     sessionGeneration: 2,
+    sessionOperation: null,
+    route,
+  };
+}
+
+function offlineState(route: RouteLocation = { path: "/settings", focusToken: 1 }) {
+  const online = authenticatedState(identity.capabilities, route);
+  return {
+    mode: "offline" as const,
+    profiles: online.profiles,
+    profile: online.profile,
+    cachedIdentity: online.identity,
+    expiresAt: online.expiresAt,
+    lastFreshAt: online.lastFreshAt,
+    staleSince: Date.now(),
+    sessionGeneration: online.sessionGeneration,
     sessionOperation: null,
     route,
   };
@@ -242,6 +260,35 @@ describe("authenticated shell", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("设置");
   });
 
+  it.each(["offline", "reconnecting"] as const)(
+    "fully disables settings and rejects forced save while %s",
+    (mode) => {
+      const onProfileSave = vi.fn();
+      const state = mode === "offline"
+        ? offlineState()
+        : { ...offlineState(), mode: "reconnecting" as const, retryAvailable: false };
+      installOcc(createOcc());
+      const { container } = render(
+        <AppShell
+          state={state}
+          statuses={[]}
+          onLogout={vi.fn()}
+          onProfileSelect={vi.fn()}
+          onProfileSave={onProfileSave}
+        />,
+      );
+
+      for (const label of [/配置名称/, /服务器源地址/, /^环境/, /CA.*指纹/]) {
+        expect(screen.getByLabelText(label)).toBeDisabled();
+      }
+      expect(screen.getByRole("button", { name: /保存配置/ })).toBeDisabled();
+      const form = container.querySelector("form");
+      expect(form).not.toBeNull();
+      fireEvent.submit(form as HTMLFormElement);
+      expect(onProfileSave).not.toHaveBeenCalled();
+    },
+  );
+
   it("shows exact stale connectivity states and mutation lockout", () => {
     const { rerender } = render(<StatusBanner mode="authenticated" lastFreshAt={Date.now() - 4_000} />);
     expect(screen.getByRole("status")).toHaveTextContent(/在线.*4 秒/);
@@ -257,6 +304,40 @@ describe("authenticated shell", () => {
 });
 
 describe("application controller", () => {
+  it("restores the durable selected profile without selecting the first profile", async () => {
+    const api = createOcc({
+      profiles: {
+        list: vi.fn().mockResolvedValue([profileA, profileB]),
+        current: vi.fn().mockResolvedValue(profileB),
+      },
+      session: {
+        restore: vi.fn().mockResolvedValue({ state: "authenticated", user: identity, expiresAt }),
+      },
+    });
+    installOcc(api);
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "运行总览" });
+    expect(screen.getByText(/Production B/)).toBeInTheDocument();
+    expect(api.profiles.select).not.toHaveBeenCalled();
+    expect(api.session.restore).toHaveBeenCalledOnce();
+  });
+
+  it("does not select or restore when no durable profile is selected", async () => {
+    const api = createOcc({
+      profiles: {
+        list: vi.fn().mockResolvedValue([profileA, profileB]),
+        current: vi.fn().mockResolvedValue(null),
+      },
+    });
+    installOcc(api);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "连接服务器" })).toBeInTheDocument();
+    expect(api.profiles.select).not.toHaveBeenCalled();
+    expect(api.session.restore).not.toHaveBeenCalled();
+  });
+
   it("initializes profiles, restores the selected session, switches profiles, and logs out", async () => {
     const api = createOcc({
       profiles: { list: vi.fn().mockResolvedValue([profileA, profileB]) },
@@ -300,7 +381,107 @@ describe("application controller", () => {
     await screen.findByRole("heading", { name: "运行总览" });
 
     fireEvent(window, new Event("offline"));
-    expect(await screen.findByRole("status", { name: /连接状态/ })).toHaveTextContent(/离线.*只读/);
+    await waitFor(() => expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent(/离线.*只读/));
+  });
+
+  it("moves stale when polling reports Core unreachable", async () => {
+    const checkedAt = "2026-08-01T12:00:00.000Z";
+    installOcc(createOcc({
+      session: {
+        restore: vi.fn().mockResolvedValue({ state: "authenticated", user: identity, expiresAt }),
+      },
+      runtime: {
+        statuses: vi.fn().mockResolvedValue([{
+          service: "occ-core",
+          version: "unknown",
+          state: "UNREACHABLE",
+          checkedAt,
+          components: [],
+        }]),
+      },
+    }));
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent(/离线.*只读/);
+    });
+    expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("不可达");
+  });
+
+  it("clears statuses on profile switch and rejects the old delayed callback", async () => {
+    let resolveA!: (value: []) => void;
+    let resolveB!: (value: []) => void;
+    const statuses = vi.fn()
+      .mockImplementationOnce(() => new Promise<[]>((resolve) => void (resolveA = resolve)))
+      .mockImplementationOnce(() => new Promise<[]>((resolve) => void (resolveB = resolve)));
+    const api = createOcc({
+      profiles: {
+        list: vi.fn().mockResolvedValue([profileA, profileB]),
+        current: vi.fn().mockResolvedValue(profileA),
+      },
+      session: {
+        restore: vi.fn().mockResolvedValue({ state: "authenticated", user: identity, expiresAt }),
+      },
+      runtime: { statuses },
+    });
+    installOcc(api);
+    render(<App />);
+    await screen.findByRole("heading", { name: "运行总览" });
+    expect(statuses).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: /退出登录/ }));
+    await screen.findByRole("heading", { name: /登录/ });
+    fireEvent.change(screen.getByLabelText(/服务器配置/), { target: { value: profileB.id } });
+    await screen.findByRole("heading", { name: "运行总览" });
+    expect(statuses).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("检查中");
+
+    resolveA([]);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(screen.getByRole("row", { name: /OCC Core/ })).toHaveTextContent("检查中");
+    resolveB([]);
+  });
+
+  it("guards profile persistence after the shell becomes read-only", async () => {
+    const api = createOcc({
+      session: {
+        restore: vi.fn().mockResolvedValue({ state: "authenticated", user: identity, expiresAt }),
+      },
+    });
+    installOcc(api);
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "运行总览" });
+    window.location.hash = "#/settings";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    await screen.findByRole("heading", { name: "设置" });
+    fireEvent(window, new Event("offline"));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /保存配置/ })).toBeDisabled());
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement);
+    expect(api.profiles.save).not.toHaveBeenCalled();
+  });
+
+  it("bounds failed reconnect validation and unlocks only after manual retry succeeds", async () => {
+    const restore = vi.fn()
+      .mockResolvedValueOnce({ state: "authenticated", user: identity, expiresAt })
+      .mockRejectedValueOnce(new Error("offline secret"))
+      .mockResolvedValueOnce({ state: "authenticated", user: identity, expiresAt });
+    const api = createOcc({ session: { restore } });
+    installOcc(api);
+    render(<App />);
+    await screen.findByRole("heading", { name: "运行总览" });
+
+    fireEvent(window, new Event("offline"));
+    fireEvent(window, new Event("online"));
+    const retry = await screen.findByRole("button", { name: /重试连接/ });
+    expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent(/重新连接.*锁定/);
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+    expect(restore).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByRole("status", { name: /连接状态/ })).toHaveTextContent("在线"));
+    expect(restore).toHaveBeenCalledTimes(3);
+    expect(document.body).not.toHaveTextContent("offline secret");
   });
 
   it("keeps a saved settings profile in the selectable profile list", async () => {
@@ -328,5 +509,28 @@ describe("application controller", () => {
 
     const selector = await screen.findByLabelText(/服务器配置/);
     expect(within(selector).getByRole("option", { name: updated.name })).toBeInTheDocument();
+  });
+});
+
+describe("renderer error boundary", () => {
+  it("hides sensitive exception details and remounts content on retry", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let fail = true;
+    function UnstableContent() {
+      if (fail) throw new Error("token secret-value at C:\\private\\path");
+      return <p>恢复完成</p>;
+    }
+    render(
+      <RendererErrorBoundary>
+        <UnstableContent />
+      </RendererErrorBoundary>,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("应用无法继续显示");
+    expect(document.body).not.toHaveTextContent(/secret-value|private|token/i);
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: /重试应用/ }));
+    expect(screen.getByText("恢复完成")).toBeInTheDocument();
+    consoleError.mockRestore();
   });
 });

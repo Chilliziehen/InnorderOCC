@@ -24,7 +24,11 @@ export function App() {
   const stateRef = useRef(state);
   const [loading, setLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [statuses, setStatuses] = useState<SystemStatus[]>([]);
+  const [statuses, setStatuses] = useState<{
+    profileId: string;
+    generation: number;
+    values: SystemStatus[];
+  } | null>(null);
   const routerRef = useRef<ReturnType<typeof createHashRouter> | null>(null);
   stateRef.current = state;
 
@@ -50,7 +54,12 @@ export function App() {
         at: Date.now(),
       });
     } catch {
-      // Login remains available when session restoration cannot complete.
+      dispatchEvent({
+        type: "SESSION_OPERATION_FAILED",
+        operation: "restore",
+        profileId: profile.id,
+        generation,
+      });
     }
   }, [dispatchEvent]);
 
@@ -58,15 +67,16 @@ export function App() {
     setLoading(true);
     setLoadFailed(false);
     try {
-      const profiles = await window.occ.profiles.list();
-      const profile = profiles[0];
+      const [profiles, profile] = await Promise.all([
+        window.occ.profiles.list(),
+        window.occ.profiles.current(),
+      ]);
       dispatchEvent({
         type: "PROFILES_LOADED",
         profiles,
         selectedProfileId: profile?.id ?? null,
       });
       if (profile) {
-        await window.occ.profiles.select(profile.id);
         await restore(profile, nextGeneration(stateRef.current));
       }
     } catch {
@@ -100,7 +110,7 @@ export function App() {
   }, [dispatchEvent]);
 
   useEffect(() => {
-    if (state.mode !== "reconnecting" || state.sessionOperation !== null) return;
+    if (state.mode !== "reconnecting" || state.sessionOperation !== null || state.retryAvailable) return;
     void restore(state.profile, nextGeneration(state));
   }, [restore, state]);
 
@@ -126,10 +136,39 @@ export function App() {
     };
   }, [dispatchEvent, state]);
 
+  const statusProfileId = state.mode === "bootstrap" || state.mode === "login"
+    ? null
+    : state.profile.id;
+  const statusGeneration = state.mode === "bootstrap" || state.mode === "login"
+    ? null
+    : state.sessionGeneration;
+
   useEffect(() => {
-    if (state.mode !== "authenticated" && state.mode !== "offline" && state.mode !== "reconnecting") return;
-    return startStatusPolling(setStatuses);
-  }, [state.mode, state.mode === "bootstrap" || state.mode === "login" ? null : state.profile.id]);
+    if (statusProfileId === null || statusGeneration === null) {
+      setStatuses(null);
+      return;
+    }
+    const profileId = statusProfileId;
+    const generation = statusGeneration;
+    setStatuses({ profileId, generation, values: [] });
+    return startStatusPolling((sample) => {
+      const current = stateRef.current;
+      if (
+        (current.mode !== "authenticated" && current.mode !== "offline" && current.mode !== "reconnecting") ||
+        current.profile.id !== profileId ||
+        current.sessionGeneration !== generation
+      ) return;
+      setStatuses({ profileId, generation, values: sample.statuses });
+      dispatchEvent({
+        type: sample.successful && sample.coreReachable
+          ? "STATUS_REACHABLE"
+          : "STATUS_UNREACHABLE",
+        profileId,
+        generation,
+        at: sample.polledAt,
+      });
+    });
+  }, [dispatchEvent, statusGeneration, statusProfileId]);
 
   const selectProfile = async (profile: ServerProfile) => {
     await window.occ.profiles.select(profile.id);
@@ -138,6 +177,10 @@ export function App() {
   };
 
   const saveProfile = async (input: ProfileInput) => {
+    const current = stateRef.current;
+    if (current.mode === "offline" || current.mode === "reconnecting") {
+      throw new Error("Profile changes unavailable");
+    }
     const profile = await window.occ.profiles.save(input);
     await window.occ.profiles.select(profile.id);
     const profiles = stateRef.current.profiles.some(({ id }) => id === profile.id)
@@ -174,6 +217,12 @@ export function App() {
     }
   };
 
+  const retryRestore = () => {
+    const current = stateRef.current;
+    if (current.mode !== "reconnecting" || current.sessionOperation !== null) return;
+    void restore(current.profile, nextGeneration(current));
+  };
+
   let content;
   if (loading) {
     content = <main className="entry-screen" aria-busy="true"><p role="status">正在加载服务器配置…</p></main>;
@@ -198,13 +247,18 @@ export function App() {
       </main>
     );
   } else {
+    const visibleStatuses = statuses?.profileId === state.profile.id &&
+      statuses.generation === state.sessionGeneration
+      ? statuses.values
+      : [];
     content = (
       <AppShell
         state={state}
-        statuses={statuses}
+        statuses={visibleStatuses}
         onLogout={logout}
         onProfileSelect={selectProfile}
         onProfileSave={saveProfile}
+        onRetry={retryRestore}
       />
     );
   }

@@ -18,17 +18,36 @@ function unreachableStatuses(): SystemStatus[] {
   );
 }
 
-export async function getSystemStatuses(): Promise<SystemStatus[]> {
+export interface StatusPollSample {
+  statuses: SystemStatus[];
+  successful: boolean;
+  coreReachable: boolean;
+  polledAt: number;
+}
+
+export async function getSystemStatuses(): Promise<StatusPollSample> {
+  const polledAt = Date.now();
   try {
-    const statuses = await window.occ.runtime.statuses();
-    return statuses.map((status) => SystemStatusSchema.parse(status));
+    const statuses = (await window.occ.runtime.statuses())
+      .map((status) => SystemStatusSchema.parse(status));
+    return {
+      statuses,
+      successful: true,
+      coreReachable: statuses.find(({ service }) => service === "occ-core")?.state !== "UNREACHABLE",
+      polledAt,
+    };
   } catch {
-    return unreachableStatuses();
+    return {
+      statuses: unreachableStatuses(),
+      successful: false,
+      coreReachable: false,
+      polledAt,
+    };
   }
 }
 
 export function startStatusPolling(
-  onStatuses: (statuses: SystemStatus[]) => void,
+  onStatuses: (sample: StatusPollSample) => void,
   intervalMs = 15_000,
 ): () => void {
   let disposed = false;
@@ -41,9 +60,9 @@ export function startStatusPolling(
 
     inFlight = true;
     try {
-      const statuses = await getSystemStatuses();
+      const sample = await getSystemStatuses();
       if (!disposed) {
-        onStatuses(statuses);
+        onStatuses(sample);
       }
     } finally {
       inFlight = false;

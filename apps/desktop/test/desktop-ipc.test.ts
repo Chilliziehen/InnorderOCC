@@ -37,6 +37,7 @@ function dependencies() {
   return {
     profiles: {
       list: vi.fn().mockResolvedValue([profile]),
+      current: vi.fn().mockResolvedValue(profile),
       save: vi.fn().mockResolvedValue(profile),
       select: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),
@@ -94,8 +95,20 @@ describe("desktop IPC", () => {
     expect(electronMocks.handle.mock.calls.map(([channel]) => channel).sort()).toEqual(
       [...channels].sort(),
     );
-    expect(channels).toHaveLength(13);
+    expect(channels).toHaveLength(14);
     expect(channels.join(" ")).not.toMatch(/request|path|url|filesystem|shell/i);
+  });
+
+  it("returns the durable selected profile through a validated named channel", async () => {
+    const deps = dependencies();
+    deps.profiles.current = vi.fn().mockResolvedValue(profile);
+    registerDesktopIpc(rendererUrl, deps);
+    const handler = registeredHandler(DESKTOP_CHANNELS.profiles.current);
+    const event = { senderFrame: { url: rendererUrl, parent: null } };
+
+    await expect(handler(event, undefined)).resolves.toEqual(profile);
+    deps.profiles.current.mockResolvedValueOnce({ ...profile, token: "secret" });
+    await expect(handler(event, undefined)).rejects.toThrow("IPC request failed");
   });
 
   it("accepts only the exact top-level renderer document sender", async () => {

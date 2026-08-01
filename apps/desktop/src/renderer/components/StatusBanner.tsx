@@ -5,6 +5,8 @@ type ConnectedMode = AuthenticatedState["mode"] | OfflineState["mode"] | Reconne
 interface StatusBannerProps {
   mode: ConnectedMode;
   lastFreshAt: number;
+  retryAvailable?: boolean;
+  onRetry?(): void;
 }
 
 function ageLabel(ageMs: number): string {
@@ -15,7 +17,7 @@ function ageLabel(ageMs: number): string {
   return `${Math.floor(minutes / 60)} 小时`;
 }
 
-export function StatusBanner({ mode, lastFreshAt }: StatusBannerProps) {
+export function StatusBanner({ mode, lastFreshAt, retryAvailable = false, onRetry }: StatusBannerProps) {
   const age = ageLabel(Date.now() - lastFreshAt);
   const state = mode === "authenticated" ? "在线" : mode === "reconnecting" ? "正在重新连接" : "离线";
 
@@ -30,6 +32,9 @@ export function StatusBanner({ mode, lastFreshAt }: StatusBannerProps) {
       <span>数据距上次更新 {age}</span>
       {mode !== "authenticated" ? (
         <span className="mutation-lock">{mode === "offline" ? "只读模式，更改操作已锁定" : "更改操作已锁定"}</span>
+      ) : null}
+      {mode === "reconnecting" && retryAvailable ? (
+        <button type="button" onClick={onRetry}>重试连接</button>
       ) : null}
     </div>
   );

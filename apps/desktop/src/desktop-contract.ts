@@ -73,6 +73,8 @@ export const serverProfileSchema = z
   })
   .strict();
 
+export const selectedServerProfileSchema = serverProfileSchema.nullable();
+
 export type ServerProfile = z.infer<typeof serverProfileSchema>;
 
 export function parseServerProfile(
@@ -282,6 +284,7 @@ export type NotificationPage = z.infer<typeof notificationPageSchema>;
 export interface OccApi {
   profiles: {
     list(): Promise<ServerProfile[]>;
+    current(): Promise<ServerProfile | null>;
     save(input: ProfileInput): Promise<ServerProfile>;
     select(id: string): Promise<void>;
     remove(id: string): Promise<void>;

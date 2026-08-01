@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const DESKTOP_CHANNELS = {
   profiles: {
-    list: "profiles:list", save: "profiles:save", select: "profiles:select", remove: "profiles:remove",
+    list: "profiles:list", current: "profiles:current", save: "profiles:save", select: "profiles:select", remove: "profiles:remove",
   },
   session: { restore: "session:restore", login: "session:login", logout: "session:logout" },
   runtime: { statuses: "system-statuses:get" },

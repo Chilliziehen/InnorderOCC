@@ -59,6 +59,7 @@ describe("preload bridge", () => {
     const input = { marker: true };
 
     await api.profiles.list();
+    await api.profiles.current();
     await api.profiles.save(input);
     await api.profiles.select("profile-id");
     await api.profiles.remove("profile-id");
@@ -74,6 +75,7 @@ describe("preload bridge", () => {
 
     expect(electronMocks.invoke.mock.calls).toEqual([
       [DESKTOP_CHANNELS.profiles.list, undefined],
+      [DESKTOP_CHANNELS.profiles.current, undefined],
       [DESKTOP_CHANNELS.profiles.save, input],
       [DESKTOP_CHANNELS.profiles.select, "profile-id"],
       [DESKTOP_CHANNELS.profiles.remove, "profile-id"],

@@ -8,7 +8,7 @@ import {
   commandReceiptSchema, DESKTOP_CHANNELS, evidenceUploadInputSchema,
   idInputSchema, loginInputSchema, noInputSchema, notificationPageSchema,
   notificationEventSchema,
-  optionalCursorSchema, profileInputSchema, serverProfileSchema,
+  optionalCursorSchema, profileInputSchema, selectedServerProfileSchema, serverProfileSchema,
   sessionSnapshotSchema, systemStatusesSchema, uploadReceiptSchema,
   voidOutputSchema, workspaceCommandSchema, workspaceQuerySchema,
   workspaceResultSchema, type OccApi,
@@ -197,6 +197,7 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
   return {
     profiles: {
       list: () => dependencies.profiles.list(),
+      current: async () => dependencies.profiles.selected() ?? null,
       save: (input) => transition(async () => {
         const candidate = input.id === undefined
           ? undefined
@@ -294,6 +295,7 @@ export function registerDesktopIpc(
   activeRegistration?.();
   const definitions: HandlerDefinition<any, any>[] = [
     { channel: DESKTOP_CHANNELS.profiles.list, input: noInputSchema, output: profileListSchema, invoke: () => api.profiles.list() },
+    { channel: DESKTOP_CHANNELS.profiles.current, input: noInputSchema, output: selectedServerProfileSchema, invoke: () => api.profiles.current() },
     { channel: DESKTOP_CHANNELS.profiles.save, input: profileInputSchema.strict(), output: serverProfileSchema, invoke: (input) => api.profiles.save(input) },
     { channel: DESKTOP_CHANNELS.profiles.select, input: idInputSchema, output: voidOutputSchema, invoke: (id) => api.profiles.select(id) },
     { channel: DESKTOP_CHANNELS.profiles.remove, input: idInputSchema, output: voidOutputSchema, invoke: (id) => api.profiles.remove(id) },

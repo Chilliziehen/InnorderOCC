@@ -5,6 +5,7 @@ import type { ProfileInput, ServerProfile } from "../../desktop-contract";
 interface ProfileBootstrapProps {
   profiles: ServerProfile[];
   profile?: ServerProfile;
+  disabled?: boolean;
   onSave(input: ProfileInput): Promise<unknown>;
   onSelect(profile: ServerProfile): void | Promise<void>;
 }
@@ -12,6 +13,7 @@ interface ProfileBootstrapProps {
 export function ProfileBootstrap({
   profiles,
   profile,
+  disabled = false,
   onSave,
   onSelect,
 }: ProfileBootstrapProps) {
@@ -33,6 +35,7 @@ export function ProfileBootstrap({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (disabled) return;
     setBusy(true);
     setFailed(false);
     try {
@@ -78,6 +81,7 @@ export function ProfileBootstrap({
         <input
           id="profile-name"
           required
+          disabled={disabled}
           maxLength={128}
           value={name}
           onChange={({ target }) => setName(target.value)}
@@ -87,6 +91,7 @@ export function ProfileBootstrap({
         <input
           id="profile-origin"
           required
+          disabled={disabled}
           type="url"
           placeholder="https://occ.example.com"
           value={origin}
@@ -96,6 +101,7 @@ export function ProfileBootstrap({
         <label htmlFor="profile-environment">环境</label>
         <select
           id="profile-environment"
+          disabled={disabled}
           value={environment}
           onChange={({ target }) => setEnvironment(target.value as ServerProfile["environment"])}
         >
@@ -107,13 +113,14 @@ export function ProfileBootstrap({
         <label htmlFor="profile-ca">CA SHA-256 指纹（可选）</label>
         <input
           id="profile-ca"
+          disabled={disabled}
           spellCheck={false}
           value={caFingerprint}
           onChange={({ target }) => setCaFingerprint(target.value)}
         />
 
         {failed ? <p className="form-error" role="alert">无法保存服务器配置，请检查输入后重试。</p> : null}
-        <button className="primary-action" type="submit" disabled={busy}>
+        <button className="primary-action" type="submit" disabled={disabled || busy}>
           {busy ? "正在保存…" : "保存配置"}
         </button>
       </form>

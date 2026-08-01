@@ -228,6 +228,33 @@ describe("application state", () => {
     expect(canMutate(offline)).toBe(false);
   });
 
+  it("scopes status reachability to the current profile generation", () => {
+    const online = onlineState();
+    const stale = reduceAppState(online, {
+      type: "STATUS_UNREACHABLE",
+      profileId: profileB.id,
+      generation: online.sessionGeneration,
+      at: 4_000,
+    });
+    expect(stale).toBe(online);
+
+    const offline = reduceAppState(online, {
+      type: "STATUS_UNREACHABLE",
+      profileId: profileA.id,
+      generation: online.sessionGeneration,
+      at: 4_000,
+    });
+    expect(offline).toMatchObject({ mode: "offline", staleSince: 4_000 });
+    const reconnecting = reduceAppState(offline, {
+      type: "STATUS_REACHABLE",
+      profileId: profileA.id,
+      generation: offline.sessionGeneration,
+      at: 5_000,
+    });
+    expect(reconnecting).toMatchObject({ mode: "reconnecting" });
+    expect(canMutate(reconnecting, "processes.start")).toBe(false);
+  });
+
   it("keeps transport reconnection read-only until a fresh session replaces cached capabilities", () => {
     const offline = reduceAppState(onlineState(), { type: "OFFLINE", at: 4_000 });
     const reconnecting = reduceAppState(offline, { type: "ONLINE", at: 9_000 });
@@ -261,6 +288,52 @@ describe("application state", () => {
     });
     expect(canMutate(validated, "processes.start")).toBe(false);
     expect(canMutate(validated, "processes.cancel")).toBe(true);
+  });
+
+  it("clears a failed restore operation and waits read-only for manual retry", () => {
+    const requested = startSessionOperation(reconnectingState(), "restore");
+    const failed = reduceAppState(requested, {
+      type: "SESSION_OPERATION_FAILED",
+      operation: "restore",
+      profileId: profileA.id,
+      generation: requested.sessionGeneration,
+    });
+
+    expect(failed).toMatchObject({
+      mode: "reconnecting",
+      sessionOperation: null,
+      retryAvailable: true,
+    });
+    expect(canMutate(failed, "processes.start")).toBe(false);
+    expect(reduceAppState(failed, {
+      type: "SESSION_OPERATION_FAILED",
+      operation: "restore",
+      profileId: profileB.id,
+      generation: requested.sessionGeneration,
+    })).toBe(failed);
+  });
+
+  it("cancels an in-flight validation when Core becomes unreachable", () => {
+    const requested = startSessionOperation(reconnectingState(), "restore");
+    const offline = reduceAppState(requested, {
+      type: "STATUS_UNREACHABLE",
+      profileId: profileA.id,
+      generation: requested.sessionGeneration,
+      at: 10_000,
+    });
+    expect(offline).toMatchObject({ mode: "offline", sessionOperation: null });
+
+    const retrying = reduceAppState(offline, {
+      type: "STATUS_REACHABLE",
+      profileId: profileA.id,
+      generation: offline.sessionGeneration,
+      at: 11_000,
+    });
+    expect(retrying).toMatchObject({
+      mode: "reconnecting",
+      sessionOperation: null,
+      retryAvailable: false,
+    });
   });
 
   it("returns an expired cached session to login when transport reconnects", () => {

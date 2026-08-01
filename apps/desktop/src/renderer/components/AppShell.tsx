@@ -31,6 +31,7 @@ interface AppShellProps {
   onLogout(): void | Promise<void>;
   onProfileSelect(profile: ServerProfile): void | Promise<void>;
   onProfileSave(input: ProfileInput): Promise<unknown>;
+  onRetry?(): void;
 }
 
 const METRICS = [
@@ -157,7 +158,7 @@ function Overview({ statuses }: { statuses: SystemStatus[] }) {
   );
 }
 
-export function AppShell({ state, statuses, onLogout, onProfileSave }: AppShellProps) {
+export function AppShell({ state, statuses, onLogout, onProfileSave, onRetry }: AppShellProps) {
   const identity = state.mode === "authenticated" ? state.identity : state.cachedIdentity;
   const resolution = resolveRoute(state.route?.path ?? "", identity.capabilities);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -206,7 +207,12 @@ export function AppShell({ state, statuses, onLogout, onProfileSave }: AppShellP
       </aside>
 
       <main className="workspace">
-        <StatusBanner mode={state.mode} lastFreshAt={state.lastFreshAt} />
+        <StatusBanner
+          mode={state.mode}
+          lastFreshAt={state.lastFreshAt}
+          retryAvailable={state.mode === "reconnecting" && state.retryAvailable}
+          {...(onRetry ? { onRetry } : {})}
+        />
         <header className="workspace-header">
           <div>
             <p className="section-kicker">{resolution.kind === "route" ? resolution.route.description : "运营控制中心"}</p>
@@ -222,7 +228,13 @@ export function AppShell({ state, statuses, onLogout, onProfileSave }: AppShellP
         ) : resolution.route.path === "/overview" ? (
           <Overview statuses={statuses} />
         ) : resolution.route.path === "/settings" ? (
-          <ProfileBootstrap profiles={state.profiles} profile={state.profile} onSave={onProfileSave} onSelect={() => undefined} />
+          <ProfileBootstrap
+            profiles={state.profiles}
+            profile={state.profile}
+            disabled={state.mode !== "authenticated"}
+            onSave={onProfileSave}
+            onSelect={() => undefined}
+          />
         ) : (
           <section className="panel unavailable-workspace">
             <strong>工作区数据接口尚不可用</strong>
