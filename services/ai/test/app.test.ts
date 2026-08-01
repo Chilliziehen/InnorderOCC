@@ -183,6 +183,8 @@ describe("configuration", () => {
       logLevel: "info",
       port: 3100,
       version: "dev",
+      businessEnabled: false,
+      databasePoolSize: 10,
     });
   });
 

@@ -89,6 +89,25 @@ occ:
     request-timeout: ${OPA_REQUEST_TIMEOUT:1s}
   ai:
     base-url: ${AI_BASE_URL:http://localhost:3100}
+    grant:
+      enabled: ${OCC_AI_GRANT_ENABLED:false}
+      private-key-file: file:${OCC_AI_GRANT_PRIVATE_KEY_FILE:}
+      public-key-file: file:${OCC_AI_GRANT_PUBLIC_KEY_FILE:}
+      key-id: ${OCC_AI_GRANT_KEY_ID:}
+      ttl: ${OCC_AI_GRANT_TTL:5m}
+      clock-skew: ${OCC_AI_GRANT_CLOCK_SKEW:30s}
+    client:
+      enabled: ${OCC_AI_CLIENT_ENABLED:false}
+      origin: ${OCC_AI_INTERNAL_ORIGIN:https://localhost:3100}
+      key-file: file:${OCC_CORE_MTLS_KEY_FILE:}
+      certificate-files: ${OCC_CORE_MTLS_CERTIFICATE_FILES:}
+      trust-files: ${OCC_SERVICE_MTLS_TRUST_FILES:}
+      connect-timeout: ${OCC_AI_CONNECT_TIMEOUT:500ms}
+      request-timeout: ${OCC_AI_REQUEST_TIMEOUT:2s}
+      revoked-serials-file: file:${OCC_SERVICE_MTLS_REVOKED_SERIALS_FILE:}
+    service-security:
+      expected-ai-identity: spiffe://innorder/ai
+      revoked-serials-file: file:${OCC_SERVICE_MTLS_REVOKED_SERIALS_FILE:}
   object-storage:
     endpoint: ${OBJECT_STORAGE_ENDPOINT:http://localhost:9000}
     bucket: ${OBJECT_STORAGE_BUCKET:innorder-occ}

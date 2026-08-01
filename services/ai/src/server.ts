@@ -1,17 +1,18 @@
-import { buildApp } from "./app.js";
+import { createCompositionRoot } from "./composition-root.js";
 import { loadConfig } from "./config.js";
 import { registerShutdownHandlers } from "./shutdown.js";
 
-const config = loadConfig();
-const app = buildApp(config);
-const removeShutdownHandlers = registerShutdownHandlers(app);
-
+let root: Awaited<ReturnType<typeof createCompositionRoot>> | undefined;
+let removeShutdownHandlers: (() => void) | undefined;
 try {
+  const config = loadConfig();
+  root = await createCompositionRoot(config);
+  const app = root.app;
+  removeShutdownHandlers = registerShutdownHandlers(app);
   await app.listen({ host: config.host, port: config.port });
-} catch (error) {
-  removeShutdownHandlers();
-  app.log.error(error);
-  console.error("AI service failed to start", error);
-  await app.close();
+} catch {
+  removeShutdownHandlers?.();
+  await root?.close().catch(() => undefined);
+  console.error("AI service failed to start");
   process.exitCode = 1;
 }
