@@ -45,6 +45,52 @@ import {
   EVENT_TYPE_MIN_LENGTH,
 } from "../src/events.js";
 import {
+  availabilityWindowPageSchema,
+  availabilityWindowSchema,
+  cancelReservationRequestSchema,
+  changeReservationRequestSchema,
+  createAvailabilityWindowRequestSchema,
+  createEvidenceUploadSessionRequestSchema,
+  createRiskAdjudicationRequestSchema,
+  evidenceContentResultSchema,
+  evidenceDownloadMetadataSchema,
+  evidenceEventPayloadSchema,
+  evidenceMetadataSchema,
+  evidencePreviewMetadataSchema,
+  evidenceRequirementPageSchema,
+  evidenceRequirementSchema,
+  evidenceReviewConditionSchema,
+  evidenceReviewPageSchema,
+  evidenceReviewSchema,
+  evidenceUploadSessionSchema,
+  evidenceVersionPageSchema,
+  evidenceVersionSchema,
+  halfOpenIntervalSchema,
+  interventionItemSchema,
+  interventionPageSchema,
+  managedResourcePageSchema,
+  managedResourceSchema,
+  reservationAvailabilityRequestSchema,
+  reservationAvailabilitySchema,
+  reservationConflictSchema,
+  reservationEventPayloadSchema,
+  reservationSchedulePageSchema,
+  reservationSchema,
+  reserveResourceRequestSchema,
+  reviewEvidenceRequestSchema,
+  riskActionPageSchema,
+  riskActionSchema,
+  riskAdjudicationPageSchema,
+  riskAdjudicationSchema,
+  riskEventPayloadSchema,
+  riskMetricsSchema,
+  riskPageSchema,
+  riskSchema,
+  resourceEventPayloadSchema,
+  submitEvidenceRequestSchema,
+  updateResourceRequestSchema,
+} from "../src/evidence-risk-resource.js";
+import {
   PROBLEM_CODE_MAX_LENGTH,
   PROBLEM_CODE_MIN_LENGTH,
   PROBLEM_DETAIL_MIN_LENGTH,
@@ -72,8 +118,16 @@ interface OpenApiSchemaProperty {
   maximum?: number;
   minLength?: number;
   minimum?: number;
+  oneOf?: OpenApiSchemaProperty[];
   pattern?: string;
   type?: string;
+}
+
+interface OpenApiParameter {
+  $ref?: string;
+  in?: string;
+  name?: string;
+  required?: boolean;
 }
 
 interface OpenApiDocument {
@@ -92,6 +146,7 @@ interface OpenApiPathItem {
 }
 
 interface OpenApiOperation {
+  parameters?: OpenApiParameter[];
   requestBody?: {
     content?: Record<string, { schema?: { $ref?: string } }>;
   };
@@ -101,6 +156,7 @@ interface OpenApiOperation {
 
 interface OpenApiResponse {
   content?: Record<string, { schema?: { $ref?: string } }>;
+  headers?: Record<string, unknown>;
   $ref?: string;
 }
 
@@ -125,11 +181,12 @@ const HTTP_METHODS = new Set([
 const expectStrictObjectParity = (
   openApiSchema: OpenApiSchema | undefined,
   zodShape: Record<string, { isOptional: () => boolean }>,
+  label?: string,
 ): void => {
-  expect(openApiSchema?.type).toBe("object");
-  expect(openApiSchema?.additionalProperties).toBe(false);
-  expect(openApiSchema?.required).toEqual(requiredKeys(zodShape));
-  expect(Object.keys(openApiSchema?.properties ?? {})).toEqual(
+  expect(openApiSchema?.type, label).toBe("object");
+  expect(openApiSchema?.additionalProperties, label).toBe(false);
+  expect(openApiSchema?.required ?? [], label).toEqual(requiredKeys(zodShape));
+  expect(Object.keys(openApiSchema?.properties ?? {}), label).toEqual(
     Object.keys(zodShape),
   );
 };
@@ -151,6 +208,240 @@ describe("OCC Core OpenAPI system status", () => {
     expect(jsonContent?.schema?.$ref).toBe(
       "#/components/schemas/SystemStatus",
     );
+  });
+
+  it("documents authenticated evidence, risk, resource, and reservation groups", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const expectedPaths = [
+      "/api/v1/evidence/requirements",
+      "/api/v1/evidence/requirements/{requirementId}",
+      "/api/v1/evidence/upload-sessions",
+      "/api/v1/evidence/upload-sessions/{uploadSessionId}",
+      "/api/v1/evidence/upload-sessions/{uploadSessionId}/content",
+      "/api/v1/evidence/{evidenceId}",
+      "/api/v1/evidence/{evidenceId}/submit",
+      "/api/v1/evidence/{evidenceId}/reviews",
+      "/api/v1/evidence/{evidenceId}/versions",
+      "/api/v1/evidence/{evidenceId}/preview",
+      "/api/v1/evidence/{evidenceId}/download",
+      "/api/v1/evidence/{evidenceId}/download-metadata",
+      "/api/v1/risks",
+      "/api/v1/risks/{riskId}",
+      "/api/v1/risks/{riskId}/actions",
+      "/api/v1/risks/interventions",
+      "/api/v1/risks/adjudications",
+      "/api/v1/risks/metrics",
+      "/api/v1/resources",
+      "/api/v1/resources/{resourceId}",
+      "/api/v1/resources/{resourceId}/availability",
+      "/api/v1/resources/{resourceId}/availability-checks",
+      "/api/v1/resources/{resourceId}/schedule",
+      "/api/v1/reservations",
+      "/api/v1/reservations/{reservationId}",
+      "/api/v1/reservations/{reservationId}/change",
+      "/api/v1/reservations/{reservationId}/cancel",
+    ];
+
+    expect(Object.keys(document.paths)).toEqual(expect.arrayContaining(expectedPaths));
+    for (const path of expectedPaths) {
+      const pathItem = document.paths[path];
+      for (const [method, operation] of Object.entries(pathItem)) {
+        if (!HTTP_METHODS.has(method)) continue;
+        expect(operation.security).toBeUndefined();
+        expect(Object.keys(operation.responses ?? {})).toEqual(
+          expect.arrayContaining(["401", "403", "500"]),
+        );
+      }
+    }
+  });
+
+  it("wires domain filters to cursor queries", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const parameterRefs = (operation: OpenApiOperation | undefined) =>
+      operation?.parameters?.map((parameter) => parameter.$ref) ?? [];
+
+    expect(parameterRefs(document.paths["/api/v1/risks"]?.get)).toEqual(expect.arrayContaining([
+      "#/components/parameters/RiskSeverityFilter",
+      "#/components/parameters/RiskStateFilter",
+      "#/components/parameters/RiskSlaStatusFilter",
+      "#/components/parameters/TargetEntityFilter",
+    ]));
+    expect(parameterRefs(document.paths["/api/v1/risks/interventions"]?.get)).toContain(
+      "#/components/parameters/OwnedByMeFilter",
+    );
+    expect(parameterRefs(document.paths["/api/v1/resources"]?.get)).toEqual(expect.arrayContaining([
+      "#/components/parameters/ResourceTypeFilter",
+      "#/components/parameters/ResourceStateFilter",
+      "#/components/parameters/MinimumCapacityFilter",
+    ]));
+    expect(parameterRefs(document.paths["/api/v1/resources/{resourceId}/schedule"]?.get)).toEqual(expect.arrayContaining([
+      "#/components/parameters/ScheduleFrom",
+      "#/components/parameters/ScheduleUntil",
+    ]));
+  });
+
+  it("requires command concurrency headers and documents correlation and replay", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const createCommands = [
+      document.paths["/api/v1/evidence/upload-sessions"]?.post,
+      document.paths["/api/v1/risks/adjudications"]?.post,
+      document.paths["/api/v1/resources/{resourceId}/availability"]?.post,
+      document.paths["/api/v1/reservations"]?.post,
+    ];
+    const updateCommands = [
+      document.paths["/api/v1/evidence/{evidenceId}/submit"]?.post,
+      document.paths["/api/v1/evidence/{evidenceId}/reviews"]?.post,
+      document.paths["/api/v1/resources/{resourceId}"]?.patch,
+      document.paths["/api/v1/resources/{resourceId}/availability"]?.post,
+      document.paths["/api/v1/reservations/{reservationId}/change"]?.post,
+      document.paths["/api/v1/reservations/{reservationId}/cancel"]?.post,
+    ];
+    const riskPath = document.paths["/api/v1/risks/{riskId}/actions"];
+    const commands = [...createCommands, ...updateCommands, riskPath?.post];
+
+    for (const operation of commands) {
+      const refs = operation?.parameters?.map((parameter) => parameter.$ref) ?? [];
+      expect(refs).toEqual(expect.arrayContaining([
+        "#/components/parameters/IdempotencyKey",
+        "#/components/parameters/CorrelationId",
+      ]));
+      for (const response of Object.values(operation?.responses ?? {})) {
+        if (response.$ref) continue;
+        expect(response.headers).toEqual(expect.objectContaining({
+          "X-Correlation-ID": expect.anything(),
+          "Idempotency-Replayed": expect.anything(),
+        }));
+      }
+    }
+    for (const operation of updateCommands) {
+      expect(operation?.parameters?.map((parameter) => parameter.$ref)).toContain(
+        "#/components/parameters/ExpectedVersion",
+      );
+    }
+  });
+
+  it("defines strict domain schemas, opaque cursor pages, and stable OCC errors", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const schemas = document.components.schemas;
+    const strictSchemas = [
+      "EvidenceRequirement",
+      "CreateEvidenceUploadSessionRequest",
+      "EvidenceUploadSession",
+      "EvidenceContentResult",
+      "EvidenceMetadata",
+      "ReviewEvidenceRequest",
+      "Risk",
+      "RiskAction",
+      "InterventionItem",
+      "ManagedResource",
+      "AvailabilityWindow",
+      "Reservation",
+      "ReservationConflict",
+    ];
+    for (const name of strictSchemas) {
+      expect(schemas[name]?.type).toBe("object");
+      expect(schemas[name]?.additionalProperties).toBe(false);
+    }
+    for (const name of [
+      "EvidenceVersionPage",
+      "EvidenceReviewPage",
+      "RiskPage",
+      "RiskActionPage",
+      "InterventionPage",
+      "ManagedResourcePage",
+      "ReservationSchedulePage",
+      "RiskAdjudicationPage",
+    ]) {
+      expect(schemas[name]?.properties?.nextCursor).toEqual({ $ref: "#/components/schemas/OpaqueCursor" });
+      expect(schemas[name]?.properties?.previousCursor).toEqual({ $ref: "#/components/schemas/OpaqueCursor" });
+    }
+    expect(schemas.OccProblemCode?.enum).toEqual(expect.arrayContaining([
+      "OCC-EVIDENCE-TOO-LARGE",
+      "OCC-EVIDENCE-DIGEST-MISMATCH",
+      "OCC-RISK-INVALID-TRANSITION",
+      "OCC-RESOURCE-UNAVAILABLE",
+      "OCC-RESERVATION-CONFLICT",
+      "OCC-VERSION-CONFLICT",
+    ]));
+    expect(schemas.RiskActionCommandRequest?.oneOf).toHaveLength(6);
+    for (const variant of schemas.RiskActionCommandRequest?.oneOf ?? []) {
+      expect(variant.type).toBe("object");
+      expect(variant.additionalProperties).toBe(false);
+    }
+  });
+
+  it("keeps strict domain Zod and OpenAPI object shapes in parity", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const contracts = {
+      HalfOpenInterval: halfOpenIntervalSchema,
+      EvidenceRequirement: evidenceRequirementSchema,
+      EvidenceRequirementPage: evidenceRequirementPageSchema,
+      CreateEvidenceUploadSessionRequest: createEvidenceUploadSessionRequestSchema,
+      EvidenceUploadSession: evidenceUploadSessionSchema,
+      EvidenceContentResult: evidenceContentResultSchema,
+      EvidenceMetadata: evidenceMetadataSchema,
+      SubmitEvidenceRequest: submitEvidenceRequestSchema,
+      EvidenceReviewCondition: evidenceReviewConditionSchema,
+      ReviewEvidenceRequest: reviewEvidenceRequestSchema,
+      EvidenceVersion: evidenceVersionSchema,
+      EvidenceReview: evidenceReviewSchema,
+      EvidenceVersionPage: evidenceVersionPageSchema,
+      EvidenceReviewPage: evidenceReviewPageSchema,
+      EvidencePreviewMetadata: evidencePreviewMetadataSchema,
+      EvidenceDownloadMetadata: evidenceDownloadMetadataSchema,
+      Risk: riskSchema,
+      RiskPage: riskPageSchema,
+      RiskAction: riskActionSchema,
+      RiskActionPage: riskActionPageSchema,
+      InterventionItem: interventionItemSchema,
+      InterventionPage: interventionPageSchema,
+      CreateRiskAdjudicationRequest: createRiskAdjudicationRequestSchema,
+      RiskAdjudication: riskAdjudicationSchema,
+      RiskAdjudicationPage: riskAdjudicationPageSchema,
+      RiskMetrics: riskMetricsSchema,
+      ManagedResource: managedResourceSchema,
+      ManagedResourcePage: managedResourcePageSchema,
+      UpdateResourceRequest: updateResourceRequestSchema,
+      AvailabilityWindow: availabilityWindowSchema,
+      CreateAvailabilityWindowRequest: createAvailabilityWindowRequestSchema,
+      AvailabilityWindowPage: availabilityWindowPageSchema,
+      ReservationConflict: reservationConflictSchema,
+      ReservationAvailabilityRequest: reservationAvailabilityRequestSchema,
+      ReservationAvailability: reservationAvailabilitySchema,
+      Reservation: reservationSchema,
+      ReservationSchedulePage: reservationSchedulePageSchema,
+      ReserveResourceRequest: reserveResourceRequestSchema,
+      ChangeReservationRequest: changeReservationRequestSchema,
+      CancelReservationRequest: cancelReservationRequestSchema,
+      EvidenceEventPayload: evidenceEventPayloadSchema,
+      RiskEventPayload: riskEventPayloadSchema,
+      ResourceEventPayload: resourceEventPayloadSchema,
+      ReservationEventPayload: reservationEventPayloadSchema,
+    };
+
+    for (const [name, schema] of Object.entries(contracts)) {
+      expectStrictObjectParity(schemas[name], schema.shape, name);
+    }
   });
 
   it("keeps status public while protecting authenticated operations", async () => {
