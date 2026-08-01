@@ -41,6 +41,7 @@ const migrations = [
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V013__process_task_workflow.sql',
 ];
 
 async function applyMigration(migration) {
@@ -55,7 +56,7 @@ async function applyMigration(migration) {
   console.log(`applied ${migration}`);
 }
 
-for (const migration of migrations.slice(0, -3)) {
+for (const migration of migrations.slice(0, migrations.indexOf('V010__platform_security_kernel.sql'))) {
   await applyMigration(migration);
 }
 
@@ -188,6 +189,7 @@ if (legacyAccountWindow.rows.length !== 1
 console.log('passed V011 legacy account failure-window backfill');
 
 await applyMigration('V012__outbox_publisher_lifecycle.sql');
+await applyMigration('V013__process_task_workflow.sql');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)

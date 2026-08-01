@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ const runtimeRoleBootstrapPath = fileURLToPath(
 const postgresqlRaceTestPath = fileURLToPath(
   new URL('./postgresql-idempotency-race.test.mjs', import.meta.url),
 );
+const pgliteSmokePath = fileURLToPath(new URL('./pglite-smoke.mjs', import.meta.url));
 const migrations = [
   'V001__bootstrap.sql',
   'V002__catalog.sql',
@@ -24,6 +25,7 @@ const migrations = [
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V013__process_task_workflow.sql',
 ];
 
 function readMigration(name) {
@@ -33,6 +35,41 @@ function readMigration(name) {
 test('provides every ordered Flyway migration without placeholders', () => {
   const sql = migrations.map(readMigration).join('\n');
   assert.doesNotMatch(sql, /\b(?:TODO|TBD)\b|待定|待补充/i);
+});
+
+test('V013 is the only migration after V012 and reserves the process task schema', () => {
+  const migrationNames = readdirSync(root)
+    .filter((name) => /^V\d+__.*\.sql$/.test(name))
+    .sort();
+  assert.deepEqual(migrationNames.slice(-2), [
+    'V012__outbox_publisher_lifecycle.sql',
+    'V013__process_task_workflow.sql',
+  ]);
+
+  const sql = readMigration('V013__process_task_workflow.sql');
+  for (const table of [
+    'occ.cohort',
+    'occ.task_blocker',
+    'occ.task_gate_requirement',
+    'occ.task_gate_provider_state',
+    'occ.task_timeline',
+    'occ.task_review_projection_fact',
+    'occ.notification',
+  ]) {
+    assert.match(sql, new RegExp(`CREATE TABLE ${table.replace('.', '\\.') }\\b`, 'i'), table);
+  }
+  assert.match(sql, /ALTER TABLE occ\.process_definition_binding\b/i);
+  assert.match(sql, /ALTER TABLE occ\.process_instance\b/i);
+  assert.match(sql, /ALTER TABLE occ\.task_projection\b/i);
+  assert.match(sql, /ERRCODE = '55000'/i);
+});
+
+test('registers V013 in every database schema entrypoint', () => {
+  const migration = 'V013__process_task_workflow.sql';
+  const entrypoint = readFileSync(fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)), 'utf8');
+  const pgliteSmoke = readFileSync(pgliteSmokePath, 'utf8');
+  assert.ok(entrypoint.indexOf(migration) > entrypoint.indexOf('V012__outbox_publisher_lifecycle.sql'));
+  assert.ok(pgliteSmoke.indexOf(migration) > pgliteSmoke.indexOf('V012__outbox_publisher_lifecycle.sql'));
 });
 
 test('creates all approved schemas and extensions', () => {
