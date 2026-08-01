@@ -264,12 +264,12 @@ function fixtureSql(prefix) {
       ('${id('000000000009')}', '${id('000000000022')}', '[1,0,0]');
 
     INSERT INTO authz.ai_authorization_grant
-      (id, token_hash, operation, jti, principal_id, target_entity_id, purpose,
+      (id, token_hash, signer_kid, operation, jti, principal_id, target_entity_id, purpose,
        authorization_revision, policy_release_id, policy_release_digest,
        authorized_set_digest, context_digest, bounded_context, classification_ceiling,
        agent_version_id, model_profile_id, prompt_version_id, package_version_id, embedding_space_id,
        issued_at, expires_at, event_id, intended_run_id)
-    SELECT grant_input.id, grant_input.token_hash, 'RETRIEVE', grant_input.jti,
+    SELECT grant_input.id, grant_input.token_hash, 'test-current', 'RETRIEVE', grant_input.jti,
            '${id('000000000005')}', '${id('000000000015')}', 'answer',
            current_revision + grant_input.revision_offset, '${id('000000000019')}', repeat('d', 64),
            repeat('6', 64), repeat('7', 64), '{"scope":"test"}', 'PUBLIC',
@@ -435,6 +435,8 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     WHERE id = '${id('000000000080')}';`, { role: 'innorder_runtime' }), '1500|1');
 
   const revision = Number(execSql('SELECT current_revision FROM authz.authorization_state WHERE singleton;'));
+  expectSqlFailure(`UPDATE authz.ai_authorization_grant SET signer_kid = 'changed-signer'
+    WHERE intended_run_id = '${id('000000000030')}';`, /lifecycle is immutable/iu);
   const bindClaim = `SET ROLE innorder_runtime;
     SELECT authz.bind_ai_grant_claim_idempotency('${id('000000000030')}', repeat('1',64));`;
   const [claimBindA, claimBindB] = await Promise.all([runSql(bindClaim), runSql(bindClaim)]);

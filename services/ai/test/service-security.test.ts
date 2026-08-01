@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { verifyAiGrant } from "../src/security/grant-verifier.js";
-import { PostgresAiRepository } from "../src/persistence/postgres.js";
+import { createPostgresPool, PostgresAiRepository } from "../src/persistence/postgres.js";
 import { verifyServiceIdentity } from "../src/security/service-identity.js";
 import { loadConfig } from "../src/config.js";
 import { readBoundedFile, validateInternalOrigin } from "../src/core/core-client.js";
@@ -161,11 +161,13 @@ describe("PostgreSQL grant consumption", () => {
     const query = vi.fn().mockResolvedValue({
       rows: [{ run_id: claims.operationId, authorized_document_version_ids: [], bounded_context: {}, replayed: true }],
     });
-    const repository = new PostgresAiRepository({ query } as never);
+    const release = vi.fn();
+    const repository = new PostgresAiRepository({ connect: vi.fn().mockResolvedValue({ query, release }), query } as never);
 
     await expect(repository.consumeGrant({ claims, tokenHash: digest("a") })).resolves.toMatchObject({ replayed: true });
 
     expect(query).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledWith();
     const [sql, values] = query.mock.calls[0]!;
     expect(sql).toMatch(/^SELECT run_id/u);
     expect(sql).toContain("authz.consume_ai_authorization_grant");
@@ -176,6 +178,46 @@ describe("PostgreSQL grant consumption", () => {
       claims.operationId, claims.agentVersionId, claims.modelProfileId,
       claims.promptVersionId, claims.packageVersionId, claims.embeddingSpaceId,
     ]);
+  });
+
+  it("destroys an in-flight consume session on abort and returns only the stable cancellation", async () => {
+    let rejectQuery: ((error: Error) => void) | undefined;
+    const query = vi.fn(() => new Promise((_resolve, reject) => { rejectQuery = reject; }));
+    const release = vi.fn((destroy?: boolean) => {
+      if (destroy) rejectQuery?.(new Error("raw connection termination detail"));
+    });
+    const database = {
+      connect: vi.fn().mockResolvedValue({ query, release }),
+      query: vi.fn(() => new Promise(() => undefined)),
+    };
+    const repository = new PostgresAiRepository(database as never);
+    const controller = new AbortController();
+
+    const consume = repository.consumeGrant({ claims, tokenHash: digest("a") }, controller.signal);
+    await vi.waitFor(() => expect(query).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(Promise.race([
+      consume,
+      new Promise((resolve) => setTimeout(() => resolve("did-not-settle"), 250)),
+    ])).rejects.toThrow("OCC-AI-CANCELLED");
+    expect(release).toHaveBeenCalledWith(true);
+  });
+
+  it("sets bounded server and client timeouts with an identifiable pool application", async () => {
+    const pool = createPostgresPool({ max: 2 });
+    try {
+      expect(pool.options).toMatchObject({
+        max: 2,
+        statement_timeout: 2_000,
+        lock_timeout: 1_000,
+        query_timeout: 2_500,
+        idle_in_transaction_session_timeout: 2_000,
+        application_name: "innorder-ai",
+      });
+    } finally {
+      await pool.end();
+    }
   });
 
   it("reads status and cancels only through the bounded transition function", async () => {

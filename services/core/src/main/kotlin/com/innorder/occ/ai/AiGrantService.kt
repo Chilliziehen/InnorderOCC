@@ -40,6 +40,7 @@ data class AuthorizationSnapshotBinding(val revision: Long, val policyReleaseDig
 data class StoredAiGrant(
     val id: UUID,
     val tokenHash: String,
+    val signerKid: String,
     val claims: AiGrantClaims,
     val policyReleaseId: UUID,
     val boundedContext: String,
@@ -72,13 +73,13 @@ class JdbcAiGrantStore(private val jdbc: JdbcOperations) : AiGrantStore {
         val c = record.claims
         jdbc.update(
             """INSERT INTO authz.ai_authorization_grant
-               (id, token_hash, operation, jti, principal_id, target_entity_id, purpose,
+               (id, token_hash, signer_kid, operation, jti, principal_id, target_entity_id, purpose,
                 authorization_revision, policy_release_id, policy_release_digest, authorized_set_digest,
                 context_digest, bounded_context, classification_ceiling, agent_version_id, model_profile_id,
                 prompt_version_id, package_version_id, embedding_space_id, issued_at, expires_at, event_id,
                 intended_run_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?)""",
-            record.id, record.tokenHash, c.operationId.toString(), c.jti.toString(), c.principalId, c.targetId,
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?)""",
+            record.id, record.tokenHash, record.signerKid, c.operationId.toString(), c.jti.toString(), c.principalId, c.targetId,
             c.purpose, c.authorizationRevision, record.policyReleaseId, c.policyReleaseDigest,
             c.authorizedSetDigest, c.contextDigest, record.boundedContext, c.classificationCeiling,
             c.agentVersionId, c.modelProfileId, c.promptVersionId, c.packageVersionId, c.embeddingSpaceId,
@@ -93,7 +94,7 @@ class JdbcAiGrantStore(private val jdbc: JdbcOperations) : AiGrantStore {
     }
 
     override fun findByOperationId(operationId: UUID): StoredAiGrant? = jdbc.query(
-        """SELECT id, token_hash, jti, event_id, operation, principal_id, target_entity_id, purpose,
+        """SELECT id, token_hash, signer_kid, jti, event_id, operation, principal_id, target_entity_id, purpose,
                   authorization_revision, policy_release_id, policy_release_digest, authorized_set_digest,
                   context_digest, bounded_context::text, classification_ceiling, agent_version_id,
                   model_profile_id, prompt_version_id, package_version_id, embedding_space_id,
@@ -121,6 +122,7 @@ class JdbcAiGrantStore(private val jdbc: JdbcOperations) : AiGrantStore {
     private fun mapGrant(rs: ResultSet, operationId: UUID): StoredAiGrant = StoredAiGrant(
         id = rs.getObject("id", UUID::class.java),
         tokenHash = rs.getString("token_hash"),
+        signerKid = rs.getString("signer_kid"),
         claims = AiGrantClaims(
             jti = UUID.fromString(rs.getString("jti")), eventId = rs.getObject("event_id", UUID::class.java),
             operationId = operationId, principalId = rs.getObject("principal_id", UUID::class.java),
@@ -168,7 +170,9 @@ class AiGrantService(
             issuedAt = issuedAt, expiresAt = tokens.expiration(issuedAt),
         )
         val token = tokens.issue(claims)
-        store.insert(StoredAiGrant(UUID.randomUUID(), tokens.sha256(token), claims, request.policyReleaseId, context.text), documents.ids)
+        store.insert(StoredAiGrant(
+            UUID.randomUUID(), tokens.sha256(token), tokens.currentKeyId, claims, request.policyReleaseId, context.text,
+        ), documents.ids)
         return AiGrantCreated(request.operationId)
     }
 
@@ -181,7 +185,7 @@ class AiGrantService(
             snapshot.policyReleaseDigest != record.claims.policyReleaseDigest) throw AiGrantStaleException()
         if (clock.instant() >= record.claims.expiresAt) throw AiGrantExpiredException()
         store.bindClaimIdempotency(record.id, sha256(idempotencyKey))
-        val token = tokens.issue(record.claims)
+        val token = tokens.issue(record.claims, record.signerKid)
         if (tokens.sha256(token) != record.tokenHash) throw AiGrantIntegrityException()
         return AiGrantClaimResponse(operationId, token)
     }

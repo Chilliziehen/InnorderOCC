@@ -32,16 +32,28 @@ import java.util.TreeMap
 import java.util.UUID
 import java.text.Normalizer
 
-@ConfigurationProperties("occ.ai.grant")
-data class AiGrantTokenProperties(
+data class AiGrantSigningKeyProperties(
+    val keyId: String,
     val privateKeyFile: Resource,
     val publicKeyFile: Resource,
-    val keyId: String,
+)
+
+@ConfigurationProperties("occ.ai.grant")
+data class AiGrantTokenProperties(
+    val current: AiGrantSigningKeyProperties,
+    val previousEnabled: Boolean = false,
+    val previous: List<AiGrantSigningKeyProperties> = emptyList(),
     val ttl: Duration = Duration.ofMinutes(5),
     val clockSkew: Duration = Duration.ofSeconds(30),
 ) {
     fun validate() {
-        require(KEY_ID.matches(keyId)) { "AI grant key ID is invalid" }
+        require((!previousEnabled && previous.size <= 1) || (previousEnabled && previous.size == 1)) {
+            "Exactly one previous AI grant signer is required when rotation is enabled"
+        }
+        val signers = listOf(current) + if (previousEnabled) previous else emptyList()
+        require(signers.map { it.keyId }.toSet().size == signers.size && signers.all { KEY_ID.matches(it.keyId) }) {
+            "AI grant key ID is invalid or duplicated"
+        }
         require(!ttl.isNegative && !ttl.isZero && ttl <= MAX_TTL) { "AI grant TTL must be at most five minutes" }
         require(!clockSkew.isNegative && clockSkew <= MAX_SKEW) { "AI grant clock skew must be at most 30 seconds" }
     }
@@ -165,22 +177,28 @@ class CanonicalTaskContext private constructor(val text: String, val digest: Str
 @Service
 @ConditionalOnProperty(prefix = "occ.ai.grant", name = ["enabled"], havingValue = "true")
 class AiGrantTokenService(private val properties: AiGrantTokenProperties, private val clock: Clock) {
-    private val privateKey: RSAPrivateKey
+    private val privateKeys: Map<String, RSAPrivateKey>
+    val currentKeyId: String = properties.current.keyId
 
     init {
         properties.validate()
-        val privateKey = loadPrivate(properties.privateKeyFile)
-        val publicKey = loadPublic(properties.publicKeyFile)
-        require(publicKey.modulus.bitLength() >= 3072 && privateKey.modulus.bitLength() >= 3072) {
-            "AI grant RSA key must be at least 3072 bits"
+        val configuredSigners = listOf(properties.current) + if (properties.previousEnabled) properties.previous else emptyList()
+        privateKeys = configuredSigners.associate { signer ->
+            val privateKey = loadPrivate(signer.privateKeyFile)
+            val publicKey = loadPublic(signer.publicKeyFile)
+            require(publicKey.modulus.bitLength() >= 3072 && privateKey.modulus.bitLength() >= 3072) {
+                "AI grant RSA key must be at least 3072 bits"
+            }
+            require(privateKey.modulus == publicKey.modulus && keyPairMatches(privateKey, publicKey)) {
+                "AI grant key pair does not match"
+            }
+            signer.keyId to privateKey
         }
-        require(privateKey.modulus == publicKey.modulus && keyPairMatches(privateKey, publicKey)) {
-            "AI grant key pair does not match"
-        }
-        this.privateKey = privateKey
     }
 
-    fun issue(claims: AiGrantClaims): String {
+    fun issue(claims: AiGrantClaims): String = issue(claims, currentKeyId)
+
+    fun issue(claims: AiGrantClaims, signerKid: String): String {
         claims.validate()
         require(claims.expiresAt == claims.issuedAt.plus(properties.ttl)) { "AI grant lifetime does not match configuration" }
         require(!claims.issuedAt.isAfter(clock.instant().plus(properties.clockSkew))) { "AI grant issue time is invalid" }
@@ -206,7 +224,8 @@ class AiGrantTokenService(private val properties: AiGrantTokenProperties, privat
             .claim("embeddingSpaceId", claims.embeddingSpaceId.toString())
             .issueTime(Date.from(claims.issuedAt)).notBeforeTime(Date.from(claims.issuedAt))
             .expirationTime(Date.from(claims.expiresAt)).build()
-        return SignedJWT(JWSHeader.Builder(JWSAlgorithm.RS256).keyID(properties.keyId).build(), body).apply {
+        val privateKey = privateKeys[signerKid] ?: throw AiGrantSigningKeyUnavailableException()
+        return SignedJWT(JWSHeader.Builder(JWSAlgorithm.RS256).keyID(signerKid).build(), body).apply {
             sign(RSASSASigner(privateKey))
         }.serialize()
     }
@@ -247,6 +266,8 @@ class AiGrantTokenService(private val properties: AiGrantTokenProperties, privat
 
     private companion object { const val MAX_KEY_FILE_BYTES = 64 * 1024 }
 }
+
+class AiGrantSigningKeyUnavailableException : RuntimeException("OCC-AI-GRANT-SIGNER-UNAVAILABLE")
 
 private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
     .joinToString("") { "%02x".format(it) }

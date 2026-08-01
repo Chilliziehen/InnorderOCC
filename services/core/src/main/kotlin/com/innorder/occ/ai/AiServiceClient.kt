@@ -9,21 +9,27 @@ import org.springframework.core.io.Resource
 import org.springframework.stereotype.Component
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import java.net.URI
+import java.net.Socket
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.security.KeyFactory
 import java.security.KeyStore
+import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.time.Duration
 import java.time.Clock
 import java.util.Base64
+import java.util.Date
 import java.util.UUID
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLParameters
 import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509ExtendedTrustManager
 
 @ConfigurationProperties("occ.ai.client")
 data class AiServiceClientProperties(
@@ -51,7 +57,12 @@ class AiServiceClient(private val properties: AiServiceClientProperties, private
     private val mapper = ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
     private val client = HttpClient.newBuilder().connectTimeout(properties.validate().connectTimeout)
-        .followRedirects(HttpClient.Redirect.NEVER).sslContext(sslContext(properties)).build()
+        .followRedirects(HttpClient.Redirect.NEVER).sslContext(sslContext(properties))
+        .sslParameters(SSLParameters().apply {
+            protocols = arrayOf("TLSv1.3")
+            endpointIdentificationAlgorithm = "HTTPS"
+        })
+        .build()
 
     fun status(operationId: UUID): JsonNode = exchange("GET", "/internal/v1/ai/operations/$operationId/status", null)
     fun cancel(operationId: UUID): JsonNode = exchange("POST", "/internal/v1/ai/operations/$operationId/cancel", ByteArray(0))
@@ -63,12 +74,6 @@ class AiServiceClient(private val properties: AiServiceClientProperties, private
             .method(method, HttpRequest.BodyPublishers.ofByteArray(body))
         try {
             val response = client.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream())
-            val peer = response.sslSession().orElseThrow().peerCertificates.firstOrNull() as? X509Certificate
-                ?: throw AiServiceClientException()
-            if (!validateServiceCertificate(
-                    serviceCertificateFacts(peer), "spiffe://innorder/ai",
-                    readRevokedSerials(properties.revokedSerialsFile), clock.instant(), SERVER_AUTH_EKU,
-                )) throw AiServiceClientException()
             response.body().use { stream ->
                 val bytes = stream.readNBytes(MAX_RESPONSE_BYTES + 1)
                 if (bytes.size > MAX_RESPONSE_BYTES || response.statusCode() !in 200..299) throw AiServiceClientException()
@@ -98,7 +103,11 @@ class AiServiceClient(private val properties: AiServiceClientProperties, private
             }
         }
         val trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(trustStore) }
-        SSLContext.getInstance("TLSv1.3").apply { init(keys.keyManagers, trust.trustManagers, null) }
+        val delegate = trust.trustManagers.filterIsInstance<X509ExtendedTrustManager>().single()
+        val identityTrust = AiServiceServerTrustManager(
+            delegate, readRevokedSerials(config.revokedSerialsFile), clock,
+        )
+        SSLContext.getInstance("TLSv1.3").apply { init(keys.keyManagers, arrayOf(identityTrust), null) }
     } catch (_: Exception) { throw IllegalArgumentException("AI service TLS material is unavailable or invalid") }
 
     private fun readPem(resource: Resource, type: String): ByteArray {
@@ -112,6 +121,56 @@ class AiServiceClient(private val properties: AiServiceClientProperties, private
     private companion object {
         const val MAX_TLS_FILE_BYTES = 64 * 1024
         const val MAX_RESPONSE_BYTES = 256 * 1024
+    }
+}
+
+private class AiServiceServerTrustManager(
+    private val delegate: X509ExtendedTrustManager,
+    private val revokedSerials: Set<String>,
+    private val clock: Clock,
+) : X509ExtendedTrustManager() {
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket) {
+        delegate.checkServerTrusted(chain, authType, socket)
+        checkIdentity(chain)
+    }
+
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String, engine: SSLEngine) {
+        delegate.checkServerTrusted(chain, authType, engine)
+        checkIdentity(chain)
+    }
+
+    override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
+        delegate.checkServerTrusted(chain, authType)
+        checkIdentity(chain)
+    }
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, socket: Socket) =
+        delegate.checkClientTrusted(chain, authType, socket)
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String, engine: SSLEngine) =
+        delegate.checkClientTrusted(chain, authType, engine)
+
+    override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) =
+        delegate.checkClientTrusted(chain, authType)
+
+    override fun getAcceptedIssuers(): Array<X509Certificate> = delegate.acceptedIssuers
+
+    private fun checkIdentity(chain: Array<X509Certificate>) {
+        val leaf = chain.firstOrNull() ?: throw CertificateException("AI service certificate is unavailable")
+        try {
+            leaf.checkValidity(Date.from(clock.instant()))
+            if (!validateServiceCertificate(
+                    serviceCertificateFacts(leaf), EXPECTED_AI_IDENTITY, revokedSerials, clock.instant(), SERVER_AUTH_EKU,
+                )) throw CertificateException("AI service certificate identity is invalid")
+        } catch (exception: CertificateException) {
+            throw exception
+        } catch (exception: Exception) {
+            throw CertificateException("AI service certificate identity is invalid", exception)
+        }
+    }
+
+    private companion object {
+        const val EXPECTED_AI_IDENTITY = "spiffe://innorder/ai"
         const val SERVER_AUTH_EKU = "1.3.6.1.5.5.7.3.1"
     }
 }

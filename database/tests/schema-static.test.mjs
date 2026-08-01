@@ -340,13 +340,14 @@ test('defines the governed AI persistence and retention contracts', () => {
     'operation', 'jti', 'principal_id', 'target_entity_id', 'purpose',
     'authorization_revision', 'policy_release_digest', 'authorized_set_digest',
     'context_digest', 'bounded_context', 'classification_ceiling', 'issued_at',
-    'expires_at', 'consumed_at', 'event_id', 'run_id',
+    'signer_kid', 'expires_at', 'consumed_at', 'event_id', 'run_id',
   ]) assert.match(sql, new RegExp(`\\b${column}\\b`, 'iu'), column);
   assert.match(sql, /expires_at <= issued_at \+ interval '5 minutes'/iu);
   assert.match(sql, /authorized document limit of 500 exceeded/iu);
   assert.doesNotMatch(sql, /LIMIT\s+500[\s\S]*INSERT INTO authz\.ai_authorized_document/iu);
   assert.match(sql, /CREATE TRIGGER trg_ai_authorization_grant_lifecycle/iu);
   assert.match(sql, /claim_idempotency_key_hash text[\s\S]*\^\[0-9a-f\]\{64\}\$/iu);
+  assert.match(sql, /signer_kid text NOT NULL[\s\S]*\^\[A-Za-z0-9\]/u);
   assert.match(sql, /CREATE FUNCTION authz\.bind_ai_grant_claim_idempotency\(p_operation_id uuid, p_key_hash text\)[\s\S]*SECURITY DEFINER/iu);
   assert.match(sql, /GRANT EXECUTE ON FUNCTION authz\.bind_ai_grant_claim_idempotency\(uuid, text\) TO innorder_runtime/iu);
   assert.match(sql, /REVOKE UPDATE, DELETE ON authz\.ai_authorization_grant FROM innorder_runtime/iu);

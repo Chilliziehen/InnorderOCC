@@ -9,6 +9,7 @@ FOR EACH ROW EXECUTE FUNCTION platform.touch_updated_at();
 CREATE TABLE authz.ai_authorization_grant (
     id uuid PRIMARY KEY,
     token_hash text NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+    signer_kid text NOT NULL CHECK (signer_kid ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'),
     claim_idempotency_key_hash text CHECK (claim_idempotency_key_hash IS NULL OR claim_idempotency_key_hash ~ '^[0-9a-f]{64}$'),
     operation text NOT NULL CHECK (operation <> ''),
     jti text NOT NULL UNIQUE CHECK (octet_length(jti) BETWEEN 1 AND 256),

@@ -98,9 +98,15 @@ occ:
     base-url: ${AI_BASE_URL:http://localhost:3100}
     grant:
       enabled: ${OCC_AI_GRANT_ENABLED:false}
-      private-key-file: file:${OCC_AI_GRANT_PRIVATE_KEY_FILE:}
-      public-key-file: file:${OCC_AI_GRANT_PUBLIC_KEY_FILE:}
-      key-id: ${OCC_AI_GRANT_KEY_ID:}
+      current:
+        private-key-file: file:${OCC_AI_GRANT_PRIVATE_KEY_FILE:}
+        public-key-file: file:${OCC_AI_GRANT_PUBLIC_KEY_FILE:}
+        key-id: ${OCC_AI_GRANT_KEY_ID:}
+      previous-enabled: ${OCC_AI_GRANT_PREVIOUS_ENABLED:false}
+      previous:
+        - private-key-file: file:${OCC_AI_GRANT_PREVIOUS_PRIVATE_KEY_FILE:}
+          public-key-file: file:${OCC_AI_GRANT_PREVIOUS_PUBLIC_KEY_FILE:}
+          key-id: ${OCC_AI_GRANT_PREVIOUS_KEY_ID:}
       ttl: ${OCC_AI_GRANT_TTL:5m}
       clock-skew: ${OCC_AI_GRANT_CLOCK_SKEW:30s}
     client:
