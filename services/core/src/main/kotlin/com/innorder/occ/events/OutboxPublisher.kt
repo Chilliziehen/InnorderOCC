@@ -42,22 +42,29 @@ class OutboxPublisher(
             }
             for (event in claimed) {
                 if (!beginSend(event)) break
+                val renewed = repository.renew(event)
+                if (renewed == null) {
+                    casLost++
+                    completeSend(event)
+                    continue
+                }
+                updateClaimToken(renewed)
                 var deliverySucceeded = false
                 val finalization = try {
                     try {
-                        sender.publish(event.envelope())
+                        sender.publish(renewed.envelope())
                         deliverySucceeded = true
-                        repository.succeed(event)
+                        repository.succeed(renewed)
                     } catch (_: InvalidEventEnvelopeException) {
                         failed++
-                        repository.fail(event, FailureCategory.INVALID_EVENT)
+                        repository.fail(renewed, FailureCategory.INVALID_EVENT)
                     } catch (_: InterruptedException) {
                         interrupted = true
                         failed++
-                        repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                        repository.fail(renewed, FailureCategory.DELIVERY_FAILED)
                     } catch (_: Exception) {
                         failed++
-                        repository.fail(event, FailureCategory.DELIVERY_FAILED)
+                        repository.fail(renewed, FailureCategory.DELIVERY_FAILED)
                     }
                 } finally {
                     completeSend(event)
@@ -124,13 +131,19 @@ class OutboxPublisher(
         }
     }
 
+    private fun updateClaimToken(event: ClaimedOutboxEvent) {
+        synchronized(lifecycleMonitor) {
+            if (outstanding.containsKey(event.id)) outstanding[event.id] = event
+        }
+    }
+
     private fun releaseUnvisitedClaims() {
         val claims = synchronized(lifecycleMonitor) {
             outstanding.values.filter { it.id != activeEventId }.also { releasable ->
                 releasable.forEach { outstanding.remove(it.id) }
             }
         }
-        claims.forEach { repository.fail(it, FailureCategory.SHUTDOWN) }
+        claims.forEach(repository::release)
     }
 
     companion object {

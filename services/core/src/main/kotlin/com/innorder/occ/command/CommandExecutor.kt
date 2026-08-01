@@ -6,12 +6,13 @@ import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationRevisionLockRepository
 import com.innorder.occ.authz.AuthorizationService
 import com.innorder.occ.events.OutboxRepository
+import com.innorder.occ.events.EventPayloadPolicy
+import com.innorder.occ.events.InvalidEventPayloadException
 import org.springframework.stereotype.Service
 import org.springframework.jdbc.core.JdbcOperations
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionTemplate
-import java.text.Normalizer
 import java.util.UUID
 
 @Service
@@ -151,11 +152,11 @@ class CommandExecutor(
     private fun validateDataMinimization(mutation: CommandMutation, requestSensitiveValues: Set<String>) {
         mutation.auditReason?.let { validatePersistedString(it, requestSensitiveValues) }
         validatePersistedString(mutation.aggregateType, requestSensitiveValues)
-        validateSafePersistenceJson(mutation.body.toJsonNode(), requestSensitiveValues, 0)
-        validateSafePersistenceJson(mutation.auditDetail.toJsonNode(), requestSensitiveValues, 0)
+        validateSafePersistenceJson(mutation.body.toJsonNode(), requestSensitiveValues, MAX_RESPONSE_BYTES)
+        validateSafePersistenceJson(mutation.auditDetail.toJsonNode(), requestSensitiveValues, MAX_AUDIT_BYTES)
         mutation.events.forEach {
             validatePersistedString(it.eventType, requestSensitiveValues)
-            validateSafePersistenceJson(it.payload.toJsonNode(), requestSensitiveValues, 0)
+            validateSafePersistenceJson(it.payload.toJsonNode(), requestSensitiveValues, MAX_EVENT_BYTES)
         }
     }
 
@@ -173,10 +174,10 @@ class CommandExecutor(
     private fun sensitiveValues(request: CanonicalJsonObject): Set<String> {
         val values = linkedSetOf<String>()
         fun visit(node: JsonNode, sensitive: Boolean, depth: Int) {
-            if (depth > MAX_JSON_DEPTH) throw InvalidCommandRequestException()
+            if (depth > EventPayloadPolicy.MAX_DEPTH) throw InvalidCommandRequestException()
             when {
                 node.isObject -> node.fields().forEachRemaining { (name, child) ->
-                    visit(child, sensitive || sensitiveName(name), depth + 1)
+                    visit(child, sensitive || EventPayloadPolicy.sensitiveName(name), depth + 1)
                 }
                 node.isArray -> node.forEach { visit(it, sensitive, depth + 1) }
                 sensitive && node.isValueNode -> scalar(node)?.takeIf(String::isNotEmpty)?.let(values::add)
@@ -186,16 +187,23 @@ class CommandExecutor(
         return values.toSet()
     }
 
-    private fun validateSafePersistenceJson(node: JsonNode, sensitiveValues: Set<String>, depth: Int) {
-        if (depth > MAX_JSON_DEPTH) throw InvalidCommandRequestException()
+    private fun validateSafePersistenceJson(node: JsonNode, sensitiveValues: Set<String>, maxBytes: Int) {
+        try {
+            EventPayloadPolicy.validate(node, maxBytes)
+        } catch (_: InvalidEventPayloadException) {
+            throw InvalidCommandRequestException()
+        }
+        validateNoSensitiveValues(node, sensitiveValues, 0)
+    }
+
+    private fun validateNoSensitiveValues(node: JsonNode, sensitiveValues: Set<String>, depth: Int) {
+        if (depth > EventPayloadPolicy.MAX_DEPTH) throw InvalidCommandRequestException()
         when {
             node.isObject -> node.fields().forEachRemaining { (name, child) ->
-                if (sensitiveName(name) || containsSensitiveValue(name, sensitiveValues)) {
-                    throw InvalidCommandRequestException()
-                }
-                validateSafePersistenceJson(child, sensitiveValues, depth + 1)
+                if (containsSensitiveValue(name, sensitiveValues)) throw InvalidCommandRequestException()
+                validateNoSensitiveValues(child, sensitiveValues, depth + 1)
             }
-            node.isArray -> node.forEach { validateSafePersistenceJson(it, sensitiveValues, depth + 1) }
+            node.isArray -> node.forEach { validateNoSensitiveValues(it, sensitiveValues, depth + 1) }
             node.isValueNode -> {
                 val candidate = scalar(node) ?: return
                 if (sensitiveValues.any { it.isNotEmpty() && candidate.contains(it) }) throw InvalidCommandRequestException()
@@ -204,7 +212,7 @@ class CommandExecutor(
     }
 
     private fun validatePersistedString(value: String, sensitiveValues: Set<String>) {
-        if (sensitiveName(value) || containsSensitiveValue(value, sensitiveValues)) {
+        if (EventPayloadPolicy.sensitiveName(value) || containsSensitiveValue(value, sensitiveValues)) {
             throw InvalidCommandRequestException()
         }
     }
@@ -217,11 +225,6 @@ class CommandExecutor(
         node.isTextual -> node.textValue()
         node.isNumber || node.isBoolean -> node.asText()
         else -> null
-    }
-
-    private fun sensitiveName(name: String): Boolean {
-        val normalized = Normalizer.normalize(name, Normalizer.Form.NFKC).lowercase().filter(Char::isLetterOrDigit)
-        return SENSITIVE_NAMES.any { normalized.contains(it) }
     }
 
     private fun authorizationNamespace(value: String): Boolean {
@@ -237,11 +240,7 @@ class CommandExecutor(
         const val MAX_RESPONSE_BYTES = 64 * 1024
         const val MAX_AUDIT_BYTES = 16 * 1024
         const val MAX_EVENT_BYTES = 64 * 1024
-        const val MAX_JSON_DEPTH = 64
         val ACTION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}${'$'}")
-        val SENSITIVE_NAMES = setOf(
-            "password", "passphrase", "secret", "token", "authorization", "cookie", "apikey", "credential", "privatekey",
-        )
         val AUTHORIZATION_PREFIXES = setOf(
             "iam", "authz", "policy", "authorization", "relation", "relationship", "grant", "principal", "role",
         )

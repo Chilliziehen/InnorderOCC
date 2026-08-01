@@ -40,6 +40,7 @@ class OutboxPublishingRepository(
 ) {
     private val transactions = TransactionTemplate(transactionManager)
 
+    /** Higher aggregate versions remain ineligible until every lower version is PUBLISHED or DEAD. */
     fun claim(limit: Int = properties.batchSize): List<ClaimedOutboxEvent> {
         require(limit in 1..properties.batchSize && limit <= 100)
         return transactions.execute {
@@ -59,13 +60,19 @@ class OutboxPublishingRepository(
                        WHERE event.id = exhausted_candidates.id
                        RETURNING event.id
                    ), candidates AS MATERIALIZED (
-                       SELECT id
-                       FROM audit.outbox_event
-                       WHERE attempts < ? AND (
-                              (status = 'PENDING' AND next_attempt_at <= statement_timestamp())
-                           OR (status = 'PUBLISHING' AND claimed_at <= statement_timestamp() - interval '5 minutes')
+                       SELECT candidate.id
+                       FROM audit.outbox_event candidate
+                       WHERE candidate.attempts < ? AND (
+                              (candidate.status = 'PENDING' AND candidate.next_attempt_at <= statement_timestamp())
+                           OR (candidate.status = 'PUBLISHING' AND candidate.claimed_at <= statement_timestamp() - interval '5 minutes')
+                       ) AND NOT EXISTS (
+                           SELECT 1
+                           FROM audit.outbox_event predecessor
+                           WHERE predecessor.aggregate_id = candidate.aggregate_id
+                             AND predecessor.aggregate_version < candidate.aggregate_version
+                             AND predecessor.status IN ('PENDING', 'PUBLISHING')
                        )
-                       ORDER BY next_attempt_at, created_at, id
+                       ORDER BY candidate.next_attempt_at, candidate.created_at, candidate.id
                        FOR UPDATE SKIP LOCKED
                        LIMIT ?
                    ), claimed AS (
@@ -81,6 +88,27 @@ class OutboxPublishingRepository(
                 properties.maxAttempts, limit, properties.maxAttempts, limit,
             )
         } ?: emptyList()
+    }
+
+    fun renew(event: ClaimedOutboxEvent): ClaimedOutboxEvent? = transactions.execute {
+        jdbc.query(
+            """UPDATE audit.outbox_event
+               SET claimed_at = statement_timestamp()
+               WHERE id = ? AND status = 'PUBLISHING' AND attempts = ? AND claimed_at = ?
+               RETURNING claimed_at""",
+            { rs, _ -> rs.getTimestamp("claimed_at").toInstant() },
+            event.id, event.attempts, Timestamp.from(event.claimedAt),
+        ).singleOrNull()?.let { event.copy(claimedAt = it) }
+    }
+
+    fun release(event: ClaimedOutboxEvent): FinalizeResult = finalize(event) {
+        jdbc.update(
+            """UPDATE audit.outbox_event
+               SET status = 'PENDING', attempts = greatest(attempts - 1, 0), claimed_at = NULL,
+                   next_attempt_at = greatest(available_at, statement_timestamp()), last_error = 'SHUTDOWN'
+               WHERE id = ? AND status = 'PUBLISHING' AND attempts = ? AND claimed_at = ?""",
+            event.id, event.attempts, Timestamp.from(event.claimedAt),
+        )
     }
 
     fun succeed(event: ClaimedOutboxEvent): FinalizeResult = finalize(event) {

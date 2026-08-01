@@ -19,6 +19,7 @@ data class OutboxProperties(
         require(pollInterval >= Duration.ofMillis(250))
         require(ackTimeout in Duration.ofSeconds(1)..Duration.ofSeconds(10))
         require(staleClaim == Duration.ofMinutes(5))
+        require(staleClaim > ackTimeout.plus(LEASE_SAFETY_MARGIN))
         require(maxAttempts == 10)
     }
 
@@ -32,5 +33,6 @@ data class OutboxProperties(
 
     companion object {
         const val TOPIC = "occ.events.v1"
+        private val LEASE_SAFETY_MARGIN = Duration.ofSeconds(30)
     }
 }

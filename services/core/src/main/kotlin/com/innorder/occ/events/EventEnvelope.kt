@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
-import java.text.Normalizer
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import java.util.TreeMap
@@ -31,7 +30,12 @@ class EventEnvelope(
     init {
         if (!STABLE_TYPE.matches(type) || !STABLE_TYPE.matches(aggregateType)) invalid()
         if (schemaVersion !in 1..MAX_SAFE_INTEGER || aggregateVersion !in 0..MAX_SAFE_INTEGER) invalid()
-        if (payload !is ObjectNode || !validJson(payload, 0)) invalid()
+        try {
+            EventPayloadPolicy.validate(payload)
+        } catch (_: InvalidEventPayloadException) {
+            invalid()
+        }
+        if (payload !is ObjectNode || !validNumbers(payload)) invalid()
         this.payload = sortObject(payload)
         bytes = serialize()
         if (bytes.size > MAX_MESSAGE_BYTES) invalid()
@@ -58,11 +62,7 @@ class EventEnvelope(
     companion object {
         const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
         const val MAX_MESSAGE_BYTES = 256 * 1024
-        private const val MAX_DEPTH = 32
         private val STABLE_TYPE = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}${'$'}")
-        private val SENSITIVE_NAMES = setOf(
-            "password", "passwd", "secret", "token", "authorization", "credential", "apikey", "privatekey",
-        )
         private val MAPPER = ObjectMapper().findAndRegisterModules().apply {
             factory.configure(JsonGenerator.Feature.AUTO_CLOSE_TARGET, false)
         }
@@ -84,27 +84,14 @@ class EventEnvelope(
             else -> node.deepCopy<JsonNode>()
         }
 
-        private fun validJson(node: JsonNode, depth: Int): Boolean {
-            if (depth > MAX_DEPTH) return false
+        private fun validNumbers(node: JsonNode): Boolean {
             return when {
-                node.isObject -> node.fields().asSequence().all { (name, value) ->
-                    validText(name) && !sensitiveName(name) && validJson(value, depth + 1)
-                }
-                node.isArray -> node.all { validJson(it, depth + 1) }
-                node.isTextual -> validText(node.textValue())
+                node.isObject -> node.fields().asSequence().all { (_, value) -> validNumbers(value) }
+                node.isArray -> node.all(::validNumbers)
                 node.isIntegralNumber -> runCatching { node.longValue() in -MAX_SAFE_INTEGER..MAX_SAFE_INTEGER }.getOrDefault(false)
                 node.isFloatingPointNumber -> node.doubleValue().isFinite() && kotlin.math.abs(node.doubleValue()) <= MAX_SAFE_INTEGER
-                node.isBoolean || node.isNull -> true
-                else -> false
+                else -> true
             }
-        }
-
-        private fun validText(value: String): Boolean = Normalizer.isNormalized(value, Normalizer.Form.NFC) &&
-            value.codePoints().allMatch { it !in 0xD800..0xDFFF && it != 0xFEFF && (it >= 0x20 || it == 0x09) }
-
-        private fun sensitiveName(value: String): Boolean {
-            val normalized = Normalizer.normalize(value, Normalizer.Form.NFKC).lowercase().filter(Char::isLetterOrDigit)
-            return SENSITIVE_NAMES.any(normalized::contains)
         }
 
         private fun invalid(): Nothing = throw InvalidEventEnvelopeException()

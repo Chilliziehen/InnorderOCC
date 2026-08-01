@@ -392,6 +392,41 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
+    fun `event payload policy rejects depth beyond publisher limit before command commit`() {
+        val nested = "{" + "\"level\":{".repeat(33) + "}" + "}".repeat(33)
+        val tooDeep = object : AuthorizedCommand by command() {
+            override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
+                events = listOf(PendingEventSpec("kernel-test.updated", 1, json(nested), 4)),
+            )
+        }
+
+        assertThatThrownBy { executor.execute(metadata("event-depth"), "{}".toByteArray(), tooDeep) }
+            .isInstanceOf(InvalidCommandRequestException::class.java)
+        assertRolledBack()
+    }
+
+    @Test
+    fun `event payload policy rejects complete normalized sensitive field union`() {
+        val fields = listOf(
+            "password", "pass-phrase", "SECRET", "to_ken", "authori-zation",
+            "cookie", "api_Key", "credential", "private.key",
+        )
+        fields.forEachIndexed { index, field ->
+            val command = object : AuthorizedCommand by command() {
+                override fun execute(context: CommandContext): CommandMutation = successMutation().copy(
+                    events = listOf(PendingEventSpec(
+                        "kernel-test.updated", 1, json("""{"$field":"legacy-value"}"""), 4,
+                    )),
+                )
+            }
+
+            assertThatThrownBy { executor.execute(metadata("event-sensitive-$index"), "{}".toByteArray(), command) }
+                .isInstanceOf(InvalidCommandRequestException::class.java)
+            assertRolledBack()
+        }
+    }
+
+    @Test
     fun `safe non-sensitive request-derived scalar may appear in audit and event payload`() {
         val safe = object : AuthorizedCommand by command() {
             override fun execute(context: CommandContext): CommandMutation {

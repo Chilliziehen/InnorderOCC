@@ -18,6 +18,7 @@ import org.testcontainers.utility.MountableFile
 import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
@@ -63,13 +64,13 @@ class OutboxPublisherIntegrationTest {
         repeat(20) { insert(nextAttemptAt = Instant.now().minusSeconds(1)) }
         val otherJdbc = JdbcTemplate(runtimeDataSource())
         val other = OutboxPublishingRepository(otherJdbc, DataSourceTransactionManager(otherJdbc.dataSource!!), OutboxProperties())
-        val ready = CountDownLatch(1)
+        val ready = CountDownLatch(2)
         val start = CountDownLatch(1)
         val pool = Executors.newFixedThreadPool(2)
         try {
             val a = pool.submit<List<ClaimedOutboxEvent>> { ready.countDown(); start.await(); repository.claim(20) }
             val b = pool.submit<List<ClaimedOutboxEvent>> { ready.countDown(); start.await(); other.claim(20) }
-            ready.await(5, TimeUnit.SECONDS)
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue()
             start.countDown()
             val idsA = a.get(10, TimeUnit.SECONDS).map { it.id }.toSet()
             val idsB = b.get(10, TimeUnit.SECONDS).map { it.id }.toSet()
@@ -107,6 +108,80 @@ class OutboxPublisherIntegrationTest {
             assertThat(deliveries.values).allMatch { it.get() == 1 }
             assertThat(admin.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_type = 'publisher-test' AND status = 'PUBLISHED'", Long::class.java)).isEqualTo(20)
         } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `later queued claim is renewed or skipped after another publisher recovers its stale lease`() {
+        val first = insert(nextAttemptAt = Instant.now().minusSeconds(20), createdAt = Instant.now().minusSeconds(700))
+        val second = insert(nextAttemptAt = Instant.now().minusSeconds(10), createdAt = Instant.now().minusSeconds(700))
+        val deliveries = ConcurrentHashMap<UUID, AtomicInteger>()
+        val otherJdbc = JdbcTemplate(runtimeDataSource())
+        val otherRepository = OutboxPublishingRepository(
+            otherJdbc, DataSourceTransactionManager(otherJdbc.dataSource!!), OutboxProperties(),
+        )
+        val otherPublisher = OutboxPublisher(otherRepository, OutboxEventSender { event ->
+            deliveries.computeIfAbsent(event.id) { AtomicInteger() }.incrementAndGet()
+        }, OutboxProperties())
+        val publisher = OutboxPublisher(repository, OutboxEventSender { event ->
+            deliveries.computeIfAbsent(event.id) { AtomicInteger() }.incrementAndGet()
+            if (event.id == first) {
+                admin.update(
+                    "UPDATE audit.outbox_event SET claimed_at = statement_timestamp() - interval '6 minutes' WHERE id = ?",
+                    second,
+                )
+                otherPublisher.publishBatch()
+            }
+        }, OutboxProperties(batchSize = 2))
+
+        publisher.publishBatch()
+
+        assertThat(deliveries[first]?.get()).isEqualTo(1)
+        assertThat(deliveries[second]?.get()).isEqualTo(1)
+        assertThat(status(first)).isEqualTo("PUBLISHED")
+        assertThat(status(second)).isEqualTo("PUBLISHED")
+    }
+
+    @Test
+    fun `later aggregate version cannot publish before earlier version is terminal`() {
+        val aggregateId = UUID.randomUUID()
+        val versionOne = insert(
+            nextAttemptAt = Instant.now().minusSeconds(2), createdAt = Instant.now().minusSeconds(10),
+            aggregateId = aggregateId, aggregateVersion = 1,
+        )
+        val versionTwo = insert(
+            nextAttemptAt = Instant.now().minusSeconds(1), createdAt = Instant.now().minusSeconds(9),
+            aggregateId = aggregateId, aggregateVersion = 2,
+        )
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val sent = Collections.synchronizedList(mutableListOf<UUID>())
+        val firstPublisher = OutboxPublisher(repositoryFor(OutboxProperties(batchSize = 1)), OutboxEventSender { event ->
+            sent.add(event.id)
+            entered.countDown()
+            release.await(5, TimeUnit.SECONDS)
+        }, OutboxProperties(batchSize = 1))
+        val otherJdbc = JdbcTemplate(runtimeDataSource())
+        val secondProperties = OutboxProperties(batchSize = 1)
+        val secondPublisher = OutboxPublisher(
+            OutboxPublishingRepository(otherJdbc, DataSourceTransactionManager(otherJdbc.dataSource!!), secondProperties),
+            OutboxEventSender { event -> sent.add(event.id) }, secondProperties,
+        )
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val firstRun = pool.submit<PublishBatchResult> { firstPublisher.publishBatch() }
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+
+            assertThat(secondPublisher.publishBatch().claimed).isZero()
+            assertThat(sent).containsExactly(versionOne)
+
+            release.countDown()
+            firstRun.get(10, TimeUnit.SECONDS)
+            assertThat(secondPublisher.publishBatch().published).isEqualTo(1)
+            assertThat(sent).containsExactly(versionOne, versionTwo)
+        } finally {
+            release.countDown()
             pool.shutdownNow()
         }
     }
@@ -221,7 +296,7 @@ class OutboxPublisherIntegrationTest {
                 .containsEntry("status", "PUBLISHING")
                 .containsEntry("attempts", 1)
             assertThat(rows.filter { it["id"] != activeId.get() }).allSatisfy {
-                assertThat(it).containsEntry("status", "PENDING").containsEntry("attempts", 1).containsEntry("last_error", "SHUTDOWN")
+                assertThat(it).containsEntry("status", "PENDING").containsEntry("attempts", 0).containsEntry("last_error", "SHUTDOWN")
             }
             release.countDown()
             publishing.get(10, TimeUnit.SECONDS)
@@ -229,6 +304,53 @@ class OutboxPublisherIntegrationTest {
             release.countDown()
             pool.shutdownNow()
         }
+    }
+
+    @Test
+    fun `repeated shutdown release does not consume target attempts and eventual send succeeds`() {
+        val target = insert(nextAttemptAt = Instant.now().minusSeconds(1), createdAt = Instant.now().minusSeconds(100))
+        repeat(10) {
+            admin.update("UPDATE audit.outbox_event SET next_attempt_at = statement_timestamp() WHERE id = ?", target)
+            val blocker = insert(
+                nextAttemptAt = Instant.now().minusSeconds(10),
+                createdAt = Instant.now().minusSeconds(20),
+            )
+            val properties = OutboxProperties(batchSize = 2, ackTimeout = Duration.ofSeconds(1))
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val publisher = OutboxPublisher(repositoryFor(properties), OutboxEventSender { event ->
+                assertThat(event.id).isEqualTo(blocker)
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }, properties)
+            val pool = Executors.newFixedThreadPool(2)
+            try {
+                val publishing = pool.submit<PublishBatchResult> { publisher.publishBatch() }
+                assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+                val shutdown = pool.submit { publisher.shutdown() }
+                await().atMost(1, TimeUnit.SECONDS).untilAsserted {
+                    assertThat(admin.queryForMap("SELECT status, attempts, last_error FROM audit.outbox_event WHERE id = ?", target))
+                        .containsEntry("status", "PENDING")
+                        .containsEntry("attempts", 0)
+                        .containsEntry("last_error", "SHUTDOWN")
+                }
+                release.countDown()
+                publishing.get(10, TimeUnit.SECONDS)
+                shutdown.get(10, TimeUnit.SECONDS)
+            } finally {
+                release.countDown()
+                pool.shutdownNow()
+            }
+        }
+
+        val sends = AtomicInteger()
+        OutboxPublisher(repository, OutboxEventSender { event ->
+            assertThat(event.id).isEqualTo(target)
+            sends.incrementAndGet()
+        }, OutboxProperties()).publishBatch()
+
+        assertThat(sends).hasValue(1)
+        assertThat(status(target)).isEqualTo("PUBLISHED")
     }
 
     @Test
@@ -366,6 +488,24 @@ class OutboxPublisherIntegrationTest {
     }
 
     @Test
+    fun `corrupt legacy sensitive field union never sends`() {
+        val fields = listOf(
+            "password", "pass-phrase", "SECRET", "to_ken", "authori-zation",
+            "cookie", "api_Key", "credential", "private.key",
+        )
+        val ids = fields.map { field ->
+            insert(payload = """{"$field":"legacy-value"}""", nextAttemptAt = Instant.now().minusSeconds(1))
+        }
+        val sends = AtomicInteger()
+
+        OutboxPublisher(repository, OutboxEventSender { sends.incrementAndGet() }, OutboxProperties()).publishBatch()
+
+        assertThat(sends).hasValue(0)
+        assertThat(ids.map { admin.queryForMap("SELECT status, last_error FROM audit.outbox_event WHERE id = ?", it) })
+            .allSatisfy { assertThat(it).containsEntry("status", "PENDING").containsEntry("last_error", "INVALID_EVENT") }
+    }
+
+    @Test
     fun `interrupt is preserved and claimed row is retried`() {
         val id = insert(nextAttemptAt = Instant.now().minusSeconds(1))
         val publisher = OutboxPublisher(repository, OutboxEventSender { throw InterruptedException("stop") }, OutboxProperties())
@@ -381,16 +521,17 @@ class OutboxPublisherIntegrationTest {
         payload: String = """{"value":"ok"}""",
         nextAttemptAt: Instant = Instant.now(),
         createdAt: Instant = Instant.now().minusSeconds(1),
+        aggregateId: UUID = UUID.randomUUID(),
+        aggregateVersion: Long = 1,
     ): UUID {
         val id = UUID.randomUUID()
-        val aggregate = UUID.randomUUID()
         val availableAt = minOf(createdAt, nextAttemptAt)
         admin.update(
             """INSERT INTO audit.outbox_event
                (id, customer_instance_id, aggregate_type, aggregate_id, aggregate_version, event_type,
                 schema_version, payload, correlation_id, available_at, next_attempt_at, created_at, status)
-               VALUES (?, ?, 'publisher-test', ?, 1, 'publisher-test.updated', 1, ?::jsonb, ?, ?, ?, ?, 'PENDING')""",
-            id, OutboxRepository.DEFAULT_CUSTOMER_INSTANCE_ID, aggregate, payload, UUID.randomUUID(),
+               VALUES (?, ?, 'publisher-test', ?, ?, 'publisher-test.updated', 1, ?::jsonb, ?, ?, ?, ?, 'PENDING')""",
+            id, OutboxRepository.DEFAULT_CUSTOMER_INSTANCE_ID, aggregateId, aggregateVersion, payload, UUID.randomUUID(),
             Timestamp.from(availableAt), Timestamp.from(nextAttemptAt), Timestamp.from(createdAt),
         )
         return id
