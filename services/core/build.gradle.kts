@@ -56,6 +56,12 @@ tasks.processResources {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    doFirst {
+        val evidenceDatabaseRequired =
+            System.getenv("INNORDER_STRICT_DATABASE_TESTS") == "1" ||
+                filter.includePatterns.any { it.contains("EvidenceRiskResourcePostgreSqlIntegrationTest") }
+        systemProperty("innorder.evidence-risk-resource-postgresql.required", evidenceDatabaseRequired.toString())
+    }
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
