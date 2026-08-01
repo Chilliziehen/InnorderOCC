@@ -243,10 +243,18 @@ export const taskCompletionDependencyProblemDetailsSchema = z.union([
   taskGateUnavailableProblemDetailsSchema,
 ]);
 
-export const workflowListProblemDetailsSchema = z.discriminatedUnion("status", [
+export const workflowTopLevelListProblemDetailsSchema = z.discriminatedUnion("status", [
   workflowBadRequestProblemDetailsSchema,
   workflowUnauthorizedProblemDetailsSchema,
   workflowForbiddenProblemDetailsSchema,
+  workflowAuthorizationUnavailableProblemDetailsSchema,
+  workflowInternalProblemDetailsSchema,
+]);
+export const workflowNestedListProblemDetailsSchema = z.discriminatedUnion("status", [
+  workflowBadRequestProblemDetailsSchema,
+  workflowUnauthorizedProblemDetailsSchema,
+  workflowForbiddenProblemDetailsSchema,
+  workflowNotFoundProblemDetailsSchema,
   workflowAuthorizationUnavailableProblemDetailsSchema,
   workflowInternalProblemDetailsSchema,
 ]);

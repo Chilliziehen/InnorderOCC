@@ -36,6 +36,8 @@ import {
   workflowRequestProblemDetailsSchema,
   workflowUnauthorizedProblemDetailsSchema,
   workflowUnavailableProblemDetailsSchema,
+  workflowNestedListProblemDetailsSchema,
+  workflowTopLevelListProblemDetailsSchema,
   workflowEventSchemas,
 } from "../src/index.js";
 
@@ -137,14 +139,14 @@ const operations = {
 } as const;
 
 const commandMethods = new Set(["post", "patch", "delete"]);
-const cursorOperations = new Set([
-  "listCohorts", "listProcesses", "listProcessParticipants", "listProcessTasks",
-  "listProcessTimeline", "listMyWork", "listTaskHistory", "listTaskBlockers",
-  "listNotifications", "catchUpAuthorizedEvents",
-]);
-const noNotFoundOperations = new Set([
+const topLevelListOperations = [
   "listCohorts", "listProcesses", "listMyWork", "listNotifications", "catchUpAuthorizedEvents",
-]);
+] as const;
+const nestedListOperations = [
+  "listProcessParticipants", "listProcessTasks", "listProcessTimeline", "listTaskHistory", "listTaskBlockers",
+] as const;
+const cursorOperations = new Set([...topLevelListOperations, ...nestedListOperations]);
+const noNotFoundOperations = new Set(topLevelListOperations);
 const workflowEngineOperations = new Set([
   "startParticipantProcess", "suspendProcess", "resumeProcess", "cancelProcess", "failProcess",
   "transferProcess", "reconcileProcess", "releaseProcessWait", "claimTask", "completeTask", "failTask",
@@ -249,6 +251,28 @@ describe("workflow OpenAPI surface", () => {
       }
     }
     expect(JSON.stringify(document.paths)).not.toContain("#/components/responses/WorkflowError");
+  });
+
+  it("matches top-level and nested list error unions per operation", () => {
+    const statusCodes = (schema: unknown) => (schema as {
+      options: Array<{ shape: { status: { value: number } } }>;
+    }).options.map((option) => option.shape.status.value).sort((left, right) => left - right);
+    const expectedByOperation = new Map<string, number[]>([
+      ...topLevelListOperations.map((operationId) => [operationId, statusCodes(workflowTopLevelListProblemDetailsSchema)] as const),
+      ...nestedListOperations.map((operationId) => [operationId, statusCodes(workflowNestedListProblemDetailsSchema)] as const),
+    ]);
+    for (const [path, methods] of Object.entries(operations)) {
+      for (const method of Object.keys(methods)) {
+        const operation = document.paths[path][method];
+        const expected = expectedByOperation.get(operation.operationId ?? "");
+        if (expected === undefined) continue;
+        const actual = Object.keys(operation.responses ?? {})
+          .filter((status) => /^[45]\d\d$/.test(status))
+          .map(Number)
+          .sort((left, right) => left - right);
+        expect(actual, operation.operationId).toEqual(expected);
+      }
+    }
   });
 });
 

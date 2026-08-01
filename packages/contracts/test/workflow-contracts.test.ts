@@ -77,7 +77,8 @@ import {
   taskCompletionProblemDetailsSchema,
   versionedCommandOperationProblemDetailsSchema,
   workflowDetailProblemDetailsSchema,
-  workflowListProblemDetailsSchema,
+  workflowNestedListProblemDetailsSchema,
+  workflowTopLevelListProblemDetailsSchema,
   transferCohortOwnerRequestSchema,
   transferProcessRequestSchema,
   updateCohortRequestSchema,
@@ -375,8 +376,14 @@ describe("workflow Problem Details", () => {
   });
 
   it("exports complete status-discriminated error contracts per operation family", () => {
-    expect(workflowListProblemDetailsSchema.parse({
+    expect(workflowTopLevelListProblemDetailsSchema.parse({
       ...problem, status: 400, code: "OCC_INVALID_CURSOR",
+    })).toBeDefined();
+    expect(() => workflowTopLevelListProblemDetailsSchema.parse({
+      ...problem, status: 404, code: "OCC_NOT_FOUND",
+    })).toThrow();
+    expect(workflowNestedListProblemDetailsSchema.parse({
+      ...problem, status: 404, code: "OCC_NOT_FOUND",
     })).toBeDefined();
     expect(workflowDetailProblemDetailsSchema.parse({
       ...problem, status: 404, code: "OCC_NOT_FOUND",
