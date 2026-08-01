@@ -9,7 +9,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.innorder.occ.command.CanonicalJsonObject
 import org.springframework.beans.factory.annotation.Value
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
+import org.springframework.context.annotation.Profile
 import org.springframework.stereotype.Component
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -36,7 +36,7 @@ data class CursorContext(
 class InvalidCursorException : RuntimeException("Cursor is invalid")
 
 @Component
-@ConditionalOnProperty("occ.cursor.secret")
+@Profile("!flowable-init")
 class CursorCodec(
     @Value("\${occ.cursor.secret}") secret: String,
     private val clock: Clock,
@@ -81,8 +81,12 @@ class CursorCodec(
         require(token.length in 1..MAX_TOKEN_CHARS && TOKEN_PATTERN.matches(token))
         val separator = token.indexOf('.')
         require(separator > 0 && separator == token.lastIndexOf('.') && separator < token.lastIndex)
-        val payloadBytes = DECODER.decode(token.substring(0, separator))
-        val suppliedSignature = DECODER.decode(token.substring(separator + 1))
+        val payloadSegment = token.substring(0, separator)
+        val signatureSegment = token.substring(separator + 1)
+        val payloadBytes = DECODER.decode(payloadSegment)
+        val suppliedSignature = DECODER.decode(signatureSegment)
+        require(ENCODER.encodeToString(payloadBytes) == payloadSegment)
+        require(ENCODER.encodeToString(suppliedSignature) == signatureSegment)
         require(payloadBytes.size in 1..MAX_PAYLOAD_BYTES && suppliedSignature.size == SIGNATURE_BYTES)
         require(MessageDigest.isEqual(sign(payloadBytes), suppliedSignature))
 

@@ -6,11 +6,12 @@ Install Docker Engine with Docker Compose v2. The stack requires Linux
 containers and enough memory for PostgreSQL, Kafka, Core, and supporting
 services.
 
-Create eight files outside the repository. Each file must contain one unique,
+Create nine files outside the repository. Each file must contain one unique,
 non-empty value without surrounding quotes. Create `infra/compose/.env` from
 `.env.example` and set these variables to the corresponding absolute paths:
 
 - `POSTGRES_ADMIN_PASSWORD_FILE`
+- `CURSOR_HMAC_KEY_FILE`
 - `POSTGRES_FLYWAY_PASSWORD_FILE`
 - `POSTGRES_RUNTIME_PASSWORD_FILE`
 - `REDIS_PASSWORD_FILE`
@@ -22,6 +23,8 @@ non-empty value without surrounding quotes. Create `infra/compose/.env` from
 The three PostgreSQL passwords must differ. The MinIO application username and
 password must differ from the root credentials. Blank paths stop Compose
 interpolation. Do not commit `.env` or any secret file.
+The cursor HMAC key file must contain at least 32 bytes of deployment-specific
+random key material.
 
 ## Start
 
@@ -69,7 +72,9 @@ foundation.
 Spring imports mounted secrets with
 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/`. Secret target filenames are
 exact Spring properties, including `spring.datasource.password`,
-`spring.flyway.password`, and `occ.object-storage.secret-key`.
+`spring.flyway.password`, `occ.object-storage.secret-key`, and
+`occ.cursor.secret`. The cursor key is mounted only into Core; missing or weak
+key material prevents normal Core startup.
 
 ## Immutable Images
 
