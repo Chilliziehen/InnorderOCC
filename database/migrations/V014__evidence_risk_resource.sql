@@ -209,7 +209,7 @@ ON occ.evidence_object_disposition (evidence_version_id)
 WHERE evidence_version_id IS NOT NULL;
 
 CREATE UNIQUE INDEX uq_evidence_object_disposition_upload
-ON occ.evidence_object_disposition (upload_session_id)
+ON occ.evidence_object_disposition (upload_session_id, object_key)
 WHERE upload_session_id IS NOT NULL;
 
 CREATE INDEX ix_evidence_object_disposition_cleanup
@@ -491,7 +491,8 @@ DECLARE
     version_upload_session_id uuid;
     version_object_key text;
     upload_evidence_id uuid;
-    upload_object_key text;
+    upload_quarantine_object_key text;
+    upload_immutable_object_key text;
     evidence_legal_hold_at timestamptz;
 BEGIN
     IF TG_OP = 'DELETE' THEN
@@ -524,9 +525,8 @@ BEGIN
         WHERE ev.id = NEW.evidence_version_id;
     END IF;
     IF NEW.upload_session_id IS NOT NULL THEN
-        SELECT us.evidence_id,
-               CASE WHEN us.status = 'CONFIRMED' THEN us.immutable_object_key ELSE us.quarantine_object_key END
-        INTO STRICT upload_evidence_id, upload_object_key
+        SELECT us.evidence_id, us.quarantine_object_key, us.immutable_object_key
+        INTO STRICT upload_evidence_id, upload_quarantine_object_key, upload_immutable_object_key
         FROM occ.upload_session us
         WHERE id = NEW.upload_session_id
         FOR KEY SHARE;
@@ -543,7 +543,8 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'disposition object key does not match evidence version';
     END IF;
     IF NEW.evidence_version_id IS NULL
-       AND NEW.object_key IS DISTINCT FROM upload_object_key THEN
+       AND NEW.object_key IS DISTINCT FROM upload_quarantine_object_key
+       AND NEW.object_key IS DISTINCT FROM upload_immutable_object_key THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'disposition object key does not match upload session';
     END IF;
     SELECT e.legal_hold_at INTO STRICT evidence_legal_hold_at
@@ -651,6 +652,10 @@ CREATE INDEX ix_risk_intervention_queue
 ON occ.risk (due_at, severity DESC, id)
 WHERE severity IN ('YELLOW', 'RED') AND state IN ('OPEN', 'ACKNOWLEDGED');
 
+CREATE UNIQUE INDEX uq_risk_head_occurrence_identity
+ON occ.risk (rule_definition_id, target_entity_id, occurrence_key)
+WHERE occurrence_key IS NOT NULL;
+
 CREATE FUNCTION occ.validate_risk_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -721,6 +726,52 @@ $$;
 CREATE TRIGGER trg_risk_occurrence_validate
 BEFORE INSERT ON occ.risk_occurrence
 FOR EACH ROW EXECUTE FUNCTION occ.validate_risk_occurrence_insert();
+
+CREATE FUNCTION occ.enforce_risk_occurrence_completeness()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, occ, pg_temp
+AS $$
+DECLARE
+    risk_id_to_check uuid;
+    risk_head occ.risk%ROWTYPE;
+    matching_occurrences bigint;
+BEGIN
+    risk_id_to_check := coalesce(
+        (to_jsonb(NEW) ->> 'risk_id')::uuid,
+        (to_jsonb(NEW) ->> 'id')::uuid
+    );
+    SELECT * INTO STRICT risk_head
+    FROM occ.risk
+    WHERE id = risk_id_to_check;
+    IF risk_head.occurrence_key IS NULL THEN
+        RETURN NULL;
+    END IF;
+    SELECT count(*) INTO matching_occurrences
+    FROM occ.risk_occurrence ro
+    WHERE ro.risk_id = risk_head.id
+      AND ro.rule_definition_id = risk_head.rule_definition_id
+      AND ro.target_entity_id = risk_head.target_entity_id
+      AND ro.occurrence_key = risk_head.occurrence_key
+      AND ro.calendar_version = risk_head.calendar_version
+      AND ro.evaluated_at = risk_head.evaluated_at
+      AND ro.detected_at = risk_head.detected_at;
+    IF matching_occurrences <> 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'risk head requires exactly one matching occurrence fact';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER trg_risk_occurrence_complete_from_risk
+AFTER INSERT OR UPDATE ON occ.risk
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_risk_occurrence_completeness();
+
+CREATE CONSTRAINT TRIGGER trg_risk_occurrence_complete_from_child
+AFTER INSERT ON occ.risk_occurrence
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION occ.enforce_risk_occurrence_completeness();
 
 CREATE FUNCTION occ.validate_risk_action_insert()
 RETURNS trigger
@@ -1069,6 +1120,7 @@ REVOKE EXECUTE ON FUNCTION occ.validate_evidence_head_lifecycle() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_object_disposition() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_risk_lifecycle() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_risk_occurrence_insert() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION occ.enforce_risk_occurrence_completeness() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_risk_action_insert() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_risk_adjudication_insert() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_resource_availability() FROM PUBLIC;

@@ -59,9 +59,13 @@ test('enforces bounded upload lease chronology', () => {
 });
 
 test('resolves and locks legal holds for version and upload dispositions', () => {
-  assert.match(sql, /CREATE UNIQUE INDEX uq_evidence_object_disposition_upload/i);
+  const uploadDispositionIndex = sql.match(
+    /CREATE UNIQUE INDEX uq_evidence_object_disposition_upload[^;]+;/i,
+  )?.[0] ?? '';
+  assert.match(uploadDispositionIndex, /\(upload_session_id, object_key\)/i);
   assert.match(sql, /NEW\.evidence_version_id IS NOT NULL AND NEW\.upload_session_id IS NOT NULL[\s\S]*mismatched disposition provenance/i);
   assert.match(sql, /NEW\.object_key IS DISTINCT FROM (?:version_object_key|upload_object_key)/i);
+  assert.match(sql, /NEW\.object_key IS DISTINCT FROM upload_quarantine_object_key[\s\S]*NEW\.object_key IS DISTINCT FROM upload_immutable_object_key/i);
   assert.match(sql, /FROM occ\.upload_session[\s\S]*WHERE id = NEW\.upload_session_id/i);
   assert.match(sql, /FROM occ\.evidence[\s\S]*WHERE id = disposition_evidence_id[\s\S]*FOR UPDATE/i);
 });
@@ -98,6 +102,12 @@ test('adds immutable risk occurrence, action, adjudication, and intervention fac
   assert.match(sql, /CREATE TRIGGER trg_risk_action_validate[\s\S]*BEFORE INSERT ON occ\.risk_action/i);
   assert.match(sql, /risk_state IN \('RESOLVED', 'DISMISSED'\)/i);
   assert.match(sql, /FROM occ\.risk[\s\S]*FOR UPDATE/i);
+  assert.match(sql, /CREATE UNIQUE INDEX uq_risk_head_occurrence_identity[\s\S]*\(rule_definition_id, target_entity_id, occurrence_key\)[\s\S]*WHERE occurrence_key IS NOT NULL/i);
+  assert.match(sql, /CREATE FUNCTION occ\.enforce_risk_occurrence_completeness\(\)/i);
+  assert.match(sql, /risk_head\.occurrence_key IS NULL[\s\S]*RETURN NULL/i);
+  assert.match(sql, /count\(\*\)[\s\S]*<> 1/i);
+  assert.match(sql, /CREATE CONSTRAINT TRIGGER trg_risk_occurrence_complete_from_risk[\s\S]*DEFERRABLE INITIALLY DEFERRED/i);
+  assert.match(sql, /CREATE CONSTRAINT TRIGGER trg_risk_occurrence_complete_from_child[\s\S]*DEFERRABLE INITIALLY DEFERRED/i);
 });
 
 test('serializes resource availability and reservation capacity on the parent row', () => {

@@ -209,12 +209,13 @@ const v14FunctionSecurity = await db.query(`
       'validate_evidence_review_insert', 'validate_evidence_head_lifecycle',
       'validate_evidence_object_disposition', 'validate_risk_lifecycle',
       'validate_risk_occurrence_insert', 'validate_risk_action_insert',
-      'validate_risk_adjudication_insert', 'validate_resource_availability',
+      'validate_risk_adjudication_insert', 'enforce_risk_occurrence_completeness',
+      'validate_resource_availability',
       'validate_resource_reservation', 'reject_resource_reservation_delete',
       'validate_managed_resource_change'
     )
 `);
-if (v14FunctionSecurity.rows.length !== 13
+if (v14FunctionSecurity.rows.length !== 14
     || v14FunctionSecurity.rows.some((row) => row.prosecdef
       || row.runtime_execute || !row.trigger_only
       || row.proconfig?.[0] !== 'search_path=pg_catalog, occ, pg_temp')) {
@@ -232,6 +233,20 @@ async function expectSqlState(sql, expectedCode, label) {
   }
   await db.exec('ROLLBACK');
   if (!caught) throw new Error(`${label} was accepted`);
+  if (caught.code !== expectedCode) throw caught;
+}
+
+async function expectCommitSqlState(sql, expectedCode, label) {
+  let caught;
+  await db.exec('BEGIN');
+  await db.exec(sql);
+  try {
+    await db.exec('COMMIT');
+  } catch (error) {
+    caught = error;
+    await db.exec('ROLLBACK');
+  }
+  if (!caught) throw new Error(`${label} committed`);
   if (caught.code !== expectedCode) throw caught;
 }
 
@@ -260,7 +275,8 @@ await db.exec(`
     ('92000000-0000-7000-8000-000000000004'::uuid, 'portable:duplicate-evidence'),
     ('92000000-0000-7000-8000-000000000005'::uuid, 'portable:reviewer'),
     ('92000000-0000-7000-8000-000000000006'::uuid, 'portable:risk'),
-    ('92000000-0000-7000-8000-000000000007'::uuid, 'portable:resource')
+    ('92000000-0000-7000-8000-000000000007'::uuid, 'portable:resource'),
+    ('92000000-0000-7000-8000-000000000008'::uuid, 'portable:duplicate-risk')
   ) fixture(id, entity_key);
   INSERT INTO iam.principal (id, principal_kind, display_name, status)
   VALUES ('92000000-0000-7000-8000-000000000005', 'USER', 'Portable Reviewer', 'ACTIVE');
@@ -396,6 +412,31 @@ await expectSqlState(`
 `, '23505', 'second evidence review');
 
 await db.exec(`
+  UPDATE occ.upload_session
+  SET status = 'STREAMING', lease_owner = '90000000-0000-7000-8000-000000000005',
+      lease_acquired_at = transaction_timestamp(), lease_heartbeat_at = transaction_timestamp(),
+      lease_expires_at = transaction_timestamp() + interval '5 minutes',
+      actual_sha256 = repeat('b', 64), actual_size_bytes = 11, detected_media_type = 'text/plain',
+      scanner_engine = 'portable', scanner_version = '1', scanner_result_ref = 'clean:spare'
+  WHERE id = '92000000-0000-7000-8000-000000000023';
+  UPDATE occ.upload_session SET status = 'INSPECTING' WHERE id = '92000000-0000-7000-8000-000000000023';
+  UPDATE occ.upload_session SET status = 'SCANNING' WHERE id = '92000000-0000-7000-8000-000000000023';
+  UPDATE occ.upload_session SET status = 'PROMOTING' WHERE id = '92000000-0000-7000-8000-000000000023';
+  INSERT INTO occ.evidence_object_disposition
+    (id, upload_session_id, object_key, disposition_state)
+  VALUES
+    ('92000000-0000-7000-8000-000000000054', '92000000-0000-7000-8000-000000000023',
+     'quarantine/spare', 'CLEANUP_PENDING'),
+    ('92000000-0000-7000-8000-000000000055', '92000000-0000-7000-8000-000000000023',
+     'evidence/spare', 'CLEANUP_PENDING');
+`);
+await expectSqlState(`
+  INSERT INTO occ.evidence_object_disposition (id, upload_session_id, object_key, disposition_state)
+  VALUES ('92000000-0000-7000-8000-000000000056', '92000000-0000-7000-8000-000000000023',
+          'evidence/spare', 'CLEANUP_PENDING')
+`, '23505', 'duplicate promoted orphan disposition');
+
+await db.exec(`
   UPDATE occ.evidence
   SET legal_hold_at = transaction_timestamp(), legal_hold_by = '92000000-0000-7000-8000-000000000005',
       legal_hold_reason = 'portable hold'
@@ -404,20 +445,11 @@ await db.exec(`
     (id, evidence_version_id, object_key, disposition_state)
   VALUES ('92000000-0000-7000-8000-000000000050', '92000000-0000-7000-8000-000000000030',
           'evidence/main', 'RETAINED');
-  INSERT INTO occ.evidence_object_disposition
-    (id, upload_session_id, object_key, disposition_state)
-  VALUES ('92000000-0000-7000-8000-000000000051', '92000000-0000-7000-8000-000000000023',
-          'quarantine/spare', 'RETAINED');
 `);
 await expectSqlState(`
   UPDATE occ.evidence_object_disposition SET disposition_state = 'CLEANUP_PENDING'
   WHERE id = '92000000-0000-7000-8000-000000000050'
 `, '55000', 'version disposition cleanup under legal hold');
-await expectSqlState(`
-  INSERT INTO occ.evidence_object_disposition (id, upload_session_id, object_key, disposition_state)
-  VALUES ('92000000-0000-7000-8000-000000000052', '92000000-0000-7000-8000-000000000023',
-          'quarantine/spare', 'RETAINED')
-`, '23505', 'duplicate upload disposition');
 await expectSqlState(`
   INSERT INTO occ.evidence_object_disposition
     (id, evidence_version_id, upload_session_id, object_key, disposition_state)
@@ -431,15 +463,13 @@ await expectSqlState(`
   VALUES ('92000000-0000-7000-8000-000000000006', '92000000-0000-7000-8000-000000000012',
           '92000000-0000-7000-8000-000000000001', 'YELLOW', 'OPEN', 'portable risk')
 `, '23514', 'risk without occurrence facts');
-await db.exec(`
+await expectSqlState(`
   INSERT INTO occ.risk
     (id, rule_definition_id, target_entity_id, severity, state, reason, occurrence_key,
      detected_at, evaluated_at, calendar_version)
   VALUES ('92000000-0000-7000-8000-000000000006', '92000000-0000-7000-8000-000000000012',
           '92000000-0000-7000-8000-000000000001', 'YELLOW', 'OPEN', 'portable risk',
           'portable-occurrence', transaction_timestamp(), transaction_timestamp(), 'calendar-1');
-`);
-await expectSqlState(`
   INSERT INTO occ.risk_occurrence
     (id, risk_id, rule_definition_id, target_entity_id, occurrence_key, triggering_fact_ids,
      threshold_kind, calendar_version, evaluated_at, detected_at)
@@ -449,6 +479,12 @@ await expectSqlState(`
           transaction_timestamp(), transaction_timestamp())
 `, '23514', 'risk occurrence mismatch');
 await db.exec(`
+  INSERT INTO occ.risk
+    (id, rule_definition_id, target_entity_id, severity, state, reason, occurrence_key,
+     detected_at, evaluated_at, calendar_version)
+  VALUES ('92000000-0000-7000-8000-000000000006', '92000000-0000-7000-8000-000000000012',
+          '92000000-0000-7000-8000-000000000001', 'YELLOW', 'OPEN', 'portable risk',
+          'portable-occurrence', transaction_timestamp(), transaction_timestamp(), 'calendar-1');
   INSERT INTO occ.risk_occurrence
     (id, risk_id, rule_definition_id, target_entity_id, occurrence_key, triggering_fact_ids,
      threshold_kind, calendar_version, evaluated_at, detected_at)
@@ -458,6 +494,22 @@ await db.exec(`
   UPDATE occ.risk SET state = 'RESOLVED', resolved_at = transaction_timestamp()
   WHERE id = '92000000-0000-7000-8000-000000000006';
 `);
+await expectSqlState(`
+  INSERT INTO occ.risk
+    (id, rule_definition_id, target_entity_id, severity, state, reason, occurrence_key,
+     detected_at, evaluated_at, calendar_version)
+  VALUES ('92000000-0000-7000-8000-000000000008', '92000000-0000-7000-8000-000000000012',
+          '92000000-0000-7000-8000-000000000001', 'YELLOW', 'OPEN', 'duplicate risk',
+          'portable-occurrence', transaction_timestamp(), transaction_timestamp(), 'calendar-1')
+`, '23505', 'duplicate risk head occurrence identity');
+await expectCommitSqlState(`
+  INSERT INTO occ.risk
+    (id, rule_definition_id, target_entity_id, severity, state, reason, occurrence_key,
+     detected_at, evaluated_at, calendar_version)
+  VALUES ('92000000-0000-7000-8000-000000000008', '92000000-0000-7000-8000-000000000012',
+          '92000000-0000-7000-8000-000000000001', 'YELLOW', 'OPEN', 'missing occurrence',
+          'portable-missing-child', transaction_timestamp(), transaction_timestamp(), 'calendar-1')
+`, '23514', 'risk head without child occurrence');
 await expectSqlState(`
   INSERT INTO occ.risk_action (id, risk_id, actor_id, action_type, reason)
   VALUES ('92000000-0000-7000-8000-000000000062', '92000000-0000-7000-8000-000000000006',
