@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DOMAIN_EVENT_TYPES,
   MAX_EVIDENCE_BYTES,
   availabilityWindowSchema,
   cancelReservationRequestSchema,
   changeReservationRequestSchema,
   createEvidenceUploadSessionRequestSchema,
   createRiskAdjudicationRequestSchema,
+  domainEventEnvelopeSchema,
+  domainProblemDetailsSchema,
   evidenceContentResultSchema,
   evidenceDownloadMetadataSchema,
+  evidenceRangeHeaderSchema,
   evidenceEventPayloadSchema,
   evidenceMetadataSchema,
   evidencePreviewMetadataSchema,
@@ -37,6 +41,7 @@ import {
   riskFiltersSchema,
   riskMetricsSchema,
   riskPageSchema,
+  riskEvaluationSummarySchema,
   riskSchema,
   submitEvidenceRequestSchema,
   updateResourceRequestSchema,
@@ -188,6 +193,21 @@ describe("evidence contracts", () => {
     expect(evidenceVersionPageSchema.safeParse({ items: [], nextCursor: "opaque_123" }).success).toBe(true);
     expect(evidenceReviewPageSchema.safeParse({ items: [], previousCursor: "opaque_456" }).success).toBe(true);
   });
+
+  it("accepts only a bounded single HTTP byte range", () => {
+    for (const range of ["bytes=0-499", "bytes=500-", "bytes=-500"]) {
+      expect(evidenceRangeHeaderSchema.safeParse(range).success).toBe(true);
+    }
+    for (const range of [
+      "items=0-1",
+      "bytes=500-499",
+      "bytes=0-1,4-5",
+      "bytes=-0",
+      `bytes=0-${Number.MAX_SAFE_INTEGER + 1}`,
+    ]) {
+      expect(evidenceRangeHeaderSchema.safeParse(range).success).toBe(false);
+    }
+  });
 });
 
 describe("risk and intervention contracts", () => {
@@ -262,6 +282,27 @@ describe("risk and intervention contracts", () => {
       resolvedCount: 2,
       generatedAt: INSTANT,
     }).success).toBe(true);
+    expect(riskEvaluationSummarySchema.safeParse({
+      evaluatedAt: INSTANT,
+      evaluatedRuleCount: 20,
+      openedRiskCount: 2,
+      deduplicatedOccurrenceCount: 3,
+      escalatedRiskCount: 1,
+    }).success).toBe(true);
+  });
+
+  it("rejects a linked risk for a missed adjudication", () => {
+    const missed = {
+      reportingPeriodStart: "2026-07-01",
+      reportingPeriodEnd: "2026-08-01",
+      knownEventKey: "missed:42",
+      targetEntityId: UUID,
+      severeEvent: true,
+      outcome: "MISSED",
+      reason: "No matching risk was opened.",
+    };
+    expect(createRiskAdjudicationRequestSchema.safeParse(missed).success).toBe(true);
+    expect(createRiskAdjudicationRequestSchema.safeParse({ ...missed, riskId: UUID_2 }).success).toBe(false);
   });
 });
 
@@ -315,5 +356,68 @@ describe("bounded event payload contracts", () => {
       expect(riskEventPayloadSchema.safeParse({ ...riskPayload, [forbidden]: "secret" }).success).toBe(false);
       expect(reservationEventPayloadSchema.safeParse({ ...reservationPayload, [forbidden]: "secret" }).success).toBe(false);
     }
+  });
+
+  it("maps exact domain event types to strict payloads", () => {
+    expect(DOMAIN_EVENT_TYPES).toEqual([
+      "EVIDENCE_UPLOAD_FAILED",
+      "EVIDENCE_UPLOAD_CONFIRMED",
+      "EVIDENCE_SUBMITTED",
+      "EVIDENCE_REVIEWED",
+      "RISK_OPENED",
+      "RISK_ACTIONED",
+      "RISK_ESCALATED",
+      "RISK_RESOLVED",
+      "RISK_DISMISSED",
+      "RESOURCE_AVAILABILITY_CHANGED",
+      "RESERVATION_CREATED",
+      "RESERVATION_CHANGED",
+      "RESERVATION_CANCELLED",
+      "RESERVATION_CONFLICTED",
+    ]);
+    const envelope = {
+      id: UUID,
+      customerInstanceId: UUID_2,
+      type: "EVIDENCE_SUBMITTED",
+      schemaVersion: 1,
+      aggregateType: "EVIDENCE",
+      aggregateId: UUID,
+      aggregateVersion: 2,
+      occurredAt: INSTANT,
+      correlationId: UUID_2,
+      payload: {
+        evidenceId: UUID,
+        state: "SUBMITTED",
+        version: 2,
+        evidenceVersion: 1,
+      },
+    };
+    expect(domainEventEnvelopeSchema.safeParse(envelope).success).toBe(true);
+    expect(domainEventEnvelopeSchema.safeParse({ ...envelope, credentials: "secret" }).success).toBe(false);
+    expect(domainEventEnvelopeSchema.safeParse({ ...envelope, token: "secret" }).success).toBe(false);
+    expect(domainEventEnvelopeSchema.safeParse({
+      ...envelope,
+      type: "RISK_OPENED",
+    }).success).toBe(false);
+    expect(domainEventEnvelopeSchema.safeParse({
+      ...envelope,
+      payload: { ...envelope.payload, objectKey: "private/key" },
+    }).success).toBe(false);
+  });
+});
+
+describe("domain problem details", () => {
+  it("accepts only stable OCC problem codes", () => {
+    const problem = {
+      type: "https://innorder.example/problems/version-conflict",
+      title: "Version conflict",
+      status: 409,
+      code: "OCC-VERSION-CONFLICT",
+      correlationId: UUID,
+      currentVersion: 2,
+    };
+    expect(domainProblemDetailsSchema.safeParse(problem).success).toBe(true);
+    expect(domainProblemDetailsSchema.safeParse({ ...problem, code: "AD_HOC_CODE" }).success).toBe(false);
+    expectUnknownFieldRejected(domainProblemDetailsSchema, problem);
   });
 });

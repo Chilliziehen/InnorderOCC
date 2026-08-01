@@ -390,6 +390,8 @@ paths:
       - $ref: "#/components/parameters/EvidenceId"
     get:
       operationId: downloadEvidence
+      parameters:
+        - $ref: "#/components/parameters/Range"
       responses:
         "200":
           description: Authorized evidence attachment streamed by Core
@@ -407,6 +409,34 @@ paths:
               required: true
               schema:
                 type: string
+            Accept-Ranges:
+              $ref: "#/components/headers/AcceptRanges"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                maxLength: 104857600
+        "206":
+          description: Authorized partial evidence attachment streamed by Core
+          headers:
+            Content-Disposition:
+              required: true
+              schema:
+                type: string
+            X-Content-Type-Options:
+              required: true
+              schema:
+                type: string
+                const: nosniff
+            Digest:
+              required: true
+              schema:
+                type: string
+            Accept-Ranges:
+              $ref: "#/components/headers/AcceptRanges"
+            Content-Range:
+              $ref: "#/components/headers/ContentRange"
           content:
             application/octet-stream:
               schema:
@@ -632,6 +662,24 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/risks/evaluations/latest:
+    get:
+      operationId: getLatestRiskEvaluation
+      responses:
+        "200":
+          description: Summary of the latest deterministic risk evaluation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskEvaluationSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources:
@@ -963,6 +1011,15 @@ components:
         format: int64
         minimum: 0
         maximum: 9007199254740991
+    Range:
+      name: Range
+      in: header
+      required: false
+      description: A single bounded HTTP byte range
+      schema:
+        type: string
+        maxLength: 39
+        pattern: "^bytes=(?:[0-9]{1,16}-[0-9]{0,16}|-[0-9]{1,16})$"
     Cursor:
       name: cursor
       in: query
@@ -1136,6 +1193,26 @@ components:
       required: true
       schema:
         type: boolean
+    AcceptRanges:
+      description: Supported range unit
+      required: true
+      schema:
+        type: string
+        const: bytes
+    ContentRange:
+      description: Inclusive byte range and complete representation length
+      required: true
+      schema:
+        type: string
+        maxLength: 56
+        pattern: "^bytes [0-9]{1,16}-[0-9]{1,16}/[0-9]{1,16}$"
+    UnsatisfiedContentRange:
+      description: Complete representation length for an unsatisfied range
+      required: true
+      schema:
+        type: string
+        maxLength: 24
+        pattern: "^bytes \\*/[0-9]{1,16}$"
   responses:
     BadRequest:
       description: Invalid request
@@ -1187,6 +1264,11 @@ components:
             $ref: "#/components/schemas/ProblemDetails"
     InvalidRange:
       description: Requested evidence byte range is invalid
+      headers:
+        Accept-Ranges:
+          $ref: "#/components/headers/AcceptRanges"
+        Content-Range:
+          $ref: "#/components/headers/UnsatisfiedContentRange"
       content:
         application/problem+json:
           schema:
@@ -1226,9 +1308,7 @@ components:
           minimum: 400
           maximum: 599
         code:
-          type: string
-          minLength: 1
-          maxLength: 128
+          $ref: "#/components/schemas/OccProblemCode"
         correlationId:
           type: string
           format: uuid
@@ -1620,6 +1700,17 @@ components:
       type: object
       additionalProperties: false
       required: [evidenceVersion, decision, reason]
+      if:
+        required: [decision]
+        properties:
+          decision: { const: CONDITIONAL }
+      then:
+        required: [conditions]
+        properties:
+          conditions: { minItems: 1 }
+      else:
+        not:
+          required: [conditions]
       properties:
         evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
         decision: { $ref: "#/components/schemas/EvidenceReviewDecision" }
@@ -1827,6 +1918,13 @@ components:
       type: object
       additionalProperties: false
       required: [reportingPeriodStart, reportingPeriodEnd, knownEventKey, targetEntityId, severeEvent, outcome, reason]
+      if:
+        required: [outcome]
+        properties:
+          outcome: { const: MISSED }
+      then:
+        not:
+          required: [riskId]
       properties:
         reportingPeriodStart: { type: string, format: date }
         reportingPeriodEnd: { type: string, format: date }
@@ -1877,6 +1975,16 @@ components:
         acknowledgedWithinSlaCount: { $ref: "#/components/schemas/SafeVersion" }
         resolvedCount: { $ref: "#/components/schemas/SafeVersion" }
         generatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+    RiskEvaluationSummary:
+      type: object
+      additionalProperties: false
+      required: [evaluatedAt, evaluatedRuleCount, openedRiskCount, deduplicatedOccurrenceCount, escalatedRiskCount]
+      properties:
+        evaluatedAt: { $ref: "#/components/schemas/OffsetInstant" }
+        evaluatedRuleCount: { $ref: "#/components/schemas/SafeVersion" }
+        openedRiskCount: { $ref: "#/components/schemas/SafeVersion" }
+        deduplicatedOccurrenceCount: { $ref: "#/components/schemas/SafeVersion" }
+        escalatedRiskCount: { $ref: "#/components/schemas/SafeVersion" }
     ResourceState:
       type: string
       enum: [AVAILABLE, UNAVAILABLE, MAINTENANCE, ARCHIVED]
@@ -2088,3 +2196,193 @@ components:
         exclusive: { type: boolean }
         conflictKind: { $ref: "#/components/schemas/ReservationConflictKind" }
         reasonCode: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,127}$" }
+    DomainEventType:
+      type: string
+      enum:
+        - EVIDENCE_UPLOAD_FAILED
+        - EVIDENCE_UPLOAD_CONFIRMED
+        - EVIDENCE_SUBMITTED
+        - EVIDENCE_REVIEWED
+        - RISK_OPENED
+        - RISK_ACTIONED
+        - RISK_ESCALATED
+        - RISK_RESOLVED
+        - RISK_DISMISSED
+        - RESOURCE_AVAILABILITY_CHANGED
+        - RESERVATION_CREATED
+        - RESERVATION_CHANGED
+        - RESERVATION_CANCELLED
+        - RESERVATION_CONFLICTED
+    DomainEventEnvelopeBase:
+      type: object
+      required: [id, customerInstanceId, schemaVersion, aggregateType, aggregateId, aggregateVersion, occurredAt, correlationId]
+      properties:
+        id: { type: string, format: uuid }
+        customerInstanceId: { type: string, format: uuid }
+        schemaVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        aggregateType: { type: string, minLength: 1, maxLength: 256 }
+        aggregateId: { type: string, format: uuid }
+        aggregateVersion: { $ref: "#/components/schemas/SafeVersion" }
+        occurredAt: { $ref: "#/components/schemas/OffsetInstant" }
+        actorId: { type: string, format: uuid }
+        correlationId: { type: string, format: uuid }
+        causationId: { type: string, format: uuid }
+    EvidenceUploadFailedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: EVIDENCE_UPLOAD_FAILED }
+            payload: { $ref: "#/components/schemas/EvidenceEventPayload" }
+      unevaluatedProperties: false
+    EvidenceUploadConfirmedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: EVIDENCE_UPLOAD_CONFIRMED }
+            payload: { $ref: "#/components/schemas/EvidenceEventPayload" }
+      unevaluatedProperties: false
+    EvidenceSubmittedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: EVIDENCE_SUBMITTED }
+            payload: { $ref: "#/components/schemas/EvidenceEventPayload" }
+      unevaluatedProperties: false
+    EvidenceReviewedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: EVIDENCE_REVIEWED }
+            payload: { $ref: "#/components/schemas/EvidenceEventPayload" }
+      unevaluatedProperties: false
+    RiskOpenedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RISK_OPENED }
+            payload: { $ref: "#/components/schemas/RiskEventPayload" }
+      unevaluatedProperties: false
+    RiskActionedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RISK_ACTIONED }
+            payload: { $ref: "#/components/schemas/RiskEventPayload" }
+      unevaluatedProperties: false
+    RiskEscalatedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RISK_ESCALATED }
+            payload: { $ref: "#/components/schemas/RiskEventPayload" }
+      unevaluatedProperties: false
+    RiskResolvedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RISK_RESOLVED }
+            payload: { $ref: "#/components/schemas/RiskEventPayload" }
+      unevaluatedProperties: false
+    RiskDismissedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RISK_DISMISSED }
+            payload: { $ref: "#/components/schemas/RiskEventPayload" }
+      unevaluatedProperties: false
+    ResourceAvailabilityChangedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RESOURCE_AVAILABILITY_CHANGED }
+            payload: { $ref: "#/components/schemas/ResourceEventPayload" }
+      unevaluatedProperties: false
+    ReservationCreatedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RESERVATION_CREATED }
+            payload: { $ref: "#/components/schemas/ReservationEventPayload" }
+      unevaluatedProperties: false
+    ReservationChangedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RESERVATION_CHANGED }
+            payload: { $ref: "#/components/schemas/ReservationEventPayload" }
+      unevaluatedProperties: false
+    ReservationCancelledEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RESERVATION_CANCELLED }
+            payload: { $ref: "#/components/schemas/ReservationEventPayload" }
+      unevaluatedProperties: false
+    ReservationConflictedEvent:
+      allOf:
+        - $ref: "#/components/schemas/DomainEventEnvelopeBase"
+        - type: object
+          required: [type, payload]
+          properties:
+            type: { type: string, const: RESERVATION_CONFLICTED }
+            payload: { $ref: "#/components/schemas/ReservationEventPayload" }
+      unevaluatedProperties: false
+    DomainEventEnvelope:
+      oneOf:
+        - $ref: "#/components/schemas/EvidenceUploadFailedEvent"
+        - $ref: "#/components/schemas/EvidenceUploadConfirmedEvent"
+        - $ref: "#/components/schemas/EvidenceSubmittedEvent"
+        - $ref: "#/components/schemas/EvidenceReviewedEvent"
+        - $ref: "#/components/schemas/RiskOpenedEvent"
+        - $ref: "#/components/schemas/RiskActionedEvent"
+        - $ref: "#/components/schemas/RiskEscalatedEvent"
+        - $ref: "#/components/schemas/RiskResolvedEvent"
+        - $ref: "#/components/schemas/RiskDismissedEvent"
+        - $ref: "#/components/schemas/ResourceAvailabilityChangedEvent"
+        - $ref: "#/components/schemas/ReservationCreatedEvent"
+        - $ref: "#/components/schemas/ReservationChangedEvent"
+        - $ref: "#/components/schemas/ReservationCancelledEvent"
+        - $ref: "#/components/schemas/ReservationConflictedEvent"
+      discriminator:
+        propertyName: type
+        mapping:
+          EVIDENCE_UPLOAD_FAILED: "#/components/schemas/EvidenceUploadFailedEvent"
+          EVIDENCE_UPLOAD_CONFIRMED: "#/components/schemas/EvidenceUploadConfirmedEvent"
+          EVIDENCE_SUBMITTED: "#/components/schemas/EvidenceSubmittedEvent"
+          EVIDENCE_REVIEWED: "#/components/schemas/EvidenceReviewedEvent"
+          RISK_OPENED: "#/components/schemas/RiskOpenedEvent"
+          RISK_ACTIONED: "#/components/schemas/RiskActionedEvent"
+          RISK_ESCALATED: "#/components/schemas/RiskEscalatedEvent"
+          RISK_RESOLVED: "#/components/schemas/RiskResolvedEvent"
+          RISK_DISMISSED: "#/components/schemas/RiskDismissedEvent"
+          RESOURCE_AVAILABILITY_CHANGED: "#/components/schemas/ResourceAvailabilityChangedEvent"
+          RESERVATION_CREATED: "#/components/schemas/ReservationCreatedEvent"
+          RESERVATION_CHANGED: "#/components/schemas/ReservationChangedEvent"
+          RESERVATION_CANCELLED: "#/components/schemas/ReservationCancelledEvent"
+          RESERVATION_CONFLICTED: "#/components/schemas/ReservationConflictedEvent"
