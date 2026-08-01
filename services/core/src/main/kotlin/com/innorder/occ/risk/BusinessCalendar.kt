@@ -1,6 +1,7 @@
 package com.innorder.occ.risk
 
 import java.time.DayOfWeek
+import java.time.DateTimeException
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -11,14 +12,20 @@ class BusinessCalendar(version: String, holidays: Set<LocalDate>) {
     val holidays: Set<LocalDate> = Collections.unmodifiableSet(holidays.toSet())
 
     fun thresholdAfter(start: Instant, businessDays: Int, zone: ZoneId): Instant {
-        require(businessDays > 0) { "businessDays must be positive" }
-        var cursor = start.atZone(zone)
-        var remaining = businessDays
-        while (remaining > 0) {
-            cursor = cursor.plusDays(1)
-            if (cursor.dayOfWeek !in WEEKEND && cursor.toLocalDate() !in holidays) remaining--
+        require(businessDays in 1..RiskRule.MAX_BUSINESS_DAYS) { "businessDays is outside operational bounds" }
+        try {
+            var cursor = start.atZone(zone)
+            var remaining = businessDays
+            while (remaining > 0) {
+                cursor = cursor.plusDays(1)
+                if (cursor.dayOfWeek !in WEEKEND && cursor.toLocalDate() !in holidays) remaining--
+            }
+            return cursor.toInstant()
+        } catch (exception: DateTimeException) {
+            throw IllegalArgumentException("business calendar arithmetic overflow", exception)
+        } catch (exception: ArithmeticException) {
+            throw IllegalArgumentException("business calendar arithmetic overflow", exception)
         }
-        return cursor.toInstant()
     }
 
     companion object {
