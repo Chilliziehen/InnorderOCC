@@ -379,7 +379,7 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         checkDeadline(deadline)
         val size = Files.size(path)
         if (size < 4) return false
-        if (isValidZip(path, deadline)) return true
+        if (isValidZipStructure(path, deadline)) return true
         val prefix = Files.newInputStream(path).use { it.readNBytes(minOf(size, 512L).toInt()) }
         if (prefix.matchesAt(0, GZIP_MAGIC) && isValidGzip(path, deadline)) return true
         if (prefix.size >= 512 && isValidTar(path, deadline)) return true
@@ -398,28 +398,95 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         return false
     }
 
-    private fun isValidZip(path: java.nio.file.Path, deadline: Instant): Boolean = try {
-        ZipFile(path.toFile()).use { zip ->
-            val entries = zip.entries()
-            var expanded = 0L
-            while (entries.hasMoreElements()) {
+    private fun isValidZipStructure(path: java.nio.file.Path, deadline: Instant): Boolean = try {
+        Files.newByteChannel(path, StandardOpenOption.READ).use { channel ->
+            val size = channel.size()
+            val tailSize = minOf(size, MAXIMUM_ZIP_END_BYTES.toLong()).toInt()
+            val tail = probeRead(channel, size - tailSize, tailSize, deadline) ?: return false
+            val endIndex = (tail.size - ZIP_END_BYTES downTo 0).firstOrNull { index ->
+                tail.matchesAt(index, ZIP_END_MAGIC) &&
+                    size - tailSize + index + ZIP_END_BYTES + unsignedShort(tail, index + 20) == size
+            } ?: return false
+            val entries = unsignedShort(tail, endIndex + 10)
+            if (unsignedShort(tail, endIndex + 4) != 0 || unsignedShort(tail, endIndex + 6) != 0 ||
+                unsignedShort(tail, endIndex + 8) != entries
+            ) return false
+            val centralSize = unsignedInt(tail, endIndex + 12)
+            val centralOffset = unsignedInt(tail, endIndex + 16)
+            if (centralSize == ZIP64_SENTINEL || centralOffset == ZIP64_SENTINEL) return false
+            val absoluteEnd = size - tailSize + endIndex
+            val prefixBytes = absoluteEnd - centralSize - centralOffset
+            if (prefixBytes < 0) return false
+            val absoluteCentral = prefixBytes + centralOffset
+            if (absoluteCentral < 0 || absoluteCentral + centralSize != absoluteEnd) return false
+
+            var centralPosition = absoluteCentral
+            var centralRemaining = centralSize
+            val localOffsets = HashSet<Long>()
+            repeat(entries) {
                 checkDeadline(deadline)
-                val entry = entries.nextElement()
-                if (!entry.isDirectory) zip.getInputStream(entry).use { input ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    while (true) {
-                        checkDeadline(deadline)
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        expanded += count
-                        if (expanded > MAXIMUM_NESTED_PROBE_EXPANDED_BYTES) return true
-                    }
-                }
+                if (centralRemaining < ZIP_CENTRAL_HEADER_BYTES) return false
+                val fixed = probeRead(channel, centralPosition, ZIP_CENTRAL_HEADER_BYTES, deadline) ?: return false
+                if (!fixed.matchesAt(0, ZIP_CENTRAL_MAGIC)) return false
+                val flags = unsignedShort(fixed, 8)
+                val method = unsignedShort(fixed, 10)
+                val crc = unsignedInt(fixed, 16)
+                val compressedSize = unsignedInt(fixed, 20)
+                val expandedSize = unsignedInt(fixed, 24)
+                val nameLength = unsignedShort(fixed, 28)
+                val extraLength = unsignedShort(fixed, 30)
+                val commentLength = unsignedShort(fixed, 32)
+                val localOffset = unsignedInt(fixed, 42)
+                if (compressedSize == ZIP64_SENTINEL || expandedSize == ZIP64_SENTINEL || localOffset == ZIP64_SENTINEL ||
+                    unsignedShort(fixed, 34) != 0
+                ) return false
+                val variableLength = nameLength.toLong() + extraLength + commentLength
+                if (ZIP_CENTRAL_HEADER_BYTES + variableLength > centralRemaining) return false
+                val centralName = probeRead(channel, centralPosition + ZIP_CENTRAL_HEADER_BYTES, nameLength, deadline) ?: return false
+
+                val absoluteLocal = prefixBytes + localOffset
+                if (!localOffsets.add(absoluteLocal)) return false
+                val local = probeRead(channel, absoluteLocal, ZIP_LOCAL_HEADER_BYTES, deadline) ?: return false
+                if (!local.matchesAt(0, ZIP_LOCAL_MAGIC) || unsignedShort(local, 6) != flags || unsignedShort(local, 8) != method) return false
+                if (flags and ZIP_DATA_DESCRIPTOR_FLAG == 0 &&
+                    (unsignedInt(local, 14) != crc || unsignedInt(local, 18) != compressedSize || unsignedInt(local, 22) != expandedSize)
+                ) return false
+                if (flags and ZIP_DATA_DESCRIPTOR_FLAG != 0 &&
+                    (unsignedInt(local, 14) != 0L || unsignedInt(local, 18) != 0L || unsignedInt(local, 22) != 0L)
+                ) return false
+                val localNameLength = unsignedShort(local, 26)
+                val localExtraLength = unsignedShort(local, 28)
+                val localName = probeRead(channel, absoluteLocal + ZIP_LOCAL_HEADER_BYTES, localNameLength, deadline) ?: return false
+                if (!centralName.contentEquals(localName)) return false
+                val dataStart = absoluteLocal + ZIP_LOCAL_HEADER_BYTES + localNameLength + localExtraLength
+                if (absoluteLocal < prefixBytes || dataStart < absoluteLocal || compressedSize > absoluteCentral - dataStart) return false
+
+                val recordLength = ZIP_CENTRAL_HEADER_BYTES + variableLength
+                centralPosition += recordLength
+                centralRemaining -= recordLength
             }
+            centralRemaining == 0L && centralPosition == absoluteEnd
         }
-        true
+    } catch (rejected: EvidenceRejectedException) {
+        throw rejected
     } catch (_: IOException) {
         false
+    }
+
+    private fun probeRead(
+        channel: java.nio.channels.SeekableByteChannel,
+        position: Long,
+        count: Int,
+        deadline: Instant,
+    ): ByteArray? {
+        if (position < 0 || count < 0 || position > channel.size() || count.toLong() > channel.size() - position) return null
+        channel.position(position)
+        val buffer = ByteBuffer.allocate(count)
+        while (buffer.hasRemaining()) {
+            checkDeadline(deadline)
+            if (channel.read(buffer) < 0) return null
+        }
+        return buffer.array()
     }
 
     private fun isValidGzip(path: java.nio.file.Path, deadline: Instant): Boolean = try {
@@ -508,7 +575,9 @@ internal class ArchiveContentValidator(private val clock: Clock) {
         private const val ZIP_END_BYTES = 22
         private const val MAXIMUM_ZIP_END_BYTES = ZIP_END_BYTES + 65_535
         private const val ZIP_CENTRAL_HEADER_BYTES = 46
+        private const val ZIP_LOCAL_HEADER_BYTES = 30
         private const val UTF8_FLAG = 1 shl 11
+        private const val ZIP_DATA_DESCRIPTOR_FLAG = 1 shl 3
         private const val ZIP64_SENTINEL = 0xffff_ffffL
         private const val CONTENT_TYPES = "[Content_Types].xml"
         private const val ROOT_RELATIONSHIPS = "_rels/.rels"

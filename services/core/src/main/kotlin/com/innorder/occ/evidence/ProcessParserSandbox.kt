@@ -10,7 +10,10 @@ import java.time.Clock
 import java.time.Duration
 import java.util.HexFormat
 import java.util.concurrent.ExecutionException
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.Semaphore
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
@@ -23,6 +26,8 @@ class ProcessParserSandboxConfiguration(
     val maximumContainerMemoryBytes: Long,
     val maximumContainerPids: Int,
     val maximumTmpfsBytes: Long,
+    val maximumConcurrentParsers: Int = 4,
+    val maximumQueuedParsers: Int = 16,
 ) {
     val arguments: List<String> = java.util.List.copyOf(arguments)
 
@@ -35,6 +40,8 @@ class ProcessParserSandboxConfiguration(
         require(maximumContainerMemoryBytes in MINIMUM_MEMORY_BYTES..2L * 1024 * 1024 * 1024)
         require(maximumContainerPids in 1..1024)
         require(maximumTmpfsBytes in 1..1024L * 1024 * 1024)
+        require(maximumConcurrentParsers in 1..16)
+        require(maximumQueuedParsers in 0..64)
         validateArguments()
     }
 
@@ -140,7 +147,18 @@ class ProcessParserSandbox internal constructor(
     private val configuration: ProcessParserSandboxConfiguration,
     private val clock: Clock,
     private val processStarter: ProcessStarter,
-) : ParserSandbox {
+) : ParserSandbox, AutoCloseable {
+    private val admission = Semaphore(configuration.maximumConcurrentParsers + configuration.maximumQueuedParsers, true)
+    private val active = Semaphore(configuration.maximumConcurrentParsers, true)
+    private val readers = ThreadPoolExecutor(
+        configuration.maximumConcurrentParsers * 2,
+        configuration.maximumConcurrentParsers * 2,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(configuration.maximumConcurrentParsers * 2),
+        { work -> Thread(work, "evidence-parser-shared-output").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
     constructor(
         configuration: ProcessParserSandboxConfiguration,
         clock: Clock = Clock.systemUTC(),
@@ -151,6 +169,25 @@ class ProcessParserSandbox internal constructor(
     )
 
     override fun inspect(request: ParserSandboxRequest): ParserSandboxResult {
+        if (!admission.tryAcquire()) return sandboxError()
+        try {
+            val remaining = Duration.between(clock.instant(), request.deadline).toMillis()
+            if (remaining <= 0) return ParserSandboxResult.Rejected(EvidenceRejectionCode.DEADLINE_EXCEEDED)
+            if (!active.tryAcquire(remaining, TimeUnit.MILLISECONDS)) return sandboxError()
+            try {
+                return execute(request)
+            } finally {
+                active.release()
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return sandboxError()
+        } finally {
+            admission.release()
+        }
+    }
+
+    private fun execute(request: ParserSandboxRequest): ParserSandboxResult {
         val requestRemaining = Duration.between(clock.instant(), request.deadline)
         if (requestRemaining.isZero || requestRemaining.isNegative) {
             return ParserSandboxResult.Rejected(EvidenceRejectionCode.DEADLINE_EXCEEDED)
@@ -208,10 +245,12 @@ class ProcessParserSandbox internal constructor(
         } catch (_: Exception) {
             return ControlOutcome(-1, ByteArray(0), completed = false, oversized = false, interrupted = false)
         }
-        val readerExecutor = Executors.newSingleThreadExecutor { work ->
-            Thread(work, "evidence-parser-docker-control-output").apply { isDaemon = true }
+        val outputFuture = try {
+            readers.submit<BoundedOutput> { readBounded(process) }
+        } catch (_: RejectedExecutionException) {
+            terminate(process)
+            return ControlOutcome(-1, ByteArray(0), completed = false, oversized = true, interrupted = false)
         }
-        val outputFuture = readerExecutor.submit<BoundedOutput> { readBounded(process) }
         return try {
             process.outputStream.close()
             if (!process.waitFor(CONTROL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
@@ -244,16 +283,17 @@ class ProcessParserSandbox internal constructor(
         } finally {
             if (process.isAlive) terminateWithoutWaiting(process)
             outputFuture.cancel(true)
-            readerExecutor.shutdownNow()
         }
     }
 
     private fun launch(command: List<String>, input: ByteArray, timeout: Duration): ProcessOutcome {
         val process = processStarter.start(command)
-        val readerExecutor = Executors.newSingleThreadExecutor { work ->
-            Thread(work, "evidence-parser-output").apply { isDaemon = true }
+        val outputFuture = try {
+            readers.submit<BoundedOutput> { readBounded(process) }
+        } catch (_: RejectedExecutionException) {
+            terminate(process)
+            return ProcessOutcome(-1, ByteArray(0), timedOut = false, oversized = true)
         }
-        val outputFuture = readerExecutor.submit<BoundedOutput> { readBounded(process) }
         return try {
             try {
                 process.outputStream.use { it.write(input) }
@@ -277,7 +317,6 @@ class ProcessParserSandbox internal constructor(
         } finally {
             if (process.isAlive) terminate(process)
             outputFuture.cancel(true)
-            readerExecutor.shutdownNow()
         }
     }
 
@@ -309,6 +348,15 @@ class ProcessParserSandbox internal constructor(
     private fun terminateWithoutWaiting(process: Process) {
         process.destroy()
         if (process.isAlive) process.destroyForcibly()
+    }
+
+    override fun close() {
+        readers.shutdownNow()
+        try {
+            readers.awaitTermination(2, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun sandboxError() = ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR)

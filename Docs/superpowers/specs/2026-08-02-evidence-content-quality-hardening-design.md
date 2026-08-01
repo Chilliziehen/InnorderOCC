@@ -22,6 +22,12 @@ Whole-file raw signature searching is removed. Top-level format selection uses o
 
 Nested entries are rejected by archive filename or by a validated container probe, not a short magic match. Probes validate ZIP central-directory layout including self-extracting prefixes, gzip framing/trailer by bounded decompression, TAR header checksum, and sufficiently complete checksummed headers for the other recognized formats. Incidental magic bytes remain ordinary payload.
 
+Nested ZIP validation is independent of entry decompression. A bounded random-access probe locates the terminal EOCD, derives any self-extracting prefix adjustment, walks every central record, and verifies each corresponding local header, name, flags, method, data extent, and offset. Structurally valid encrypted entries and unknown compression methods are nested archives; malformed PK bytes and inconsistent records are not.
+
+## Parser Concurrency
+
+`ProcessParserSandbox` owns fair bounded admission and active-concurrency gates plus one fixed bounded output executor shared by parser and Docker control commands. Saturated or deadline-expired admission fails closed. The sandbox is `AutoCloseable`; application and tests own its lifecycle, and no inspection or control command creates an executor.
+
 ## Integration Tests
 
 Docker lifecycle tests carry a `full-integration` tag and require the explicit `innorder.fullIntegration=true` system property, supplied from `-PfullEvidenceIntegration=true`. Default unit runs skip them visibly. Forced strict runs set the property and assert zero skips. Docker command helpers drain bounded output concurrently, wait with a deadline, kill timed-out CLI processes, and never call blocking `readText()` before timed wait.
