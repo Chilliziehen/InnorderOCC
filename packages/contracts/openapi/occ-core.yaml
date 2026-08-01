@@ -98,12 +98,466 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/providers:
+    post:
+      operationId: createAiProvider
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderConfigCreate"
+      responses:
+        "201":
+          description: Provider configuration created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderConfig"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/providers/{providerId}:
+    patch:
+      operationId: updateAiProvider
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ProviderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderConfigUpdate"
+      responses:
+        "200":
+          description: Provider configuration updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderConfig"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/provider-profiles:
+    post:
+      operationId: createAiProviderProfile
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderProfileCreate"
+      responses:
+        "201":
+          description: Provider profile created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/provider-profiles/{profileId}:
+    patch:
+      operationId: updateAiProviderProfile
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ProfileId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderProfileUpdate"
+      responses:
+        "200":
+          description: Provider profile updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/providers/{providerId}/probes:
+    post:
+      operationId: probeAiProvider
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/ProviderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CapabilityProbeRequest"
+      responses:
+        "202":
+          description: Capability probe accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilityProbe"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/knowledge/uploads:
+    post:
+      operationId: uploadAiKnowledge
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeUploadMetadata"
+      responses:
+        "202":
+          description: Quarantined upload accepted for ingestion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionJob"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/knowledge/ingestions/{jobId}:
+    get:
+      operationId: getAiKnowledgeIngestion
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Current ingestion state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionJob"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/knowledge/spaces/{spaceId}/activate:
+    post:
+      operationId: activateAiKnowledgeSpace
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeActivationRequest"
+      responses:
+        "200":
+          description: Knowledge space activated after gate validation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeGateResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/admin/ai/knowledge/spaces/{spaceId}/rollback:
+    post:
+      operationId: rollbackAiKnowledgeSpace
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeRollbackRequest"
+      responses:
+        "200":
+          description: Knowledge space rolled back to the specified immutable version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeIngestionJob"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/ai/guidance:
+    post:
+      operationId: requestAiGuidance
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GuidanceRequest"
+      responses:
+        "202":
+          description: Guidance operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuidanceStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/ai/guidance/{operationId}:
+    get:
+      operationId: getAiGuidanceStatus
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Guidance operation status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GuidanceStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/ai/recommendations:
+    get:
+      operationId: listAiRecommendations
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Currently authorized recommendations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecommendationList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/ai/recommendations/{recommendationId}:
+    get:
+      operationId: getAiRecommendation
+      parameters:
+        - $ref: "#/components/parameters/RecommendationId"
+      responses:
+        "200":
+          description: Currently authorized recommendation detail and citations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecommendationDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/ai/recommendations/{recommendationId}/review:
+    post:
+      operationId: reviewAiRecommendation
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RecommendationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecommendationReviewRequest"
+      responses:
+        "200":
+          description: Recommendation review recorded without workflow mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecommendationDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /internal/v1/ai/grants/claim:
+    post:
+      operationId: claimAiServiceGrant
+      description: mTLS-only Core route for the AI service; rejects bearer credentials.
+      security:
+        - mtlsAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceGrantClaim"
+      responses:
+        "200":
+          description: Single-use operation grant exchanged only with the authenticated AI service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceGrantExchange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /internal/v1/ai/recommendations:
+    post:
+      operationId: submitAiServiceRecommendation
+      description: mTLS-only Core route for the AI service; rejects bearer credentials.
+      security:
+        - mtlsAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceRecommendationSubmission"
+      responses:
+        "201":
+          description: Informational recommendation accepted for human review
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecommendationDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /internal/v1/ai/operations/{operationId}/outcome:
+    post:
+      operationId: reportAiServiceOperationOutcome
+      description: mTLS-only Core route for the AI service; rejects bearer credentials.
+      security:
+        - mtlsAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceOperationOutcome"
+      responses:
+        "204":
+          description: Operation outcome recorded
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    mtlsAuth:
+      type: mutualTLS
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProfileId:
+      name: profileId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SpaceId:
+      name: spaceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RecommendationId:
+      name: recommendationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   responses:
     BadRequest:
       description: Invalid request
@@ -113,6 +567,18 @@ components:
             $ref: "#/components/schemas/ProblemDetails"
     Unauthorized:
       description: Authentication is required or invalid
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    NotFound:
+      description: Resource was not found or is not currently visible
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    Conflict:
+      description: Expected version or idempotency state conflicts with current state
       content:
         application/problem+json:
           schema:
@@ -362,3 +828,786 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ComponentStatus"
+    DataClassification:
+      type: string
+      enum: [PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED]
+    ProviderPurpose:
+      type: string
+      enum: [CHAT, EMBEDDING]
+    ProviderConfig:
+      type: object
+      additionalProperties: false
+      required: [id, name, origin, apiPrefix, approvedPrivateCidrs, credentialFile, enabled, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        origin:
+          type: string
+          format: uri
+          pattern: "^https://[^/?#]+$"
+          minLength: 9
+          maxLength: 2048
+        apiPrefix:
+          type: string
+          pattern: "^/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?$"
+          minLength: 1
+          maxLength: 256
+        approvedPrivateCidrs:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            minLength: 3
+            maxLength: 64
+        credentialFile:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    ProviderConfigCreate:
+      type: object
+      additionalProperties: false
+      required: [name, origin, apiPrefix, approvedPrivateCidrs, credentialFile, enabled]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        origin:
+          type: string
+          format: uri
+        apiPrefix:
+          type: string
+        approvedPrivateCidrs:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+        credentialFile:
+          type: string
+        enabled:
+          type: boolean
+    ProviderConfigUpdate:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        origin:
+          type: string
+          format: uri
+        apiPrefix:
+          type: string
+        approvedPrivateCidrs:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+        credentialFile:
+          type: string
+        enabled:
+          type: boolean
+        expectedVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    ProviderTimeouts:
+      type: object
+      additionalProperties: false
+      required: [connectMs, totalMs]
+      properties:
+        connectMs:
+          type: integer
+          minimum: 100
+          maximum: 60000
+        totalMs:
+          type: integer
+          minimum: 100
+          maximum: 300000
+    ProviderRateLimit:
+      type: object
+      additionalProperties: false
+      required: [requestsPerMinute, tokensPerMinute, maxConcurrency]
+      properties:
+        requestsPerMinute:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        tokensPerMinute:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        maxConcurrency:
+          type: integer
+          minimum: 1
+          maximum: 1024
+    ProviderCostRule:
+      type: object
+      additionalProperties: false
+      required: [currency, inputMicrosPerMillionTokens, outputMicrosPerMillionTokens]
+      properties:
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          pattern: "^[A-Z]{3}$"
+        inputMicrosPerMillionTokens:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        outputMicrosPerMillionTokens:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    RequiredProviderCapabilities:
+      type: object
+      additionalProperties: false
+      required: [structuredOutput]
+      properties:
+        structuredOutput:
+          type: boolean
+        embeddingDimensions:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+    CapabilitySnapshot:
+      type: object
+      additionalProperties: false
+      required: [chat, embeddings, structuredOutput, maxInputTokens, maxOutputTokens, probedAt, snapshotHash]
+      properties:
+        chat:
+          type: boolean
+        embeddings:
+          type: boolean
+        structuredOutput:
+          type: boolean
+        embeddingDimensions:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+        maxInputTokens:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        maxOutputTokens:
+          type: integer
+          minimum: 1
+          maximum: 9007199254740991
+        probedAt:
+          type: string
+          format: date-time
+        snapshotHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+    ProviderProfile:
+      type: object
+      additionalProperties: false
+      required: [id, providerId, name, purpose, model, maxClassification, requiredCapabilities, timeouts, rateLimit, cost, capabilitySnapshot, enabled, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        purpose:
+          $ref: "#/components/schemas/ProviderPurpose"
+        model:
+          type: string
+          minLength: 1
+          maxLength: 256
+        maxClassification:
+          $ref: "#/components/schemas/DataClassification"
+        requiredCapabilities:
+          $ref: "#/components/schemas/RequiredProviderCapabilities"
+        timeouts:
+          $ref: "#/components/schemas/ProviderTimeouts"
+        rateLimit:
+          $ref: "#/components/schemas/ProviderRateLimit"
+        cost:
+          $ref: "#/components/schemas/ProviderCostRule"
+        capabilitySnapshot:
+          $ref: "#/components/schemas/CapabilitySnapshot"
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    ProviderProfileCreate:
+      type: object
+      additionalProperties: false
+      required: [providerId, name, purpose, model, maxClassification, requiredCapabilities, timeouts, rateLimit, cost, capabilitySnapshot, enabled]
+      properties:
+        providerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        purpose:
+          $ref: "#/components/schemas/ProviderPurpose"
+        model:
+          type: string
+        maxClassification:
+          $ref: "#/components/schemas/DataClassification"
+        requiredCapabilities:
+          $ref: "#/components/schemas/RequiredProviderCapabilities"
+        timeouts:
+          $ref: "#/components/schemas/ProviderTimeouts"
+        rateLimit:
+          $ref: "#/components/schemas/ProviderRateLimit"
+        cost:
+          $ref: "#/components/schemas/ProviderCostRule"
+        capabilitySnapshot:
+          $ref: "#/components/schemas/CapabilitySnapshot"
+        enabled:
+          type: boolean
+    ProviderProfileUpdate:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        providerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        purpose:
+          $ref: "#/components/schemas/ProviderPurpose"
+        model:
+          type: string
+        maxClassification:
+          $ref: "#/components/schemas/DataClassification"
+        requiredCapabilities:
+          $ref: "#/components/schemas/RequiredProviderCapabilities"
+        timeouts:
+          $ref: "#/components/schemas/ProviderTimeouts"
+        rateLimit:
+          $ref: "#/components/schemas/ProviderRateLimit"
+        cost:
+          $ref: "#/components/schemas/ProviderCostRule"
+        capabilitySnapshot:
+          $ref: "#/components/schemas/CapabilitySnapshot"
+        enabled:
+          type: boolean
+        expectedVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    CapabilityProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [providerId]
+      properties:
+        providerId:
+          type: string
+          format: uuid
+    CapabilityProbe:
+      type: object
+      additionalProperties: false
+      required: [id, providerId, status, requestedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCEEDED, FAILED]
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        snapshot:
+          $ref: "#/components/schemas/CapabilitySnapshot"
+        errorCode:
+          type: string
+          minLength: 1
+          maxLength: 128
+    KnowledgeUploadMetadata:
+      type: object
+      additionalProperties: false
+      required: [fileName, mediaType, format, title, classification, sizeBytes, contentHash]
+      properties:
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+        mediaType:
+          type: string
+          minLength: 1
+          maxLength: 255
+        format:
+          type: string
+          enum: [TEXT, MARKDOWN, PDF, DOCX, XLSX]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        classification:
+          $ref: "#/components/schemas/DataClassification"
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 104857600
+        contentHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+    KnowledgeIngestionJob:
+      type: object
+      additionalProperties: false
+      required: [id, documentVersionId, stage, status, progressPercent, attempt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentVersionId:
+          type: string
+          format: uuid
+        stage:
+          type: string
+          enum: [QUARANTINE, MALWARE_SCAN, PARSE, NORMALIZE, CHUNK, EMBED, QUALITY_GATE, COMPLETE]
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED]
+        progressPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        attempt:
+          type: integer
+          minimum: 0
+          maximum: 100
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        errorCode:
+          type: string
+          minLength: 1
+          maxLength: 128
+    KnowledgeGateMetrics:
+      type: object
+      additionalProperties: false
+      required: [coverage, unauthorizedHits, citationPrecision, recallAt10]
+      properties:
+        coverage:
+          type: number
+          minimum: 0
+          maximum: 1
+        unauthorizedHits:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        citationPrecision:
+          type: number
+          minimum: 0
+          maximum: 1
+        recallAt10:
+          type: number
+          minimum: 0
+          maximum: 1
+    KnowledgeGateResult:
+      type: object
+      additionalProperties: false
+      required: [id, embeddingSpaceId, corpusManifestHash, metrics, decision, evaluatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        embeddingSpaceId:
+          type: string
+          format: uuid
+        corpusManifestHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        metrics:
+          $ref: "#/components/schemas/KnowledgeGateMetrics"
+        decision:
+          type: string
+          enum: [PASS, FAIL]
+        evaluatedAt:
+          type: string
+          format: date-time
+    KnowledgeActivationRequest:
+      type: object
+      additionalProperties: false
+      required: [gateResultId, expectedVersion]
+      properties:
+        gateResultId:
+          type: string
+          format: uuid
+        expectedVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    KnowledgeRollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [targetVersionId, expectedVersion]
+      properties:
+        targetVersionId:
+          type: string
+          format: uuid
+        expectedVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    GuidanceRequest:
+      type: object
+      additionalProperties: false
+      required: [targetEntityId, taskId, providerProfileId, expectedTargetVersion]
+      properties:
+        targetEntityId:
+          type: string
+          format: uuid
+        taskId:
+          type: string
+          format: uuid
+        providerProfileId:
+          type: string
+          format: uuid
+        expectedTargetVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+    GuidanceStatus:
+      type: object
+      additionalProperties: false
+      required: [operationId, status, requestedAt, updatedAt]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED, DEAD_LETTERED]
+        recommendationId:
+          type: string
+          format: uuid
+        errorCode:
+          type: string
+          minLength: 1
+          maxLength: 128
+        requestedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Citation:
+      type: object
+      additionalProperties: false
+      required: [rank, retrievalHitId, excerptHash]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+          maximum: 50
+        retrievalHitId:
+          type: string
+          format: uuid
+        excerptHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+    GuidanceStep:
+      type: object
+      additionalProperties: false
+      required: [text, citationRanks]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        citationRanks:
+          type: array
+          minItems: 1
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: integer
+            minimum: 1
+            maximum: 50
+    GeneratedRecommendation:
+      type: object
+      additionalProperties: false
+      required: [generatedContent, summary, steps, confidence, citations]
+      properties:
+        generatedContent:
+          type: boolean
+          const: true
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/GuidanceStep"
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        citations:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/Citation"
+    RecommendationItem:
+      type: object
+      additionalProperties: false
+      required: [id, targetEntityId, status, summary, confidence, staleReasons, version, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        targetEntityId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PROPOSED, ACCEPTED, REJECTED]
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        staleReasons:
+          type: array
+          maxItems: 6
+          items:
+            type: string
+            enum: [PACKAGE_VERSION_CHANGED, POLICY_RELEASE_CHANGED, DOCUMENT_VERSION_CHANGED, PROVIDER_CAPABILITY_CHANGED, TARGET_VERSION_CHANGED, AI_UNAVAILABLE]
+        version:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        createdAt:
+          type: string
+          format: date-time
+    RecommendationList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RecommendationItem"
+        nextCursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    RecommendationDetail:
+      type: object
+      additionalProperties: false
+      required: [id, targetEntityId, status, summary, confidence, staleReasons, version, createdAt, output]
+      properties:
+        id:
+          type: string
+          format: uuid
+        targetEntityId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PROPOSED, ACCEPTED, REJECTED]
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        staleReasons:
+          type: array
+          maxItems: 6
+          items:
+            type: string
+        version:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        createdAt:
+          type: string
+          format: date-time
+        output:
+          $ref: "#/components/schemas/GeneratedRecommendation"
+    RecommendationReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [decision, expectedVersion]
+      properties:
+        decision:
+          type: string
+          enum: [ACCEPTED, REJECTED]
+        expectedVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        comment:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    ServiceGrantClaim:
+      type: object
+      additionalProperties: false
+      required: [operationId]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+    ServiceGrantExchange:
+      type: object
+      additionalProperties: false
+      required: [operationId, grantToken]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        grantToken:
+          type: string
+          minLength: 3
+          maxLength: 8192
+          pattern: "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+    ServiceRecommendationSubmission:
+      type: object
+      additionalProperties: false
+      required: [operationId, runId, targetEntityId, expectedTargetVersion, output]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        runId:
+          type: string
+          format: uuid
+        targetEntityId:
+          type: string
+          format: uuid
+        expectedTargetVersion:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        output:
+          $ref: "#/components/schemas/GeneratedRecommendation"
+    ServiceOperationOutcome:
+      type: object
+      additionalProperties: false
+      required: [operationId, status]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [SUCCEEDED, FAILED]
+        errorCode:
+          type: string
+          minLength: 1
+          maxLength: 128
+    KnowledgeIngestionRequestedPayload:
+      type: object
+      additionalProperties: false
+      required: [operationId, ingestionJobId, documentVersionId]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        ingestionJobId:
+          type: string
+          format: uuid
+        documentVersionId:
+          type: string
+          format: uuid
+    AiGuidanceRouting:
+      type: object
+      additionalProperties: false
+      required: [routingKey, attempt]
+      properties:
+        routingKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._-]+$"
+        attempt:
+          type: integer
+          minimum: 0
+          maximum: 100
+    AiGuidanceRequestedPayload:
+      type: object
+      additionalProperties: false
+      required: [operationId, routing]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        routing:
+          $ref: "#/components/schemas/AiGuidanceRouting"
+    AiRecommendationProposedPayload:
+      type: object
+      additionalProperties: false
+      required: [operationId, recommendationId, runId]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        recommendationId:
+          type: string
+          format: uuid
+        runId:
+          type: string
+          format: uuid
+    AiOperationDeadLetteredPayload:
+      type: object
+      additionalProperties: false
+      required: [operationId, failedEventId, failedEventType, attempts, errorCode]
+      properties:
+        operationId:
+          type: string
+          format: uuid
+        failedEventId:
+          type: string
+          format: uuid
+        failedEventType:
+          type: string
+          minLength: 1
+          maxLength: 256
+        attempts:
+          type: integer
+          minimum: 1
+          maximum: 100
+        errorCode:
+          type: string
+          minLength: 1
+          maxLength: 128

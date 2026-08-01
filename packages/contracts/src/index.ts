@@ -28,8 +28,29 @@ export type {
   TokenResponse,
 } from "./auth.js";
 
-export { eventEnvelopeSchema } from "./events.js";
-export type { EventEnvelope } from "./events.js";
+export * from "./governed-ai.js";
+
+export {
+  aiGuidanceRequestedEventSchema,
+  aiGuidanceRequestedPayloadSchema,
+  aiGuidanceRoutingSchema,
+  aiOperationDeadLetteredEventSchema,
+  aiOperationDeadLetteredPayloadSchema,
+  aiRecommendationProposedEventSchema,
+  aiRecommendationProposedPayloadSchema,
+  eventEnvelopeSchema,
+  governedAiEventSchema,
+  knowledgeIngestionRequestedEventSchema,
+  knowledgeIngestionRequestedPayloadSchema,
+} from "./events.js";
+export type {
+  AiGuidanceRequestedPayload,
+  AiOperationDeadLetteredPayload,
+  AiRecommendationProposedPayload,
+  EventEnvelope,
+  GovernedAiEvent,
+  KnowledgeIngestionRequestedPayload,
+} from "./events.js";
 
 export {
   authorizationDecisionSchema,
