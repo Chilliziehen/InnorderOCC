@@ -5,8 +5,10 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.security.SecureRandom
 import java.time.Clock
 import java.time.Duration
+import java.util.HexFormat
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -37,12 +39,34 @@ class ProcessParserSandboxConfiguration(
     }
 
     fun command(input: Path, operation: String): List<String> {
+        return invocation(input, operation).command
+    }
+
+    internal fun invocation(input: Path, operation: String): DockerInvocation {
         require(operation == "--inspect")
         val normalized = input.toAbsolutePath().normalize()
         require(Files.isRegularFile(normalized, LinkOption.NOFOLLOW_LINKS))
         require(normalized.toString().none { it == ',' || it == '\n' || it == '\r' || it == '\u0000' })
         val mount = "--mount=type=bind,src=$normalized,dst=$CONTAINER_INPUT_PATH,readonly"
-        return listOf(executable.toString()) + arguments.map { if (it == INPUT_MOUNT_PLACEHOLDER) mount else it } + operation
+        val name = CONTAINER_NAME_PREFIX + HexFormat.of().formatHex(ByteArray(CONTAINER_NAME_RANDOM_BYTES).also(RANDOM::nextBytes))
+        val command = buildList {
+            add(executable.toString())
+            add(arguments.first())
+            add("--name=$name")
+            addAll(arguments.drop(1).map { if (it == INPUT_MOUNT_PLACEHOLDER) mount else it })
+            add(operation)
+        }
+        return DockerInvocation(name, command)
+    }
+
+    internal fun removalCommand(name: String): List<String> {
+        require(CONTAINER_NAME.matches(name))
+        return listOf(executable.toString(), "rm", "-f", name)
+    }
+
+    internal fun inspectionCommand(name: String): List<String> {
+        require(CONTAINER_NAME.matches(name))
+        return listOf(executable.toString(), "inspect", name)
     }
 
     private fun validateArguments() {
@@ -88,10 +112,16 @@ class ProcessParserSandboxConfiguration(
         const val CONTAINER_INPUT_PATH = "/input/evidence"
         private const val EXPECTED_ARGUMENT_COUNT = 11
         private const val MINIMUM_MEMORY_BYTES = 16L * 1024 * 1024
+        private const val CONTAINER_NAME_PREFIX = "occ-evidence-"
+        private const val CONTAINER_NAME_RANDOM_BYTES = 12
         private val REQUIRED_FIXED_OPTIONS = setOf("--rm", "--read-only")
-        private val IMAGE_REFERENCE = Regex("^[a-z0-9][a-z0-9._/-]{0,254}@sha256:[0-9a-f]{64}$")
+        private val IMAGE_REFERENCE = Regex("^(?:[a-z0-9][a-z0-9._/-]{0,254}@)?sha256:[0-9a-f]{64}$")
+        private val CONTAINER_NAME = Regex("^$CONTAINER_NAME_PREFIX[a-f0-9]{${CONTAINER_NAME_RANDOM_BYTES * 2}}$")
+        private val RANDOM = SecureRandom()
     }
 }
+
+internal data class DockerInvocation(val containerName: String, val command: List<String>)
 
 internal fun interface ProcessStarter {
     fun start(command: List<String>): Process
@@ -117,17 +147,77 @@ class ProcessParserSandbox internal constructor(
             return ParserSandboxResult.Rejected(EvidenceRejectionCode.DEADLINE_EXCEEDED)
         }
         val timeout = minOf(requestRemaining, configuration.maximumRuntime)
-        return try {
+        val invocation = try {
             if (Files.size(request.path) > request.policy.maximumBytes) return sandboxError()
             val workerRequest = request.copy(path = Path.of(ProcessParserSandboxConfiguration.CONTAINER_INPUT_PATH))
             val input = ByteArrayOutputStream().also { ParserSandboxProtocol.writeRequest(it, workerRequest) }.toByteArray()
             if (input.size > configuration.maximumRequestBytes) return sandboxError()
-            val command = configuration.command(request.path, "--inspect")
-            val outcome = launch(command, input, timeout)
+            configuration.invocation(request.path, "--inspect") to input
+        } catch (_: Exception) {
+            return sandboxError()
+        }
+        var interrupted = false
+        val result = try {
+            val outcome = launch(invocation.first.command, invocation.second, timeout)
             if (outcome.exitCode != 0 || outcome.timedOut || outcome.oversized) sandboxError()
             else ParserSandboxProtocol.readResult(outcome.output)
+        } catch (_: InterruptedException) {
+            interrupted = true
+            sandboxError()
         } catch (_: Exception) {
             sandboxError()
+        }
+        val cleanup = cleanup(invocation.first.containerName)
+        if (interrupted || cleanup.interrupted) Thread.currentThread().interrupt()
+        return if (cleanup.absent) result else sandboxError()
+    }
+
+    private fun cleanup(containerName: String): CleanupOutcome {
+        val removal = control(configuration.removalCommand(containerName))
+        val inspection = control(configuration.inspectionCommand(containerName))
+        return CleanupOutcome(
+            absent = inspection.completed && !inspection.oversized && inspection.exitCode != 0,
+            interrupted = removal.interrupted || inspection.interrupted,
+        )
+    }
+
+    private fun control(command: List<String>): ControlOutcome {
+        val process = try {
+            processStarter.start(command)
+        } catch (_: Exception) {
+            return ControlOutcome(-1, completed = false, oversized = false, interrupted = false)
+        }
+        val readerExecutor = Executors.newSingleThreadExecutor { work ->
+            Thread(work, "evidence-parser-docker-control-output").apply { isDaemon = true }
+        }
+        val outputFuture = readerExecutor.submit<BoundedOutput> { readBounded(process) }
+        return try {
+            process.outputStream.close()
+            if (!process.waitFor(CONTROL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                terminate(process)
+                ControlOutcome(-1, completed = false, oversized = false, interrupted = false)
+            } else {
+                val bounded = try {
+                    outputFuture.get(CONTROL_OUTPUT_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                } catch (_: ExecutionException) {
+                    terminate(process)
+                    BoundedOutput(ByteArray(0), oversized = true)
+                } catch (_: TimeoutException) {
+                    terminate(process)
+                    BoundedOutput(ByteArray(0), oversized = true)
+                }
+                ControlOutcome(process.exitValue(), completed = true, oversized = bounded.oversized, interrupted = false)
+            }
+        } catch (_: InterruptedException) {
+            terminateWithoutWaiting(process)
+            ControlOutcome(-1, completed = false, oversized = false, interrupted = true)
+        } catch (_: Exception) {
+            terminateWithoutWaiting(process)
+            ControlOutcome(-1, completed = false, oversized = false, interrupted = false)
+        } finally {
+            if (process.isAlive) terminateWithoutWaiting(process)
+            outputFuture.cancel(true)
+            readerExecutor.shutdownNow()
         }
     }
 
@@ -189,11 +279,25 @@ class ProcessParserSandbox internal constructor(
         }
     }
 
+    private fun terminateWithoutWaiting(process: Process) {
+        process.destroy()
+        if (process.isAlive) process.destroyForcibly()
+    }
+
     private fun sandboxError() = ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR)
     private data class ProcessOutcome(val exitCode: Int, val output: ByteArray, val timedOut: Boolean, val oversized: Boolean)
     private data class BoundedOutput(val bytes: ByteArray, val oversized: Boolean)
+    private data class ControlOutcome(
+        val exitCode: Int,
+        val completed: Boolean,
+        val oversized: Boolean,
+        val interrupted: Boolean,
+    )
+    private data class CleanupOutcome(val absent: Boolean, val interrupted: Boolean)
 
     companion object {
         const val INPUT_MOUNT_PLACEHOLDER = ProcessParserSandboxConfiguration.INPUT_MOUNT_PLACEHOLDER
+        private const val CONTROL_TIMEOUT_MILLIS = 2_000L
+        private const val CONTROL_OUTPUT_TIMEOUT_MILLIS = 1_000L
     }
 }

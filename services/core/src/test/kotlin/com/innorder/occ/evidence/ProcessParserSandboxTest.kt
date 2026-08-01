@@ -13,6 +13,9 @@ import java.nio.file.Path
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.system.exitProcess
 import java.util.stream.Stream
 
 class ProcessParserSandboxTest {
@@ -49,8 +52,8 @@ class ProcessParserSandboxTest {
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Accepted("application/pdf"))
-        assertThat(commands).hasSize(1)
-        assertThat(commands.single()).contains(
+        val runCommand = commands.single { it.getOrNull(1) == "run" }
+        assertThat(runCommand).contains(
             "--network=none",
             "--memory=67108864",
             "--pids-limit=32",
@@ -60,7 +63,26 @@ class ProcessParserSandboxTest {
             "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16777216",
             "--mount=type=bind,src=${path.toAbsolutePath().normalize()},dst=/input/evidence,readonly",
         )
-        assertThat(commands.single()).doesNotContain(ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER)
+        assertThat(runCommand).doesNotContain(ProcessParserSandbox.INPUT_MOUNT_PLACEHOLDER)
+        assertThat(runCommand.single { it.startsWith("--name=") })
+            .matches("--name=occ-evidence-[a-f0-9]{24}")
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+    }
+
+    @Test
+    fun `container names are generated per invocation and cannot inject Docker arguments`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox("clean", commands = commands)
+        val first = Files.writeString(tempDirectory.resolve("first.pdf"), "fixture")
+        val second = Files.writeString(tempDirectory.resolve("second.pdf"), "fixture")
+
+        sandbox.inspect(parserRequest(first))
+        sandbox.inspect(parserRequest(second))
+
+        val names = commands.filter { it.getOrNull(1) == "run" }
+            .map { command -> command.single { it.startsWith("--name=") }.removePrefix("--name=") }
+        assertThat(names).hasSize(2).doesNotHaveDuplicates()
+        assertThat(names).allMatch { it.matches(Regex("occ-evidence-[a-f0-9]{24}")) }
     }
 
     @Test
@@ -78,11 +100,28 @@ class ProcessParserSandboxTest {
     @ParameterizedTest
     @ValueSource(strings = ["malformed-output", "oversized-output"])
     fun `malformed or oversized worker output fails closed`(mode: String) {
-        val sandbox = sandbox(mode)
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox(mode, commands = commands)
         val path = Files.writeString(tempDirectory.resolve("claim-$mode.pdf"), "fixture")
 
         assertThat(sandbox.inspect(parserRequest(path)))
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+        val name = commands.first().single { it.startsWith("--name=") }.removePrefix("--name=")
+        assertThat(commands.takeLast(2)).containsExactly(
+            listOf(fakeDockerExecutable().toString(), "rm", "-f", name),
+            listOf(fakeDockerExecutable().toString(), "inspect", name),
+        )
+    }
+
+    @Test
+    fun `successful parser result fails closed unless cleanup verifies container absence`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox("clean", commands = commands, inspectExitCode = 0)
+        val path = Files.writeString(tempDirectory.resolve("claim.pdf"), "fixture")
+
+        assertThat(sandbox.inspect(parserRequest(path)))
+            .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
     }
 
     @Test
@@ -95,6 +134,37 @@ class ProcessParserSandboxTest {
             .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
         val pid = Files.readString(pidFile).trim().toLong()
         assertThat(ProcessHandle.of(pid).map { it.isAlive }.orElse(false)).isFalse()
+    }
+
+    @Test
+    fun `interruption cleans up and verifies container absence before restoring interrupt`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox("timeout", maximumRuntime = Duration.ofSeconds(5), commands = commands)
+        val path = Files.writeString(tempDirectory.resolve("interrupted.pdf"), "fixture")
+        val testThread = Thread.currentThread()
+        val interrupter = Executors.newSingleThreadScheduledExecutor()
+        interrupter.schedule({ testThread.interrupt() }, 250, TimeUnit.MILLISECONDS)
+
+        try {
+            assertThat(sandbox.inspect(parserRequest(path)))
+                .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+            assertThat(Thread.interrupted()).isTrue()
+            assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
+        } finally {
+            Thread.interrupted()
+            interrupter.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `nonzero worker exit still removes and verifies daemon container`() {
+        val commands = mutableListOf<List<String>>()
+        val sandbox = sandbox("failure", commands = commands)
+        val path = Files.writeString(tempDirectory.resolve("failure.pdf"), "fixture")
+
+        assertThat(sandbox.inspect(parserRequest(path)))
+            .isEqualTo(ParserSandboxResult.Rejected(EvidenceRejectionCode.PARSER_SANDBOX_ERROR))
+        assertThat(commands.map { it.getOrNull(1) }).containsExactly("run", "rm", "inspect")
     }
 
     @Test
@@ -123,6 +193,7 @@ class ProcessParserSandboxTest {
         maximumRuntime: Duration = Duration.ofSeconds(8),
         maximumRequestBytes: Int = 4096,
         commands: MutableList<List<String>> = mutableListOf(),
+        inspectExitCode: Int = 1,
     ): ProcessParserSandbox {
         val javaExecutable = Path.of(
             System.getProperty("java.home"),
@@ -134,12 +205,23 @@ class ProcessParserSandboxTest {
             argumentFile,
             "-cp\n${System.getProperty("java.class.path")}\n${ParserWorkerFixture::class.java.name}\n$mode\n$pidFile\n",
         )
+        val controlArgumentFile = tempDirectory.resolve("docker-control-$mode-$inspectExitCode.args")
+        Files.writeString(
+            controlArgumentFile,
+            "-cp\n${System.getProperty("java.class.path")}\n${DockerControlFixture::class.java.name}\n",
+        )
         return ProcessParserSandbox(
             configuration(maximumRuntime = maximumRuntime, maximumRequestBytes = maximumRequestBytes),
             Clock.systemUTC(),
             ProcessStarter { command ->
                 commands += command
-                ProcessBuilder(javaExecutable.toString(), "@$argumentFile", command.last())
+                val processArguments = if (command.getOrNull(1) == "run") {
+                    listOf(javaExecutable.toString(), "@$argumentFile", command.last())
+                } else {
+                    val exitCode = if (command.getOrNull(1) == "inspect") inspectExitCode else 0
+                    listOf(javaExecutable.toString(), "@$controlArgumentFile", exitCode.toString())
+                }
+                ProcessBuilder(processArguments)
                     .redirectErrorStream(true)
                     .start()
             },
@@ -220,9 +302,17 @@ class ProcessParserSandboxTest {
                 Arguments.of("unbounded tmpfs", replacing("--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=16777216", "--tmpfs=/tmp")),
                 Arguments.of("additional volume", secure.toMutableList().apply { add(size - 1, "--volume=/host:/host") }),
                 Arguments.of("privileged", secure.toMutableList().apply { add(size - 1, "--privileged") }),
+                Arguments.of("caller supplied container name", secure.toMutableList().apply { add(size - 1, "--name=attacker") }),
                 Arguments.of("unpinned image", secure.dropLast(1) + "registry.example/occ-evidence-parser:latest"),
             )
         }
+    }
+}
+
+object DockerControlFixture {
+    @JvmStatic
+    fun main(args: Array<String>) {
+        exitProcess(args.single().toInt())
     }
 }
 
@@ -239,6 +329,7 @@ object ParserWorkerFixture {
             }
             "malformed-output" -> print("not-the-parser-protocol")
             "oversized-output" -> print("x".repeat(4096))
+            "failure" -> exitProcess(2)
             else -> ParserSandboxProtocol.writeResult(System.out, ParserSandboxResult.Accepted("application/pdf"))
         }
     }
