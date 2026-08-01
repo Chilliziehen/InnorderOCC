@@ -213,6 +213,9 @@ for (const relation of [
   'ai.retrieval_trace',
   'ai.retrieval_hit',
   'ai.embedding_space_gate_result',
+  'ai.embedding_space_gate_evaluation',
+  'ai.embedding_space_gate_case_evidence',
+  'ai.retention_policy',
 ]) {
   const result = await db.query('SELECT to_regclass($1) IS NOT NULL AS present', [relation]);
   if (!result.rows[0]?.present) throw new Error(`${relation} is missing after V015`);
@@ -222,6 +225,20 @@ for (const routine of [
   'ai.claim_ingestion_jobs',
   'ai.claim_event_consumptions',
   'ai.authorized_hybrid_retrieval',
+  'ai.persist_ingestion_document_version',
+  'ai.persist_ingestion_chunk_embedding',
+  'ai.finalize_ingestion_job',
+  'ai.register_event_consumption',
+  'ai.finalize_event_consumption',
+  'ai.transition_ai_run',
+  'ai.start_model_invocation',
+  'ai.finalize_model_invocation',
+  'ai.persist_run_artifact',
+  'ai.record_retrieval_trace',
+  'ai.record_retrieval_hit',
+  'ai.begin_embedding_space_gate',
+  'ai.record_embedding_gate_case',
+  'ai.finalize_embedding_space_gate',
 ]) {
   const result = await db.query(`
     SELECT count(*)::integer AS count

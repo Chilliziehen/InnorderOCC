@@ -416,7 +416,7 @@ test('provisions a separate AI identity before Flyway without granting broad acc
 
   const sql = readMigration('V015__governed_ai_runtime.sql');
   assert.match(sql, /GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime/iu);
-  assert.match(sql, /GRANT SELECT, INSERT ON ai\.knowledge_document_version, ai\.knowledge_chunk, ai\.chunk_embedding[\s\S]*TO innorder_ai_runtime/iu);
+  assert.match(sql, /GRANT SELECT ON[\s\S]*ai\.knowledge_document_version[\s\S]*ai\.knowledge_chunk[\s\S]*ai\.chunk_embedding[\s\S]*TO innorder_ai_runtime/iu);
   assert.doesNotMatch(sql, /GRANT\s+(?:ALL|CREATE)\s+ON SCHEMA/iu);
   assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*ON[^;]*(?:iam\.|authz\.(?:entity|relationship|authorization_state|policy_release)\b|occ\.|flowable\.|audit\.|ai\.(?:model_provider|knowledge_source|knowledge_document|recommendation|conversation)\b)/iu);
   for (const schema of ['iam', 'occ', 'flowable', 'audit']) {
@@ -426,4 +426,90 @@ test('provisions a separate AI identity before Flyway without granting broad acc
   const liveSuite = readFileSync(governedPostgresqlTestPath, 'utf8');
   assert.match(liveSuite, /docker/iu);
   assert.doesNotMatch(liveSuite, /\bskip\s*:/iu);
+});
+
+test('keeps current Compose compatible while supporting a file-backed AI LOGIN', () => {
+  const compose = readFileSync(composeRolePath, 'utf8');
+  assert.match(compose, /ai_password_file="\$\{AI_DATABASE_PASSWORD_FILE:-\/run\/secrets\/postgres_ai_runtime_password\}"/u);
+  assert.match(compose, /if \[\[ -r "\$ai_password_file" \]\]/u);
+  assert.match(compose, /ai_runtime_login=(?:true|false)/u);
+  assert.match(compose, /CREATE ROLE %I NOLOGIN/iu);
+  assert.match(compose, /ALTER ROLE %I LOGIN PASSWORD %L/iu);
+  assert.match(compose, /ALTER ROLE %I NOLOGIN/iu);
+  assert.doesNotMatch(compose, /ai_runtime_password="\$\(read_secret "\$\{AI_DATABASE_PASSWORD_FILE/iu);
+});
+
+test('binds grant consumption to every signed token claim and 32 KiB canonical context', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.match(sql, /octet_length\(bounded_context::text\) <= 32768/iu);
+  const consume = sql.match(/CREATE FUNCTION authz\.consume_ai_authorization_grant\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  for (const parameter of [
+    'p_event_id uuid', 'p_operation text', 'p_authorization_revision bigint',
+    'p_policy_release_digest text', 'p_authorized_set_digest text', 'p_context_digest text',
+  ]) assert.match(consume, new RegExp(parameter, 'iu'), parameter);
+  assert.match(consume, /grant token event mismatch/iu);
+  assert.match(consume, /grant token operation mismatch/iu);
+  assert.match(consume, /grant token authorized-set digest mismatch/iu);
+  assert.match(consume, /grant token context digest mismatch/iu);
+  assert.match(consume, /grant token run mismatch/iu);
+  assert.match(consume, /authorization_revision <> p_authorization_revision/iu);
+});
+
+test('fails embedding gates closed with fixed manifest-bound evidence', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.match(sql, /CREATE TABLE ai\.embedding_space_gate_case_evidence\b/iu);
+  assert.match(sql, /candidate_embedding_space_id uuid NOT NULL/iu);
+  assert.match(sql, /eligible_count bigint NOT NULL CHECK \(eligible_count > 0\)/iu);
+  assert.match(sql, /citation_denominator bigint NOT NULL CHECK \(citation_denominator > 0/iu);
+  assert.match(sql, /recall_count bigint NOT NULL CHECK \(recall_count > 0\)/iu);
+  assert.match(sql, /minimum_coverage numeric NOT NULL DEFAULT 1\.0 CHECK \(minimum_coverage = 1\.0\)/iu);
+  assert.match(sql, /maximum_leakage bigint NOT NULL DEFAULT 0 CHECK \(maximum_leakage = 0\)/iu);
+  assert.match(sql, /minimum_citation_precision numeric NOT NULL DEFAULT 0\.95 CHECK \(minimum_citation_precision = 0\.95\)/iu);
+  assert.match(sql, /minimum_recall_at_10 numeric NOT NULL DEFAULT 0\.85 CHECK \(minimum_recall_at_10 = 0\.85\)/iu);
+  assert.doesNotMatch(sql, /CASE WHEN (?:citation_denominator|recall_count|eligible_count) = 0 THEN 1/iu);
+  for (const fn of ['begin_embedding_space_gate', 'record_embedding_gate_case', 'finalize_embedding_space_gate']) {
+    const definition = sql.match(new RegExp(`CREATE FUNCTION ai\\.${fn}\\([\\s\\S]*?\\$\\$;`, 'iu'))?.[0] ?? '';
+    assert.match(definition, /SECURITY DEFINER/iu, fn);
+    assert.match(definition, /SET search_path = pg_catalog, pg_temp/iu, fn);
+  }
+  assert.match(sql, /stale corpus manifest/iu);
+  assert.match(sql, /empty gate evidence/iu);
+});
+
+test('routes AI mutations through bounded functions and retains governed evidence', () => {
+  const sql = readMigration('V015__governed_ai_runtime.sql');
+  assert.match(sql, /CREATE TABLE ai\.retention_policy\b/iu);
+  assert.match(sql, /retention_interval interval NOT NULL DEFAULT interval '1 year'/iu);
+  for (const table of ['model_invocation', 'retrieval_trace', 'retrieval_hit', 'embedding_space_gate_result']) {
+    const definition = sql.match(new RegExp(`CREATE TABLE ai\\.${table}\\s*\\([\\s\\S]*?\\n\\);`, 'iu'))?.[0] ?? '';
+    assert.match(definition, /retention_until timestamptz NOT NULL DEFAULT \(statement_timestamp\(\) \+ interval '1 year'\)/iu, table);
+    assert.match(definition, /legal_hold_id uuid/iu, table);
+  }
+  assert.match(sql, /ALTER TABLE ai\.ai_run_artifact[\s\S]*retention_until[\s\S]*interval '1 year'/iu);
+  assert.match(sql, /fk_retrieval_trace_grant_run/iu);
+  assert.match(sql, /fk_retrieval_trace_run_grant/iu);
+  assert.match(sql, /CREATE TRIGGER trg_retrieval_hit_authorized/iu);
+  assert.match(sql, /retrieval hit document is not authorized by grant/iu);
+  for (const fn of [
+    'persist_ingestion_document_version', 'persist_ingestion_chunk_embedding',
+    'finalize_ingestion_job', 'fail_ingestion_job', 'register_event_consumption',
+    'finalize_event_consumption', 'fail_event_consumption', 'transition_ai_run',
+    'start_model_invocation', 'finalize_model_invocation', 'persist_run_artifact',
+    'record_retrieval_trace', 'record_retrieval_hit',
+  ]) assert.match(sql, new RegExp(`CREATE FUNCTION ai\\.${fn}\\(`, 'iu'), fn);
+  assert.match(sql, /GRANT SELECT ON ai\.model_provider/iu);
+  assert.doesNotMatch(sql, /GRANT SELECT, INSERT(?:, UPDATE)? ON ai\.(?:knowledge_document_version|knowledge_chunk|chunk_embedding|ingestion_job|ingestion_attempt|event_consumption|model_invocation|retrieval_trace|retrieval_hit)/iu);
+});
+
+test('requires live LOGIN, denial, concurrency, vector, event, and gate coverage', () => {
+  const source = readFileSync(governedPostgresqlTestPath, 'utf8');
+  for (const marker of [
+    'innorder_ai_runtime LOGIN PASSWORD', 'aiConnectionEnvironment', 'PGPASSWORD',
+    'knowledge_document', 'recommendation', 'iam.principal', 'occ.business_object',
+    'audit.outbox_event', 'flowable', 'expired', 'stale authorization revision',
+    'authorized-set digest mismatch', 'grant token event mismatch', 'grant token run mismatch',
+    'claim_event_consumptions', 'stale event lease', 'hnsw', 'vector retrieval',
+    'empty gate evidence', 'stale corpus manifest', 'positive path',
+  ]) assert.match(source, new RegExp(marker, 'iu'), marker);
+  assert.doesNotMatch(source, /'--dbname',\s*databaseUrl/iu);
 });

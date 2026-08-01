@@ -20,14 +20,20 @@ read_secret() {
 admin_password="$(read_secret /run/secrets/postgres_admin_password)"
 flyway_password="$(read_secret /run/secrets/postgres_flyway_password)"
 runtime_password="$(read_secret /run/secrets/postgres_runtime_password)"
-ai_runtime_password="$(read_secret "${AI_DATABASE_PASSWORD_FILE:-/run/secrets/postgres_ai_runtime_password}")"
+ai_password_file="${AI_DATABASE_PASSWORD_FILE:-/run/secrets/postgres_ai_runtime_password}"
+ai_runtime_login=false
+ai_runtime_password=''
+if [[ -r "$ai_password_file" ]]; then
+  ai_runtime_password="$(read_secret "$ai_password_file")"
+  ai_runtime_login=true
+fi
 
 if [[ "$admin_password" == "$flyway_password" ||
       "$admin_password" == "$runtime_password" ||
       "$flyway_password" == "$runtime_password" ||
-      "$admin_password" == "$ai_runtime_password" ||
-      "$flyway_password" == "$ai_runtime_password" ||
-      "$runtime_password" == "$ai_runtime_password" ]]; then
+      ( "$ai_runtime_login" == true && ( "$admin_password" == "$ai_runtime_password" ||
+        "$flyway_password" == "$ai_runtime_password" ||
+        "$runtime_password" == "$ai_runtime_password" ) ) ]]; then
   echo "PostgreSQL admin, Flyway, Core runtime, and AI runtime passwords must be distinct" >&2
   exit 1
 fi
@@ -38,6 +44,7 @@ psql \
   --set=database_name="$POSTGRES_DB" \
   --set=flyway_password="$flyway_password" \
   --set=runtime_password="$runtime_password" \
+  --set=ai_runtime_login="$ai_runtime_login" \
   --set=ai_runtime_password="$ai_runtime_password" <<'SQL'
 \set ON_ERROR_STOP on
 
@@ -72,18 +79,26 @@ SELECT format(
 ALTER ROLE innorder_runtime SET search_path TO flowable, pg_catalog;
 
 SELECT format(
-  'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
+  'CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
   'innorder_ai_runtime'
 )
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'innorder_ai_runtime')
 \gexec
 
-SELECT format(
-  'ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
-  'innorder_ai_runtime',
-  :'ai_runtime_password'
-)
-\gexec
+\if :ai_runtime_login
+  SELECT format(
+    'ALTER ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
+    'innorder_ai_runtime',
+    :'ai_runtime_password'
+  )
+  \gexec
+\else
+  SELECT format(
+    'ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
+    'innorder_ai_runtime'
+  )
+  \gexec
+\endif
 
 ALTER ROLE innorder_ai_runtime SET search_path TO pg_catalog;
 

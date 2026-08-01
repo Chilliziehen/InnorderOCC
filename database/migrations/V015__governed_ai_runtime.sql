@@ -13,7 +13,7 @@ CREATE TABLE authz.ai_authorization_grant (
     context_digest text NOT NULL CHECK (context_digest ~ '^[0-9a-f]{64}$'),
     bounded_context jsonb NOT NULL CHECK (
         platform.is_json_object(bounded_context)
-        AND octet_length(bounded_context::text) <= 16384
+        AND octet_length(bounded_context::text) <= 32768
     ),
     classification_ceiling text NOT NULL
         CHECK (classification_ceiling IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
@@ -21,12 +21,14 @@ CREATE TABLE authz.ai_authorization_grant (
     expires_at timestamptz NOT NULL,
     consumed_at timestamptz,
     event_id uuid NOT NULL,
+    intended_run_id uuid NOT NULL UNIQUE,
     run_id uuid UNIQUE,
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     CHECK (issued_at <= created_at + interval '1 minute'),
     CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '5 minutes'),
     CHECK ((consumed_at IS NULL AND run_id IS NULL) OR (consumed_at IS NOT NULL AND run_id IS NOT NULL)),
-    CHECK (consumed_at IS NULL OR (consumed_at >= issued_at AND consumed_at < expires_at))
+    CHECK (consumed_at IS NULL OR (consumed_at >= issued_at AND consumed_at < expires_at)),
+    UNIQUE (id, run_id)
 );
 
 CREATE TABLE authz.ai_authorized_document (
@@ -37,7 +39,8 @@ CREATE TABLE authz.ai_authorized_document (
 );
 
 ALTER TABLE ai.ai_run
-    ADD COLUMN authorization_grant_id uuid UNIQUE REFERENCES authz.ai_authorization_grant(id);
+    ADD COLUMN authorization_grant_id uuid UNIQUE REFERENCES authz.ai_authorization_grant(id),
+    ADD CONSTRAINT uq_ai_run_grant UNIQUE (id, authorization_grant_id);
 ALTER TABLE authz.ai_authorization_grant
     ADD CONSTRAINT fk_ai_authorization_grant_run
     FOREIGN KEY (run_id) REFERENCES ai.ai_run(id) DEFERRABLE INITIALLY DEFERRED;
@@ -91,6 +94,7 @@ CREATE TABLE ai.ingestion_job (
     id uuid PRIMARY KEY,
     source_id uuid NOT NULL REFERENCES ai.knowledge_source(id),
     document_id uuid REFERENCES ai.knowledge_document(id),
+    produced_document_version_id uuid REFERENCES ai.knowledge_document_version(id),
     source_version text NOT NULL,
     content_hash text NOT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
     parser_version text NOT NULL,
@@ -111,7 +115,8 @@ CREATE TABLE ai.ingestion_job (
     UNIQUE (source_id, source_version, content_hash, parser_version),
     CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
     CHECK (lease_expires_at IS NULL OR lease_expires_at > created_at),
-    CHECK (status <> 'DEAD' OR sanitized_error IS NOT NULL)
+    CHECK (status <> 'DEAD' OR sanitized_error IS NOT NULL),
+    CHECK (status <> 'COMPLETED' OR produced_document_version_id IS NOT NULL)
 );
 
 CREATE TABLE ai.ingestion_attempt (
@@ -157,6 +162,16 @@ CREATE TABLE ai.event_consumption (
     CHECK (status <> 'COMPLETED' OR completed_at IS NOT NULL)
 );
 
+CREATE TABLE ai.retention_policy (
+    object_kind text PRIMARY KEY CHECK (object_kind IN ('TRACE', 'RETRIEVAL_HIT', 'INVOCATION', 'GATE_RESULT', 'GATE_EVIDENCE', 'ARTIFACT')),
+    retention_interval interval NOT NULL DEFAULT interval '1 year'
+        CHECK (retention_interval >= interval '1 year'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp()
+);
+
+INSERT INTO ai.retention_policy (object_kind)
+VALUES ('TRACE'), ('RETRIEVAL_HIT'), ('INVOCATION'), ('GATE_RESULT'), ('GATE_EVIDENCE'), ('ARTIFACT');
+
 CREATE TABLE ai.model_invocation (
     id uuid PRIMARY KEY,
     run_id uuid NOT NULL REFERENCES ai.ai_run(id),
@@ -174,8 +189,11 @@ CREATE TABLE ai.model_invocation (
     latency_ms integer CHECK (latency_ms IS NULL OR latency_ms >= 0),
     status text NOT NULL CHECK (status IN ('STARTED', 'COMPLETED', 'FAILED', 'CANCELLED')),
     sanitized_error text CHECK (sanitized_error IS NULL OR octet_length(sanitized_error) BETWEEN 1 AND 2048),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
     CHECK (status <> 'FAILED' OR sanitized_error IS NOT NULL),
-    CHECK (completed_at IS NULL OR completed_at >= started_at)
+    CHECK (completed_at IS NULL OR completed_at >= started_at),
+    CHECK (retention_until >= started_at + interval '1 year')
 );
 
 CREATE TABLE ai.retrieval_trace (
@@ -193,7 +211,12 @@ CREATE TABLE ai.retrieval_trace (
     ranking_config jsonb NOT NULL CHECK (platform.is_json_object(ranking_config)),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
-    CHECK (retention_until >= created_at + interval '1 year')
+    legal_hold_id uuid,
+    CHECK (retention_until >= created_at + interval '1 year'),
+    CONSTRAINT fk_retrieval_trace_grant_run FOREIGN KEY (grant_id, run_id)
+        REFERENCES authz.ai_authorization_grant(id, run_id),
+    CONSTRAINT fk_retrieval_trace_run_grant FOREIGN KEY (run_id, grant_id)
+        REFERENCES ai.ai_run(id, authorization_grant_id)
 );
 
 CREATE TABLE ai.retrieval_hit (
@@ -206,45 +229,78 @@ CREATE TABLE ai.retrieval_hit (
     rank integer NOT NULL CHECK (rank > 0),
     excerpt_hash text NOT NULL CHECK (excerpt_hash ~ '^[0-9a-f]{64}$'),
     injection_detected boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
     PRIMARY KEY (trace_id, rank),
     UNIQUE (trace_id, chunk_id),
-    FOREIGN KEY (chunk_id, document_version_id) REFERENCES ai.knowledge_chunk(id, document_version_id)
+    FOREIGN KEY (chunk_id, document_version_id) REFERENCES ai.knowledge_chunk(id, document_version_id),
+    CHECK (retention_until >= created_at + interval '1 year')
 );
 
-CREATE TABLE ai.embedding_space_gate_result (
+CREATE TABLE ai.embedding_space_gate_evaluation (
     id uuid PRIMARY KEY,
     dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
     corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
     expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
-    eligible_count bigint NOT NULL CHECK (eligible_count >= 0),
+    eligible_count bigint NOT NULL CHECK (eligible_count > 0),
+    embedded_count bigint NOT NULL CHECK (embedded_count >= 0 AND embedded_count <= eligible_count),
+    leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
+    evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    CHECK (retention_until >= created_at + interval '1 year'),
+    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id)
+);
+
+CREATE TABLE ai.embedding_space_gate_case_evidence (
+    evaluation_id uuid NOT NULL REFERENCES ai.embedding_space_gate_evaluation(id),
+    case_id uuid NOT NULL REFERENCES ai.evaluation_case(id),
+    citation_numerator bigint NOT NULL CHECK (citation_numerator >= 0),
+    citation_denominator bigint NOT NULL CHECK (citation_denominator > 0 AND citation_denominator >= citation_numerator),
+    recall_at_10 numeric NOT NULL CHECK (recall_at_10 BETWEEN 0 AND 1),
+    evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    PRIMARY KEY (evaluation_id, case_id),
+    CHECK (retention_until >= created_at + interval '1 year')
+);
+
+CREATE TABLE ai.embedding_space_gate_result (
+    id uuid PRIMARY KEY REFERENCES ai.embedding_space_gate_evaluation(id),
+    dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
+    corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    eligible_count bigint NOT NULL CHECK (eligible_count > 0),
     embedded_count bigint NOT NULL CHECK (embedded_count >= 0 AND embedded_count <= eligible_count),
     leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
     citation_numerator bigint NOT NULL CHECK (citation_numerator >= 0),
-    citation_denominator bigint NOT NULL CHECK (citation_denominator >= citation_numerator),
-    citation_precision numeric GENERATED ALWAYS AS (
-        CASE WHEN citation_denominator = 0 THEN 1::numeric ELSE citation_numerator::numeric / citation_denominator END
-    ) STORED,
+    citation_denominator bigint NOT NULL CHECK (citation_denominator > 0 AND citation_denominator >= citation_numerator),
+    citation_precision numeric GENERATED ALWAYS AS (citation_numerator::numeric / citation_denominator) STORED,
     recall_sum numeric NOT NULL CHECK (recall_sum >= 0),
-    recall_count bigint NOT NULL CHECK (recall_count >= 0),
-    recall_mean numeric GENERATED ALWAYS AS (
-        CASE WHEN recall_count = 0 THEN 1::numeric ELSE recall_sum / recall_count END
-    ) STORED,
-    minimum_coverage numeric NOT NULL CHECK (minimum_coverage BETWEEN 0 AND 1),
-    maximum_leakage bigint NOT NULL CHECK (maximum_leakage >= 0),
-    minimum_citation_precision numeric NOT NULL CHECK (minimum_citation_precision BETWEEN 0 AND 1),
-    minimum_recall numeric NOT NULL CHECK (minimum_recall BETWEEN 0 AND 1),
+    recall_count bigint NOT NULL CHECK (recall_count > 0),
+    recall_mean numeric GENERATED ALWAYS AS (recall_sum / recall_count) STORED,
+    minimum_coverage numeric NOT NULL DEFAULT 1.0 CHECK (minimum_coverage = 1.0),
+    maximum_leakage bigint NOT NULL DEFAULT 0 CHECK (maximum_leakage = 0),
+    minimum_citation_precision numeric NOT NULL DEFAULT 0.95 CHECK (minimum_citation_precision = 0.95),
+    minimum_recall_at_10 numeric NOT NULL DEFAULT 0.85 CHECK (minimum_recall_at_10 = 0.85),
     decision text NOT NULL CHECK (decision IN ('PASS', 'FAIL')),
     evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
-    evaluated_at timestamptz NOT NULL,
-    retention_until timestamptz NOT NULL,
+    evaluated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
     CHECK (retention_until >= evaluated_at + interval '1 year'),
     CHECK ((decision = 'PASS') = (
-        (CASE WHEN eligible_count = 0 THEN 1::numeric ELSE embedded_count::numeric / eligible_count END) >= minimum_coverage
+        embedded_count::numeric / eligible_count >= minimum_coverage
         AND leakage_count <= maximum_leakage
-        AND (CASE WHEN citation_denominator = 0 THEN 1::numeric ELSE citation_numerator::numeric / citation_denominator END) >= minimum_citation_precision
-        AND (CASE WHEN recall_count = 0 THEN 1::numeric ELSE recall_sum / recall_count END) >= minimum_recall
+        AND citation_numerator::numeric / citation_denominator >= minimum_citation_precision
+        AND recall_sum / recall_count >= minimum_recall_at_10
     )),
-    UNIQUE (dataset_version_id, corpus_manifest_digest, expected_active_space_id)
+    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id)
 );
 
 CREATE TABLE ai.legal_hold (
@@ -268,6 +324,27 @@ CREATE TABLE ai.legal_hold_object (
     PRIMARY KEY (hold_id, object_kind, object_id, fact_key)
 );
 
+ALTER TABLE ai.model_invocation
+    ADD CONSTRAINT fk_model_invocation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.retrieval_trace
+    ADD CONSTRAINT fk_retrieval_trace_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.retrieval_hit
+    ADD CONSTRAINT fk_retrieval_hit_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.embedding_space_gate_evaluation
+    ADD CONSTRAINT fk_gate_evaluation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.embedding_space_gate_case_evidence
+    ADD CONSTRAINT fk_gate_case_evidence_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.embedding_space_gate_result
+    ADD CONSTRAINT fk_gate_result_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+UPDATE ai.ai_run_artifact
+SET retention_until = created_at + interval '1 year'
+WHERE retention_until < created_at + interval '1 year';
+ALTER TABLE ai.ai_run_artifact
+    ALTER COLUMN retention_until SET DEFAULT (statement_timestamp() + interval '1 year'),
+    ADD COLUMN legal_hold_id uuid REFERENCES ai.legal_hold(id),
+    ADD CONSTRAINT ck_ai_run_artifact_one_year_retention
+        CHECK (retention_until >= created_at + interval '1 year');
+
 CREATE FUNCTION ai.enforce_ingestion_job_lifecycle()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -286,6 +363,10 @@ BEGIN
        OR NEW.created_at IS DISTINCT FROM OLD.created_at
        OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion job deterministic identity is immutable';
+    END IF;
+    IF OLD.produced_document_version_id IS NOT NULL
+       AND NEW.produced_document_version_id IS DISTINCT FROM OLD.produced_document_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'produced ingestion document version is immutable';
     END IF;
     IF OLD.status IN ('COMPLETED', 'DEAD') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal ingestion job is immutable';
@@ -405,12 +486,40 @@ CREATE TRIGGER trg_model_invocation_lifecycle
 BEFORE UPDATE OR DELETE ON ai.model_invocation
 FOR EACH ROW EXECUTE FUNCTION ai.enforce_model_invocation_lifecycle();
 
+CREATE FUNCTION ai.validate_retrieval_hit_authorized()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM ai.retrieval_trace trace
+        JOIN authz.ai_authorized_document allowed
+          ON allowed.grant_id = trace.grant_id
+         AND allowed.document_version_id = NEW.document_version_id
+        WHERE trace.id = NEW.trace_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'retrieval hit document is not authorized by grant';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_retrieval_hit_authorized
+BEFORE INSERT ON ai.retrieval_hit
+FOR EACH ROW EXECUTE FUNCTION ai.validate_retrieval_hit_authorized();
+
 CREATE TRIGGER trg_retrieval_trace_immutable
 BEFORE UPDATE OR DELETE ON ai.retrieval_trace FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 CREATE TRIGGER trg_retrieval_hit_immutable
 BEFORE UPDATE OR DELETE ON ai.retrieval_hit FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 CREATE TRIGGER trg_embedding_space_gate_result_immutable
 BEFORE UPDATE OR DELETE ON ai.embedding_space_gate_result FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_embedding_space_gate_evaluation_immutable
+BEFORE UPDATE OR DELETE ON ai.embedding_space_gate_evaluation FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_embedding_space_gate_case_evidence_immutable
+BEFORE UPDATE OR DELETE ON ai.embedding_space_gate_case_evidence FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 CREATE TRIGGER trg_legal_hold_object_immutable
 BEFORE UPDATE OR DELETE ON ai.legal_hold_object FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 
@@ -430,6 +539,12 @@ CREATE INDEX ix_legal_hold_object_lookup ON ai.legal_hold_object (object_kind, o
 
 CREATE FUNCTION authz.consume_ai_authorization_grant(
     p_token_hash text,
+    p_event_id uuid,
+    p_operation text,
+    p_authorization_revision bigint,
+    p_policy_release_digest text,
+    p_authorized_set_digest text,
+    p_context_digest text,
     p_run_id uuid,
     p_agent_version_id uuid,
     p_model_profile_id uuid,
@@ -459,6 +574,27 @@ BEGIN
     END IF;
     IF transaction_timestamp() < grant_row.issued_at OR transaction_timestamp() >= grant_row.expires_at THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant expired';
+    END IF;
+    IF grant_row.event_id <> p_event_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token event mismatch';
+    END IF;
+    IF grant_row.operation <> p_operation THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token operation mismatch';
+    END IF;
+    IF grant_row.intended_run_id <> p_run_id OR (grant_row.run_id IS NOT NULL AND grant_row.run_id <> p_run_id) THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token run mismatch';
+    END IF;
+    IF grant_row.authorized_set_digest <> p_authorized_set_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token authorized-set digest mismatch';
+    END IF;
+    IF grant_row.context_digest <> p_context_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token context digest mismatch';
+    END IF;
+    IF grant_row.policy_release_digest <> p_policy_release_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token release digest mismatch';
+    END IF;
+    IF grant_row.authorization_revision <> p_authorization_revision THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token authorization revision mismatch';
     END IF;
     SELECT current_revision INTO STRICT current_auth_revision
     FROM authz.authorization_state WHERE singleton FOR SHARE;
@@ -546,6 +682,475 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION ai.persist_ingestion_document_version(
+    p_job_id uuid, p_worker_id text, p_document_version_id uuid, p_version integer,
+    p_object_key text, p_content_hash text, p_mime_type text, p_data_classification text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    job ai.ingestion_job%ROWTYPE;
+BEGIN
+    SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
+    IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
+       OR job.lease_expires_at <= transaction_timestamp() OR job.document_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    IF p_content_hash <> job.content_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'ingestion content hash does not match claimed job';
+    END IF;
+    INSERT INTO ai.knowledge_document_version
+        (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
+    VALUES (p_document_version_id, job.document_id, p_version, p_object_key, p_content_hash,
+            p_mime_type, job.parser_version, p_data_classification);
+    UPDATE ai.ingestion_job SET produced_document_version_id = p_document_version_id
+    WHERE id = p_job_id;
+    RETURN p_document_version_id;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_ingestion_chunk_embedding(
+    p_job_id uuid, p_worker_id text, p_document_version_id uuid, p_chunk_id uuid,
+    p_ordinal integer, p_content text, p_content_hash text, p_token_count integer,
+    p_metadata jsonb, p_embedding_space_id uuid, p_embedding public.vector
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    job ai.ingestion_job%ROWTYPE;
+    version_document_id uuid;
+    space_manifest text;
+BEGIN
+    SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
+    IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
+       OR job.lease_expires_at <= transaction_timestamp() THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    SELECT document_id INTO STRICT version_document_id
+    FROM ai.knowledge_document_version WHERE id = p_document_version_id;
+    IF version_document_id <> job.document_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'ingestion document version does not belong to claimed job';
+    END IF;
+    SELECT corpus_version INTO STRICT space_manifest FROM ai.embedding_space WHERE id = p_embedding_space_id;
+    IF space_manifest <> job.corpus_manifest_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space corpus manifest does not match claimed job';
+    END IF;
+    INSERT INTO ai.knowledge_chunk
+        (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
+    VALUES (p_chunk_id, p_document_version_id, p_ordinal, p_content, p_content_hash, p_token_count, p_metadata);
+    INSERT INTO ai.chunk_embedding (embedding_space_id, chunk_id, embedding)
+    VALUES (p_embedding_space_id, p_chunk_id, p_embedding);
+    RETURN p_chunk_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_ingestion_job(p_job_id uuid, p_worker_id text, p_checkpoint jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    UPDATE ai.ingestion_job
+    SET status = 'COMPLETED', stage = 'COMPLETE', checkpoint = p_checkpoint,
+        lease_owner = NULL, lease_expires_at = NULL, sanitized_error = NULL,
+        updated_at = statement_timestamp()
+    WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.fail_ingestion_job(
+    p_job_id uuid, p_worker_id text, p_sanitized_error text, p_retry_after interval
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    next_status text;
+BEGIN
+    IF p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion retry bound';
+    END IF;
+    UPDATE ai.ingestion_job
+    SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'RETRY' END,
+        next_attempt_at = transaction_timestamp() + p_retry_after,
+        lease_owner = NULL, lease_expires_at = NULL, sanitized_error = p_sanitized_error,
+        updated_at = statement_timestamp()
+    WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp()
+    RETURNING status INTO next_status;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    RETURN next_status;
+END;
+$$;
+
+CREATE FUNCTION ai.register_event_consumption(
+    p_id uuid, p_consumer_key text, p_event_id uuid, p_event_type text,
+    p_schema_version integer, p_aggregate_type text, p_aggregate_id uuid, p_aggregate_version bigint
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    registered_id uuid;
+    existing ai.event_consumption%ROWTYPE;
+BEGIN
+    INSERT INTO ai.event_consumption
+        (id, consumer_key, event_id, event_type, schema_version, aggregate_type, aggregate_id, aggregate_version)
+    VALUES (p_id, p_consumer_key, p_event_id, p_event_type, p_schema_version,
+            p_aggregate_type, p_aggregate_id, p_aggregate_version)
+    ON CONFLICT (consumer_key, event_id) DO NOTHING
+    RETURNING id INTO registered_id;
+    IF registered_id IS NULL THEN
+        SELECT * INTO STRICT existing FROM ai.event_consumption
+        WHERE consumer_key = p_consumer_key AND event_id = p_event_id;
+        IF existing.event_type <> p_event_type OR existing.schema_version <> p_schema_version
+           OR existing.aggregate_type <> p_aggregate_type OR existing.aggregate_id <> p_aggregate_id
+           OR existing.aggregate_version <> p_aggregate_version THEN
+            RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'event dedup key reused with different immutable envelope';
+        END IF;
+        registered_id := existing.id;
+    END IF;
+    RETURN registered_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_event_consumption(p_id uuid, p_worker_id text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    UPDATE ai.event_consumption
+    SET status = 'COMPLETED', completed_at = statement_timestamp(),
+        lease_owner = NULL, lease_expires_at = NULL, sanitized_terminal_error = NULL
+    WHERE id = p_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event lease is not owned or has expired';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.fail_event_consumption(
+    p_id uuid, p_worker_id text, p_sanitized_error text, p_retry_after interval
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    next_status text;
+BEGIN
+    IF p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid event retry bound';
+    END IF;
+    UPDATE ai.event_consumption
+    SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'RETRY' END,
+        next_attempt_at = transaction_timestamp() + p_retry_after,
+        lease_owner = NULL, lease_expires_at = NULL,
+        sanitized_terminal_error = CASE WHEN attempts >= max_attempts THEN p_sanitized_error ELSE NULL END
+    WHERE id = p_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp()
+    RETURNING status INTO next_status;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event lease is not owned or has expired';
+    END IF;
+    RETURN next_status;
+END;
+$$;
+
+CREATE FUNCTION ai.transition_ai_run(p_run_id uuid, p_status text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    old_status text;
+BEGIN
+    SELECT status INTO STRICT old_status FROM ai.ai_run
+    WHERE id = p_run_id AND authorization_grant_id IS NOT NULL FOR UPDATE;
+    IF NOT ((old_status = 'QUEUED' AND p_status IN ('RUNNING', 'CANCELLED'))
+        OR (old_status = 'RUNNING' AND p_status IN ('COMPLETED', 'FAILED', 'CANCELLED'))) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid governed AI run transition';
+    END IF;
+    UPDATE ai.ai_run
+    SET status = p_status,
+        started_at = CASE WHEN p_status = 'RUNNING' THEN statement_timestamp() ELSE started_at END,
+        completed_at = CASE WHEN p_status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN statement_timestamp() ELSE NULL END
+    WHERE id = p_run_id;
+    RETURN p_status;
+END;
+$$;
+
+CREATE FUNCTION ai.start_model_invocation(
+    p_id uuid, p_run_id uuid, p_model_profile_id uuid, p_operation text,
+    p_request_hash text, p_capability_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_operation text;
+BEGIN
+    SELECT grant_row.operation INTO grant_operation
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row ON grant_row.id = run.authorization_grant_id
+    WHERE run.id = p_run_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'model invocation requires a governed run';
+    END IF;
+    IF grant_operation <> p_operation THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'invocation operation does not match grant';
+    END IF;
+    INSERT INTO ai.model_invocation
+        (id, run_id, model_profile_id, operation, request_hash, capability_hash, status)
+    VALUES (p_id, p_run_id, p_model_profile_id, p_operation, p_request_hash, p_capability_hash, 'STARTED');
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_model_invocation(
+    p_id uuid, p_status text, p_response_hash text, p_provider_request_id text,
+    p_input_tokens bigint, p_output_tokens bigint, p_cost numeric,
+    p_latency_ms integer, p_sanitized_error text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid terminal invocation status';
+    END IF;
+    UPDATE ai.model_invocation
+    SET status = p_status, response_hash = p_response_hash, provider_request_id = p_provider_request_id,
+        input_tokens = p_input_tokens, output_tokens = p_output_tokens, cost = p_cost,
+        latency_ms = p_latency_ms, sanitized_error = p_sanitized_error,
+        completed_at = statement_timestamp()
+    WHERE id = p_id AND status = 'STARTED';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'model invocation is not active';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_run_artifact(
+    p_id uuid, p_run_id uuid, p_artifact_kind text, p_object_key text,
+    p_sha256 text, p_data_classification text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM ai.ai_run WHERE id = p_run_id AND authorization_grant_id IS NOT NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'artifact requires a governed run';
+    END IF;
+    INSERT INTO ai.ai_run_artifact
+        (id, run_id, artifact_kind, object_key, sha256, data_classification, retention_until)
+    VALUES (p_id, p_run_id, p_artifact_kind, p_object_key, p_sha256,
+            p_data_classification, statement_timestamp() + interval '1 year');
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.record_retrieval_trace(
+    p_id uuid, p_run_id uuid, p_embedding_space_id uuid, p_query_hash text,
+    p_lexical_candidate_count integer, p_vector_candidate_count integer,
+    p_result_count integer, p_ranking_config jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+    document_count integer;
+BEGIN
+    SELECT * INTO STRICT grant_row FROM authz.ai_authorization_grant
+    WHERE run_id = p_run_id AND consumed_at IS NOT NULL;
+    SELECT count(*) INTO document_count FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
+    INSERT INTO ai.retrieval_trace
+        (id, run_id, grant_id, embedding_space_id, query_hash, authorized_set_digest,
+         authorized_document_count, classification_ceiling, lexical_candidate_count,
+         vector_candidate_count, result_count, ranking_config)
+    VALUES (p_id, p_run_id, grant_row.id, p_embedding_space_id, p_query_hash,
+            grant_row.authorized_set_digest, document_count, grant_row.classification_ceiling,
+            p_lexical_candidate_count, p_vector_candidate_count, p_result_count, p_ranking_config);
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.record_retrieval_hit(
+    p_trace_id uuid, p_document_version_id uuid, p_chunk_id uuid,
+    p_lexical_score double precision, p_vector_score double precision,
+    p_fused_score double precision, p_rank integer, p_excerpt_hash text, p_injection_detected boolean
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    INSERT INTO ai.retrieval_hit
+        (trace_id, document_version_id, chunk_id, lexical_score, vector_score,
+         fused_score, rank, excerpt_hash, injection_detected)
+    VALUES (p_trace_id, p_document_version_id, p_chunk_id, p_lexical_score, p_vector_score,
+            p_fused_score, p_rank, p_excerpt_hash, p_injection_detected);
+    RETURN p_chunk_id;
+END;
+$$;
+
+CREATE FUNCTION ai.begin_embedding_space_gate(
+    p_id uuid, p_dataset_version_id uuid, p_candidate_embedding_space_id uuid,
+    p_corpus_manifest_digest text, p_expected_active_space_id uuid, p_evidence_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_manifest text;
+    candidate_status text;
+    active_status text;
+    eligible bigint;
+    embedded bigint;
+    leakage bigint;
+BEGIN
+    SELECT corpus_version, status INTO STRICT candidate_manifest, candidate_status
+    FROM ai.embedding_space WHERE id = p_candidate_embedding_space_id;
+    SELECT status INTO STRICT active_status FROM ai.embedding_space WHERE id = p_expected_active_space_id;
+    IF candidate_manifest <> p_corpus_manifest_digest OR candidate_status <> 'BUILDING' OR active_status <> 'ACTIVE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
+    END IF;
+    WITH eligible_chunks AS (
+        SELECT DISTINCT chunk.id
+        FROM ai.ingestion_job job
+        JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
+        WHERE job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    )
+    SELECT count(*), count(embedding.chunk_id),
+           (SELECT count(*) FROM ai.chunk_embedding all_embedding
+            LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
+            WHERE all_embedding.embedding_space_id = p_candidate_embedding_space_id AND allowed.id IS NULL)
+    INTO eligible, embedded, leakage
+    FROM eligible_chunks eligible_chunk
+    LEFT JOIN ai.chunk_embedding embedding
+      ON embedding.chunk_id = eligible_chunk.id AND embedding.embedding_space_id = p_candidate_embedding_space_id;
+    IF eligible = 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: eligible corpus is empty';
+    END IF;
+    INSERT INTO ai.embedding_space_gate_evaluation
+        (id, dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id,
+         expected_active_space_id, eligible_count, embedded_count, leakage_count, evidence_hash)
+    VALUES (p_id, p_dataset_version_id, p_corpus_manifest_digest, p_candidate_embedding_space_id,
+            p_expected_active_space_id, eligible, embedded, leakage, p_evidence_hash);
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.record_embedding_gate_case(
+    p_evaluation_id uuid, p_case_id uuid, p_citation_numerator bigint,
+    p_citation_denominator bigint, p_recall_at_10 numeric, p_evidence_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    expected_dataset uuid;
+    case_dataset uuid;
+BEGIN
+    SELECT dataset_version_id INTO STRICT expected_dataset
+    FROM ai.embedding_space_gate_evaluation WHERE id = p_evaluation_id;
+    SELECT dataset_version_id INTO STRICT case_dataset FROM ai.evaluation_case WHERE id = p_case_id;
+    IF case_dataset <> expected_dataset THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'gate case is outside evaluation dataset';
+    END IF;
+    INSERT INTO ai.embedding_space_gate_case_evidence
+        (evaluation_id, case_id, citation_numerator, citation_denominator, recall_at_10, evidence_hash)
+    VALUES (p_evaluation_id, p_case_id, p_citation_numerator, p_citation_denominator, p_recall_at_10, p_evidence_hash);
+    RETURN p_case_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_embedding_space_gate(p_evaluation_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    evaluation ai.embedding_space_gate_evaluation%ROWTYPE;
+    current_manifest text;
+    active_status text;
+    citation_num bigint;
+    citation_den bigint;
+    recall_total numeric;
+    cases bigint;
+    gate_decision text;
+BEGIN
+    SELECT * INTO STRICT evaluation FROM ai.embedding_space_gate_evaluation
+    WHERE id = p_evaluation_id FOR SHARE;
+    SELECT corpus_version INTO STRICT current_manifest FROM ai.embedding_space
+    WHERE id = evaluation.candidate_embedding_space_id;
+    SELECT status INTO STRICT active_status FROM ai.embedding_space
+    WHERE id = evaluation.expected_active_space_id;
+    IF current_manifest <> evaluation.corpus_manifest_digest OR active_status <> 'ACTIVE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
+    END IF;
+    SELECT coalesce(sum(citation_numerator), 0), coalesce(sum(citation_denominator), 0),
+           coalesce(sum(recall_at_10), 0), count(*)
+    INTO citation_num, citation_den, recall_total, cases
+    FROM ai.embedding_space_gate_case_evidence WHERE evaluation_id = p_evaluation_id;
+    IF citation_den = 0 OR cases = 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: citation and recall evidence are required';
+    END IF;
+    gate_decision := CASE WHEN evaluation.embedded_count = evaluation.eligible_count
+        AND evaluation.leakage_count = 0
+        AND citation_num::numeric / citation_den >= 0.95
+        AND recall_total / cases >= 0.85 THEN 'PASS' ELSE 'FAIL' END;
+    INSERT INTO ai.embedding_space_gate_result
+        (id, dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id,
+         expected_active_space_id, eligible_count, embedded_count, leakage_count,
+         citation_numerator, citation_denominator, recall_sum, recall_count,
+         decision, evidence_hash)
+    VALUES (evaluation.id, evaluation.dataset_version_id, evaluation.corpus_manifest_digest,
+            evaluation.candidate_embedding_space_id, evaluation.expected_active_space_id,
+            evaluation.eligible_count, evaluation.embedded_count, evaluation.leakage_count,
+            citation_num, citation_den, recall_total, cases, gate_decision, evaluation.evidence_hash);
+    RETURN gate_decision;
+END;
+$$;
+
 CREATE FUNCTION ai.authorized_hybrid_retrieval(
     p_run_id uuid,
     p_space_id uuid,
@@ -574,6 +1179,9 @@ BEGIN
         WHERE grant_row.run_id = p_run_id AND grant_row.consumed_at IS NOT NULL
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'run has no consumed AI authorization grant';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM ai.embedding_space WHERE id = p_space_id AND status = 'ACTIVE') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retrieval embedding space is not active';
     END IF;
     RETURN QUERY
     WITH grant_scope AS (
@@ -633,25 +1241,38 @@ REVOKE ALL ON SCHEMA public FROM innorder_ai_runtime;
 GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime;
 GRANT USAGE ON SCHEMA authz TO innorder_ai_runtime;
 
-GRANT SELECT ON ai.model_profile, ai.prompt_template_version, ai.agent_definition_version,
+GRANT SELECT ON ai.model_provider, ai.model_profile, ai.prompt_template_version, ai.agent_definition_version,
     ai.tool_definition, ai.agent_tool_grant, ai.embedding_space,
-    ai.evaluation_dataset_version, ai.evaluation_case
+    ai.evaluation_dataset_version, ai.evaluation_case, ai.knowledge_document_version,
+    ai.knowledge_chunk, ai.chunk_embedding, ai.ingestion_job, ai.ingestion_attempt,
+    ai.event_consumption, ai.model_invocation, ai.retrieval_trace, ai.retrieval_hit,
+    ai.embedding_space_gate_evaluation, ai.embedding_space_gate_case_evidence,
+    ai.embedding_space_gate_result, ai.ai_run_artifact, ai.retention_policy
 TO innorder_ai_runtime;
-GRANT SELECT, INSERT ON ai.knowledge_document_version, ai.knowledge_chunk, ai.chunk_embedding
-TO innorder_ai_runtime;
-GRANT SELECT, INSERT, UPDATE ON ai.ingestion_job, ai.ingestion_attempt, ai.event_consumption,
-    ai.model_invocation
-TO innorder_ai_runtime;
-GRANT SELECT, INSERT ON ai.retrieval_trace, ai.retrieval_hit TO innorder_ai_runtime;
-GRANT SELECT ON ai.embedding_space_gate_result TO innorder_ai_runtime;
 
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai FROM PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai TO innorder_runtime;
-REVOKE ALL ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, uuid, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_ingestion_chunk_embedding(uuid, text, uuid, uuid, integer, text, text, integer, jsonb, uuid, public.vector) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_ingestion_job(uuid, text, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.fail_ingestion_job(uuid, text, text, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.register_event_consumption(uuid, text, uuid, text, integer, text, uuid, bigint) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_event_consumption(uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.fail_event_consumption(uuid, text, text, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.transition_ai_run(uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.start_model_invocation(uuid, uuid, uuid, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_model_invocation(uuid, text, text, text, bigint, bigint, numeric, integer, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_run_artifact(uuid, uuid, text, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.record_retrieval_trace(uuid, uuid, uuid, text, integer, integer, integer, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.record_retrieval_hit(uuid, uuid, uuid, double precision, double precision, double precision, integer, text, boolean) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.begin_embedding_space_gate(uuid, uuid, uuid, text, uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.record_embedding_gate_case(uuid, uuid, bigint, bigint, numeric, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_embedding_space_gate(uuid) TO innorder_ai_runtime;
