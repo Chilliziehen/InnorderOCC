@@ -45,8 +45,7 @@ class IdempotencyRepository private constructor(
         val row = jdbc.queryForObject(
             """SELECT id, request_hash, state, expires_at
                FROM audit.idempotency_record
-               WHERE principal_id = ? AND command_key = ? AND idempotency_key = ?
-               FOR UPDATE""",
+               WHERE principal_id = ? AND command_key = ? AND idempotency_key = ?""",
             { result, _ -> ExistingRecord(
                 result.getObject("id", UUID::class.java),
                 result.getString("request_hash"),

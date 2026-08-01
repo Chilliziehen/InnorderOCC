@@ -2,6 +2,7 @@ package com.innorder.occ.command
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.innorder.occ.authz.AuthorizationDecisionReference
 import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationRevisionLockRepository
 import com.innorder.occ.authz.AuthorizationService
@@ -39,13 +40,11 @@ class CommandExecutor(
         val sensitiveValues = sensitiveValues(request)
         validatePreAcquireDataMinimization(metadata, descriptor, sensitiveValues)
         return transactions.execute {
+            val authorization = authorize(metadata, descriptor, fingerprint)
             when (val acquisition = idempotency.acquire(descriptor, metadata.idempotencyKey, fingerprint)) {
-                is IdempotencyAcquisition.Replay -> {
-                    authorize(metadata, descriptor, fingerprint)
-                    idempotency.replay(acquisition.recordId)
-                }
+                is IdempotencyAcquisition.Replay -> idempotency.replay(acquisition.recordId)
                 is IdempotencyAcquisition.Owner -> executeOwned(
-                    metadata, descriptor, fingerprint, sensitiveValues, command, acquisition.recordId,
+                    metadata, descriptor, authorization, fingerprint, sensitiveValues, command, acquisition.recordId,
                 )
             }
         }!!
@@ -54,12 +53,12 @@ class CommandExecutor(
     private fun executeOwned(
         metadata: CommandMetadata,
         descriptor: CommandDescriptor,
+        authorization: AuthorizationDecisionReference,
         requestDigest: String,
         sensitiveValues: Set<String>,
         command: AuthorizedCommand,
         idempotencyRecordId: UUID,
     ): CommandResult {
-        val authorization = authorize(metadata, descriptor, requestDigest)
         val transactionId = UUID.randomUUID()
         val acquired = aggregateLocks.acquire(jdbc, requireNotNull(descriptor.lockPlan))
         val context = CommandContext(
@@ -88,7 +87,7 @@ class CommandExecutor(
         metadata: CommandMetadata,
         descriptor: CommandDescriptor,
         requestDigest: String,
-    ): com.innorder.occ.authz.AuthorizationDecisionReference {
+    ): AuthorizationDecisionReference {
         if (descriptor.changesAuthorizationFacts) authorizationLocks.acquireForChange()
         return authorizationService.authorize(
             AuthorizationRequest(
@@ -176,13 +175,6 @@ class CommandExecutor(
             put("changesAuthorizationFacts", descriptor.changesAuthorizationFacts)
             if (descriptor.expectedVersion == null) putNull("expectedVersion") else put("expectedVersion", descriptor.expectedVersion)
             put("principalId", descriptor.principalId.toString())
-            val identityOrder = compareBy<AggregateReference>({ it.type }, { it.id.toString() })
-            putArray("existingAggregates").also { array -> descriptor.lockPlan?.existing?.sortedWith(identityOrder)?.forEach {
-                array.addObject().put("type", it.type).put("id", it.id.toString())
-            } }
-            putArray("createdAggregates").also { array -> descriptor.lockPlan?.created?.sortedWith(identityOrder)?.forEach {
-                array.addObject().put("type", it.type).put("id", it.id.toString())
-            } }
             set<JsonNode>("request", request.toJsonNode())
         }
         return CanonicalJsonObject.from(envelope, MAX_REQUEST_BYTES + 4096).digest

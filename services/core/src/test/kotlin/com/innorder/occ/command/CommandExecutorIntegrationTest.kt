@@ -35,6 +35,7 @@ import org.testcontainers.utility.MountableFile
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.springframework.transaction.support.TransactionTemplate
@@ -161,14 +162,14 @@ class CommandExecutorIntegrationTest {
     }
 
     @Test
-    fun `same key with a different canonical request conflicts before authorization or execution`() {
+    fun `same key with a different canonical request conflicts after fresh authorization but before execution`() {
         val metadata = metadata("conflict-key")
         executor.execute(metadata, """{"value":1}""".toByteArray(), command())
 
         assertThatThrownBy { executor.execute(metadata, """{"value":2}""".toByteArray(), command()) }
             .isInstanceOf(IdempotencyConflictException::class.java)
         assertThat(executions).hasValue(1)
-        assertThat(snapshots.calls).hasValue(1)
+        assertThat(snapshots.calls).hasValue(2)
     }
 
     @Test
@@ -989,6 +990,76 @@ class CommandExecutorIntegrationTest {
         assertThat(executions).hasValue(1)
     }
 
+    @Test
+    fun `request fingerprint remains byte compatible with legacy command descriptor envelope`() {
+        executor.execute(metadata("legacy-digest-fixture"), "{}".toByteArray(), command())
+
+        assertThat(jdbc.queryForObject(
+            "SELECT request_hash FROM audit.idempotency_record WHERE principal_id = ? AND idempotency_key = ?",
+            String::class.java,
+            PRINCIPAL_ID,
+            "legacy-digest-fixture",
+        )).isEqualTo(LEGACY_EMPTY_REQUEST_DIGEST)
+    }
+
+    @Test
+    fun `completed record written with legacy fingerprint replays after lock plan upgrade`() {
+        val key = "legacy-upgrade-replay"
+        insertIdempotencyFixture(key, LEGACY_EMPTY_REQUEST_DIGEST, "COMPLETED")
+
+        val replay = executor.execute(metadata(key), "{}".toByteArray(), command())
+
+        assertThat(replay.replayed).isTrue()
+        assertThat(replay.body.toJsonNode()).isEqualTo(JSON.readTree("""{"result":"legacy"}"""))
+        assertThat(executions).hasValue(0)
+        assertThat(snapshots.calls).hasValue(1)
+    }
+
+    @Test
+    fun `denied caller cannot distinguish matching mismatched expired in progress or corrupt idempotency keys`() {
+        insertIdempotencyFixture("probe-matching", LEGACY_EMPTY_REQUEST_DIGEST, "COMPLETED")
+        insertIdempotencyFixture("probe-mismatch", "f".repeat(64), "COMPLETED")
+        insertIdempotencyFixture("probe-expired", LEGACY_EMPTY_REQUEST_DIGEST, "COMPLETED", expired = true)
+        insertIdempotencyFixture("probe-in-progress", LEGACY_EMPTY_REQUEST_DIGEST, "IN_PROGRESS")
+        insertIdempotencyFixture("probe-corrupt", LEGACY_EMPTY_REQUEST_DIGEST, "FAILED")
+        configureAuthorization(AuthorizationDecisionValue.DENY)
+
+        listOf("matching", "mismatch", "expired", "in-progress", "corrupt").forEach { kind ->
+            assertThatThrownBy {
+                executor.execute(metadata("probe-$kind"), "{}".toByteArray(), command())
+            }.describedAs(kind)
+                .isExactlyInstanceOf(com.innorder.occ.authz.AuthorizationDeniedException::class.java)
+                .hasMessage("Authorization denied")
+        }
+        assertThat(snapshots.calls).hasValue(5)
+        assertThat(executions).hasValue(0)
+    }
+
+    @Test
+    fun `completed replay authorizations run concurrently before terminal idempotency reads`() {
+        val key = metadata("parallel-replay")
+        executor.execute(key, "{}".toByteArray(), command())
+        snapshots.barrier = CyclicBarrier(2)
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val futures = (1..2).map {
+                pool.submit<CommandResult> {
+                    assertThat(start.await(10, TimeUnit.SECONDS)).isTrue()
+                    executor.execute(key, "{}".toByteArray(), command())
+                }
+            }
+            start.countDown()
+
+            assertThat(futures.map { it.get(15, TimeUnit.SECONDS) }).allMatch { it.replayed }
+            assertThat(snapshots.calls).hasValue(3)
+            assertThat(executions).hasValue(1)
+        } finally {
+            pool.shutdownNow()
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue()
+        }
+    }
+
     private fun metadata(key: String) = CommandMetadata(PRINCIPAL_ID, "test.update", key, 3, CORRELATION_ID)
 
     private fun configureAuthorization(outcome: AuthorizationDecisionValue) {
@@ -1009,6 +1080,32 @@ class CommandExecutorIntegrationTest {
     )
 
     private fun primaryRef() = AggregateReference("kernel-test", AGGREGATE_ID)
+
+    private fun insertIdempotencyFixture(
+        key: String,
+        requestHash: String,
+        state: String,
+        expired: Boolean = false,
+    ) {
+        val completed = state == "COMPLETED"
+        val failed = state == "FAILED"
+        val body = json("""{"result":"legacy"}""")
+        jdbc.update(
+            """INSERT INTO audit.idempotency_record
+               (id, principal_id, command_key, idempotency_key, request_hash, state,
+                response_status, response_body, response_digest, resource_id,
+                created_at, updated_at, expires_at)
+               VALUES (?, ?, 'test.update', ?, ?, ?, ?, ?::jsonb, ?, ?,
+                       statement_timestamp() - interval '2 days', statement_timestamp() - interval '2 days',
+                       statement_timestamp() + CASE WHEN ? THEN interval '-1 day' ELSE interval '1 day' END)""",
+            UUID.randomUUID(), PRINCIPAL_ID, key, requestHash, state,
+            when { completed -> 200; failed -> 500; else -> null },
+            if (completed) body.canonicalText() else null,
+            if (completed) body.digest else null,
+            if (completed) RESOURCE_ID else null,
+            expired,
+        )
+    }
 
     private fun json(value: String): CanonicalJsonObject = CanonicalJsonObject.from(JSON.readTree(value))
 
@@ -1081,10 +1178,12 @@ class CommandExecutorIntegrationTest {
         val calls = AtomicInteger()
         var lastRequest: AuthorizationRequest? = null
         var outcome = AuthorizationDecisionValue.ALLOW
+        @Volatile var barrier: CyclicBarrier? = null
 
         override fun load(request: AuthorizationRequest): AuthorizationSnapshot {
             calls.incrementAndGet()
             lastRequest = request
+            barrier?.await(5, TimeUnit.SECONDS)
             return AuthorizationSnapshot(
                 1, request.requestId, 1, mapOf(PolicyLayer.PLATFORM to RELEASE_ID),
                 AuthorizationPrincipal(request.principalId, true), AuthorizationEntity(request.entityId),
@@ -1107,6 +1206,7 @@ class CommandExecutorIntegrationTest {
         private val CORRELATION_ID = UUID.fromString("81000000-0000-7000-8000-000000000005")
         private val RELEASE_ID = UUID.fromString("81000000-0000-7000-8000-000000000006")
         private const val POLICY_REFERENCE = "policy:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        private const val LEGACY_EMPTY_REQUEST_DIGEST = "734b3981c4f2042036781483a13af5fa7a5e5904cde000ca0b222f34b2b02c2f"
 
         @Container
         @JvmStatic
