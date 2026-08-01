@@ -65,7 +65,7 @@ open class ObjectStoreException internal constructor(message: String) : RuntimeE
 
 class ObjectNotFoundException internal constructor() : ObjectStoreException("Object not found")
 
-class ObjectAlreadyExistsException internal constructor() : ObjectStoreException("Immutable object already exists")
+class ObjectAlreadyExistsException internal constructor() : ObjectStoreException("Object already exists")
 
 class ObjectIntegrityException internal constructor() :
     ObjectStoreException("Object content did not match declared size or hash")
