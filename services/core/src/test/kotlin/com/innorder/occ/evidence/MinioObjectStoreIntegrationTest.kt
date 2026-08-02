@@ -1,6 +1,7 @@
 package com.innorder.occ.evidence
 
 import eu.rekawek.toxiproxy.model.ToxicDirection
+import okhttp3.Interceptor
 import org.awaitility.Awaitility.await
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -16,26 +17,28 @@ import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.Network
 import org.testcontainers.containers.ToxiproxyContainer
 import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.images.builder.Transferable
 import org.testcontainers.containers.startupcheck.OneShotStartupCheckStrategy
+import org.testcontainers.images.builder.Transferable
 import org.testcontainers.utility.DockerImageName
-import okhttp3.Interceptor
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
-import java.security.MessageDigest
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.time.Duration
 import java.util.UUID
-import java.util.concurrent.Executors
-import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 @Suppress("DEPRECATION")
 class MinioObjectStoreIntegrationTest {
@@ -508,6 +511,162 @@ class MinioObjectStoreIntegrationTest {
     }
 
     @Test
+    fun `request bound deadline stops stalled stat after dispatcher timeout replacement`() {
+        val key = "quarantine/stalled-stat-${UUID.randomUUID()}"
+        val bytes = "stalled-stat".toByteArray()
+        store.putQuarantine(ObjectPut(key, ByteArrayInputStream(bytes), bytes.size.toLong(), sha256(bytes), "text/plain"))
+        val latency = faultProxy.toxics().latency(
+            "stalled-stat-${UUID.randomUUID()}",
+            ToxicDirection.DOWNSTREAM,
+            1_500,
+        )
+        val deadlineObserved = AtomicBoolean()
+        val faultStore = MinioObjectStore(
+            EvidenceStorageProperties(
+                "http://${faultProxy.containerIpAddress}:${faultProxy.proxyPort}",
+                BUCKET,
+                APP_USER,
+                APP_PASSWORD,
+                Duration.ofMillis(350),
+            ),
+            dispatcherTimeoutReplacement(deadlineObserved),
+            null,
+        )
+        try {
+            val started = System.nanoTime()
+            assertThatThrownBy { faultStore.stat(key) }
+                .isInstanceOf(ObjectStoreException::class.java)
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(1))
+            assertThat(deadlineObserved).isTrue()
+        } finally {
+            faultStore.close()
+            latency.remove()
+            store.delete(key)
+        }
+    }
+
+    @Test
+    fun `request bound deadline stops promotion when a later SDK request stalls`() {
+        val sourceKey = "quarantine/stalled-promotion-${UUID.randomUUID()}"
+        val targetKey = "evidence/stalled-promotion-${UUID.randomUUID()}"
+        val bytes = "stalled-promotion".toByteArray()
+        val hash = sha256(bytes)
+        store.putQuarantine(ObjectPut(sourceKey, ByteArrayInputStream(bytes), bytes.size.toLong(), hash, "text/plain"))
+        val latency = AtomicReference<eu.rekawek.toxiproxy.model.toxic.Latency>()
+        val requests = AtomicInteger()
+        val deadlineObserved = AtomicBoolean()
+        val observedDeadlines = ConcurrentHashMap.newKeySet<String>()
+        val boundary = Interceptor { chain ->
+            chain.request().header("X-Innorder-Internal-Deadline-Nanos")?.let(observedDeadlines::add)
+            if (requests.incrementAndGet() == 2) {
+                latency.set(
+                    faultProxy.toxics().latency(
+                        "stalled-promotion-${UUID.randomUUID()}",
+                        ToxicDirection.DOWNSTREAM,
+                        1_500,
+                    ),
+                )
+            }
+            dispatcherTimeoutReplacement(deadlineObserved).intercept(chain)
+        }
+        val faultStore = MinioObjectStore(
+            EvidenceStorageProperties(
+                "http://${faultProxy.containerIpAddress}:${faultProxy.proxyPort}",
+                BUCKET,
+                APP_USER,
+                APP_PASSWORD,
+                Duration.ofMillis(500),
+            ),
+            boundary,
+            null,
+        )
+        try {
+            val started = System.nanoTime()
+            assertThatThrownBy { faultStore.promote(sourceKey, targetKey, bytes.size.toLong(), hash) }
+                .isInstanceOf(ObjectStoreException::class.java)
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(1))
+            assertThat(deadlineObserved).isTrue()
+            assertThat(observedDeadlines).hasSize(1)
+            assertThat(rootObjectExists(targetKey)).isFalse()
+        } finally {
+            faultStore.close()
+            latency.get()?.remove()
+            if (rootObjectExists(sourceKey)) rootStore.delete(sourceKey)
+            if (rootObjectExists(targetKey)) rootStore.delete(targetKey)
+        }
+    }
+
+    @Test
+    fun `download body is forcibly closed at the request bound deadline`() {
+        val key = "quarantine/slow-download-${UUID.randomUUID()}"
+        val bytes = ByteArray(256 * 1024) { index -> (index % 251).toByte() }
+        store.putQuarantine(
+            ObjectPut(key, ByteArrayInputStream(bytes), bytes.size.toLong(), sha256(bytes), "application/octet-stream"),
+        )
+        val bandwidth = faultProxy.toxics().bandwidth(
+            "slow-download-${UUID.randomUUID()}",
+            ToxicDirection.DOWNSTREAM,
+            128,
+        )
+        val deadlineObserved = AtomicBoolean()
+        val faultStore = MinioObjectStore(
+            EvidenceStorageProperties(
+                "http://${faultProxy.containerIpAddress}:${faultProxy.proxyPort}",
+                BUCKET,
+                APP_USER,
+                APP_PASSWORD,
+                Duration.ofMillis(400),
+            ),
+            dispatcherTimeoutReplacement(deadlineObserved),
+            null,
+        )
+        var bandwidthRemoved = false
+        try {
+            val started = System.nanoTime()
+            faultStore.get(key).use { read ->
+                assertThatThrownBy { read.stream.readBytes() }
+                    .isInstanceOf(IOException::class.java)
+            }
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(1))
+            assertThat(deadlineObserved).isTrue()
+            bandwidth.remove()
+            bandwidthRemoved = true
+            assertThat(faultStore.stat(key).sha256).isEqualTo(sha256(bytes))
+            repeat(5) {
+                faultStore.get(key, ObjectRange(0, 1)).use { read ->
+                    assertThat(read.stream.read()).isEqualTo(bytes[0].toInt() and 0xff)
+                    assertThat(read.stream.read()).isEqualTo(-1)
+                }
+            }
+        } finally {
+            faultStore.close()
+            if (!bandwidthRemoved) runCatching { bandwidth.remove() }
+            store.delete(key)
+        }
+    }
+
+    @Test
+    fun `closing store closes an unread download stream`() {
+        val key = "quarantine/close-download-${UUID.randomUUID()}"
+        val bytes = "close-download".toByteArray()
+        store.putQuarantine(ObjectPut(key, ByteArrayInputStream(bytes), bytes.size.toLong(), sha256(bytes), "text/plain"))
+        val ownedStore = MinioObjectStore(
+            EvidenceStorageProperties(endpoint, BUCKET, APP_USER, APP_PASSWORD, Duration.ofSeconds(10)),
+        )
+        val read = ownedStore.get(key)
+        try {
+            ownedStore.close()
+
+            assertThatThrownBy { read.stream.read() }
+                .isInstanceOf(IOException::class.java)
+        } finally {
+            read.close()
+            ownedStore.close()
+            store.delete(key)
+        }
+    }
+
+    @Test
     fun `production storage wiring accepts only strong config tree credentials`(@TempDir tempDirectory: Path) {
         val validDirectory = Files.createDirectory(tempDirectory.resolve("valid"))
         Files.writeString(validDirectory.resolve(ACCESS_KEY_PROPERTY), APP_USER)
@@ -654,6 +813,16 @@ class MinioObjectStoreIntegrationTest {
             closed = true
             released.countDown()
         }
+    }
+
+    private fun dispatcherTimeoutReplacement(deadlineObserved: AtomicBoolean): Interceptor = Interceptor { chain ->
+        deadlineObserved.set(chain.request().header("X-Innorder-Internal-Deadline-Nanos") != null)
+        chain.call().timeout().clearTimeout()
+        chain
+            .withConnectTimeout(5, TimeUnit.SECONDS)
+            .withReadTimeout(5, TimeUnit.SECONDS)
+            .withWriteTimeout(5, TimeUnit.SECONDS)
+            .proceed(chain.request())
     }
 
     companion object {
