@@ -25,6 +25,15 @@ const confirmationSchema = z.object({
   caFingerprint: z.string().regex(/^[0-9A-Fa-f]{64}$/).transform((value) => value.toUpperCase()),
 }).strict();
 
+export async function runLifecycleBeforeSingleInstance(input: {
+  lifecycle(): Promise<{ handled: boolean }>;
+  acquireNormalInstance(): boolean;
+}): Promise<{ handled: boolean; ownsInstance: boolean }> {
+  const lifecycle = await input.lifecycle();
+  if (lifecycle.handled) return { handled: true, ownsInstance: false };
+  return { handled: false, ownsInstance: input.acquireNormalInstance() };
+}
+
 export async function handleDeploymentCaLifecycle(
   input: Input,
   dependencies: {

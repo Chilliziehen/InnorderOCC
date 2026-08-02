@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -9,6 +9,7 @@ import { createProfileTransport } from "../src/profile-transport";
 const profile = { id: "9d564974-1f4f-4cc8-987a-4f2f09790d13", origin: "https://occ.example", caFingerprint: "AA".repeat(32) };
 
 describe("profile-scoped Electron transport", () => {
+  afterEach(() => vi.useRealTimers());
   it("uses a profile partition and delegates only an exact system-valid chain to Chromium", async () => {
     const setCertificateVerifyProc = vi.fn();
     const fetch = vi.fn().mockResolvedValue(new Response("{}"));
@@ -76,19 +77,18 @@ describe("profile-scoped Electron transport", () => {
     expect(second.fetch).toHaveBeenCalledOnce();
 
     finishA();
-    await expect(pendingA).resolves.toBeInstanceOf(Response);
+    const responseA = await pendingA;
+    await expect(responseA.text()).resolves.toBe("A");
     await vi.waitFor(() => expect(first.clearStorageData).toHaveBeenCalledOnce());
     expect(first.setCertificateVerifyProc).not.toHaveBeenCalledWith(null);
   });
 
-  it("does not deadlock A to B to A with independent deferred requests", async () => {
+  it("does not deadlock A to B to A and gives each activation an immutable partition", async () => {
     let finishA1!: () => void;
     let finishB!: () => void;
     const first = {
       setCertificateVerifyProc: vi.fn(),
-      fetch: vi.fn()
-        .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishA1 = () => resolve(new Response("A1")); }))
-        .mockResolvedValueOnce(new Response("A2")),
+      fetch: vi.fn(() => new Promise<Response>((resolve) => { finishA1 = () => resolve(new Response("A1")); })),
       clearStorageData: vi.fn().mockResolvedValue(undefined),
     };
     const second = {
@@ -96,20 +96,129 @@ describe("profile-scoped Electron transport", () => {
       fetch: vi.fn(() => new Promise<Response>((resolve) => { finishB = () => resolve(new Response("B")); })),
       clearStorageData: vi.fn().mockResolvedValue(undefined),
     };
-    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) });
+    const third = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("A2")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const fromPartition = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second).mockReturnValueOnce(third);
+    const transport = createProfileTransport({ fromPartition });
     const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
     const pendingA1 = transport.fetch(profile, new URL("https://occ.example/a1"));
     await vi.waitFor(() => expect(first.fetch).toHaveBeenCalledOnce());
     const pendingB = transport.fetch(profileB, new URL("https://b.example/b"));
     await vi.waitFor(() => expect(second.fetch).toHaveBeenCalledOnce());
     await expect(transport.fetch(profile, new URL("https://occ.example/a2"))).resolves.toBeInstanceOf(Response);
-    expect(first.fetch).toHaveBeenCalledTimes(2);
+    expect(first.fetch).toHaveBeenCalledOnce();
+    expect(third.fetch).toHaveBeenCalledOnce();
+    expect(new Set(fromPartition.mock.calls.map(([partition]) => partition)).size).toBe(3);
     finishB();
     finishA1();
     await Promise.all([pendingA1, pendingB]);
     expect(first.setCertificateVerifyProc).not.toHaveBeenCalledWith(null);
     expect(second.setCertificateVerifyProc).not.toHaveBeenCalledWith(null);
   });
+
+  it("does not reuse a partition generation when the transport is recreated", async () => {
+    const partitions: string[] = [];
+    const fromPartition = (partition: string) => {
+      partitions.push(partition);
+      return { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("A")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    };
+    await createProfileTransport({ fromPartition }).fetch(profile, new URL("https://occ.example/a"));
+    await createProfileTransport({ fromPartition }).fetch(profile, new URL("https://occ.example/a"));
+    expect(new Set(partitions).size).toBe(2);
+  });
+
+  it("keeps a retired request pinned until its streaming body reaches EOF", async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const first = {
+      setCertificateVerifyProc: vi.fn(),
+      fetch: vi.fn().mockResolvedValue(new Response(new ReadableStream<Uint8Array>({ start(controller) { streamController = controller; } }))),
+      clearStorageData: vi.fn().mockResolvedValue(undefined),
+    };
+    const second = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("B")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const third = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("A2")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second).mockReturnValueOnce(third) });
+    const responseA = await transport.fetch(profile, new URL("https://occ.example/a"));
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    await transport.fetch(profileB, new URL("https://b.example/b"));
+    await transport.fetch(profile, new URL("https://occ.example/a2"));
+    expect(first.clearStorageData).not.toHaveBeenCalled();
+    const body = responseA.text();
+    streamController.enqueue(new TextEncoder().encode("A"));
+    streamController.close();
+    await expect(body).resolves.toBe("A");
+    await vi.waitFor(() => expect(first.clearStorageData).toHaveBeenCalledOnce());
+  });
+
+  it("expires only retired streaming bodies and rejects subsequent reads", async () => {
+    vi.useFakeTimers();
+    const cancelA = vi.fn().mockResolvedValue(undefined);
+    const cancelB = vi.fn().mockResolvedValue(undefined);
+    const stream = (cancel: ReturnType<typeof vi.fn>) => new ReadableStream<Uint8Array>({ pull() { return new Promise(() => undefined); }, cancel });
+    const first = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response(stream(cancelA))), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const second = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response(stream(cancelB))), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const transport = createProfileTransport({
+      fromPartition: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second),
+      retiredTimeoutMs: 1_000,
+      maxRetiredBindings: 2,
+    });
+    const responseA = await transport.fetch(profile, new URL("https://occ.example/a"));
+    const readA = responseA.body!.getReader().read();
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    const responseB = await transport.fetch(profileB, new URL("https://b.example/b"));
+    const readB = responseB.body!.getReader().read();
+    const retiredRead = expect(readA).rejects.toThrow(/retired/i);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await retiredRead;
+    expect(cancelA).toHaveBeenCalledOnce();
+    expect(cancelB).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(first.clearStorageData).toHaveBeenCalledOnce());
+    let settledB = false;
+    void readB.finally(() => { settledB = true; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settledB).toBe(false);
+  });
+
+  it("clears an expired retired binding even when stream cancellation never settles", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn(() => new Promise<void>(() => undefined));
+    const first = {
+      setCertificateVerifyProc: vi.fn(),
+      fetch: vi.fn().mockResolvedValue(new Response(new ReadableStream<Uint8Array>({ pull() { return new Promise(() => undefined); }, cancel }))),
+      clearStorageData: vi.fn().mockResolvedValue(undefined),
+    };
+    const second = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("B")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second), retiredTimeoutMs: 1_000 });
+    const response = await transport.fetch(profile, new URL("https://occ.example/a"));
+    const read = response.body!.getReader().read();
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    await transport.fetch(profileB, new URL("https://b.example/b"));
+    const rejected = expect(read).rejects.toThrow(/retired/i);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await rejected;
+    expect(cancel).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(first.clearStorageData).toHaveBeenCalledOnce());
+  });
+
+  it("expires only the oldest overflow when retired bindings exceed the bound", async () => {
+    const cancellations = [vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined)];
+    const sessions = cancellations.map((cancel) => ({
+      setCertificateVerifyProc: vi.fn(),
+      fetch: vi.fn().mockResolvedValue(new Response(new ReadableStream<Uint8Array>({ pull() { return new Promise(() => undefined); }, cancel }))),
+      clearStorageData: vi.fn().mockResolvedValue(undefined),
+    }));
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(sessions[0]).mockReturnValueOnce(sessions[1]).mockReturnValueOnce(sessions[2]), retiredTimeoutMs: 60_000, maxRetiredBindings: 1 });
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    const profileC = { ...profile, id: "7a597dde-f073-4cc8-b5ce-6e6f60bb69b3", origin: "https://c.example" };
+    const responseA = await transport.fetch(profile, new URL("https://occ.example/a"));
+    const readA = responseA.body!.getReader().read();
+    const rejectedA = expect(readA).rejects.toThrow(/retired/i);
+    const responseB = await transport.fetch(profileB, new URL("https://b.example/b"));
+    void responseB.body!.getReader().read();
+    await transport.fetch(profileC, new URL("https://c.example/c"));
+    await rejectedA;
+    expect(cancellations[0]).toHaveBeenCalledOnce();
+    expect(cancellations[1]).not.toHaveBeenCalled();
+    expect(cancellations[2]).not.toHaveBeenCalled();
+  }, 2_000);
 
   it("contains asynchronous retired-session cleanup errors", async () => {
     const first = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn(), clearStorageData: vi.fn().mockRejectedValue(new Error("cleanup failed")) };

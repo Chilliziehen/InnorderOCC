@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { handleDeploymentCaLifecycle } from "../src/deployment-ca-lifecycle";
+import { handleDeploymentCaLifecycle, runLifecycleBeforeSingleInstance } from "../src/deployment-ca-lifecycle";
+import { resolveTrustedPowerShell } from "../src/trusted-powershell";
 
 describe("bounded Squirrel deployment CA lifecycle", () => {
   const verifiedRelease = {
@@ -95,5 +96,39 @@ describe("bounded Squirrel deployment CA lifecycle", () => {
     expect(main).toContain("process.resourcesPath");
     expect(main).toContain("execFile");
     expect(main).not.toMatch(/exec\(|shell:\s*true|Invoke-Expression|ExecutionPolicy|Bypass/);
+  });
+
+  it("resolves only the regular System32 Windows PowerShell executable and ignores PATH", async () => {
+    const lstat = vi.fn(async (target: string) => ({ isFile: () => target.endsWith("powershell.exe"), isSymbolicLink: () => false }));
+    await expect(resolveTrustedPowerShell({ systemRoot: "C:\\Windows", pathEnvironment: "C:\\malicious", lstat, realpath: async (target) => target }))
+      .resolves.toBe("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    expect(lstat).toHaveBeenCalledWith("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  });
+
+  it("rejects relative, missing, and reparse PowerShell candidates", async () => {
+    const identity = async (target: string) => target;
+    await expect(resolveTrustedPowerShell({ systemRoot: "Windows", pathEnvironment: "C:\\malicious", lstat: vi.fn(), realpath: identity })).rejects.toThrow(/absolute/i);
+    await expect(resolveTrustedPowerShell({ systemRoot: "C:\\Windows", pathEnvironment: "C:\\malicious", lstat: async () => ({ isFile: () => false, isSymbolicLink: () => false }), realpath: identity })).rejects.toThrow(/regular/i);
+    await expect(resolveTrustedPowerShell({ systemRoot: "C:\\Windows", pathEnvironment: "C:\\malicious", lstat: async () => ({ isFile: () => true, isSymbolicLink: () => true }), realpath: identity })).rejects.toThrow(/regular/i);
+    await expect(resolveTrustedPowerShell({ systemRoot: "C:\\Windows", pathEnvironment: "C:\\malicious", lstat: async () => ({ isFile: () => true, isSymbolicLink: () => false }), realpath: async () => "D:\\attacker\\powershell.exe" })).rejects.toThrow(/SystemRoot/i);
+  });
+
+  it("handles Squirrel lifecycle before requesting the normal-app instance lock", async () => {
+    const order: string[] = [];
+    const result = await runLifecycleBeforeSingleInstance({
+      lifecycle: async () => { order.push("lifecycle"); return { handled: true, status: "invoked" }; },
+      acquireNormalInstance: () => { order.push("instance"); return false; },
+    });
+    expect(result).toEqual({ handled: true, ownsInstance: false });
+    expect(order).toEqual(["lifecycle"]);
+  });
+
+  it("requests the instance lock only after a non-Squirrel lifecycle result", async () => {
+    const order: string[] = [];
+    await expect(runLifecycleBeforeSingleInstance({
+      lifecycle: async () => { order.push("lifecycle"); return { handled: false, status: "not-squirrel" }; },
+      acquireNormalInstance: () => { order.push("instance"); return false; },
+    })).resolves.toEqual({ handled: false, ownsInstance: false });
+    expect(order).toEqual(["lifecycle", "instance"]);
   });
 });

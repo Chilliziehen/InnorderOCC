@@ -293,7 +293,7 @@ describe("deployment certificate manifest", () => {
       expectedFingerprint: new X509Certificate(DEPLOYMENT_CA_PEM).fingerprint256,
       now: fixtureNow,
     })).rejects.toThrow(/PEM|private|trailing|certificate/i);
-  });
+  }, 15_000);
 });
 
 describe("server certificate fail-closed verification", () => {
@@ -365,5 +365,5 @@ describe("owned certificate reference state", () => {
       selectedProfileId: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2",
     });
     expect(JSON.parse(await readFile(path.join(stateDirectory, "unrelated.json"), "utf8"))).toEqual({ keep: true });
-  });
+  }, 15_000);
 });

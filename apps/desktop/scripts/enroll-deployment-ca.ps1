@@ -10,6 +10,7 @@ param(
   [string]$InstallerPath,
   [string]$TestReleasePublicKeyPath,
   [string]$TestStoreRoot,
+  [ValidateSet('', 'AfterJournal', 'AfterStore', 'AfterState')][string]$TestCrashPhase = '',
   [switch]$InstallerConfirmed,
   [switch]$PlanOnly
 )
@@ -22,6 +23,7 @@ $MaximumManifestBytes = 65536
 $MaximumCertificateBytes = 262144
 $MaximumStateBytes = 65536
 $UuidV4Pattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+$LockStaleMilliseconds = 30000
 $ProductionKeyN = 'x-emz8UzYUFQWLVF8Ud4X1lC_iC8w2LF0hupPJyKHSnKZB2Vu98yjK1Y8Hqv1dxasqx03r3RSGheXj_i-OVD8eqeZ6WCe13T5Kml38JGXgF0TEtSO0mQ-ToziCAoX4u_dCn3Hs_WV87JgqPFJXz5QJuyj8enSj3jATk6VSY9ceYjuxPkmqgO996gYnY_dS2LfXG7KkfZc3nTzEMbh1U-IQ6rEvTzzNDLpLGY9MhcsBewH2q7Mik4rWNV1LEbSVYefdfnpMRYkfoCZ6UMfAv9C9pdHYZzVRjWeRxOKb47chV6_yWQLbq0hilTYNT64ZiySC62Js4vWYnuksmqSnuCnNdORvLqCdhodWvdd49gAQNO3cdOIcr6yHogCG8LUdReglgQsd_1XgHl68dsFdOH2CG8-Ph-aeZ_eBv5XW8L3osh_ztOn_s26Ii4By00_-ITW83eagKCXW8FiXjZ5WVnGo2BCJPVVH4oHdFNEZdySgpi4bCSwbSebah9ILyPpvEH'
 $ProductionKeyE = 'AQAB'
 $ProductionKeyId = 'innorder-release-2026'
@@ -65,10 +67,110 @@ function Enter-LifecycleLock([string]$Root) {
   for ($attempt = 0; $attempt -lt 100; $attempt++) {
     try {
       $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-      return [pscustomobject]@{ Stream = $stream; Path = $lockPath }
-    } catch [IO.IOException] { Start-Sleep -Milliseconds 100 }
+      $owner = [Guid]::NewGuid().ToString('D')
+      $record = [ordered]@{ version = 1; pid = $PID; processStartUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o'); acquiredAtUtc = [DateTime]::UtcNow.ToString('o'); owner = $owner }
+      [byte[]]$bytes = [Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Compress))
+      $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true)
+      return [pscustomobject]@{ Stream = $stream; Path = $lockPath; Owner = $owner }
+    } catch [IO.IOException] {
+      try {
+        $item = Get-Item -LiteralPath $lockPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and -not $item.PSIsContainer -and $item.Length -le 4096) {
+          [byte[]]$observed = [IO.File]::ReadAllBytes($lockPath)
+          $record = $null
+          try { $record = [Text.Encoding]::UTF8.GetString($observed) | ConvertFrom-Json } catch { }
+          $acquired = [DateTime]::MinValue; $started = [DateTime]::MinValue
+          $valid = $null -ne $record -and (@($record.PSObject.Properties.Name | Sort-Object) -join '|') -ceq (@('acquiredAtUtc','owner','pid','processStartUtc','version') -join '|') -and $record.version -eq 1 -and $record.pid -is [int] -and $record.pid -gt 0 -and [string]$record.owner -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' -and [DateTime]::TryParse([string]$record.acquiredAtUtc, [ref]$acquired) -and [DateTime]::TryParse([string]$record.processStartUtc, [ref]$started)
+          if ($valid -and ([DateTime]::UtcNow - ([DateTime]::Parse([string]$record.acquiredAtUtc).ToUniversalTime())).TotalMilliseconds -ge $LockStaleMilliseconds) {
+            $live = $false; $inspectionKnown = $false
+            try { $liveProcess = Get-Process -Id ([int]$record.pid) -ErrorAction Stop; $live = $liveProcess.StartTime.ToUniversalTime().ToString('o') -ceq [string]$record.processStartUtc; $inspectionKnown = $true } catch { if ($_.FullyQualifiedErrorId -match 'NoProcessFound') { $inspectionKnown = $true } }
+            if ($inspectionKnown -and -not $live) {
+              $stalePath = "$lockPath.stale.$([Guid]::NewGuid().ToString('N'))"
+              [IO.File]::Move($lockPath, $stalePath)
+              [byte[]]$moved = [IO.File]::ReadAllBytes($stalePath)
+              if ([Convert]::ToBase64String($moved) -ceq [Convert]::ToBase64String($observed)) { [IO.File]::Delete($stalePath) }
+              elseif (-not (Test-Path -LiteralPath $lockPath)) { [IO.File]::Move($stalePath, $lockPath) }
+            }
+          }
+        }
+      } catch { }
+      Start-Sleep -Milliseconds 100
+    }
   }
   throw 'Timed out acquiring deployment CA lifecycle lock'
+}
+
+function Exit-LifecycleLock($Lock) {
+  $Lock.Stream.Dispose()
+  try {
+    $record = [IO.File]::ReadAllText($Lock.Path) | ConvertFrom-Json
+    if ([string]$record.owner -ceq [string]$Lock.Owner) { [IO.File]::Delete($Lock.Path) }
+  } catch { }
+}
+
+function Write-DurableBytes([string]$Path, [byte[]]$Bytes) {
+  $stream = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+  try { $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+}
+
+function Write-AtomicText([string]$Path, [string]$Text) {
+  $temporary = "$Path.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
+  Write-DurableBytes $temporary ([Text.Encoding]::UTF8.GetBytes($Text))
+  if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    $backup = "$Path.$PID.$([Guid]::NewGuid().ToString('N')).backup"
+    [IO.File]::Replace($temporary, $Path, $backup); [IO.File]::Delete($backup)
+  } else { [IO.File]::Move($temporary, $Path) }
+}
+
+function Test-StoreCertificate([string]$Thumbprint, [string]$FakeRoot) {
+  if (-not [string]::IsNullOrWhiteSpace($FakeRoot)) { return Test-Path -LiteralPath ([IO.Path]::Combine($FakeRoot, 'Root', "$Thumbprint.cer")) -PathType Leaf }
+  $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser'); $store.Open('ReadOnly')
+  try { return @($store.Certificates | Where-Object { (Get-Sha256 $_.RawData) -ceq $Thumbprint }).Count -eq 1 } finally { $store.Close() }
+}
+
+function Remove-StoreCertificate([string]$Thumbprint, [string]$FakeRoot) {
+  if (-not [string]::IsNullOrWhiteSpace($FakeRoot)) {
+    $target = [IO.Path]::Combine($FakeRoot, 'Root', "$Thumbprint.cer")
+    if ((Test-Path -LiteralPath $target -PathType Leaf) -and (Get-Sha256 ([IO.File]::ReadAllBytes($target))) -ceq $Thumbprint) { [IO.File]::Delete($target) }
+    return
+  }
+  $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser'); $store.Open('ReadWrite')
+  try { $exact = @($store.Certificates | Where-Object { (Get-Sha256 $_.RawData) -ceq $Thumbprint }); if ($exact.Count -eq 1) { $store.Remove($exact[0]) } } finally { $store.Close() }
+}
+
+function Add-StoreCertificate([string]$Thumbprint, [string]$CertificateBase64, [string]$FakeRoot) {
+  if (Test-StoreCertificate $Thumbprint $FakeRoot) { return }
+  [byte[]]$raw = [Convert]::FromBase64String($CertificateBase64)
+  if ((Get-Sha256 $raw) -cne $Thumbprint) { throw 'Journal certificate fingerprint mismatch' }
+  if (-not [string]::IsNullOrWhiteSpace($FakeRoot)) { $root = [IO.Path]::Combine($FakeRoot, 'Root'); [void][IO.Directory]::CreateDirectory($root); Write-DurableBytes ([IO.Path]::Combine($root, "$Thumbprint.cer")) $raw; return }
+  $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($raw)
+  $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser'); $store.Open('ReadWrite')
+  try { $store.Add($certificate) } finally { $store.Close(); $certificate.Dispose() }
+}
+
+function Recover-TransactionJournal([string]$JournalPath, [string]$StatePath, [string]$FakeRoot, [string]$ExpectedDeploymentId) {
+  if (-not (Test-Path -LiteralPath $JournalPath -PathType Leaf)) { return }
+  $journalItem = Get-Item -LiteralPath $JournalPath -Force
+  if (($journalItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $journalItem.PSIsContainer -or $journalItem.Length -eq 0 -or $journalItem.Length -gt 524288) { throw 'Transaction journal must be a bounded regular file' }
+  $journal = [IO.File]::ReadAllText($JournalPath) | ConvertFrom-Json
+  Assert-ExactProperties $journal @('version','productId','deploymentId','operation','phase','action','thumbprint','priorStateBase64','priorImportedByProduct','storeHadCertificate','certificateBase64') 'Transaction journal'
+  if ($journal.version -ne 1 -or $journal.productId -cne $ProductId -or $journal.deploymentId -cne $ExpectedDeploymentId -or [string]$journal.thumbprint -notmatch '^[0-9A-F]{64}$' -or [string]$journal.operation -notin @('enroll','remove') -or [string]$journal.phase -notin @('prepared','store-mutated','state-committed') -or $journal.priorImportedByProduct -isnot [bool] -or $journal.storeHadCertificate -isnot [bool]) { throw 'Invalid transaction journal' }
+  [byte[]]$journalCertificate = [Convert]::FromBase64String([string]$journal.certificateBase64)
+  if ($journalCertificate.Length -eq 0 -or $journalCertificate.Length -gt $MaximumCertificateBytes -or (Get-Sha256 $journalCertificate) -cne [string]$journal.thumbprint) { throw 'Invalid transaction journal certificate' }
+  if ($null -ne $journal.priorStateBase64) {
+    [byte[]]$priorStateBytes = [Convert]::FromBase64String([string]$journal.priorStateBase64)
+    if ($priorStateBytes.Length -eq 0 -or $priorStateBytes.Length -gt $MaximumStateBytes) { throw 'Invalid transaction journal prior state' }
+    $priorState = [Text.Encoding]::UTF8.GetString($priorStateBytes) | ConvertFrom-Json
+    Assert-ExactProperties $priorState @('version','productId','deploymentId','importedByProduct','managed','ownedThumbprint','store','profileReferences','selectedProfileId') 'Transaction prior state'
+    if ($priorState.productId -cne $ProductId -or $priorState.deploymentId -cne $ExpectedDeploymentId -or $priorState.ownedThumbprint -cne [string]$journal.thumbprint -or $priorState.importedByProduct -ne $journal.priorImportedByProduct) { throw 'Transaction prior state mismatch' }
+  } elseif ($journal.priorImportedByProduct -ne $false) { throw 'Transaction prior ownership mismatch' }
+  if ($journal.phase -cne 'state-committed') {
+    if ($journal.operation -ceq 'enroll' -and $journal.storeHadCertificate -eq $false) { Remove-StoreCertificate ([string]$journal.thumbprint) $FakeRoot }
+    if ($journal.operation -ceq 'remove') { Add-StoreCertificate ([string]$journal.thumbprint) ([string]$journal.certificateBase64) $FakeRoot }
+    if ($null -eq $journal.priorStateBase64) { if (Test-Path -LiteralPath $StatePath) { [IO.File]::Delete($StatePath) } }
+    else { Write-AtomicText $StatePath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$journal.priorStateBase64))) }
+  }
+  [IO.File]::Delete($JournalPath)
 }
 
 function Assert-ExactProperties($Value, [string[]]$Names, [string]$Label) {
@@ -123,7 +225,7 @@ function Get-CertificateSans([Security.Cryptography.X509Certificates.X509Certifi
 
 function Assert-AbsoluteRegularPath([string]$Target, [string]$Label) {
   if (-not [IO.Path]::IsPathRooted($Target)) { throw "$Label must be absolute" }
-  $item = Get-Item -LiteralPath $Target -Force
+  $item = Get-Item -LiteralPath ([IO.Path]::GetFullPath($Target)) -Force
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.PSIsContainer) { throw "$Label must be a regular non-reparse file" }
   return $item.FullName
 }
@@ -133,14 +235,14 @@ function Test-PathUnder([string]$Root, [string]$Target) {
   return $Target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
-$PayloadRoot = [IO.Path]::GetFullPath($PayloadRoot)
 if (-not [IO.Path]::IsPathRooted($PayloadRoot)) { throw 'PayloadRoot must be absolute' }
+$PayloadRoot = [IO.Path]::GetFullPath($PayloadRoot)
 $rootItem = Get-Item -LiteralPath $PayloadRoot -Force
 if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'PayloadRoot must be a regular directory' }
 $PayloadRoot = $rootItem.FullName
-$ManifestPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($ManifestPath)) 'ManifestPath'
+$ManifestPath = Assert-AbsoluteRegularPath $ManifestPath 'ManifestPath'
 if (-not (Test-PathUnder $PayloadRoot $ManifestPath)) { throw 'ManifestPath must be under PayloadRoot' }
-$ReleaseManifestPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($ReleaseManifestPath)) 'ReleaseManifestPath'
+$ReleaseManifestPath = Assert-AbsoluteRegularPath $ReleaseManifestPath 'ReleaseManifestPath'
 if (-not (Test-PathUnder $PayloadRoot $ReleaseManifestPath)) { throw 'ReleaseManifestPath must be under PayloadRoot' }
 if (-not [IO.Path]::IsPathRooted($StateRoot) -or [IO.Path]::GetFileName([IO.Path]::GetFullPath($StateRoot).TrimEnd('\')) -cne 'state') { throw 'StateRoot must be an absolute product state path' }
 $StateRoot = [IO.Path]::GetFullPath($StateRoot)
@@ -217,7 +319,7 @@ if (($helperItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $
 if ($release.helper.file -cne [IO.Path]::GetFileName($PSCommandPath) -or (Get-Sha256 ([IO.File]::ReadAllBytes($PSCommandPath))) -cne (ConvertTo-NormalizedSha256 ([string]$release.helper.sha256) 'Helper sha256')) { throw 'Enrollment helper binding mismatch' }
 $removalHelperPath = Assert-AbsoluteRegularPath ([IO.Path]::Combine([IO.Path]::GetDirectoryName($PSCommandPath), [string]$release.removalHelper.file)) 'RemovalHelperPath'
 if ((Get-Sha256 ([IO.File]::ReadAllBytes($removalHelperPath))) -cne (ConvertTo-NormalizedSha256 ([string]$release.removalHelper.sha256) 'Removal helper sha256')) { throw 'Removal helper binding mismatch' }
-$InstallerPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($InstallerPath)) 'InstallerPath'
+$InstallerPath = Assert-AbsoluteRegularPath $InstallerPath 'InstallerPath'
 if ($InstallerPath -ceq $PSCommandPath) { throw 'Installer and helper paths must be distinct' }
 $installerItem = Get-Item -LiteralPath $InstallerPath -Force
 if ($installerItem.Length -eq 0 -or $installerItem.Length -gt 536870912) { throw 'Installer size exceeds the allowed bound' }
@@ -228,6 +330,8 @@ $contentBytes = [Text.Encoding]::UTF8.GetBytes(($certificatePayload | ConvertTo-
 if ((Get-Sha256 $contentBytes) -cne (ConvertTo-NormalizedSha256 ([string]$release.certificateManifest.contentSha256) 'Certificate manifest content sha256')) { throw 'Certificate manifest content binding mismatch' }
 
 if ($Mode -eq 'Production' -and (-not [string]::IsNullOrWhiteSpace($TestReleasePublicKeyPath) -or -not [string]::IsNullOrWhiteSpace($TestStoreRoot))) { throw 'Production mode cannot redirect release keys or certificate stores' }
+if (-not [string]::IsNullOrWhiteSpace($TestReleasePublicKeyPath) -and -not [IO.Path]::IsPathRooted($TestReleasePublicKeyPath)) { throw 'TestReleasePublicKeyPath must be absolute' }
+if (-not [string]::IsNullOrWhiteSpace($TestStoreRoot) -and -not [IO.Path]::IsPathRooted($TestStoreRoot)) { throw 'TestStoreRoot must be absolute' }
 if ($Mode -eq 'Production') {
   $preflightHelperSignature = Get-AuthenticodeSignature -LiteralPath $PSCommandPath
   $preflightInstallerSignature = Get-AuthenticodeSignature -LiteralPath $InstallerPath
@@ -263,6 +367,7 @@ if ($Mode -eq 'Production') {
 $plan = [ordered]@{ status = 'planned'; action = 'import-if-absent'; store = $StoreName; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; ownedThumbprint = $fingerprint; statePath = [IO.Path]::Combine($StateRoot, "$($manifest.deploymentId).json") }
 if ($PlanOnly) { [pscustomobject]$plan | ConvertTo-Json -Compress; exit 0 }
 if (-not $InstallerConfirmed -and -not $PSCmdlet.ShouldContinue("Import deployment CA $fingerprint into $StoreName", 'Confirm deployment CA enrollment')) { throw 'Enrollment was not confirmed' }
+if (-not [string]::IsNullOrWhiteSpace($TestCrashPhase) -and ($Mode -ne 'Development' -or [string]::IsNullOrWhiteSpace($TestStoreRoot))) { throw 'TestCrashPhase requires Development fake-store mode' }
 
 if (-not (Test-Path -LiteralPath $StateRoot)) { [void][IO.Directory]::CreateDirectory($StateRoot) }
 $stateDirectory = Get-Item -LiteralPath $StateRoot -Force
@@ -278,13 +383,17 @@ $lifecycleLock = Enter-LifecycleLock $StateRoot
 try {
 
 $statePath = [string]$plan.statePath
+$journalPath = [IO.Path]::Combine($StateRoot, ".deployment-ca.$($manifest.deploymentId).journal.json")
+Recover-TransactionJournal $journalPath $statePath $TestStoreRoot ([string]$manifest.deploymentId)
 $profileReferences = @()
 $selectedProfileId = $null
 $priorOwned = $false
+$priorStateBase64 = $null
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
   $existingStateItem = Get-Item -LiteralPath $statePath -Force
   if (($existingStateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $existingStateItem.PSIsContainer -or $existingStateItem.Length -eq 0 -or $existingStateItem.Length -gt $MaximumStateBytes) { throw 'Existing certificate state must be a bounded regular non-reparse file' }
   $existing = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+  $priorStateBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath))
   Assert-ExactProperties $existing @('version', 'productId', 'deploymentId', 'importedByProduct', 'managed', 'ownedThumbprint', 'store', 'profileReferences', 'selectedProfileId') 'Existing certificate state'
   if ($existing.productId -cne $ProductId -or $existing.deploymentId -cne [string]$manifest.deploymentId -or $existing.ownedThumbprint -cne $fingerprint -or $existing.importedByProduct -isnot [bool] -or $existing.managed -isnot [bool] -or $existing.managed -ne $true -or $existing.store -cne $StoreName) { throw 'Existing certificate state ownership mismatch' }
   $priorOwned = $existing.importedByProduct -eq $true
@@ -304,45 +413,30 @@ if (-not [string]::IsNullOrWhiteSpace($TestStoreRoot)) {
   $subjectCollision = @($fakeCertificates | Where-Object { $_.Subject -ceq $certificate.Subject -and (Get-Sha256 $_.RawData) -cne $fingerprint })
   if ($subjectCollision.Count -ne 0) { throw 'A different certificate with the same subject is already trusted' }
   if (Test-Path -LiteralPath $exactPath -PathType Leaf) { $exactCount = 1 }
-  else { [IO.File]::WriteAllBytes($exactPath, $certificate.RawData); $imported = $true }
 } else {
   $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
-  $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
   try {
     $exact = @($store.Certificates | Where-Object { (Get-Sha256 $_.RawData) -ceq $fingerprint })
     $exactCount = $exact.Count
     $subjectCollision = @($store.Certificates | Where-Object { $_.Subject -ceq $certificate.Subject -and (Get-Sha256 $_.RawData) -cne $fingerprint })
     if ($subjectCollision.Count -ne 0) { throw 'A different certificate with the same subject is already trusted' }
-    if ($exact.Count -eq 0) { $store.Add($certificate); $imported = $true }
   } finally { $store.Close() }
 }
 
+$journal = [ordered]@{ version = 1; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; operation = 'enroll'; phase = 'prepared'; action = $(if ($exactCount -eq 0) { 'import' } else { 'state-only' }); thumbprint = $fingerprint; priorStateBase64 = $priorStateBase64; priorImportedByProduct = $priorOwned; storeHadCertificate = $exactCount -eq 1; certificateBase64 = [Convert]::ToBase64String($certificate.RawData) }
+Write-AtomicText $journalPath ($journal | ConvertTo-Json -Compress)
+if ($TestCrashPhase -ceq 'AfterJournal') { throw 'Simulated crash after journal' }
+if ($exactCount -eq 0) { Add-StoreCertificate $fingerprint ([string]$journal.certificateBase64) $TestStoreRoot; $imported = $true }
+$journal.phase = 'store-mutated'; Write-AtomicText $journalPath ($journal | ConvertTo-Json -Compress)
+if ($TestCrashPhase -ceq 'AfterStore') { throw 'Simulated crash after store mutation' }
 $owned = $priorOwned -or $imported
 $state = [ordered]@{ version = 1; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; importedByProduct = $owned; managed = $true; ownedThumbprint = $fingerprint; store = $StoreName; profileReferences = $profileReferences; selectedProfileId = $selectedProfileId }
-$temporaryState = "$statePath.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
-try {
-  [IO.File]::WriteAllText($temporaryState, ($state | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-  if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-    $backupState = "$statePath.$PID.backup"
-    [IO.File]::Replace($temporaryState, $statePath, $backupState)
-    Remove-Item -LiteralPath $backupState -Force
-  }
-  else { [IO.File]::Move($temporaryState, $statePath) }
-} catch {
-  if (Test-Path -LiteralPath $temporaryState -PathType Leaf) { Remove-Item -LiteralPath $temporaryState -Force }
-  if ($imported -and [string]::IsNullOrWhiteSpace($TestStoreRoot)) {
-    $rollbackStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
-    $rollbackStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    try {
-      $rollbackExact = @($rollbackStore.Certificates | Where-Object { (Get-Sha256 $_.RawData) -ceq $fingerprint })
-      if ($rollbackExact.Count -eq 1) { $rollbackStore.Remove($rollbackExact[0]) }
-    } finally { $rollbackStore.Close() }
-  }
-  if ($imported -and -not [string]::IsNullOrWhiteSpace($TestStoreRoot)) { Remove-Item -LiteralPath $exactPath -Force -ErrorAction SilentlyContinue }
-  throw
-}
+Write-AtomicText $statePath ($state | ConvertTo-Json -Compress)
+$journal.phase = 'state-committed'; Write-AtomicText $journalPath ($journal | ConvertTo-Json -Compress)
+if ($TestCrashPhase -ceq 'AfterState') { throw 'Simulated crash after state commit' }
+[IO.File]::Delete($journalPath)
 [pscustomobject]@{ status = 'enrolled'; action = $(if ($imported) { 'imported' } else { 'already-present' }); importedByProduct = $owned; store = $StoreName; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; ownedThumbprint = $fingerprint } | ConvertTo-Json -Compress
 } finally {
-  $lifecycleLock.Stream.Dispose()
-  Remove-Item -LiteralPath $lifecycleLock.Path -Force -ErrorAction SilentlyContinue
+  Exit-LifecycleLock $lifecycleLock
 }

@@ -27,8 +27,8 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function payload() {
-  const root = await mkdtemp(path.join(tmpdir(), "occ-ca-script-"));
+async function payload(parent = tmpdir()) {
+  const root = await mkdtemp(path.join(parent, ".occ-ca-script-"));
   roots.push(root);
   const certificate = new X509Certificate(DEPLOYMENT_CA_PEM);
   const manifestPath = path.join(root, "certificate-manifest.json");
@@ -109,11 +109,25 @@ describe("bounded PowerShell certificate helpers", () => {
   it("validates existing ownership before import and atomically creates or replaces state", () => {
     const source = readFileSync(enrollScript, "utf8");
     expect(source.indexOf("Existing certificate state ownership mismatch")).toBeGreaterThan(0);
-    expect(source.indexOf("Existing certificate state ownership mismatch")).toBeLessThan(source.indexOf("$store.Add"));
-    expect(source).toMatch(/Test-Path[^\n]+\$statePath[\s\S]+\[IO\.File\]::Replace[\s\S]+else[\s\S]+\[IO\.File\]::Move/);
+    expect(source.indexOf("Existing certificate state ownership mismatch")).toBeLessThan(source.lastIndexOf("Add-StoreCertificate $fingerprint"));
+    expect(source).toMatch(/function Write-AtomicText[\s\S]+\[IO\.File\]::Replace[\s\S]+else[\s\S]+\[IO\.File\]::Move/);
     expect(source).toMatch(/\$existingStateItem[\s\S]+ReparsePoint[\s\S]+Existing certificate state ownership mismatch/);
-    expect(source).toMatch(/\$store\.Add\(\$certificate\)[\s\S]+\$imported = \$true/);
-    expect(source).toMatch(/catch[\s\S]+\$rollbackStore\.Remove/);
+    expect(source).toMatch(/Write-AtomicText \$journalPath[\s\S]+Add-StoreCertificate[\s\S]+Write-AtomicText \$statePath/);
+  });
+
+  it("uses the strict owner lock and durable ownership journal in both mutating helpers", () => {
+    for (const source of [readFileSync(enrollScript, "utf8"), readFileSync(removeScript, "utf8")]) {
+      expect(source).toMatch(/processStartUtc/);
+      expect(source).toMatch(/acquiredAtUtc/);
+      expect(source).toMatch(/owner/);
+      expect(source).toMatch(/\.stale\./);
+      expect(source).toMatch(/Flush\(\$true\)/);
+      expect(source).toMatch(/journal/i);
+      expect(source).toMatch(/priorState/i);
+      expect(source).toMatch(/priorImportedByProduct/i);
+      expect(source).toMatch(/storeHadCertificate/i);
+      expect(source).not.toMatch(/inspectionKnown\s*=\s*-not\s+\$valid/i);
+    }
   });
 
   it("returns an exact development enrollment plan without touching the real store", async () => {
@@ -141,6 +155,27 @@ describe("bounded PowerShell certificate helpers", () => {
       ownedThumbprint: fixture.fingerprint,
     });
     expect(plan).not.toHaveProperty("privateKey");
+  }, 30_000);
+
+  it.each(["PayloadRoot", "ManifestPath", "ReleaseManifestPath", "InstallerPath", "StateRoot", "TestReleasePublicKeyPath", "TestStoreRoot"])("rejects relative %s before canonicalization", async (argumentName) => {
+    const fixture = await payload(desktopRoot);
+    const values: Record<string, string> = {
+      PayloadRoot: fixture.root,
+      ManifestPath: fixture.manifestPath,
+      ReleaseManifestPath: fixture.releaseManifestPath,
+      InstallerPath: fixture.installerPath,
+      StateRoot: fixture.stateRoot,
+      TestReleasePublicKeyPath: fixture.testPublicKeyPath,
+      TestStoreRoot: fixture.testStoreRoot,
+    };
+    values[argumentName] = path.relative(process.cwd(), values[argumentName]!);
+    await expect(runPowerShell(enrollScript, [
+      "-PayloadRoot", values.PayloadRoot!, "-ManifestPath", values.ManifestPath!,
+      "-ReleaseManifestPath", values.ReleaseManifestPath!, "-InstallerPath", values.InstallerPath!,
+      "-ExpectedManifestSha256", sha256(fixture.manifestBytes), "-ExpectedFingerprint", fixture.fingerprint,
+      "-StateRoot", values.StateRoot!, "-Mode", "Development", "-InstallerConfirmed", "-PlanOnly",
+      "-TestReleasePublicKeyPath", values.TestReleasePublicKeyPath!, "-TestStoreRoot", values.TestStoreRoot!,
+    ])).rejects.toThrow(/absolute/i);
   }, 30_000);
 
   it("refuses unsigned production enrollment even in a deterministic plan", async () => {
@@ -229,6 +264,43 @@ describe("bounded PowerShell certificate helpers", () => {
     await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode"]))
       .resolves.toMatchObject({ status: "retained", reason: "PREEXISTING_CERTIFICATE" });
   }, 60_000);
+
+  it.each(["AfterJournal", "AfterStore", "AfterState"])("recovers enrollment after simulated %s crash", async (phase) => {
+    const fixture = await payload();
+    const common = [
+      "-PayloadRoot", fixture.root, "-ManifestPath", fixture.manifestPath,
+      "-ReleaseManifestPath", fixture.releaseManifestPath, "-InstallerPath", fixture.installerPath,
+      "-ExpectedManifestSha256", sha256(fixture.manifestBytes), "-ExpectedFingerprint", fixture.fingerprint,
+      "-StateRoot", fixture.stateRoot, "-Mode", "Development", "-InstallerConfirmed",
+      "-TestReleasePublicKeyPath", fixture.testPublicKeyPath, "-TestStoreRoot", fixture.testStoreRoot,
+    ];
+    await expect(runPowerShell(enrollScript, [...common, "-TestCrashPhase", phase])).rejects.toThrow(/simulated crash/i);
+    const journalPath = path.join(fixture.stateRoot, `.deployment-ca.${deploymentId}.journal.json`);
+    expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({ operation: "enroll", phase: expect.any(String), thumbprint: fixture.fingerprint });
+    await expect(runPowerShell(enrollScript, common)).resolves.toMatchObject({ status: "enrolled", importedByProduct: true });
+    await expect(readFile(journalPath)).rejects.toThrow();
+    expect(new X509Certificate(await readFile(path.join(fixture.testStoreRoot, "Root", `${fixture.fingerprint}.cer`))).fingerprint256.replaceAll(":", "")).toBe(fixture.fingerprint);
+  }, 60_000);
+
+  it.each(["AfterJournal", "AfterStore", "AfterState"])("recovers removal after simulated %s crash", async (phase) => {
+    const fixture = await payload();
+    const enrollArguments = [
+      "-PayloadRoot", fixture.root, "-ManifestPath", fixture.manifestPath,
+      "-ReleaseManifestPath", fixture.releaseManifestPath, "-InstallerPath", fixture.installerPath,
+      "-ExpectedManifestSha256", sha256(fixture.manifestBytes), "-ExpectedFingerprint", fixture.fingerprint,
+      "-StateRoot", fixture.stateRoot, "-Mode", "Development", "-InstallerConfirmed",
+      "-TestReleasePublicKeyPath", fixture.testPublicKeyPath, "-TestStoreRoot", fixture.testStoreRoot,
+    ];
+    await runPowerShell(enrollScript, enrollArguments);
+    const removeArguments = ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode"];
+    await expect(runPowerShell(removeScript, [...removeArguments, "-TestCrashPhase", phase])).rejects.toThrow(/simulated crash/i);
+    const journalPath = path.join(fixture.stateRoot, `.deployment-ca.${deploymentId}.journal.json`);
+    expect(JSON.parse(await readFile(journalPath, "utf8"))).toMatchObject({ operation: "remove", phase: expect.any(String), thumbprint: fixture.fingerprint });
+    await expect(runPowerShell(removeScript, removeArguments)).resolves.toMatchObject({ status: phase === "AfterState" ? "absent" : "removed" });
+    await expect(readFile(journalPath)).rejects.toThrow();
+    await expect(readFile(path.join(fixture.stateRoot, `${deploymentId}.json`))).rejects.toThrow();
+    await expect(readFile(path.join(fixture.testStoreRoot, "Root", `${fixture.fingerprint}.cer`))).rejects.toThrow();
+  }, 60_000);
 });
 
 describe("main-process trust reference integration", () => {
@@ -263,6 +335,7 @@ describe("main-process trust reference integration", () => {
     const packageJson = JSON.parse(readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
     const rootPackageJson = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
     expect(packageJson.scripts["cert:verify"]).toBeDefined();
+    expect(packageJson.scripts["cert:verify"]).toBe("vitest run certificate-manifest.test.ts certificate-scripts.test.ts release-binding.test.ts deployment-ca-lifecycle.test.ts profile-transport.test.ts");
     expect(rootPackageJson.scripts["cert:verify"]).toBeDefined();
     const preload = readFileSync(path.join(desktopRoot, "src", "preload.ts"), "utf8");
     expect(preload).not.toMatch(/certificate|powershell|shell|enroll/i);

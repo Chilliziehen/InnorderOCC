@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "node scripts/run-forge.mjs start",
     "test": "vitest run",
-    "cert:verify": "vitest run certificate-manifest.test.ts certificate-scripts.test.ts",
+    "cert:verify": "vitest run certificate-manifest.test.ts certificate-scripts.test.ts release-binding.test.ts deployment-ca-lifecycle.test.ts profile-transport.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node scripts/run-forge.mjs package",
     "package": "node scripts/run-forge.mjs package",

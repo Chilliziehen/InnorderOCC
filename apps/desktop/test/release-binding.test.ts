@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -188,13 +188,118 @@ describe("certificate identity policy", () => {
     let started!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const firstStarted = new Promise<void>((resolve) => { started = resolve; });
-    const first = withCertificateLifecycleLock(root, async () => { order.push("first-start"); started(); await gate; order.push("first-end"); });
+    const processStartUtc = "2026-01-01T00:00:00.000Z";
+    const lockDependencies = { currentProcessStart: async () => processStartUtc, inspectProcess: async () => ({ processStartUtc }) };
+    const first = withCertificateLifecycleLock(root, async () => { order.push("first-start"); started(); await gate; order.push("first-end"); }, lockDependencies);
     await firstStarted;
-    const second = withCertificateLifecycleLock(root, async () => { order.push("second"); });
+    const second = withCertificateLifecycleLock(root, async () => { order.push("second"); }, lockDependencies);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(order).toEqual(["first-start"]);
     release();
     await Promise.all([first, second]);
     expect(order).toEqual(["first-start", "first-end", "second"]);
+  });
+
+  it("recovers a strict dead stale lifecycle lock", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-dead-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    await writeFile(lockPath, JSON.stringify({ version: 1, pid: 424242, processStartUtc: "2026-01-01T00:00:00.000Z", acquiredAtUtc: "2026-01-01T00:00:00.000Z", owner: "11111111-1111-4111-8111-111111111111" }));
+    await utimes(lockPath, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+    await expect(withCertificateLifecycleLock(root, async () => "recovered", {
+      now: () => new Date("2026-01-01T00:01:00Z"),
+      inspectProcess: async () => null,
+      currentProcessStart: async () => "2026-01-01T00:00:30.000Z",
+      sleep: async () => undefined,
+      attempts: 2,
+      staleMilliseconds: 1_000,
+    })).resolves.toBe("recovered");
+  });
+
+  it("preserves a live stale lifecycle lock and a malformed fresh lock", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-live-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    const live = { version: 1, pid: 42, processStartUtc: "2026-01-01T00:00:00.000Z", acquiredAtUtc: "2026-01-01T00:00:00.000Z", owner: "11111111-1111-4111-8111-111111111111" };
+    await writeFile(lockPath, JSON.stringify(live));
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      now: () => new Date("2026-01-01T00:01:00Z"), inspectProcess: async () => ({ processStartUtc: live.processStartUtc }), currentProcessStart: async () => live.processStartUtc, sleep: async () => undefined, attempts: 2, staleMilliseconds: 1,
+    })).rejects.toThrow(/timed out/i);
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toEqual(live);
+    await writeFile(lockPath, "{");
+    const fresh = new Date();
+    await utimes(lockPath, fresh, fresh);
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      now: () => fresh, inspectProcess: async () => null, sleep: async () => undefined, attempts: 2, staleMilliseconds: 60_000,
+    })).rejects.toThrow(/timed out/i);
+    expect((await stat(lockPath)).isFile()).toBe(true);
+  }, 15_000);
+
+  it("preserves a malformed stale lifecycle lock because its owner cannot be proven dead", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-malformed-stale-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    await writeFile(lockPath, "{");
+    await utimes(lockPath, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      now: () => new Date("2026-01-01T00:01:00Z"),
+      inspectProcess: async () => null,
+      currentProcessStart: async () => "2026-01-01T00:00:30.000Z",
+      sleep: async () => undefined,
+      attempts: 2,
+      staleMilliseconds: 1,
+    })).rejects.toThrow(/timed out/i);
+    await expect(readFile(lockPath, "utf8")).resolves.toBe("{");
+  });
+
+  it("preserves a stale lock whose owner token is not a UUID v4", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-owner-version-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    const record = { version: 1, pid: 42, processStartUtc: "2026-01-01T00:00:00.000Z", acquiredAtUtc: "2026-01-01T00:00:00.000Z", owner: "11111111-1111-1111-8111-111111111111" };
+    await writeFile(lockPath, JSON.stringify(record));
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      now: () => new Date("2026-01-01T00:01:00Z"),
+      inspectProcess: async () => null,
+      currentProcessStart: async () => "2026-01-01T00:00:30.000Z",
+      sleep: async () => undefined,
+      attempts: 2,
+      staleMilliseconds: 1,
+    })).rejects.toThrow(/timed out/i);
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toEqual(record);
+  });
+
+  it("preserves a stale lock when process liveness cannot be inspected", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-unknown-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    const record = { version: 1, pid: 42, processStartUtc: "2026-01-01T00:00:00.000Z", acquiredAtUtc: "2026-01-01T00:00:00.000Z", owner: "11111111-1111-4111-8111-111111111111" };
+    await writeFile(lockPath, JSON.stringify(record));
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      now: () => new Date("2026-01-01T00:01:00Z"), inspectProcess: async () => undefined, currentProcessStart: async () => record.processStartUtc, sleep: async () => undefined, attempts: 2, staleMilliseconds: 1,
+    })).rejects.toThrow(/timed out/i);
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toEqual(record);
+  });
+
+  it("does not delete a replacement lock owned by another process", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-race-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    const replacement = { version: 1, pid: 42, processStartUtc: "2026-01-01T00:00:00.000Z", acquiredAtUtc: "2026-01-01T00:00:01.000Z", owner: "22222222-2222-4222-8222-222222222222" };
+    await withCertificateLifecycleLock(root, async () => {
+      await rm(lockPath, { force: true });
+      await writeFile(lockPath, JSON.stringify(replacement));
+    }, { currentProcessStart: async () => "2026-01-01T00:00:30.000Z" });
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toEqual(replacement);
+  });
+
+  it("does not publish a lock when its current process identity is unavailable", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-identity-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      currentProcessStart: async () => { throw new Error("process identity unavailable"); },
+    })).rejects.toThrow(/identity unavailable/i);
+    await expect(stat(lockPath)).rejects.toThrow();
   });
 });

@@ -10,7 +10,7 @@ import { createCoreClient } from "./core-client";
 import { createCommandIntentRegistry } from "./command-intents";
 import { synchronizeCertificateReferences, verifyProductionDeploymentReleaseBundle } from "./certificate-manifest";
 import { createConnectivityTracker } from "./connectivity";
-import { handleDeploymentCaLifecycle } from "./deployment-ca-lifecycle";
+import { handleDeploymentCaLifecycle, runLifecycleBeforeSingleInstance } from "./deployment-ca-lifecycle";
 import {
   createAtomicJsonPersistence,
   createAtomicTextPersistence,
@@ -38,6 +38,7 @@ import { SQUIRREL_APP_USER_MODEL_ID } from "./product-identity";
 import { createSessionManager, customerInstanceIdFromAccessToken } from "./session-manager";
 import { createMainReliabilityApi } from "./main-reliability-composition";
 import { fetchSystemStatuses } from "./system-status-ipc";
+import { resolveTrustedPowerShell } from "./trusted-powershell";
 
 const CORE_BASE_URL = process.env.CORE_BASE_URL ?? "http://127.0.0.1:8080";
 const AI_BASE_URL = process.env.AI_BASE_URL ?? "http://127.0.0.1:3100";
@@ -101,20 +102,25 @@ enablePackagedSmokeInspector({
   openInspector,
 });
 app.setAppUserModelId(SQUIRREL_APP_USER_MODEL_ID);
-const ownsInstance = registerSingleInstanceLifecycle(app, () => mainWindow);
-
-if (ownsInstance) void app.whenReady().then(async () => {
-  const lifecycle = await handleDeploymentCaLifecycle({
+void app.whenReady().then(async () => {
+  const trustedPowerShell = await resolveTrustedPowerShell({
+    systemRoot: process.env.SystemRoot,
+    pathEnvironment: process.env.PATH,
+    lstat: fs.lstat,
+    realpath: fs.realpath,
+  });
+  const startup = await runLifecycleBeforeSingleInstance({
+    lifecycle: () => handleDeploymentCaLifecycle({
     argv: process.argv,
     resourcesPath: process.resourcesPath,
     userData: app.getPath("userData"),
     execPath: process.execPath,
-  }, {
+    }, {
     exists: async (target) => fs.lstat(target).then((stat) => stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && stat.size <= 512 * 1024, () => false),
     read: (target) => fs.readFile(target),
     verify: (verification) => verifyProductionDeploymentReleaseBundle(verification),
     preflight: ({ helperPath, installerPath, productVersion, publisherSubject, publisherThumbprint }) => new Promise((resolve, reject) => {
-      execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", AUTHENTICODE_PREFLIGHT_COMMAND], {
+      execFile(trustedPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", AUTHENTICODE_PREFLIGHT_COMMAND], {
         windowsHide: true,
         timeout: 30_000,
         env: {
@@ -131,16 +137,19 @@ if (ownsInstance) void app.whenReady().then(async () => {
       });
     }),
     invoke: ({ script, arguments: args }) => new Promise((resolve, reject) => {
-      execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, ...args], { windowsHide: true, timeout: 30_000 }, (error, stdout) => {
+      execFile(trustedPowerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, ...args], { windowsHide: true }, (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
       });
     }),
+    }),
+    acquireNormalInstance: () => registerSingleInstanceLifecycle(app, () => mainWindow),
   });
-  if (lifecycle.handled) {
+  if (startup.handled) {
     app.quit();
     return;
   }
+  if (!startup.ownsInstance) return;
   if (app.isPackaged) {
     registerProductionCsp(session.defaultSession.webRequest);
   }
