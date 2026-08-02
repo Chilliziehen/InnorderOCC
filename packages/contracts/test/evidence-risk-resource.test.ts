@@ -12,7 +12,13 @@ import {
   createRiskAdjudicationRequestSchema,
   domainEventEnvelopeSchema,
   domainProblemDetailsSchema,
+  evidenceDigestMismatchProblemSchema,
+  evidenceInvalidContentProblemSchema,
+  evidenceReviewConflictProblemSchema,
+  evidenceTooLargeProblemSchema,
+  evidenceUploadConflictProblemSchema,
   evidenceContentResultSchema,
+  confirmedEvidenceContentResultSchema,
   evidenceDownloadMetadataSchema,
   evidenceRangeHeaderSchema,
   evidenceEventPayloadSchema,
@@ -22,15 +28,18 @@ import {
   evidenceReviewPageSchema,
   evidenceUploadSessionSchema,
   evidenceVersionPageSchema,
+  failedEvidenceContentResultSchema,
   halfOpenIntervalSchema,
   interventionFiltersSchema,
   interventionPageSchema,
+  invalidRangeProblemSchema,
   managedResourceSchema,
   opaqueCursorSchema,
   reservationAvailabilityRequestSchema,
   reservationAvailabilitySchema,
   reservationConflictSchema,
   reservationEventPayloadSchema,
+  reservationConflictProblemSchema,
   reservationSchedulePageSchema,
   reservationSchema,
   reserveResourceRequestSchema,
@@ -42,11 +51,14 @@ import {
   riskEventPayloadSchema,
   riskFiltersSchema,
   riskMetricsSchema,
+  riskInvalidTransitionProblemSchema,
   riskPageSchema,
   riskEvaluationSummarySchema,
   riskSchema,
   submitEvidenceRequestSchema,
+  resourceUnavailableProblemSchema,
   updateResourceRequestSchema,
+  versionConflictProblemSchema,
 } from "../src/evidence-risk-resource.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -187,6 +199,35 @@ describe("evidence contracts", () => {
       disposition: "attachment",
     }).success).toBe(true);
     expectUnknownFieldRejected(evidenceMetadataSchema, metadata);
+  });
+
+  it("discriminates confirmed and failed evidence content results", () => {
+    const confirmed = {
+      uploadSessionId: UUID,
+      evidenceId: UUID_2,
+      status: "CONFIRMED",
+      sha256: SHA256,
+      sizeBytes: 25,
+      detectedMediaType: "application/pdf",
+      evidenceVersion: 1,
+      version: 2,
+    };
+    const failed = {
+      uploadSessionId: UUID,
+      evidenceId: UUID_2,
+      status: "FAILED",
+      failureCode: "DIGEST_MISMATCH",
+      version: 2,
+    };
+
+    expect(confirmedEvidenceContentResultSchema.safeParse(confirmed).success).toBe(true);
+    expect(failedEvidenceContentResultSchema.safeParse(failed).success).toBe(true);
+    expect(evidenceContentResultSchema.safeParse(confirmed).success).toBe(true);
+    expect(evidenceContentResultSchema.safeParse(failed).success).toBe(true);
+    expect(evidenceContentResultSchema.safeParse({ ...confirmed, failureCode: "FAILED" }).success).toBe(false);
+    expect(evidenceContentResultSchema.safeParse({ ...failed, sha256: SHA256 }).success).toBe(false);
+    expect(evidenceContentResultSchema.safeParse({ ...confirmed, sha256: undefined }).success).toBe(false);
+    expect(evidenceContentResultSchema.safeParse({ ...failed, failureCode: undefined }).success).toBe(false);
   });
 
   it("uses opaque cursor pages for immutable version and review history", () => {
@@ -421,6 +462,32 @@ describe("domain problem details", () => {
     expect(domainProblemDetailsSchema.safeParse(problem).success).toBe(true);
     expect(domainProblemDetailsSchema.safeParse({ ...problem, code: "AD_HOC_CODE" }).success).toBe(false);
     expectUnknownFieldRejected(domainProblemDetailsSchema, problem);
+  });
+
+  it("fixes status and code for named domain errors", () => {
+    const variants = [
+      [evidenceUploadConflictProblemSchema, 409, "OCC-EVIDENCE-UPLOAD-CONFLICT"],
+      [evidenceReviewConflictProblemSchema, 409, "OCC-EVIDENCE-REVIEW-CONFLICT"],
+      [riskInvalidTransitionProblemSchema, 409, "OCC-RISK-INVALID-TRANSITION"],
+      [resourceUnavailableProblemSchema, 409, "OCC-RESOURCE-UNAVAILABLE"],
+      [reservationConflictProblemSchema, 409, "OCC-RESERVATION-CONFLICT"],
+      [versionConflictProblemSchema, 409, "OCC-VERSION-CONFLICT"],
+      [evidenceTooLargeProblemSchema, 413, "OCC-EVIDENCE-TOO-LARGE"],
+      [evidenceDigestMismatchProblemSchema, 422, "OCC-EVIDENCE-DIGEST-MISMATCH"],
+      [evidenceInvalidContentProblemSchema, 422, "OCC-EVIDENCE-INVALID-CONTENT"],
+      [invalidRangeProblemSchema, 416, "OCC-INVALID-REQUEST"],
+    ] as const;
+    const base = {
+      type: "https://innorder.local/problems/domain-error",
+      title: "Domain error",
+      correlationId: UUID,
+    };
+
+    for (const [schema, status, code] of variants) {
+      expect(schema.safeParse({ ...base, status, code }).success).toBe(true);
+      expect(schema.safeParse({ ...base, status: status + 1, code }).success).toBe(false);
+      expect(schema.safeParse({ ...base, status, code: "OCC-API-INTERNAL" }).success).toBe(false);
+    }
   });
 });
 

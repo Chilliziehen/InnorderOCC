@@ -16,13 +16,66 @@ export const ISO_OFFSET_INSTANT_PATTERN =
   "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$";
 export const OPAQUE_CURSOR_PATTERN = "^[A-Za-z0-9._~-]{8,2048}$";
 export const EVIDENCE_RANGE_PATTERN =
-  "^bytes=(?:[0-9]{1,16}-[0-9]{0,16}|-[0-9]{1,16})$";
+  "^bytes=(?:[0-9]{1,16}-[0-9]{0,16}|-[1-9][0-9]{0,15})$";
 export const EVIDENCE_CONTENT_RANGE_PATTERN =
   "^bytes [0-9]{1,16}-[0-9]{1,16}/[0-9]{1,16}$";
 export const EVIDENCE_UNSATISFIED_CONTENT_RANGE_PATTERN =
   "^bytes \\*/[0-9]{1,16}$";
 
 export const domainProblemDetailsSchema = problemDetailsSchema;
+
+const fixedDomainProblemDetailsSchema = <
+  S extends number,
+  C extends z.infer<typeof problemDetailsSchema.shape.code>,
+>(status: S, code: C) =>
+  domainProblemDetailsSchema
+    .extend({ status: z.literal(status), code: z.literal(code) })
+    .strict();
+
+export const evidenceUploadConflictProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-EVIDENCE-UPLOAD-CONFLICT",
+);
+export const evidenceReviewConflictProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-EVIDENCE-REVIEW-CONFLICT",
+);
+export const riskInvalidTransitionProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-RISK-INVALID-TRANSITION",
+);
+export const resourceUnavailableProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-RESOURCE-UNAVAILABLE",
+);
+export const reservationConflictProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-RESERVATION-CONFLICT",
+);
+export const versionConflictProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-VERSION-CONFLICT",
+);
+export const evidenceTooLargeProblemSchema = fixedDomainProblemDetailsSchema(
+  413,
+  "OCC-EVIDENCE-TOO-LARGE",
+);
+export const evidenceDigestMismatchProblemSchema = fixedDomainProblemDetailsSchema(
+  422,
+  "OCC-EVIDENCE-DIGEST-MISMATCH",
+);
+export const evidenceInvalidContentProblemSchema = fixedDomainProblemDetailsSchema(
+  422,
+  "OCC-EVIDENCE-INVALID-CONTENT",
+);
+export const unprocessableContentProblemSchema = z.union([
+  evidenceDigestMismatchProblemSchema,
+  evidenceInvalidContentProblemSchema,
+]);
+export const invalidRangeProblemSchema = fixedDomainProblemDetailsSchema(
+  416,
+  "OCC-INVALID-REQUEST",
+);
 
 const boundedText = (maximum: number, minimum = 1) =>
   z.string().trim().min(minimum).max(maximum);
@@ -177,19 +230,33 @@ export const evidenceUploadSessionSchema = z
   })
   .strict();
 
-export const evidenceContentResultSchema = z
+export const confirmedEvidenceContentResultSchema = z
   .object({
     uploadSessionId: z.uuid(),
     evidenceId: z.uuid(),
-    status: z.enum(["CONFIRMED", "FAILED"]),
-    sha256: sha256Schema.optional(),
-    sizeBytes: positiveIntegerSchema.max(MAX_EVIDENCE_BYTES).optional(),
-    detectedMediaType: boundedText(128).optional(),
-    evidenceVersion: positiveIntegerSchema.optional(),
-    failureCode: boundedText(128).optional(),
+    status: z.literal("CONFIRMED"),
+    sha256: sha256Schema,
+    sizeBytes: positiveIntegerSchema.max(MAX_EVIDENCE_BYTES),
+    detectedMediaType: boundedText(128),
+    evidenceVersion: positiveIntegerSchema,
     version: versionSchema,
   })
   .strict();
+
+export const failedEvidenceContentResultSchema = z
+  .object({
+    uploadSessionId: z.uuid(),
+    evidenceId: z.uuid(),
+    status: z.literal("FAILED"),
+    failureCode: boundedText(128),
+    version: versionSchema,
+  })
+  .strict();
+
+export const evidenceContentResultSchema = z.discriminatedUnion("status", [
+  confirmedEvidenceContentResultSchema,
+  failedEvidenceContentResultSchema,
+]);
 
 export const evidenceMetadataSchema = z
   .object({
@@ -397,19 +464,32 @@ export const riskActionRequestSchemas = {
   dismiss: dismissRiskRequestSchema,
 } as const;
 
+export const acknowledgeRiskActionCommandSchema = acknowledgeRiskRequestSchema
+  .extend({ action: z.literal("ACKNOWLEDGE") })
+  .strict();
+export const assignRiskActionCommandSchema = assignRiskRequestSchema
+  .extend({ action: z.literal("ASSIGN") })
+  .strict();
+export const escalateRiskActionCommandSchema = escalateRiskRequestSchema
+  .extend({ action: z.literal("ESCALATE") })
+  .strict();
+export const mitigateRiskActionCommandSchema = mitigateRiskRequestSchema
+  .extend({ action: z.literal("MITIGATE") })
+  .strict();
+export const resolveRiskActionCommandSchema = resolveRiskRequestSchema
+  .extend({ action: z.literal("RESOLVE") })
+  .strict();
+export const dismissRiskActionCommandSchema = dismissRiskRequestSchema
+  .extend({ action: z.literal("DISMISS") })
+  .strict();
+
 export const riskActionCommandRequestSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("ACKNOWLEDGE"), reason: boundedText(2048) }).strict(),
-  z.object({ action: z.literal("ASSIGN"), ownerRelationshipId: z.uuid(), reason: boundedText(2048) }).strict(),
-  z.object({
-    action: z.literal("ESCALATE"),
-    level: z.number().int().nonnegative().max(100),
-    severity: riskSeveritySchema,
-    ownerRelationshipId: z.uuid().optional(),
-    reason: boundedText(2048),
-  }).strict(),
-  z.object({ action: z.literal("MITIGATE"), interventionType: boundedText(128), reason: boundedText(2048) }).strict(),
-  z.object({ action: z.literal("RESOLVE"), reason: boundedText(2048) }).strict(),
-  z.object({ action: z.literal("DISMISS"), reason: boundedText(2048) }).strict(),
+  acknowledgeRiskActionCommandSchema,
+  assignRiskActionCommandSchema,
+  escalateRiskActionCommandSchema,
+  mitigateRiskActionCommandSchema,
+  resolveRiskActionCommandSchema,
+  dismissRiskActionCommandSchema,
 ]);
 
 export const riskActionPageSchema = z
@@ -484,7 +564,12 @@ export const riskAdjudicationSchema = z
     supersedesAdjudicationId: z.uuid().optional(),
     createdAt: instantSchema,
   })
-  .strict();
+  .strict()
+  .refine(
+    ({ reportingPeriodStart, reportingPeriodEnd }) =>
+      Date.parse(reportingPeriodStart) < Date.parse(reportingPeriodEnd),
+    { message: "reporting period end must be later than start", path: ["reportingPeriodEnd"] },
+  );
 
 export const riskAdjudicationPageSchema = z
   .object({ items: z.array(riskAdjudicationSchema).max(100), ...pageFields })
@@ -503,7 +588,12 @@ export const riskMetricsSchema = z
     resolvedCount: versionSchema,
     generatedAt: instantSchema,
   })
-  .strict();
+  .strict()
+  .refine(
+    ({ reportingPeriodStart, reportingPeriodEnd }) =>
+      Date.parse(reportingPeriodStart) < Date.parse(reportingPeriodEnd),
+    { message: "reporting period end must be later than start", path: ["reportingPeriodEnd"] },
+  );
 
 export const riskEvaluationSummarySchema = z
   .object({
@@ -798,6 +888,17 @@ export type EvidenceRangeHeader = z.infer<typeof evidenceRangeHeaderSchema>;
 export type EvidenceContentRangeHeader = z.infer<typeof evidenceContentRangeHeaderSchema>;
 export type EvidenceUnsatisfiedContentRangeHeader = z.infer<typeof evidenceUnsatisfiedContentRangeHeaderSchema>;
 export type DomainProblemDetails = z.infer<typeof domainProblemDetailsSchema>;
+export type EvidenceUploadConflictProblem = z.infer<typeof evidenceUploadConflictProblemSchema>;
+export type EvidenceReviewConflictProblem = z.infer<typeof evidenceReviewConflictProblemSchema>;
+export type RiskInvalidTransitionProblem = z.infer<typeof riskInvalidTransitionProblemSchema>;
+export type ResourceUnavailableProblem = z.infer<typeof resourceUnavailableProblemSchema>;
+export type ReservationConflictProblem = z.infer<typeof reservationConflictProblemSchema>;
+export type VersionConflictProblem = z.infer<typeof versionConflictProblemSchema>;
+export type EvidenceTooLargeProblem = z.infer<typeof evidenceTooLargeProblemSchema>;
+export type EvidenceDigestMismatchProblem = z.infer<typeof evidenceDigestMismatchProblemSchema>;
+export type EvidenceInvalidContentProblem = z.infer<typeof evidenceInvalidContentProblemSchema>;
+export type UnprocessableContentProblem = z.infer<typeof unprocessableContentProblemSchema>;
+export type InvalidRangeProblem = z.infer<typeof invalidRangeProblemSchema>;
 export type EvidenceState = z.infer<typeof evidenceStateSchema>;
 export type EvidenceUploadStatus = z.infer<typeof evidenceUploadStatusSchema>;
 export type EvidenceReviewDecision = z.infer<typeof evidenceReviewDecisionSchema>;
@@ -807,6 +908,8 @@ export type EvidenceRequirementPage = z.infer<typeof evidenceRequirementPageSche
 export type CreateEvidenceUploadSessionRequest = z.infer<typeof createEvidenceUploadSessionRequestSchema>;
 export type EvidenceUploadSession = z.infer<typeof evidenceUploadSessionSchema>;
 export type EvidenceContentResult = z.infer<typeof evidenceContentResultSchema>;
+export type ConfirmedEvidenceContentResult = z.infer<typeof confirmedEvidenceContentResultSchema>;
+export type FailedEvidenceContentResult = z.infer<typeof failedEvidenceContentResultSchema>;
 export type EvidenceMetadata = z.infer<typeof evidenceMetadataSchema>;
 export type SubmitEvidenceRequest = z.infer<typeof submitEvidenceRequestSchema>;
 export type EvidenceReviewCondition = z.infer<typeof evidenceReviewConditionSchema>;
@@ -833,6 +936,12 @@ export type MitigateRiskRequest = z.infer<typeof mitigateRiskRequestSchema>;
 export type ResolveRiskRequest = z.infer<typeof resolveRiskRequestSchema>;
 export type DismissRiskRequest = z.infer<typeof dismissRiskRequestSchema>;
 export type RiskActionCommandRequest = z.infer<typeof riskActionCommandRequestSchema>;
+export type AcknowledgeRiskActionCommand = z.infer<typeof acknowledgeRiskActionCommandSchema>;
+export type AssignRiskActionCommand = z.infer<typeof assignRiskActionCommandSchema>;
+export type EscalateRiskActionCommand = z.infer<typeof escalateRiskActionCommandSchema>;
+export type MitigateRiskActionCommand = z.infer<typeof mitigateRiskActionCommandSchema>;
+export type ResolveRiskActionCommand = z.infer<typeof resolveRiskActionCommandSchema>;
+export type DismissRiskActionCommand = z.infer<typeof dismissRiskActionCommandSchema>;
 export type RiskActionPage = z.infer<typeof riskActionPageSchema>;
 export type InterventionFilters = z.infer<typeof interventionFiltersSchema>;
 export type InterventionItem = z.infer<typeof interventionItemSchema>;
