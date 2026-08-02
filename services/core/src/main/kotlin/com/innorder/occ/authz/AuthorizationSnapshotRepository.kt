@@ -67,7 +67,11 @@ class AuthorizationSnapshotRepository(
         if (contextBytes.size > MAX_CONTEXT_BYTES) throw AuthorizationSnapshotException()
         val forbiddenActions = layers.flatMap { it.forbiddenActions }.distinct().sorted()
         if (forbiddenActions.size > MAX_FORBIDDEN_ACTIONS) throw AuthorizationSnapshotException()
-        val relationships = loadRelationships(request, snapshotAt)
+        val relationships = if (request.action in WORKFLOW_ACTIONS) {
+            loadRelationships(request, snapshotAt)
+        } else {
+            emptyList()
+        }
 
         return AuthorizationSnapshot(
             contractVersion = 2,
@@ -486,6 +490,8 @@ class AuthorizationSnapshotRepository(
     private data class CanonicalRelationMetadata(val id: UUID, val key: String, val authRelevant: Boolean)
 
     companion object {
+        private val WORKFLOW_ACTIONS = WorkflowAuthorizationRoles.processOwnerActions +
+            WorkflowAuthorizationRoles.participantActions
         private val PINNED_BUNDLE_STATUSES = setOf("ACTIVE", "DEPRECATED")
         private val OPA_REVISION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private const val MAX_ACTION_LENGTH = 128

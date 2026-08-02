@@ -96,34 +96,6 @@ class PlatformSecurityKernelIntegrationTest(
             UUID::class.java,
         )!!
         val flyway = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
-        if (flyway.queryForObject(
-                "SELECT count(*) FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
-                Long::class.java,
-                *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
-            ) == 0L
-        ) {
-            flyway.update(
-                "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'kernel-authz-relations', 'Kernel authz relations', 'ACTIVE')",
-                KERNEL_RELATION_PACKAGE_ID,
-            )
-            flyway.update(
-                "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
-                KERNEL_RELATION_PACKAGE_VERSION_ID, KERNEL_RELATION_PACKAGE_ID,
-            )
-            WorkflowAuthorizationRelationDefinitions.all.forEach { definition ->
-                flyway.update(
-                    """INSERT INTO catalog.relation_definition
-                       (id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
-                       VALUES (?, ?, ?, ?, ?, 'MANY_TO_MANY', true)""",
-                    definition.id, KERNEL_RELATION_PACKAGE_VERSION_ID, definition.key,
-                    BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE,
-                )
-            }
-            flyway.update(
-                "UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('e', 64), published_at = transaction_timestamp() WHERE id = ?",
-                KERNEL_RELATION_PACKAGE_VERSION_ID,
-            )
-        }
         flyway.execute("CREATE TABLE IF NOT EXISTS occ.platform_kernel_test(id uuid PRIMARY KEY, value text NOT NULL, row_version bigint NOT NULL)")
         flyway.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON occ.platform_kernel_test TO innorder_runtime")
         jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", administratorId)
@@ -135,6 +107,29 @@ class PlatformSecurityKernelIntegrationTest(
     @AfterEach
     fun restoreAdministratorRole() {
         facts.restore(administratorId)
+    }
+
+    @Test
+    fun `fresh V001 V013 bootstrap v2 authorizes non workflow command without workflow catalog`() {
+        val flyway = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
+        assertThat(flyway.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java)).isEqualTo(13)
+        assertThat(jdbc.queryForObject(
+            "SELECT opa_revision FROM authz.policy_release WHERE status = 'ACTIVE'",
+            String::class.java,
+        )).isEqualTo("platform-authz-v2")
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
+            Long::class.java,
+            *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
+        )).isZero()
+
+        val accessToken = login().path("accessToken").textValue()
+        val result = command(
+            accessToken, administratorId, "fresh-non-workflow", 3, """{"value":"fresh"}""", 200,
+        )
+
+        assertThat(result.body).isEqualTo(mapper.readTree("""{"result":"fresh","version":4}"""))
+        assertThat(result.replayed).isFalse()
     }
 
     @Test
@@ -419,8 +414,6 @@ class PlatformSecurityKernelIntegrationTest(
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val PASSWORD = "platform-kernel-bootstrap-test-only"
-        private val KERNEL_RELATION_PACKAGE_ID = UUID.fromString("00000000-0000-7000-8000-000000000150")
-        private val KERNEL_RELATION_PACKAGE_VERSION_ID = UUID.fromString("00000000-0000-7000-8000-000000000151")
         private val opa = OpaProcess()
 
         @Container
