@@ -208,6 +208,13 @@ workflow_relationship_constraint(grant) if {
 }
 
 workflow_relationship_constraint(grant) if {
+    grant.action == "task.read"
+    input.action == "task.read"
+    some relation in {"TASK_CANDIDATE", "TASK_ASSIGNEE"}
+    workflow_relationship(relation, input.resource.id)
+}
+
+workflow_relationship_constraint(grant) if {
     grant.action == "task.complete"
     input.action == "task.complete"
     workflow_relationship("TASK_ASSIGNEE", input.resource.id)
@@ -224,8 +231,8 @@ workflow_relationship(relation, object_id) if {
 
 cohort_management_actions := {
     "cohort.read", "cohort.update", "cohort.owner.transfer", "cohort.members.manage", "cohort.archive",
-    "cohort.process.start", "process.suspend", "process.resume", "process.cancel", "process.fail",
-    "process.transfer", "process.reconcile", "process.wait.release",
+    "cohort.process.start", "process.read", "process.suspend", "process.resume", "process.cancel", "process.fail",
+    "process.transfer", "process.reconcile", "process.wait.release", "task.fail", "task.assignment.manage",
 }
 
 workflow_actions := {

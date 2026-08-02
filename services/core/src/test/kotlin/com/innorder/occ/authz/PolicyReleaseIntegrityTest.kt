@@ -40,4 +40,13 @@ class PolicyReleaseIntegrityTest {
         assertThat(PolicyReleaseIntegrity.contentHash("revision", listOf(platform, domain)))
             .isEqualTo(PolicyReleaseIntegrity.contentHash("revision", listOf(domain, platform)))
     }
+
+    @Test
+    fun `canonical manifest hash is independent of json property order`() {
+        val first = """{"version":1,"roleGrants":[],"forbiddenActions":[]}"""
+        val reordered = """{"forbiddenActions":[],"roleGrants":[],"version":1}"""
+
+        assertThat(PolicyReleaseIntegrity.manifestContentHash(first))
+            .isEqualTo(PolicyReleaseIntegrity.manifestContentHash(reordered))
+    }
 }
