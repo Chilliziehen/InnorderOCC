@@ -105,6 +105,8 @@ ALTER TABLE occ.upload_session
     ADD COLUMN requirement_id uuid REFERENCES catalog.evidence_requirement(id),
     ADD COLUMN evidence_id uuid REFERENCES occ.evidence(id),
     ADD COLUMN slot_key text,
+    ADD COLUMN expected_evidence_version bigint,
+    ADD COLUMN original_filename text,
     ADD COLUMN normalized_extension text,
     ADD COLUMN quarantine_object_key text,
     ADD COLUMN immutable_object_key text,
@@ -134,6 +136,16 @@ ALTER TABLE occ.upload_session
     ),
     ADD CONSTRAINT ck_upload_session_slot CHECK (
         slot_key IS NULL OR (pg_catalog.length(slot_key) BETWEEN 1 AND 128)
+    ),
+    ADD CONSTRAINT ck_upload_session_expected_evidence_version CHECK (
+        expected_evidence_version IS NULL OR expected_evidence_version >= 0
+    ),
+    ADD CONSTRAINT ck_upload_session_original_filename CHECK (
+        original_filename IS NULL OR (
+            pg_catalog.length(original_filename) BETWEEN 1 AND 255
+            AND original_filename !~ '[\\/]'
+            AND original_filename !~ '[[:cntrl:]]'
+        )
     ),
     ADD CONSTRAINT ck_upload_session_extension CHECK (
         normalized_extension IS NULL OR normalized_extension ~ '^[a-z0-9][a-z0-9._-]{0,31}$'
@@ -178,8 +190,12 @@ ALTER TABLE occ.evidence_version
     ADD COLUMN scanner_version text,
     ADD COLUMN scanner_result text,
     ADD COLUMN scanner_result_ref text,
+    ADD COLUMN preview_content text,
     ADD CONSTRAINT ck_evidence_version_scanner_result CHECK (
         scanner_result IS NULL OR scanner_result = 'CLEAN'
+    ),
+    ADD CONSTRAINT ck_evidence_version_preview CHECK (
+        preview_content IS NULL OR pg_catalog.octet_length(preview_content) <= 65536
     );
 
 ALTER TABLE occ.evidence_review
@@ -230,7 +246,7 @@ WHERE upload_session_id IS NOT NULL;
 
 CREATE INDEX ix_evidence_object_disposition_cleanup
 ON occ.evidence_object_disposition (cleanup_lease_expires_at, retained_until, id)
-WHERE disposition_state IN ('CLEANUP_PENDING', 'DELETE_FAILED');
+WHERE disposition_state IN ('CLEANUP_PENDING', 'DELETE_FAILED', 'DELETING');
 
 CREATE FUNCTION occ.validate_upload_session_lifecycle()
 RETURNS trigger
@@ -245,6 +261,7 @@ BEGIN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'upload session must start in CREATED state';
         END IF;
         IF NEW.requirement_id IS NULL OR NEW.evidence_id IS NULL OR NEW.slot_key IS NULL
+           OR NEW.expected_evidence_version IS NULL OR NEW.original_filename IS NULL
            OR NEW.normalized_extension IS NULL OR NEW.quarantine_object_key IS NULL
            OR NEW.immutable_object_key IS NULL OR NEW.absolute_deadline_at IS NULL THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'new upload session requires complete lease and object provenance';
@@ -261,7 +278,8 @@ BEGIN
         FOR UPDATE;
         IF NEW.requirement_id IS DISTINCT FROM evidence_head.requirement_id
            OR NEW.target_entity_id IS DISTINCT FROM evidence_head.target_entity_id
-           OR NEW.slot_key IS DISTINCT FROM evidence_head.slot_key THEN
+           OR NEW.slot_key IS DISTINCT FROM evidence_head.slot_key
+           OR (TG_OP = 'INSERT' AND NEW.expected_evidence_version IS DISTINCT FROM evidence_head.row_version) THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'upload session does not match evidence requirement, target, and slot';
         END IF;
     END IF;
@@ -276,6 +294,8 @@ BEGIN
            OR NEW.requirement_id IS DISTINCT FROM OLD.requirement_id
            OR NEW.evidence_id IS DISTINCT FROM OLD.evidence_id
            OR NEW.slot_key IS DISTINCT FROM OLD.slot_key
+           OR NEW.expected_evidence_version IS DISTINCT FROM OLD.expected_evidence_version
+           OR NEW.original_filename IS DISTINCT FROM OLD.original_filename
            OR NEW.object_key IS DISTINCT FROM OLD.object_key
            OR NEW.expected_sha256 IS DISTINCT FROM OLD.expected_sha256
            OR NEW.expected_size_bytes IS DISTINCT FROM OLD.expected_size_bytes
@@ -580,6 +600,57 @@ $$;
 CREATE TRIGGER trg_evidence_object_disposition_identity
 BEFORE INSERT OR UPDATE OR DELETE ON occ.evidence_object_disposition
 FOR EACH ROW EXECUTE FUNCTION occ.validate_evidence_object_disposition();
+
+-- Flowable/task integration is deliberately outside this slice. A future adapter
+-- claims these transactional intents and invokes the workflow engine after commit.
+CREATE TABLE occ.evidence_workflow_intent (
+    id uuid PRIMARY KEY,
+    event_id uuid NOT NULL UNIQUE,
+    evidence_id uuid NOT NULL REFERENCES occ.evidence(id),
+    evidence_version integer NOT NULL CHECK (evidence_version > 0),
+    intent_type text NOT NULL CHECK (intent_type IN ('VERSION_CONFIRMED', 'SUBMITTED', 'REVIEWED')),
+    review_outcome text CHECK (review_outcome IN ('ACCEPTED', 'REJECTED', 'CONDITIONAL')),
+    gate_satisfied boolean NOT NULL,
+    follow_up_required boolean NOT NULL,
+    follow_up_due_at timestamptz,
+    prior_assignee_id uuid REFERENCES iam.principal(id),
+    correlation_id uuid NOT NULL,
+    state text NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING', 'CLAIMED', 'DELIVERED', 'FAILED')),
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    available_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    lease_owner uuid,
+    lease_expires_at timestamptz,
+    last_error text CHECK (last_error IS NULL OR pg_catalog.length(last_error) <= 1024),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    CHECK ((intent_type = 'REVIEWED') = (review_outcome IS NOT NULL)),
+    CHECK (follow_up_required = (follow_up_due_at IS NOT NULL)),
+    CHECK (NOT gate_satisfied OR NOT follow_up_required)
+);
+
+CREATE INDEX ix_evidence_workflow_intent_delivery
+ON occ.evidence_workflow_intent (available_at, id)
+WHERE state IN ('PENDING', 'FAILED');
+
+CREATE TABLE occ.evidence_notification_intent (
+    id uuid PRIMARY KEY,
+    event_id uuid NOT NULL,
+    evidence_id uuid NOT NULL REFERENCES occ.evidence(id),
+    recipient_selector text NOT NULL CHECK (
+        pg_catalog.length(recipient_selector) BETWEEN 1 AND 256
+        AND recipient_selector !~ '[[:cntrl:]]'
+    ),
+    notification_type text NOT NULL CHECK (
+        notification_type ~ '^[A-Z][A-Z0-9_]{0,63}$'
+    ),
+    payload jsonb NOT NULL CHECK (platform.is_json_object(payload)),
+    correlation_id uuid NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    UNIQUE (event_id, recipient_selector)
+);
+
+CREATE INDEX ix_evidence_notification_intent_evidence
+ON occ.evidence_notification_intent (evidence_id, created_at, id);
 
 ALTER TABLE occ.risk
     ADD COLUMN occurrence_key text,
@@ -1316,6 +1387,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     occ.risk_adjudication,
     occ.risk_intervention,
     occ.resource_availability
+TO innorder_runtime;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    occ.evidence_workflow_intent,
+    occ.evidence_notification_intent
 TO innorder_runtime;
 
 REVOKE INSERT, UPDATE, DELETE ON TABLE occ.resource_reservation_history FROM innorder_runtime;

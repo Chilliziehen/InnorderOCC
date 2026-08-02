@@ -40,6 +40,21 @@ test('extends evidence storage without invalidating legacy rows', () => {
   assert.doesNotMatch(sql, /DROP TRIGGER\s+trg_evidence_(?:version|review)_immutable/i);
 });
 
+test('persists evidence application integration intents and resubmit provenance', () => {
+  assert.match(sql, /ALTER TABLE occ\.upload_session[\s\S]*ADD COLUMN expected_evidence_version bigint/i);
+  assert.match(sql, /ALTER TABLE occ\.upload_session[\s\S]*ADD COLUMN original_filename text/i);
+  assert.match(sql, /ALTER TABLE occ\.evidence_version[\s\S]*ADD COLUMN preview_content text/i);
+  assert.match(sql, /CREATE TABLE occ\.evidence_workflow_intent\b/i);
+  assert.match(sql, /review_outcome text[\s\S]*gate_satisfied boolean[\s\S]*follow_up_required boolean/i);
+  assert.match(sql, /prior_assignee_id uuid[\s\S]*correlation_id uuid/i);
+  assert.match(sql, /CREATE TABLE occ\.evidence_notification_intent\b/i);
+  assert.match(sql, /UNIQUE \(event_id, recipient_selector\)/i);
+  assert.match(sql, /TG_OP = 'INSERT'[\s\S]*NEW\.expected_evidence_version IS NULL[\s\S]*NEW\.original_filename IS NULL/i);
+  assert.match(sql, /NEW\.expected_evidence_version IS DISTINCT FROM OLD\.expected_evidence_version/i);
+  assert.match(sql, /NEW\.original_filename IS DISTINCT FROM OLD\.original_filename/i);
+  assert.match(sql, /GRANT SELECT, INSERT, UPDATE[\s\S]*occ\.evidence_workflow_intent[\s\S]*occ\.evidence_notification_intent[\s\S]*TO innorder_runtime/i);
+});
+
 test('locks and validates complete upload to version provenance', () => {
   for (const comparison of [
     'upload.requirement_id IS DISTINCT FROM evidence_head.requirement_id',

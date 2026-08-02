@@ -22,6 +22,14 @@ import com.innorder.occ.resource.ResourceQueryValidationException
 import com.innorder.occ.resource.ResourceReferenceValidationException
 import com.innorder.occ.resource.ResourceIdConflictException
 import com.innorder.occ.resource.ReservationNotFoundException
+import com.innorder.occ.evidence.EvidenceNotFoundException
+import com.innorder.occ.evidence.EvidenceSessionNotFoundException
+import com.innorder.occ.evidence.InvalidEvidenceRequirementException
+import com.innorder.occ.evidence.InvalidEvidenceRequestException
+import com.innorder.occ.evidence.EvidenceStateConflictException
+import com.innorder.occ.evidence.EvidenceUploadConflictException
+import com.innorder.occ.evidence.EvidenceReviewSegregationException
+import com.innorder.occ.evidence.EvidenceRejectedException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -163,6 +171,26 @@ class ApiExceptionHandler(
     @ExceptionHandler(RiskNotFoundException::class)
     fun riskNotFound(exception: RiskNotFoundException, request: HttpServletRequest): ResponseEntity<OccProblem> =
         responses.riskNotFound(request)
+
+    @ExceptionHandler(EvidenceNotFoundException::class, EvidenceSessionNotFoundException::class)
+    fun evidenceNotFound(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.evidenceNotFound(request)
+
+    @ExceptionHandler(
+        InvalidEvidenceRequirementException::class,
+        InvalidEvidenceRequestException::class,
+        EvidenceRejectedException::class,
+    )
+    fun invalidEvidence(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.invalidEvidence(request)
+
+    @ExceptionHandler(
+        EvidenceStateConflictException::class,
+        EvidenceUploadConflictException::class,
+        EvidenceReviewSegregationException::class,
+    )
+    fun evidenceConflict(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.evidenceConflict(request)
 
     @ExceptionHandler(TerminalRiskException::class)
     fun terminalRisk(exception: TerminalRiskException, request: HttpServletRequest): ResponseEntity<OccProblem> =

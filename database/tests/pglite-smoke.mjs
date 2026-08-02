@@ -329,44 +329,49 @@ await expectSqlState(`
   INSERT INTO occ.upload_session
     (id, uploader_id, target_entity_id, object_key, expected_sha256, expected_size_bytes,
      status, expires_at, requirement_id, evidence_id, slot_key, normalized_extension,
-     quarantine_object_key, immutable_object_key, absolute_deadline_at)
+     quarantine_object_key, immutable_object_key, absolute_deadline_at,
+     expected_evidence_version, original_filename)
   VALUES ('92000000-0000-7000-8000-000000000020', '90000000-0000-7000-8000-000000000005',
           '92000000-0000-7000-8000-000000000001', 'lease-too-long', repeat('a', 64), 10,
           'CREATED', transaction_timestamp() + interval '31 minutes',
-          '92000000-0000-7000-8000-000000000010', '92000000-0000-7000-8000-000000000002',
-          'main', 'txt', 'quarantine/lease-too-long', 'evidence/lease-too-long',
-          transaction_timestamp() + interval '2 hours 1 second')
+           '92000000-0000-7000-8000-000000000010', '92000000-0000-7000-8000-000000000002',
+           'main', 'txt', 'quarantine/lease-too-long', 'evidence/lease-too-long',
+           transaction_timestamp() + interval '2 hours 1 second', 0, 'lease-too-long.txt')
 `, '23514', 'unbounded upload lease');
 
 await expectSqlState(`
   INSERT INTO occ.upload_session
     (id, uploader_id, target_entity_id, object_key, expected_sha256, expected_size_bytes,
      status, expires_at, requirement_id, evidence_id, slot_key, normalized_extension,
-     quarantine_object_key, immutable_object_key, absolute_deadline_at)
+     quarantine_object_key, immutable_object_key, absolute_deadline_at,
+     expected_evidence_version, original_filename)
   VALUES ('92000000-0000-7000-8000-000000000021', '90000000-0000-7000-8000-000000000005',
           '92000000-0000-7000-8000-000000000001', 'wrong-requirement', repeat('a', 64), 10,
           'CREATED', transaction_timestamp() + interval '30 minutes',
-          '92000000-0000-7000-8000-000000000011', '92000000-0000-7000-8000-000000000002',
-          'main', 'txt', 'quarantine/wrong-requirement', 'evidence/wrong-requirement',
-          transaction_timestamp() + interval '2 hours')
+           '92000000-0000-7000-8000-000000000011', '92000000-0000-7000-8000-000000000002',
+           'main', 'txt', 'quarantine/wrong-requirement', 'evidence/wrong-requirement',
+           transaction_timestamp() + interval '2 hours', 0, 'wrong-requirement.txt')
 `, '23514', 'mismatched upload provenance');
 
 await db.exec(`
   INSERT INTO occ.upload_session
     (id, uploader_id, target_entity_id, object_key, expected_sha256, expected_size_bytes,
      status, expires_at, requirement_id, evidence_id, slot_key, normalized_extension,
-     quarantine_object_key, immutable_object_key, absolute_deadline_at)
+     quarantine_object_key, immutable_object_key, absolute_deadline_at,
+     expected_evidence_version, original_filename)
   VALUES
     ('92000000-0000-7000-8000-000000000022', '90000000-0000-7000-8000-000000000005',
           '92000000-0000-7000-8000-000000000001', 'quarantine/main', repeat('a', 64), 10,
      'CREATED', transaction_timestamp() + interval '30 minutes',
      '92000000-0000-7000-8000-000000000010', '92000000-0000-7000-8000-000000000002',
-     'main', 'txt', 'quarantine/main', 'evidence/main', transaction_timestamp() + interval '2 hours'),
+     'main', 'txt', 'quarantine/main', 'evidence/main', transaction_timestamp() + interval '2 hours',
+     0, 'main.txt'),
     ('92000000-0000-7000-8000-000000000023', '90000000-0000-7000-8000-000000000005',
      '92000000-0000-7000-8000-000000000001', 'quarantine/spare', repeat('b', 64), 11,
      'CREATED', transaction_timestamp() + interval '30 minutes',
      '92000000-0000-7000-8000-000000000010', '92000000-0000-7000-8000-000000000002',
-     'main', 'txt', 'quarantine/spare', 'evidence/spare', transaction_timestamp() + interval '2 hours');
+     'main', 'txt', 'quarantine/spare', 'evidence/spare', transaction_timestamp() + interval '2 hours',
+     0, 'spare.txt');
   UPDATE occ.upload_session
   SET status = 'STREAMING', lease_owner = '90000000-0000-7000-8000-000000000005',
       lease_acquired_at = transaction_timestamp(), lease_heartbeat_at = transaction_timestamp(),

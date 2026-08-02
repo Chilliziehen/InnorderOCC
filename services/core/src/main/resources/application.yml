@@ -100,3 +100,7 @@ occ:
   object-storage:
     endpoint: ${OBJECT_STORAGE_ENDPOINT:http://localhost:9000}
     bucket: ${OBJECT_STORAGE_BUCKET:innorder-occ}
+  evidence-inspection:
+    docker-executable: ${EVIDENCE_DOCKER_EXECUTABLE}
+    parser-image: ${EVIDENCE_PARSER_IMAGE}
+    scanner-image: ${EVIDENCE_SCANNER_IMAGE}

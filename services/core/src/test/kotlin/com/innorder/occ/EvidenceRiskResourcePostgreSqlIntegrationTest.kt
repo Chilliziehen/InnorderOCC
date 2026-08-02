@@ -220,9 +220,10 @@ class EvidenceRiskResourcePostgreSqlIntegrationTest {
             """INSERT INTO occ.upload_session
                (id, uploader_id, target_entity_id, object_key, expected_sha256, expected_size_bytes,
                 status, expires_at, requirement_id, evidence_id, slot_key, normalized_extension,
-                quarantine_object_key, immutable_object_key, absolute_deadline_at)
+                quarantine_object_key, immutable_object_key, absolute_deadline_at,
+                expected_evidence_version, original_filename)
                VALUES (?, ?, ?, ?, ?, 10, 'CREATED', now() + interval '20 minutes', ?, ?, 'primary',
-                       'pdf', ?, ?, now() + interval '90 minutes')""",
+                       'pdf', ?, ?, now() + interval '90 minutes', 0, 'claim.pdf')""",
             upload, submitter, target, "quarantine/${fixture.key}", "a".repeat(64), requirement, evidence,
             "quarantine/${fixture.key}", objectKey,
         )

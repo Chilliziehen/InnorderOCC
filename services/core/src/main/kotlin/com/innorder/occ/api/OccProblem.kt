@@ -102,6 +102,15 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun riskNotFound(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 404, "risk-not-found", "Risk not found", "OCC-RISK-NOT-FOUND")
 
+    fun evidenceNotFound(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 404, "evidence-not-found", "Evidence not found", "OCC-EVIDENCE-NOT-FOUND")
+
+    fun invalidEvidence(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "invalid-evidence-request", "Invalid evidence request", "OCC-EVIDENCE-REQUEST")
+
+    fun evidenceConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "evidence-state-conflict", "Evidence state conflict", "OCC-EVIDENCE-CONFLICT")
+
     fun terminalRisk(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 409, "risk-terminal", "Risk is terminal", "OCC-RISK-TERMINAL")
 
