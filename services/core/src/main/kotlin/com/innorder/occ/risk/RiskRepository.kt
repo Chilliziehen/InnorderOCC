@@ -172,9 +172,9 @@ class RiskRepository(private val jdbc: JdbcOperations) {
         DUE_ESCALATION_SQL,
         { row, _ -> DueRiskEscalation(
             row.getObject("risk_id", UUID::class.java), row.getObject("target_entity_id", UUID::class.java),
-            row.getInt("level"), row.getTimestamp("due_at").toInstant(),
+            row.getObject("level") as Int?, row.getTimestamp("due_at").toInstant(),
             row.getObject("owner_relationship_id", UUID::class.java),
-            row.getString("severity")?.let(RiskSeverity::valueOf),
+            row.getString("severity"),
         ) }, Timestamp.from(at), limit,
     )
 
@@ -304,19 +304,21 @@ class RiskRepository(private val jdbc: JdbcOperations) {
     }
 
     companion object {
-        const val DUE_ESCALATION_SQL = """SELECT intervention.risk_id, risk.target_entity_id,
-                   (intervention.intervention_data->>'level')::integer AS level,
+        const val DUE_ESCALATION_SQL = """SELECT intervention.risk_id, risk.target_entity_id, parsed.level,
                    intervention.due_at, intervention.owner_relationship_id,
                    intervention.intervention_data->>'severity' AS severity
             FROM occ.risk_intervention intervention
             JOIN occ.risk risk ON risk.id = intervention.risk_id
+            CROSS JOIN LATERAL (
+                SELECT CASE WHEN intervention.intervention_data->>'level' ~ '^[0-9]{1,9}$'
+                            THEN (intervention.intervention_data->>'level')::integer END AS level
+            ) parsed
             WHERE intervention.intervention_type = 'ESCALATION' AND intervention.due_at <= ?
               AND risk.state IN ('OPEN','ACKNOWLEDGED')
               AND NOT EXISTS (SELECT 1 FROM occ.risk_action action
                               WHERE action.risk_id = risk.id
-                                AND action.escalation_level = (intervention.intervention_data->>'level')::integer)
-            ORDER BY intervention.due_at, intervention.risk_id,
-                     (intervention.intervention_data->>'level')::integer
+                                AND action.escalation_level = parsed.level)
+            ORDER BY intervention.due_at, intervention.risk_id, parsed.level NULLS FIRST
             FOR UPDATE OF risk SKIP LOCKED LIMIT ?"""
 
         const val DUE_SLA_BREACH_SQL = """SELECT risk.*

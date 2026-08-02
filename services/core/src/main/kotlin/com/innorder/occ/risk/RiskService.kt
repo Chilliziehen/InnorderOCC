@@ -19,6 +19,7 @@ import com.innorder.occ.command.CommandMutation
 import com.innorder.occ.command.CommandResult
 import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.PendingEventSpec
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
@@ -82,7 +83,7 @@ class RiskService(
         severity: RiskSeverity?,
         at: Instant,
     ): CommandResult {
-        require(level >= 0 && (ownerRelationshipId != null || severity != null))
+        if (level < 0 || (ownerRelationshipId == null && severity == null)) throw InvalidRiskActionException()
         return action(
             metadata, riskId, RiskActionType.ESCALATED, reason, emptyMap(), ownerRelationshipId,
             severity, level, at,
@@ -90,39 +91,44 @@ class RiskService(
     }
 
     fun escalateDue(principalId: UUID, at: Instant, limit: Int, correlationId: UUID): List<CommandResult> {
-        require(limit in 1..100)
-        return transactions.execute {
-            risks.dueEscalations(at, limit).map { escalation ->
-                val version = risks.get(escalation.riskId).rowVersion
-                val metadata = CommandMetadata(
-                    principalId, "risk.escalate", "due-${escalation.riskId}-${escalation.level}",
-                    version, correlationId,
-                )
-                action(
-                    metadata, escalation.riskId, RiskActionType.ESCALATED,
-                    "SLA escalation level ${escalation.level}", emptyMap(), escalation.ownerRelationshipId,
-                    escalation.severity, escalation.level, at,
-                )
+        if (limit !in 1..100) throw InvalidRiskRequestException()
+        val candidates = transactions.execute { risks.dueEscalations(at, DUE_SCAN_LIMIT) }!!
+        return processDue("escalation", candidates, limit, DueRiskEscalation::riskId) { escalation ->
+            val level = escalation.level ?: throw InvalidRiskActionException()
+            val severity = try {
+                escalation.severityKey?.let(RiskSeverity::valueOf)
+            } catch (_: IllegalArgumentException) {
+                throw InvalidRiskActionException()
             }
-        }!!
+            if (escalation.ownerRelationshipId == null && severity == null) throw InvalidRiskActionException()
+            val version = risks.get(escalation.riskId).rowVersion
+            val metadata = CommandMetadata(
+                principalId, "risk.escalate", "due-${escalation.riskId}-$level",
+                version, correlationId,
+            )
+            action(
+                metadata, escalation.riskId, RiskActionType.ESCALATED,
+                "SLA escalation level $level", emptyMap(), escalation.ownerRelationshipId,
+                severity, level, at,
+            )
+        }
     }
 
     fun recordDueSlaBreaches(principalId: UUID, at: Instant, limit: Int, correlationId: UUID): List<CommandResult> {
-        require(limit in 1..100)
-        return transactions.execute {
-            risks.dueSlaBreaches(at, limit).map { risk ->
-                action(
-                    CommandMetadata(
-                        principalId, "risk.sla_breach", "sla-${risk.id}-${risk.dueAt}",
-                        risk.rowVersion, correlationId,
-                    ),
-                    risk.id,
-                    RiskActionType.SLA_BREACHED,
-                    "Risk SLA breached",
-                    at = at,
-                )
-            }
-        }!!
+        if (limit !in 1..100) throw InvalidRiskRequestException()
+        val candidates = transactions.execute { risks.dueSlaBreaches(at, DUE_SCAN_LIMIT) }!!
+        return processDue("sla-breach", candidates, limit, RiskRecord::id) { risk ->
+            action(
+                CommandMetadata(
+                    principalId, "risk.sla_breach", "sla-${risk.id}-${risk.dueAt}",
+                    risk.rowVersion, correlationId,
+                ),
+                risk.id,
+                RiskActionType.SLA_BREACHED,
+                "Risk SLA breached",
+                at = at,
+            )
+        }
     }
 
     fun interventionQueue(
@@ -145,7 +151,7 @@ class RiskService(
         limit: Int,
         cursor: String? = null,
     ): RiskQueuePage {
-        require(limit in 1..100)
+        if (limit !in 1..100) throw InvalidRiskRequestException()
         val context = queueContext(customerInstanceId, filters, at)
         val after = cursor?.let { decodeTuple(cursors.decode(it, context)) }
         return transactions.execute {
@@ -173,31 +179,23 @@ class RiskService(
     }
 
     fun adjudicate(metadata: CommandMetadata, request: RiskAdjudicationRequest): CommandResult {
-        return transactions.execute {
-            risks.lockAdjudicationIdentity(request.knownEventKey, request.targetEntityId)
-            val linkedRisk = request.riskId?.let(risks::lock)
-            if (linkedRisk != null && linkedRisk.targetEntityId != request.targetEntityId) {
-                throw InvalidRiskActionException()
-            }
-            val aggregateId = adjudicationAggregateId(request.knownEventKey, request.targetEntityId)
-            commands.execute(
-                metadata,
-                requestBytes(mapOf(
-                    "reportingPeriodStart" to request.reportingPeriodStart.toString(),
-                    "reportingPeriodEnd" to request.reportingPeriodEnd.toString(),
-                    "knownEventKey" to request.knownEventKey,
-                    "targetEntityId" to request.targetEntityId.toString(),
-                    "severeEvent" to request.severeEvent,
-                    "riskId" to request.riskId?.toString(),
-                    "outcome" to request.outcome.name,
-                    "reason" to request.reason,
-                )),
-                AdjudicateRiskCommand(
-                    aggregateId, request, linkedRisk?.targetEntityId ?: request.targetEntityId,
-                    linkedRisk?.id ?: request.targetEntityId,
-                ),
-            )
-        }!!
+        val aggregateId = adjudicationAggregateId(request.knownEventKey, request.targetEntityId)
+        return commands.execute(
+            metadata,
+            requestBytes(mapOf(
+                "reportingPeriodStart" to request.reportingPeriodStart.toString(),
+                "reportingPeriodEnd" to request.reportingPeriodEnd.toString(),
+                "knownEventKey" to request.knownEventKey,
+                "targetEntityId" to request.targetEntityId.toString(),
+                "severeEvent" to request.severeEvent,
+                "riskId" to request.riskId?.toString(),
+                "outcome" to request.outcome.name,
+                "reason" to request.reason,
+            )),
+            AdjudicateRiskCommand(
+                aggregateId, request, request.targetEntityId, request.riskId ?: request.targetEntityId,
+            ),
+        )
     }
 
     fun metrics(
@@ -207,7 +205,7 @@ class RiskService(
         start: LocalDate,
         end: LocalDate,
     ): RiskMetrics {
-        require(end > start)
+        if (end <= start) throw InvalidRiskRequestException()
         if (!metricsProperties.enabled) throw AuthorizationAvailabilityException()
         val reportResourceId = metricsProperties.reportResourceUuid ?: throw AuthorizationAvailabilityException()
         return transactions.execute {
@@ -245,6 +243,28 @@ class RiskService(
             )),
             RiskActionCommand(riskId, type, reason, data, ownerRelationshipId, severity, escalationLevel, at),
         )
+    }
+
+    private fun <T> processDue(
+        type: String,
+        candidates: List<T>,
+        limit: Int,
+        riskId: (T) -> UUID,
+        execute: (T) -> CommandResult,
+    ): List<CommandResult> {
+        val results = mutableListOf<CommandResult>()
+        for (candidate in candidates) {
+            if (results.size == limit) break
+            try {
+                results += execute(candidate)
+            } catch (failure: Exception) {
+                LOG.warn(
+                    "Risk due item failed type={} riskId={} failure={}",
+                    type, riskId(candidate), failure.javaClass.name,
+                )
+            }
+        }
+        return results
     }
 
     private fun allowed(principalId: UUID, correlationId: UUID, action: String, risk: RiskRecord): Boolean = try {
@@ -435,6 +455,11 @@ class RiskService(
         private var prior: RiskAdjudicationRecord? = null
 
         override fun lockCurrentVersion(context: CommandContext): Long {
+            risks.lockAdjudicationIdentity(request.knownEventKey, request.targetEntityId)
+            val linkedRisk = request.riskId?.let(risks::lock)
+            if (linkedRisk != null && linkedRisk.targetEntityId != request.targetEntityId) {
+                throw InvalidRiskActionException()
+            }
             prior = risks.latestAdjudication(request.knownEventKey, request.targetEntityId, lock = true)
             return prior?.version?.toLong() ?: 0
         }
@@ -529,9 +554,11 @@ class RiskService(
 
     companion object {
         private const val QUEUE_BATCH_SIZE = 128
+        private const val DUE_SCAN_LIMIT = 100
         private val DEFAULT_CUSTOMER_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
         private val TERMINAL_STATES = setOf(RiskState.RESOLVED, RiskState.DISMISSED)
         private val MAPPER = ObjectMapper().findAndRegisterModules()
+        private val LOG = LoggerFactory.getLogger(RiskService::class.java)
 
         private fun adjudicationAggregateId(eventKey: String, targetEntityId: UUID): UUID = UUID.nameUUIDFromBytes(
             "risk-adjudication:$eventKey:$targetEntityId".toByteArray(StandardCharsets.UTF_8),
