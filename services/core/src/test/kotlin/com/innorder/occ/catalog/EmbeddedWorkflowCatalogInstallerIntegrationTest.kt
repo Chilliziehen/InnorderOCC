@@ -16,6 +16,40 @@ import org.testcontainers.utility.MountableFile
 
 class EmbeddedWorkflowCatalogInstallerIntegrationTest {
     @Test
+    fun `workflow catalog owns stable UUIDv5 identifiers while canonical relation literals remain upstream exceptions`() {
+        assertThat(EmbeddedWorkflowCatalogIds.NAMESPACE)
+            .isEqualTo(java.util.UUID.fromString("9f973715-bf36-57c5-9339-d0013c9c99d7"))
+        assertThat(
+            listOf(
+                EmbeddedWorkflowCatalogIds.PACKAGE,
+                EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                EmbeddedWorkflowCatalogIds.COHORT_TYPE,
+                EmbeddedWorkflowCatalogIds.COHORT_TYPE_VERSION,
+                EmbeddedWorkflowCatalogIds.PROCESS_TYPE,
+                EmbeddedWorkflowCatalogIds.PROCESS_TYPE_VERSION,
+                EmbeddedWorkflowCatalogIds.TASK_TYPE,
+                EmbeddedWorkflowCatalogIds.TASK_TYPE_VERSION,
+            ),
+        ).containsExactly(
+            java.util.UUID.fromString("37779a89-8140-5bd6-aa71-51f7aa4e26a0"),
+            java.util.UUID.fromString("5e2b6072-9b03-5ede-8bf0-540b2447655a"),
+            java.util.UUID.fromString("cf3f4f08-947c-5d79-9bc6-700de641f2c7"),
+            java.util.UUID.fromString("b36593b3-9df3-55b7-861a-6466853f41f4"),
+            java.util.UUID.fromString("4f3d5746-f425-58e2-9aa1-147faa4f33a5"),
+            java.util.UUID.fromString("15fa468c-1400-58fe-b7e9-9398f24802cd"),
+            java.util.UUID.fromString("88bb8859-b452-5330-8221-29700dc6a89f"),
+            java.util.UUID.fromString("7020a106-ff69-52db-aa0d-de281b1d8bad"),
+        ).allSatisfy { assertThat(it.version()).isEqualTo(5) }
+        assertThat(WorkflowAuthorizationRelationDefinitions.all.map { it.id.toString() }).containsExactly(
+            "00000000-0000-7000-8000-000000000101",
+            "00000000-0000-7000-8000-000000000102",
+            "00000000-0000-7000-8000-000000000103",
+            "00000000-0000-7000-8000-000000000104",
+            "00000000-0000-7000-8000-000000000105",
+        )
+    }
+
+    @Test
     fun `installer publishes stable workflow prerequisites idempotently and rejects drift`() {
         PostgreSQLContainer(DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres")).use { postgres ->
             postgres.withDatabaseName("innorder_occ")
@@ -41,6 +75,13 @@ class EmbeddedWorkflowCatalogInstallerIntegrationTest {
             )
 
             installer.installPackage()
+            assertThat(jdbc.queryForObject(
+                "SELECT id FROM authz.entity WHERE entity_key = 'customer:default'",
+                java.util.UUID::class.java,
+            )).isEqualTo(jdbc.queryForObject(
+                "SELECT id FROM platform.customer_instance WHERE singleton",
+                java.util.UUID::class.java,
+            ))
             val firstTypes = jdbc.queryForList(
                 "SELECT id::text, type_key FROM catalog.entity_type WHERE package_id = ? ORDER BY type_key",
                 EmbeddedWorkflowCatalogIds.PACKAGE,

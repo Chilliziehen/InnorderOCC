@@ -18,16 +18,18 @@ class WorkflowCatalogInstallationException : IllegalStateException(
 )
 
 object EmbeddedWorkflowCatalogIds {
-    val PACKAGE: UUID = uuid("00000000-0000-7000-8000-000000000300")
-    val PACKAGE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000301")
-    val COHORT_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000302")
-    val COHORT_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000303")
-    val PROCESS_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000304")
-    val PROCESS_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000305")
-    val TASK_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000306")
-    val TASK_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000307")
+    private val DNS_NAMESPACE = UUID.fromString("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    val NAMESPACE: UUID = UuidV5.from(DNS_NAMESPACE, "com.innorder.occ.workflow-catalog")
+    val PACKAGE: UUID = id("package:embedded-workflow")
+    val PACKAGE_VERSION: UUID = id("package-version:embedded-workflow:1.0.0")
+    val COHORT_TYPE: UUID = id("entity-type:cohort")
+    val COHORT_TYPE_VERSION: UUID = id("entity-type-version:cohort:1")
+    val PROCESS_TYPE: UUID = id("entity-type:process")
+    val PROCESS_TYPE_VERSION: UUID = id("entity-type-version:process:1")
+    val TASK_TYPE: UUID = id("entity-type:task")
+    val TASK_TYPE_VERSION: UUID = id("entity-type-version:task:1")
 
-    private fun uuid(value: String): UUID = UUID.fromString(value)
+    private fun id(name: String): UUID = UuidV5.from(NAMESPACE, name)
 }
 
 @Component
@@ -217,6 +219,7 @@ class EmbeddedWorkflowCatalogInstaller(
     }
 
     private fun ensureCustomerRoot(now: OffsetDateTime) {
+        // Customer root identity is the existing deployment singleton, not a catalog-derived UUID.
         val customer = jdbc.queryForMap(
             "SELECT id, instance_key FROM platform.customer_instance WHERE singleton",
         )
@@ -346,6 +349,7 @@ class EmbeddedWorkflowCatalogInstaller(
             TypeSpec(EmbeddedWorkflowCatalogIds.PROCESS_TYPE, EmbeddedWorkflowCatalogIds.PROCESS_TYPE_VERSION, "process", "Process"),
             TypeSpec(EmbeddedWorkflowCatalogIds.TASK_TYPE, EmbeddedWorkflowCatalogIds.TASK_TYPE_VERSION, "task", "Task"),
         )
+        // Task5 relation IDs are upstream production literals and intentionally exempt from UUIDv5 derivation.
         private val RELATIONS = listOf(
             relation(0, EmbeddedWorkflowCatalogIds.COHORT_TYPE, "ONE_TO_MANY"),
             relation(1, EmbeddedWorkflowCatalogIds.COHORT_TYPE, "MANY_TO_MANY"),
