@@ -135,6 +135,8 @@ SELECT pg_temp.assert_raises(
   $$UPDATE occ.cohort SET status = 'ARCHIVED', archived_at = transaction_timestamp()
     WHERE id = '57000000-0000-7000-8000-000000000001'$$,
   '55000', 'cohort cannot skip ACTIVE');
+CREATE TEMP TABLE cohort_owner_transfer_revision_before AS
+SELECT current_revision FROM authz.authorization_state WHERE singleton = true;
 SELECT pg_temp.assert_raises(
   $$UPDATE occ.cohort SET package_version_id = '51000000-0000-7000-8000-000000000002'
     WHERE id = '57000000-0000-7000-8000-000000000001'$$,
@@ -142,6 +144,11 @@ SELECT pg_temp.assert_raises(
 UPDATE occ.cohort SET owner_principal_id = '56000000-0000-7000-8000-000000000003',
   updated_by = '56000000-0000-7000-8000-000000000003'
 WHERE id = '57000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+  (SELECT state.current_revision = before.current_revision + 1
+   FROM authz.authorization_state state CROSS JOIN cohort_owner_transfer_revision_before before
+   WHERE state.singleton = true),
+  'cohort owner transfer increments authorization revision exactly once');
 SELECT pg_temp.assert_true(
   (SELECT count(*) = 1 FROM authz.relationship
    WHERE relation_definition_id = '55000000-0000-7000-8000-000000000001'

@@ -93,7 +93,7 @@ class AuthorizationServiceIntegrationTest {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
                 requestBody[0] = exchange.requestBody.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val response = """{"result":{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
+                val response = """{"result":{"contractVersion":2,"opaRevision":"platform-authz-v2","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
                 exchange.responseHeaders.add("Content-Type", "application/json")
                 exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
                 exchange.responseBody.use { it.write(response.toByteArray()) }
@@ -111,7 +111,7 @@ class AuthorizationServiceIntegrationTest {
         assertThat(decision.allow).isTrue()
         val input = ObjectMapper().readTree(requestBody[0]).path("input")
         val expected = ObjectMapper().readTree(
-            """{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"principal":{"id":"$PRINCIPAL_ID","enabled":true},"entity":{"id":"$ENTITY_ID"},"action":"occ.read","resource":{"id":"$RESOURCE_ID","active":true},"context":{"correlationId":"$REQUEST_ID"},"forbiddenActions":[],"grants":[{"id":"platform-administrator-read","layer":"PLATFORM","releaseId":"$PLATFORM_VERSION_ID","effect":"ALLOW","action":"occ.read","principalId":"$PRINCIPAL_ID","entityId":"*","resourceId":"*"}]}""",
+            """{"contractVersion":2,"opaRevision":"platform-authz-v2","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"principal":{"id":"$PRINCIPAL_ID","enabled":true},"entity":{"id":"$ENTITY_ID"},"action":"occ.read","resource":{"id":"$RESOURCE_ID","active":true},"context":{"correlationId":"$REQUEST_ID"},"forbiddenActions":[],"grants":[{"id":"platform-administrator-read","layer":"PLATFORM","releaseId":"$PLATFORM_VERSION_ID","effect":"ALLOW","action":"occ.read","principalId":"$PRINCIPAL_ID","entityId":"*","resourceId":"*"}],"relationships":[]}""",
         )
         assertThat(input).isEqualTo(expected)
     }
@@ -176,7 +176,7 @@ class AuthorizationServiceIntegrationTest {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
                 exchange.requestBody.use { it.readAllBytes() }
-                val response = """{"result":{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["grant:raw-id"],"matchedPolicyIds":["grant:raw-id"]}}"""
+                val response = """{"result":{"contractVersion":2,"opaRevision":"platform-authz-v2","requestId":"$REQUEST_ID","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["grant:raw-id"],"matchedPolicyIds":["grant:raw-id"]}}"""
                 exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
                 exchange.responseBody.use { it.write(response.toByteArray()) }
             }
@@ -197,7 +197,7 @@ class AuthorizationServiceIntegrationTest {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/data/innorder/platform/authz/decision") { exchange ->
                 exchange.requestBody.use { it.readAllBytes() }
-                val response = """{"result":{"contractVersion":1,"opaRevision":"platform-authz-v1","requestId":"3d3d3d3dTd2N3d3d3d3d3Q==","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
+                val response = """{"result":{"contractVersion":2,"opaRevision":"platform-authz-v2","requestId":"3d3d3d3dTd2N3d3d3d3d3Q==","authorizationRevision":17,"releases":{"PLATFORM":"$PLATFORM_VERSION_ID"},"decision":"ALLOW","allow":true,"reasonCodes":["ALLOW_GRANT_MATCH"],"reasonIds":["$GRANT_REFERENCE"],"matchedPolicyIds":["$GRANT_REFERENCE"]}}"""
                 exchange.sendResponseHeaders(200, response.toByteArray().size.toLong())
                 exchange.responseBody.use { it.write(response.toByteArray()) }
             }
@@ -419,7 +419,7 @@ class AuthorizationServiceIntegrationTest {
             PolicyDecisionClient { snapshot ->
                 observedRevisions.add(snapshot.authorizationRevision)
                 AuthorizationDecision(
-                    1, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
+                    2, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
                     snapshot.releases, AuthorizationDecisionValue.ALLOW, true,
                     listOf("ALLOW_GRANT_MATCH"), listOf(GRANT_REFERENCE), listOf(GRANT_REFERENCE),
                 )
@@ -505,7 +505,7 @@ class AuthorizationServiceIntegrationTest {
             PolicyLayer.PLATFORM to PLATFORM_VERSION_ID,
         ))
         assertThat(snapshot.composedReleaseId).isEqualTo(COMPOSED_RELEASE_ID)
-        assertThat(snapshot.opaRevision).isEqualTo("platform-authz-v1")
+        assertThat(snapshot.opaRevision).isEqualTo("platform-authz-v2")
         assertThat(snapshot.principal.enabled).isTrue()
         assertThat(snapshot.resource.active).isTrue()
         assertThat(snapshot.grants).containsExactly(
@@ -697,7 +697,7 @@ class AuthorizationServiceIntegrationTest {
                     local.update("UPDATE authz.policy_release SET status = 'RETIRED' WHERE id = ?", COMPOSED_RELEASE_ID)
                     val changed = local.update(
                         """UPDATE authz.policy_release
-                           SET status = 'ACTIVE', opa_revision = 'platform-authz-v1', published_at = transaction_timestamp()
+                           SET status = 'ACTIVE', opa_revision = 'platform-authz-v2', published_at = transaction_timestamp()
                            WHERE id = ?""",
                         stagedReleaseId,
                     )
@@ -794,7 +794,7 @@ class AuthorizationServiceIntegrationTest {
         assertThat(row["context_digest"])
             .isEqualTo("f0f1045f6f1922e3bc4fcc9ec9eec908ec2b38dc70d0586f97edb522633cd567")
         assertThat(row["result_digest"])
-            .isEqualTo("58550ec3986331489d91c872e124989630489daac625b2c346aebe7d25c78c59")
+            .isEqualTo("4e6d060101fcb70972b7194bcb95ac495e9ae1fa66f61241b63cf22f2e9fc81e")
         assertThat(row["principal_entity_id"]).isEqualTo(PRINCIPAL_ID)
         assertThat(row["action_key"]).isEqualTo("occ.read")
         assertThat(row["resource_entity_id"]).isEqualTo(RESOURCE_ID)
@@ -920,14 +920,14 @@ class AuthorizationServiceIntegrationTest {
             PolicyDecisionClient { throw OpaClientException() },
             PolicyDecisionClient { snapshot ->
                 AuthorizationDecision(
-                    1, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision - 1, snapshot.releases,
+                    2, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision - 1, snapshot.releases,
                     AuthorizationDecisionValue.ALLOW, true, listOf("ALLOW_GRANT_MATCH"),
                     listOf(GRANT_REFERENCE), listOf(GRANT_REFERENCE),
                 )
             },
             PolicyDecisionClient { snapshot ->
                 AuthorizationDecision(
-                    1, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
+                    2, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
                     snapshot.releases + (PolicyLayer.PLATFORM to UUID.randomUUID()),
                     AuthorizationDecisionValue.ALLOW, true, listOf("ALLOW_GRANT_MATCH"),
                     listOf(GRANT_REFERENCE), listOf(GRANT_REFERENCE),
@@ -1069,7 +1069,7 @@ class AuthorizationServiceIntegrationTest {
     )
 
     private fun snapshot() = AuthorizationSnapshot(
-        contractVersion = 1,
+        contractVersion = 2,
         requestId = REQUEST_ID,
         authorizationRevision = 17,
         releases = mapOf(PolicyLayer.PLATFORM to PLATFORM_VERSION_ID),
@@ -1086,14 +1086,14 @@ class AuthorizationServiceIntegrationTest {
             ),
         ),
         composedReleaseId = COMPOSED_RELEASE_ID,
-        opaRevision = "platform-authz-v1",
+        opaRevision = "platform-authz-v2",
         entityVersions = mapOf(PRINCIPAL_ID to 0, ENTITY_ID to 2, RESOURCE_ID to 4),
         contextDigest = "a".repeat(64),
     )
 
     private fun decision() = AuthorizationDecision(
-        contractVersion = 1,
-        opaRevision = "platform-authz-v1",
+        contractVersion = 2,
+        opaRevision = "platform-authz-v2",
         requestId = REQUEST_ID,
         authorizationRevision = 17,
         releases = mapOf(PolicyLayer.PLATFORM to PLATFORM_VERSION_ID),
@@ -1114,7 +1114,7 @@ class AuthorizationServiceIntegrationTest {
             AuthorizationSnapshotRepository(jdbc, mapper),
             PolicyDecisionClient { snapshot ->
                 AuthorizationDecision(
-                    1,
+                    2,
                     snapshot.opaRevision,
                     snapshot.requestId,
                     snapshot.authorizationRevision,
@@ -1187,7 +1187,7 @@ class AuthorizationServiceIntegrationTest {
                     AuthorizationDecisionValidator.POLICY_REASON_IDS.getValue("NO_MATCHING_ALLOW")
                 }
                 val result = mapper.createObjectNode().apply {
-                    put("contractVersion", 1)
+                    put("contractVersion", 2)
                     put("opaRevision", input.path("opaRevision").textValue())
                     put("requestId", input.path("requestId").textValue())
                     put("authorizationRevision", input.path("authorizationRevision").longValue())
@@ -1350,7 +1350,7 @@ class AuthorizationServiceIntegrationTest {
         mapper: ObjectMapper,
         input: com.fasterxml.jackson.databind.JsonNode,
     ): com.fasterxml.jackson.databind.node.ObjectNode = mapper.createObjectNode().apply {
-        put("contractVersion", 1)
+        put("contractVersion", 2)
         put("opaRevision", input.path("opaRevision").textValue())
         put("requestId", input.path("requestId").textValue())
         put("authorizationRevision", input.path("authorizationRevision").longValue())
@@ -1467,7 +1467,7 @@ class AuthorizationServiceIntegrationTest {
             val domainManifest = """{"version":1,"roleGrants":[{"id":"domain-administrator-read-deny","effect":"DENY","action":"occ.read","entityId":"*","resourceId":"*","subjectRoleEntityKey":"role:administrator"}],"forbiddenActions":[]}"""
             val domainHash = sha256(domainManifest)
             val releaseHash = PolicyReleaseIntegrity.contentHash(
-                "platform-authz-v1",
+                "platform-authz-v2",
                 listOf(
                     PolicyReleaseItemIntegrity(PolicyLayer.PLATFORM, BUNDLE_ID, PLATFORM_VERSION_ID, hash),
                     PolicyReleaseItemIntegrity(PolicyLayer.DOMAIN, DOMAIN_BUNDLE_ID, DOMAIN_VERSION_ID, domainHash),
@@ -1480,7 +1480,7 @@ class AuthorizationServiceIntegrationTest {
             jdbc.update("INSERT INTO authz.policy_release(id, release_number, status, content_hash) VALUES (?, 720001, 'STAGED', ?)", COMPOSED_RELEASE_ID, releaseHash)
             jdbc.update("INSERT INTO authz.policy_release_item(release_id, bundle_id, bundle_version_id) VALUES (?, ?, ?)", COMPOSED_RELEASE_ID, BUNDLE_ID, PLATFORM_VERSION_ID)
             jdbc.update("INSERT INTO authz.policy_release_item(release_id, bundle_id, bundle_version_id) VALUES (?, ?, ?)", COMPOSED_RELEASE_ID, DOMAIN_BUNDLE_ID, DOMAIN_VERSION_ID)
-            jdbc.update("UPDATE authz.policy_release SET status = 'ACTIVE', opa_revision = 'platform-authz-v1', published_at = transaction_timestamp() WHERE id = ?", COMPOSED_RELEASE_ID)
+            jdbc.update("UPDATE authz.policy_release SET status = 'ACTIVE', opa_revision = 'platform-authz-v2', published_at = transaction_timestamp() WHERE id = ?", COMPOSED_RELEASE_ID)
         }
 
         private fun resetAuthorizationFacts(jdbc: JdbcTemplate) {

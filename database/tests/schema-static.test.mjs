@@ -27,6 +27,7 @@ const migrations = [
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
   'V013__process_task_workflow.sql',
+  'V014__relationship_revision_per_command.sql',
 ];
 const frozenMigrationDigests = {
   'V001__bootstrap.sql': '5bfe3250f881a3321a8f900f98477dd733ed14d6ef54d1ddc566c68254102b27',
@@ -61,13 +62,13 @@ test('keeps published V001 through V012 migration content immutable', () => {
   }
 });
 
-test('V013 is the only migration after V012 and reserves the process task schema', () => {
+test('V013 reserves workflow schema and V014 fixes command-scoped relationship revisions', () => {
   const migrationNames = readdirSync(root)
     .filter((name) => /^V\d+__.*\.sql$/.test(name))
     .sort();
   assert.deepEqual(migrationNames.slice(-2), [
-    'V012__outbox_publisher_lifecycle.sql',
     'V013__process_task_workflow.sql',
+    'V014__relationship_revision_per_command.sql',
   ]);
 
   const sql = readMigration('V013__process_task_workflow.sql');
@@ -88,16 +89,27 @@ test('V013 is the only migration after V012 and reserves the process task schema
   assert.match(sql, /ERRCODE = '55000'/i);
 });
 
-test('registers V013 in every database schema entrypoint', () => {
+test('V014 deduplicates relationship revision bumps within one command transaction', () => {
+  const sql = readMigration('V014__relationship_revision_per_command.sql');
+  assert.match(sql, /CREATE OR REPLACE FUNCTION authz\.bump_relationship_revision_statement\(\)/iu);
+  assert.match(sql, /definition\.relation_key <> 'cohort_owner'/iu);
+  assert.doesNotMatch(sql, /current_setting|set_config/iu);
+  assert.match(sql, /CREATE OR REPLACE FUNCTION occ\.project_cohort_owner\(\)/iu);
+});
+
+test('registers forward workflow migrations in every database schema entrypoint', () => {
   const migration = 'V013__process_task_workflow.sql';
+  const revisionMigration = 'V014__relationship_revision_per_command.sql';
   const entrypoint = readFileSync(fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)), 'utf8');
   const pgliteSmoke = readFileSync(pgliteSmokePath, 'utf8');
   const explicitApplications = [...pgliteSmoke.matchAll(
     /await\s+applyMigration\(\s*(['"])(V\d+__[^'"]+\.sql)\1\s*\)/gu,
   )].map((match) => match[2]);
   assert.ok(entrypoint.indexOf(migration) > entrypoint.indexOf('V012__outbox_publisher_lifecycle.sql'));
+  assert.ok(entrypoint.indexOf(revisionMigration) > entrypoint.indexOf(migration));
   assert.ok(pgliteSmoke.indexOf(migration) > pgliteSmoke.indexOf('V012__outbox_publisher_lifecycle.sql'));
   assert.ok(explicitApplications.includes(migration), 'PGlite explicitly applies V013');
+  assert.ok(explicitApplications.includes(revisionMigration), 'PGlite explicitly applies V014');
   assert.match(pgliteSmoke, /appliedMigrations\.push\(migration\)/u);
   assert.match(pgliteSmoke, /assert\.deepEqual\(appliedMigrations, migrations/u);
   for (const table of ['occ.cohort', 'occ.task_gate_provider_state', 'occ.task_review_projection_fact', 'occ.notification']) {

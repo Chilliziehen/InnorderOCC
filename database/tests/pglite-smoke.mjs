@@ -43,6 +43,7 @@ const migrations = [
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
   'V013__process_task_workflow.sql',
+  'V014__relationship_revision_per_command.sql',
 ];
 const appliedMigrations = [];
 
@@ -193,6 +194,7 @@ console.log('passed V011 legacy account failure-window backfill');
 
 await applyMigration('V012__outbox_publisher_lifecycle.sql');
 await applyMigration('V013__process_task_workflow.sql');
+await applyMigration('V014__relationship_revision_per_command.sql');
 assert.deepEqual(appliedMigrations, migrations, 'PGlite must apply every declared migration in order');
 
 const workflowSchema = await db.query(`

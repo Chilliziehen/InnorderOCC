@@ -73,7 +73,7 @@ class CommandExecutorIntegrationTest {
             { snapshot ->
                 val outcome = snapshots.outcome
                 AuthorizationDecision(
-                    1, "kernel-v1", snapshot.requestId, 1, snapshot.releases,
+                    2, "kernel-v1", snapshot.requestId, 1, snapshot.releases,
                     outcome, outcome == AuthorizationDecisionValue.ALLOW,
                     listOf(if (outcome == AuthorizationDecisionValue.ALLOW) "ALLOW_TEST" else "DENY_TEST"),
                     listOf(POLICY_REFERENCE), if (outcome == AuthorizationDecisionValue.ALLOW) listOf(POLICY_REFERENCE) else emptyList(),
@@ -1403,10 +1403,10 @@ class CommandExecutorIntegrationTest {
             lastRequest = request
             barrier?.await(5, TimeUnit.SECONDS)
             return AuthorizationSnapshot(
-                1, request.requestId, 1, mapOf(PolicyLayer.PLATFORM to RELEASE_ID),
+                2, request.requestId, 1, mapOf(PolicyLayer.PLATFORM to RELEASE_ID),
                 AuthorizationPrincipal(request.principalId, true), AuthorizationEntity(request.entityId),
                 request.action, AuthorizationResource(request.resourceId, true), request.context,
-                emptyList(), emptyList(), RELEASE_ID, "kernel-v1",
+                emptyList(), emptyList(), emptyList(), RELEASE_ID, "kernel-v1",
                 mapOf(request.entityId to 0), "a".repeat(64),
             )
         }

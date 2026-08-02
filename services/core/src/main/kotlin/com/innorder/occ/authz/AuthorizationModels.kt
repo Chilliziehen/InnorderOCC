@@ -7,6 +7,9 @@ import java.util.UUID
 enum class PolicyLayer { PLATFORM, DOMAIN, CUSTOMER }
 enum class GrantEffect { ALLOW, DENY }
 enum class AuthorizationDecisionValue { ALLOW, DENY, ERROR }
+enum class AuthorizationRelation {
+    COHORT_OWNER, COHORT_TEACHER, COHORT_PARTICIPANT, TASK_CANDIDATE, TASK_ASSIGNEE,
+}
 
 data class AuthorizationRequest(
     val requestId: UUID,
@@ -33,6 +36,12 @@ data class AuthorizationGrant(
     val resourceId: String,
 )
 
+data class AuthorizationRelationshipFact(
+    val relation: AuthorizationRelation,
+    val subjectId: UUID,
+    val objectId: UUID,
+)
+
 data class AuthorizationSnapshot(
     val contractVersion: Int,
     val requestId: UUID,
@@ -45,6 +54,7 @@ data class AuthorizationSnapshot(
     val context: Map<String, Any?>,
     val forbiddenActions: List<String>,
     val grants: List<AuthorizationGrant>,
+    val relationships: List<AuthorizationRelationshipFact> = emptyList(),
     @get:JsonIgnore val composedReleaseId: UUID,
     val opaRevision: String,
     @get:JsonIgnore val entityVersions: Map<UUID, Long>,

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { hasUnicodeCodePointLengthWithin } from "./unicode.js";
 
-export const AUTHORIZATION_CONTRACT_VERSION = 1;
+export const AUTHORIZATION_CONTRACT_VERSION = 2;
 export const ACTION_KEY_MAX_LENGTH = 128;
 export const CONTEXT_MAX_PROPERTIES = 32;
 export const CONTEXT_MAX_SERIALIZED_LENGTH = 4096;
@@ -10,6 +10,7 @@ export const CONTEXT_MAX_DEPTH = 8;
 export const FORBIDDEN_ACTIONS_MAX_LENGTH = 128;
 export const GRANTS_MAX_LENGTH = 256;
 export const GRANT_ID_MAX_LENGTH = 256;
+export const RELATIONSHIPS_MAX_LENGTH = 256;
 export const OPA_REVISION_MAX_LENGTH = 256;
 export const OUTPUT_IDS_MAX_LENGTH = GRANTS_MAX_LENGTH;
 
@@ -145,6 +146,20 @@ const authorizationGrantSchema = z
   })
   .strict();
 
+const authorizationRelationshipSchema = z
+  .object({
+    relation: z.enum([
+      "COHORT_OWNER",
+      "COHORT_TEACHER",
+      "COHORT_PARTICIPANT",
+      "TASK_CANDIDATE",
+      "TASK_ASSIGNEE",
+    ]),
+    subjectId: nonNilUuidSchema,
+    objectId: nonNilUuidSchema,
+  })
+  .strict();
+
 export const authorizationInputSchema = z
   .object({
     contractVersion: z.literal(AUTHORIZATION_CONTRACT_VERSION),
@@ -159,6 +174,7 @@ export const authorizationInputSchema = z
     context: contextSchema,
     forbiddenActions: z.array(stableActionSchema).max(FORBIDDEN_ACTIONS_MAX_LENGTH),
     grants: z.array(authorizationGrantSchema).max(GRANTS_MAX_LENGTH),
+    relationships: z.array(authorizationRelationshipSchema).max(RELATIONSHIPS_MAX_LENGTH),
   })
   .strict()
   .superRefine((input, context) => {
@@ -168,6 +184,12 @@ export const authorizationInputSchema = z
     const grantIds = input.grants.map((grant) => grant.id);
     if (new Set(grantIds).size !== grantIds.length) {
       context.addIssue({ code: "custom", message: "Grant IDs must be distinct" });
+    }
+    const relationshipKeys = input.relationships.map((fact) =>
+      `${fact.relation}:${normalizedUuid(fact.subjectId)}:${normalizedUuid(fact.objectId)}`
+    );
+    if (new Set(relationshipKeys).size !== relationshipKeys.length) {
+      context.addIssue({ code: "custom", message: "Relationships must be distinct" });
     }
     input.grants.forEach((grant, index) => {
       const releaseId = input.releases[grant.layer];

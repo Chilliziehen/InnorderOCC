@@ -106,8 +106,27 @@ internal object BootstrapBaseline {
 }
 
 internal object BootstrapPolicyBaseline {
-    const val OPA_REVISION = "platform-authz-v1"
-    const val manifest = """{"forbiddenActions":[],"roleGrants":[{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-viewer-read","resourceId":"*","subjectRoleEntityKey":"role:viewer"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-operator-execute","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-operator-read","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.admin","effect":"ALLOW","entityId":"*","id":"platform-administrator-admin","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-administrator-execute","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-administrator-read","resourceId":"*","subjectRoleEntityKey":"role:administrator"}],"version":1}"""
+    const val OPA_REVISION = "platform-authz-v2"
+    private val workflowActions = listOf(
+        "cohort.create", "cohort.read", "cohort.update", "cohort.owner.transfer", "cohort.members.manage",
+        "cohort.archive", "cohort.process.start", "process.read", "process.suspend", "process.resume",
+        "process.cancel", "process.fail", "process.transfer", "process.reconcile", "process.wait.release",
+        "task.read", "task.claim", "task.complete", "task.fail", "task.assignment.manage",
+    )
+    private val baselineGrants = listOf(
+        grant("viewer", "occ.read", "platform-viewer-read"),
+        grant("operator", "occ.execute", "platform-operator-execute"),
+        grant("operator", "occ.read", "platform-operator-read"),
+        grant("administrator", "occ.admin", "platform-administrator-admin"),
+        grant("administrator", "occ.execute", "platform-administrator-execute"),
+        grant("administrator", "occ.read", "platform-administrator-read"),
+    )
+    private val workflowGrants = listOf(
+        "viewer" to setOf("cohort.read", "process.read", "task.read", "task.claim", "task.complete"),
+        "operator" to workflowActions.toSet(),
+        "administrator" to workflowActions.toSet(),
+    ).flatMap { (role, actions) -> actions.sorted().map { action -> grant(role, action) } }
+    val manifest = """{"forbiddenActions":[],"roleGrants":[${(baselineGrants + workflowGrants).joinToString(",")}],"version":1}"""
     val contentHash: String = sha256(manifest)
     val releaseHash: String = PolicyReleaseIntegrity.contentHash(
         OPA_REVISION,
@@ -124,6 +143,11 @@ internal object BootstrapPolicyBaseline {
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
+
+    private fun grant(role: String, action: String, grantId: String? = null): String {
+        val id = grantId ?: "platform-$role-${action.replace('.', '-')}"
+        return """{"action":"$action","effect":"ALLOW","entityId":"*","id":"$id","resourceId":"*","subjectRoleEntityKey":"role:$role"}"""
+    }
 }
 
 internal object CanonicalUsername {

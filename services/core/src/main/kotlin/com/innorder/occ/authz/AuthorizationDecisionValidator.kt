@@ -113,7 +113,7 @@ class AuthorizationDecisionValidator {
     private fun fail(): Nothing = throw OpaClientException()
 
     companion object {
-        const val CONTRACT_VERSION = 1
+        const val CONTRACT_VERSION = 2
         const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
         const val REASON_CODES_MAX = 7
         const val REASON_IDS_MAX = 260

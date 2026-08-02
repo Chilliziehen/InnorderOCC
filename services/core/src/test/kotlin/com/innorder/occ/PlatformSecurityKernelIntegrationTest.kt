@@ -425,7 +425,8 @@ class PlatformSecurityKernelIntegrationTest(
 
     private class OpaProcess {
         private val executable = System.getenv("OPA_PATH")?.takeIf(String::isNotBlank)
-            ?: throw IllegalStateException("PlatformSecurityKernelIntegrationTest requires OPA_PATH for OPA 1.5.1")
+        private val dockerImage = System.getenv("OPA_DOCKER_IMAGE")?.takeIf(String::isNotBlank)
+        private val containerName = "innorder-core-opa-${UUID.randomUUID()}"
         private val policyDirectory = sequenceOf(Path.of("policies", "opa"), Path.of("..", "..", "policies", "opa"))
             .map(Path::toAbsolutePath).firstOrNull(Files::isDirectory)
             ?: throw IllegalStateException("Repository OPA policy directory is unavailable")
@@ -433,18 +434,30 @@ class PlatformSecurityKernelIntegrationTest(
         private var process: Process? = null
 
         init {
-            val version = ProcessBuilder(executable, "version").redirectErrorStream(true).start().run {
+            check(executable != null || dockerImage != null) {
+                "PlatformSecurityKernelIntegrationTest requires OPA_PATH or OPA_DOCKER_IMAGE for OPA 1.5.1"
+            }
+            val versionCommand = executable?.let { listOf(it, "version") }
+                ?: listOf("docker", "run", "--rm", dockerImage!!, "version")
+            val version = ProcessBuilder(versionCommand).redirectErrorStream(true).start().run {
                 val output = inputStream.bufferedReader().readText()
-                check(waitFor(10, TimeUnit.SECONDS) && exitValue() == 0) { "OPA version check failed" }
+                check(waitFor(30, TimeUnit.SECONDS) && exitValue() == 0) { "OPA version check failed" }
                 output
             }
-            check(Regex("(?m)^Version:\\s+1\\.5\\.1\\s*$").containsMatchIn(version)) { "OPA_PATH must reference OPA 1.5.1" }
+            check(Regex("(?m)^Version:\\s+1\\.5\\.1\\s*$").containsMatchIn(version)) { "OPA runtime must be 1.5.1" }
         }
 
         @Synchronized
         fun start() {
             if (process?.isAlive == true) return
-            process = ProcessBuilder(executable, "run", "--server", "--addr=127.0.0.1:$port", policyDirectory.toString())
+            val command = executable?.let {
+                listOf(it, "run", "--server", "--addr=127.0.0.1:$port", policyDirectory.toString())
+            } ?: listOf(
+                "docker", "run", "--rm", "--name", containerName,
+                "-v", "$policyDirectory:/policies:ro", "-p", "127.0.0.1:$port:$port",
+                dockerImage!!, "run", "--server", "--addr=0.0.0.0:$port", "/policies",
+            )
+            process = ProcessBuilder(command)
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start()
             repeat(100) {
                 if (process?.isAlive != true) throw IllegalStateException("OPA exited before readiness")
@@ -460,7 +473,12 @@ class PlatformSecurityKernelIntegrationTest(
 
         @Synchronized
         fun stop() {
-            process?.destroy()
+            if (executable == null && process?.isAlive == true) {
+                ProcessBuilder("docker", "stop", containerName).redirectErrorStream(true).start()
+                    .waitFor(10, TimeUnit.SECONDS)
+            } else {
+                process?.destroy()
+            }
             if (process?.waitFor(5, TimeUnit.SECONDS) == false) process?.destroyForcibly()
             process = null
         }
