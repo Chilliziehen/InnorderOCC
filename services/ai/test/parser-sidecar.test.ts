@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -54,6 +54,24 @@ describe("filesystem parser sidecar", () => {
     try {
       await expect(parsing).resolves.toMatchObject({ text: "restart text" });
       expect(await readdir(paths.output)).toEqual([".parser-heartbeat.json"]);
+    } finally { child.kill("SIGTERM"); await rm(paths.root, { recursive: true, force: true }); }
+  }, 70_000);
+
+  it("recovers only aged owned temps when client and worker restart with stable PID semantics", async () => {
+    const paths = await roots(); const requestId = randomUUID(); const old = new Date(Date.now() - 10 * 60_000);
+    const staleInput = `${requestId}.${"a".repeat(64)}.bin.atomic-client-${"1".repeat(32)}.tmp`;
+    const staleRequest = `${requestId}.request.json.atomic-client-${"2".repeat(32)}.tmp`;
+    const staleHeartbeat = `.parser-heartbeat.json.atomic-worker-${"3".repeat(32)}.tmp`;
+    const legacyPid = `.parser-heartbeat.json.${process.pid}.tmp`;
+    for (const [root, name] of [[paths.input, staleInput], [paths.requests, staleRequest], [paths.output, staleHeartbeat], [paths.output, legacyPid]]) {
+      await writeFile(join(root, name), "crash"); await utimes(join(root, name), old, old);
+    }
+    const child = worker(paths.input, paths.requests, paths.output);
+    const client = new ParserSidecarClient({ inputRoot: paths.input, requestRoot: paths.requests, outputRoot: paths.output, timeoutMs: 60_000, pollMs: 10 });
+    try {
+      await expect(client.parse({ bytes: Buffer.from("after crash"), fileName: "restart.txt", mimeType: "text/plain" }, new AbortController().signal)).resolves.toMatchObject({ text: "after crash" });
+      expect(await readdir(paths.input)).toEqual([]); expect(await readdir(paths.requests)).toEqual([]);
+      expect((await readdir(paths.output)).sort()).toEqual([".parser-heartbeat.json", legacyPid].sort());
     } finally { child.kill("SIGTERM"); await rm(paths.root, { recursive: true, force: true }); }
   }, 70_000);
 

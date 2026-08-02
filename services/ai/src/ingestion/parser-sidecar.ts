@@ -1,24 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { lstat, readFile, realpath, rm, stat } from "node:fs/promises";
+import { basename, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { ParsedDocument } from "./parser.js";
+import { atomicWrite, removeStaleAtomicTemps } from "./atomic-file.js";
 import {
   canonicalParsed, MAX_PARSER_INPUT_BYTES, MAX_PARSER_RESULT_BYTES, PARSER_PROTOCOL_VERSION,
   ParserResultSchema, sha256, type ParserRequest,
 } from "./parser-protocol.js";
 
 type Options = Readonly<{ inputRoot: string; requestRoot: string; outputRoot: string; timeoutMs?: number; pollMs?: number; heartbeatMaxAgeMs?: number; requestId?: () => string }>;
-
-async function atomicWrite(path: string, bytes: Uint8Array): Promise<void> {
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-  await rename(temporary, path);
-  try { const directory = await open(dirname(path), constants.O_RDONLY); try { await directory.sync(); } finally { await directory.close(); } } catch { /* Directory fsync is unavailable on Windows. */ }
-}
 
 async function safeRoot(path: string): Promise<string> {
   const metadata = await lstat(path);
@@ -37,6 +29,7 @@ export class ParserSidecarClient {
   private readonly requestId: () => string;
   private readonly heartbeatMaxAgeMs: number;
   private readonly shutdown = new AbortController();
+  private rootsPromise: Promise<readonly [string, string, string]> | undefined;
   constructor(private readonly options: Options) {
     const roots = [options.inputRoot, options.requestRoot, options.outputRoot].map((path) => resolve(path));
     if (new Set(roots).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
@@ -48,8 +41,7 @@ export class ParserSidecarClient {
   }
 
   async assertReady(): Promise<void> {
-    const [inputRoot, requestRoot, outputRoot] = await Promise.all([safeRoot(this.options.inputRoot), safeRoot(this.options.requestRoot), safeRoot(this.options.outputRoot)]);
-    if (new Set([inputRoot, requestRoot, outputRoot]).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
+    const [, , outputRoot] = await this.roots();
     try {
       const path = resolve(outputRoot, ".parser-heartbeat.json");
       const metadata = await stat(path); const heartbeat = JSON.parse((await readFile(path)).toString("utf8")) as unknown;
@@ -59,11 +51,20 @@ export class ParserSidecarClient {
 
   close(): void { this.shutdown.abort(); }
 
+  private roots(): Promise<readonly [string, string, string]> {
+    this.rootsPromise ??= Promise.all([safeRoot(this.options.inputRoot), safeRoot(this.options.requestRoot), safeRoot(this.options.outputRoot)]).then(async ([inputRoot, requestRoot, outputRoot]) => {
+      if (new Set([inputRoot, requestRoot, outputRoot]).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
+      await Promise.all([removeStaleAtomicTemps(inputRoot, "client-input"), removeStaleAtomicTemps(requestRoot, "client-request")]);
+      return [inputRoot, requestRoot, outputRoot] as const;
+    });
+    return this.rootsPromise;
+  }
+
   async parse(input: Readonly<{ bytes: Uint8Array; fileName: string; mimeType: string }>, signal: AbortSignal): Promise<ParsedDocument> {
     const activeSignal = AbortSignal.any([signal, this.shutdown.signal]);
     if (activeSignal.aborted) throw new Error("OCC-AI-PARSER-CANCELLED");
     if (input.bytes.length < 1 || input.bytes.length > MAX_PARSER_INPUT_BYTES) throw new Error("OCC-AI-PARSER-INPUT");
-    const [inputRoot, requestRoot, outputRoot] = await Promise.all([safeRoot(this.options.inputRoot), safeRoot(this.options.requestRoot), safeRoot(this.options.outputRoot)]);
+    const [inputRoot, requestRoot, outputRoot] = await this.roots();
     const requestId = this.requestId();
     const inputSha256 = sha256(input.bytes);
     const inputFile = `${requestId}.${inputSha256}.bin`;
@@ -85,9 +86,9 @@ export class ParserSidecarClient {
           if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") throw new Error("OCC-AI-PARSER-CONFIG");
         }
       }
-      await atomicWrite(inputPath, input.bytes);
+      await atomicWrite(inputPath, input.bytes, { owner: "client" });
       ownsInput = true;
-      await atomicWrite(requestPath, requestBytes);
+      await atomicWrite(requestPath, requestBytes, { owner: "client" });
       ownsRequest = true;
       const deadline = Date.now() + this.timeoutMs;
       while (true) {

@@ -8,6 +8,7 @@ import {
   canonicalParsed, MAX_PARSER_INPUT_BYTES, MAX_PARSER_REQUEST_BYTES, MAX_PARSER_RESULT_BYTES,
   PARSER_PROTOCOL_VERSION, ParsedDocumentSchema, ParserRequestSchema, sha256, type ParserRequest, type ParserResult,
 } from "./parser-protocol.js";
+import { atomicWrite, removeStaleAtomicTemps } from "./atomic-file.js";
 
 type TestHook = "hang" | "memory" | "output";
 type ExecutionOptions = Readonly<{
@@ -19,14 +20,6 @@ type ResolvedExecution = Readonly<{
   executionTimeoutMs: number; maxResultBytes: number; taskUrl: URL; resourceLimits: ResourceLimits;
   testHooks: Readonly<Partial<Record<TestHook, string>>> | undefined;
 }>;
-
-async function atomicWrite(path: string, bytes: Uint8Array, maxResultBytes = MAX_PARSER_RESULT_BYTES): Promise<void> {
-  if (bytes.length > maxResultBytes) throw new Error("OCC-AI-PARSER-RESULT-BOUNDS");
-  const temporary = `${path}.${process.pid}.tmp`;
-  const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-  await rename(temporary, path);
-}
 
 async function root(path: string): Promise<string> {
   const resolved = await realpath(path);
@@ -112,7 +105,9 @@ export async function processParserRequest(requestPath: string, inputRoot: strin
     version: PARSER_PROTOCOL_VERSION, ok: true, requestId: request.requestId, requestSha256: sha256(requestBytes),
     inputSha256: request.inputSha256, normalizedContentHash: sha256(validatedParsed.text), parsedSha256: sha256(canonicalParsed(validatedParsed)), parsed: validatedParsed,
   };
-  await atomicWrite(outputPath, Buffer.from(JSON.stringify(result)), executionConfig(options).maxResultBytes);
+  const resultBytes = Buffer.from(JSON.stringify(result));
+  if (resultBytes.length > executionConfig(options).maxResultBytes) throw new Error("OCC-AI-PARSER-RESULT-BOUNDS");
+  await atomicWrite(outputPath, resultBytes, { owner: "worker" });
   await rm(requestPath, { force: true });
 }
 
@@ -125,7 +120,7 @@ async function processClaim(path: string, roots: { input: string; requests: stri
   } catch (error) {
     const code = error instanceof Error && /^OCC-AI-(?:DOCUMENT|PARSER)-[A-Z0-9-]+$/u.test(error.message) ? error.message : "OCC-AI-PARSER-FAILED";
     const result: ParserResult = { version: PARSER_PROTOCOL_VERSION, ok: false, requestId: request.requestId, requestSha256: sha256(requestBytes), inputSha256: request.inputSha256, errorCode: code };
-    await atomicWrite(child(roots.output, request.outputFile), Buffer.from(JSON.stringify(result))).catch(() => undefined);
+    await atomicWrite(child(roots.output, request.outputFile), Buffer.from(JSON.stringify(result)), { owner: "worker" }).catch(() => undefined);
     await rm(path, { force: true });
   }
 }
@@ -133,12 +128,13 @@ async function processClaim(path: string, roots: { input: string; requests: stri
 export async function runParserWorker(options: WorkerOptions, signal: AbortSignal): Promise<void> {
   const [input, requests, output] = await Promise.all([root(options.inputRoot), root(options.requestRoot), root(options.outputRoot)]);
   if (new Set([input, requests, output]).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
+  await removeStaleAtomicTemps(output, "worker-output");
   const pollMs = options.pollMs ?? 25;
   if (pollMs < 5 || pollMs > 1_000) throw new Error("OCC-AI-PARSER-CONFIG");
   let lastHeartbeat = 0;
   while (!signal.aborted) {
     if (Date.now() - lastHeartbeat >= 1_000) {
-      await atomicWrite(child(output, ".parser-heartbeat.json"), Buffer.from(JSON.stringify({ version: 1, at: Date.now() })), 256);
+      await atomicWrite(child(output, ".parser-heartbeat.json"), Buffer.from(JSON.stringify({ version: 1, at: Date.now() })), { owner: "worker" });
       lastHeartbeat = Date.now();
     }
     const entries = (await readdir(requests, { withFileTypes: true })).filter((entry) => entry.isFile() && /^(?:[a-f0-9-]{36})\.(?:request|processing)\.json$/u.test(entry.name)).sort((left, right) => left.name.localeCompare(right.name));
