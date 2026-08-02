@@ -178,9 +178,13 @@ if ($LASTEXITCODE -ne 0) { throw '无法列出 Compose 服务' }
 
 ### 桌面部署 CA 信任边界
 
-桌面安装包资源包含受限的部署 CA 登记和移除 helper。登记只接受绝对 payload 根目录、该目录内的严格证书 manifest、预先核对的 manifest SHA-256 与 CA SHA-256 指纹，并且只操作当前用户的 Root store。manifest 只允许相对证书文件名、公开证书、DNS/IP SAN、有效期和签名发布 manifest 元数据；不得包含私钥。产品状态保存在桌面 `userData/state` 下，记录产品、部署、owned thumbprint 和引用该 CA 的 profile ID。移除只处理相同产品拥有、无 profile 引用且 store 中指纹精确匹配的证书与状态。
+桌面安装包资源包含受限的部署 CA 登记和移除 helper。登记只接受绝对 payload 根目录、该目录内的严格证书/release manifest、预先核对的 manifest SHA-256 与 CA SHA-256 指纹，并且只操作当前用户的 Root store。release manifest 严格绑定 `com.innorder.occ`、产品版本、`InnorderOCC`/`Innorder OCC` PE 身份、installer/helper 的精确 basename 和 SHA-256、证书 manifest 内容 SHA-256，以及批准发布者的 subject/thumbprint。证书 manifest 反向绑定 release manifest 文件 SHA-256，并携带对该摘要的 RSA-SHA256 签名；helper 使用内嵌的只读生产 RSA 公钥验证签名，不接受生产 key override。两个 manifest 均不得包含私钥。
 
-当前 `unsigned-dev` 安装包不是生产登记入口。`-PlanOnly` 可返回不访问真实证书 store 的确定性 JSON 计划；Development 模式可用于隔离测试。Production 模式必须同时验证 helper 和 installer 的有效 Authenticode 签名，否则明确返回 `AUTHENTICODE_REQUIRED` 或失败，不得写入伪造的 enrolled 状态。签名证书、私钥和时间戳凭据保持在仓库外。发布候选先执行 `npm run cert:verify`，再由发布流程传入已批准的 payload manifest SHA-256 和 CA 指纹。
+发布流水线在 `make` 前把完整且已签名的 `release-manifest.json`、`certificate-manifest.json`、公开 CA 文件和严格 `deployment-ca.confirmed.json` 放入 `apps/desktop/assets/deployment-ca`；Forge 仅在该目录存在时把它复制为 `resources/deployment-ca`。确认文件固定包含 `version: 1`、`productId: com.innorder.occ`、UUID v4 `deploymentId`、`confirmed: true`、证书 manifest SHA-256 和 CA 指纹。四项任一缺失时 Squirrel install/update/uninstall 是 no-op；helper 失败（包括 unsigned-dev 的 `AUTHENTICODE_REQUIRED`）不得阻止安装或卸载。不要在普通开发构建中创建该目录。
+
+产品状态保存在桌面 `userData/state` 下。登记、profile 引用同步和移除使用同一个 `.deployment-ca.lifecycle.lock`，移除在持锁后重新严格读取状态。只有本次实际导入或已有有效 ownership 状态才能令 `importedByProduct=true`；预先存在的精确证书可以被管理和引用，但卸载不得移除。所有 deployment/profile ID 和状态文件名只接受 UUID v4。
+
+当前 `unsigned-dev` 安装包不是生产登记入口。`-PlanOnly` 可返回不访问真实证书 store 的确定性 JSON 计划；`-TestStoreRoot` 和测试发布公钥只允许 Development 测试路径，Production 会拒绝重定向。Production 必须验证 helper 和 installer 的精确文件哈希、有效 Authenticode、同一批准发布者 subject/thumbprint 和 PE 产品身份，否则明确返回 `AUTHENTICODE_REQUIRED` 或失败，不得写入 enrolled 状态。签名证书、RSA 私钥和时间戳凭据保持在仓库外。发布候选先执行 `npm run cert:verify`，再执行完整 type/package/make/smoke 门禁。
 
 ## 镜像构建
 

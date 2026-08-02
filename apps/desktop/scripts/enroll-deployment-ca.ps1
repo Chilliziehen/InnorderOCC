@@ -2,11 +2,14 @@
 param(
   [Parameter(Mandatory = $true)][string]$PayloadRoot,
   [Parameter(Mandatory = $true)][string]$ManifestPath,
+  [Parameter(Mandatory = $true)][string]$ReleaseManifestPath,
   [Parameter(Mandatory = $true)][string]$ExpectedManifestSha256,
   [Parameter(Mandatory = $true)][string]$ExpectedFingerprint,
   [Parameter(Mandatory = $true)][string]$StateRoot,
   [ValidateSet('Production', 'Development')][string]$Mode = 'Production',
   [string]$InstallerPath,
+  [string]$TestReleasePublicKeyPath,
+  [string]$TestStoreRoot,
   [switch]$InstallerConfirmed,
   [switch]$PlanOnly
 )
@@ -18,6 +21,10 @@ $StoreName = 'CurrentUser\Root'
 $MaximumManifestBytes = 65536
 $MaximumCertificateBytes = 262144
 $MaximumStateBytes = 65536
+$UuidV4Pattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+$ProductionKeyN = 'x-emz8UzYUFQWLVF8Ud4X1lC_iC8w2LF0hupPJyKHSnKZB2Vu98yjK1Y8Hqv1dxasqx03r3RSGheXj_i-OVD8eqeZ6WCe13T5Kml38JGXgF0TEtSO0mQ-ToziCAoX4u_dCn3Hs_WV87JgqPFJXz5QJuyj8enSj3jATk6VSY9ceYjuxPkmqgO996gYnY_dS2LfXG7KkfZc3nTzEMbh1U-IQ6rEvTzzNDLpLGY9MhcsBewH2q7Mik4rWNV1LEbSVYefdfnpMRYkfoCZ6UMfAv9C9pdHYZzVRjWeRxOKb47chV6_yWQLbq0hilTYNT64ZiySC62Js4vWYnuksmqSnuCnNdORvLqCdhodWvdd49gAQNO3cdOIcr6yHogCG8LUdReglgQsd_1XgHl68dsFdOH2CG8-Ph-aeZ_eBv5XW8L3osh_ztOn_s26Ii4By00_-ITW83eagKCXW8FiXjZ5WVnGo2BCJPVVH4oHdFNEZdySgpi4bCSwbSebah9ILyPpvEH'
+$ProductionKeyE = 'AQAB'
+$ProductionKeyId = 'innorder-release-2026'
 
 function ConvertTo-NormalizedSha256([string]$Value, [string]$Label) {
   $normalized = $Value.Replace(':', '').ToUpperInvariant()
@@ -29,6 +36,39 @@ function Get-Sha256([byte[]]$Bytes) {
   $algorithm = [Security.Cryptography.SHA256]::Create()
   try { return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '') }
   finally { $algorithm.Dispose() }
+}
+
+function ConvertFrom-Base64Url([string]$Value) {
+  $base64 = $Value.Replace('-', '+').Replace('_', '/')
+  while (($base64.Length % 4) -ne 0) { $base64 += '=' }
+  return [Convert]::FromBase64String($base64)
+}
+
+function New-ReleaseRsa([string]$Modulus, [string]$Exponent) {
+  $rsa = [Security.Cryptography.RSA]::Create()
+  $parameters = New-Object Security.Cryptography.RSAParameters
+  $parameters.Modulus = ConvertFrom-Base64Url $Modulus
+  $parameters.Exponent = ConvertFrom-Base64Url $Exponent
+  $rsa.ImportParameters($parameters)
+  return $rsa
+}
+
+function ConvertFrom-Hex([string]$Value) {
+  if ($Value -notmatch '^[0-9A-Fa-f]{64}$') { throw 'Invalid SHA-256 hex value' }
+  [byte[]]$result = New-Object byte[] 32
+  for ($index = 0; $index -lt 32; $index++) { $result[$index] = [Convert]::ToByte($Value.Substring($index * 2, 2), 16) }
+  return $result
+}
+
+function Enter-LifecycleLock([string]$Root) {
+  $lockPath = [IO.Path]::Combine($Root, '.deployment-ca.lifecycle.lock')
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    try {
+      $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+      return [pscustomobject]@{ Stream = $stream; Path = $lockPath }
+    } catch [IO.IOException] { Start-Sleep -Milliseconds 100 }
+  }
+  throw 'Timed out acquiring deployment CA lifecycle lock'
 }
 
 function Assert-ExactProperties($Value, [string[]]$Names, [string]$Label) {
@@ -100,6 +140,8 @@ if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttribu
 $PayloadRoot = $rootItem.FullName
 $ManifestPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($ManifestPath)) 'ManifestPath'
 if (-not (Test-PathUnder $PayloadRoot $ManifestPath)) { throw 'ManifestPath must be under PayloadRoot' }
+$ReleaseManifestPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($ReleaseManifestPath)) 'ReleaseManifestPath'
+if (-not (Test-PathUnder $PayloadRoot $ReleaseManifestPath)) { throw 'ReleaseManifestPath must be under PayloadRoot' }
 if (-not [IO.Path]::IsPathRooted($StateRoot) -or [IO.Path]::GetFileName([IO.Path]::GetFullPath($StateRoot).TrimEnd('\')) -cne 'state') { throw 'StateRoot must be an absolute product state path' }
 $StateRoot = [IO.Path]::GetFullPath($StateRoot)
 
@@ -109,11 +151,10 @@ if ((Get-Sha256 $manifestBytes) -cne (ConvertTo-NormalizedSha256 $ExpectedManife
 $manifest = [Text.Encoding]::UTF8.GetString($manifestBytes) | ConvertFrom-Json
 Assert-ExactProperties $manifest @('version', 'productId', 'deploymentId', 'certificate', 'releaseManifest') 'Manifest'
 Assert-ExactProperties $manifest.certificate @('file', 'sha256', 'thumbprint', 'subject', 'dnsSans', 'ipSans', 'validFrom', 'validTo') 'Certificate metadata'
-Assert-ExactProperties $manifest.releaseManifest @('sha256', 'signature') 'Release manifest metadata'
 Assert-ExactProperties $manifest.releaseManifest.signature @('algorithm', 'keyId', 'value') 'Release signature metadata'
 if ($manifest.version -ne 1 -or $manifest.productId -cne $ProductId) { throw 'Manifest product identity mismatch' }
 $parsedDeploymentId = [Guid]::Empty
-if (-not [Guid]::TryParseExact([string]$manifest.deploymentId, 'D', [ref]$parsedDeploymentId)) { throw 'Manifest deploymentId must be a UUID' }
+if ([string]$manifest.deploymentId -notmatch $UuidV4Pattern -or -not [Guid]::TryParseExact([string]$manifest.deploymentId, 'D', [ref]$parsedDeploymentId)) { throw 'Manifest deploymentId must be a UUID v4' }
 if ([string]$manifest.certificate.file -in @('.', '..') -or [string]$manifest.certificate.file -notmatch '^[^\\/:]{1,255}$') { throw 'Certificate file must be a relative basename without ADS' }
 $certificatePath = Assert-AbsoluteRegularPath ([IO.Path]::Combine($PayloadRoot, [string]$manifest.certificate.file)) 'CertificatePath'
 if (-not (Test-PathUnder $PayloadRoot $certificatePath)) { throw 'CertificatePath must remain under PayloadRoot' }
@@ -151,19 +192,66 @@ $now = [DateTime]::UtcNow
 if ($now -lt $certificate.NotBefore.ToUniversalTime() -or $now -gt $certificate.NotAfter.ToUniversalTime()) { throw 'Certificate is not currently valid' }
 $sans = Get-CertificateSans $certificate
 if (($sans.Dns -join '|') -cne (@($manifest.certificate.dnsSans | ForEach-Object { ([string]$_).ToLowerInvariant() }) -join '|') -or ($sans.Ip -join '|') -cne (@($manifest.certificate.ipSans | ForEach-Object { ([Net.IPAddress]::Parse([string]$_)).ToString().ToLowerInvariant() }) -join '|')) { throw 'Certificate SAN metadata mismatch' }
-[void](ConvertTo-NormalizedSha256 ([string]$manifest.releaseManifest.sha256) 'Release manifest sha256')
-if ([string]$manifest.releaseManifest.signature.algorithm -notin @('RSA-SHA256', 'ECDSA-SHA256', 'Ed25519') -or [string]$manifest.releaseManifest.signature.keyId -notmatch '^[A-Za-z0-9._-]{1,128}$') { throw 'Invalid release signature metadata' }
+Assert-ExactProperties $manifest.releaseManifest @('file', 'sha256', 'signature') 'Release manifest metadata'
+if ([string]$manifest.releaseManifest.file -cne [IO.Path]::GetFileName($ReleaseManifestPath) -or [IO.Path]::GetFullPath([IO.Path]::Combine($PayloadRoot, [string]$manifest.releaseManifest.file)) -cne $ReleaseManifestPath) { throw 'Release manifest path mismatch' }
+[byte[]]$releaseBytes = [IO.File]::ReadAllBytes($ReleaseManifestPath)
+if ($releaseBytes.Length -eq 0 -or $releaseBytes.Length -gt $MaximumManifestBytes) { throw 'Release manifest size exceeds the allowed bound' }
+$releaseDigest = Get-Sha256 $releaseBytes
+if ($releaseDigest -cne (ConvertTo-NormalizedSha256 ([string]$manifest.releaseManifest.sha256) 'Release manifest sha256')) { throw 'Release manifest SHA-256 mismatch' }
+if ([string]$manifest.releaseManifest.signature.algorithm -cne 'RSA-SHA256' -or [string]$manifest.releaseManifest.signature.keyId -notmatch '^[A-Za-z0-9._-]{1,128}$') { throw 'Invalid release signature metadata' }
 [byte[]]$signatureBytes = [Convert]::FromBase64String([string]$manifest.releaseManifest.signature.value)
 if ($signatureBytes.Length -lt 64 -or $signatureBytes.Length -gt 8192) { throw 'Invalid release signature size' }
 
+$release = [Text.Encoding]::UTF8.GetString($releaseBytes) | ConvertFrom-Json
+Assert-ExactProperties $release @('version', 'productId', 'productVersion', 'installer', 'helper', 'certificateManifest', 'publisher') 'Release manifest'
+Assert-ExactProperties $release.installer @('file', 'sha256', 'productName', 'internalName') 'Release installer'
+Assert-ExactProperties $release.helper @('file', 'sha256') 'Release helper'
+Assert-ExactProperties $release.certificateManifest @('file', 'contentSha256') 'Release certificate manifest'
+Assert-ExactProperties $release.publisher @('subject', 'thumbprint') 'Release publisher'
+if ($release.version -ne 1 -or $release.productId -cne $ProductId -or [string]$release.productVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Release identity mismatch' }
+$publisherThumbprint = ([string]$release.publisher.thumbprint).ToUpperInvariant()
+if ([string]$release.installer.file -notmatch '^[^\\/:]{1,255}$' -or $release.helper.file -cne 'enroll-deployment-ca.ps1' -or $release.certificateManifest.file -cne 'certificate-manifest.json' -or $publisherThumbprint -notmatch '^[0-9A-F]{40}$' -or [string]::IsNullOrWhiteSpace([string]$release.publisher.subject) -or ([string]$release.publisher.subject).Length -gt 4096) { throw 'Release manifest field validation failed' }
+$helperItem = Get-Item -LiteralPath $PSCommandPath -Force
+if (($helperItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $helperItem.Length -eq 0 -or $helperItem.Length -gt $MaximumCertificateBytes) { throw 'Enrollment helper must be a bounded regular non-reparse file' }
+if ($release.helper.file -cne [IO.Path]::GetFileName($PSCommandPath) -or (Get-Sha256 ([IO.File]::ReadAllBytes($PSCommandPath))) -cne (ConvertTo-NormalizedSha256 ([string]$release.helper.sha256) 'Helper sha256')) { throw 'Enrollment helper binding mismatch' }
+$InstallerPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($InstallerPath)) 'InstallerPath'
+if ($InstallerPath -ceq $PSCommandPath) { throw 'Installer and helper paths must be distinct' }
+$installerItem = Get-Item -LiteralPath $InstallerPath -Force
+if ($installerItem.Length -eq 0 -or $installerItem.Length -gt 536870912) { throw 'Installer size exceeds the allowed bound' }
+if ($release.installer.file -cne [IO.Path]::GetFileName($InstallerPath) -or (Get-Sha256 ([IO.File]::ReadAllBytes($InstallerPath))) -cne (ConvertTo-NormalizedSha256 ([string]$release.installer.sha256) 'Installer sha256')) { throw 'Installer binding mismatch' }
+if ($release.installer.productName -cne 'Innorder OCC' -or $release.installer.internalName -cne 'InnorderOCC' -or $release.certificateManifest.file -cne [IO.Path]::GetFileName($ManifestPath)) { throw 'Signed product identity mismatch' }
+$certificatePayload = [ordered]@{ version = 1; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; certificate = $manifest.certificate }
+$contentBytes = [Text.Encoding]::UTF8.GetBytes(($certificatePayload | ConvertTo-Json -Compress -Depth 8))
+if ((Get-Sha256 $contentBytes) -cne (ConvertTo-NormalizedSha256 ([string]$release.certificateManifest.contentSha256) 'Certificate manifest content sha256')) { throw 'Certificate manifest content binding mismatch' }
+
+if ($Mode -eq 'Production' -and (-not [string]::IsNullOrWhiteSpace($TestReleasePublicKeyPath) -or -not [string]::IsNullOrWhiteSpace($TestStoreRoot))) { throw 'Production mode cannot redirect release keys or certificate stores' }
+if ($Mode -eq 'Production') {
+  $preflightHelperSignature = Get-AuthenticodeSignature -LiteralPath $PSCommandPath
+  $preflightInstallerSignature = Get-AuthenticodeSignature -LiteralPath $InstallerPath
+  if ($preflightHelperSignature.Status -ne 'Valid' -or $preflightInstallerSignature.Status -ne 'Valid') {
+    if ($PlanOnly) { [pscustomobject]@{ status = 'unavailable'; reason = 'AUTHENTICODE_REQUIRED'; action = 'none'; store = $StoreName } | ConvertTo-Json -Compress; exit 0 }
+    throw 'Production enrollment requires signed helper and installer artifacts'
+  }
+  if ([string]$manifest.releaseManifest.signature.keyId -cne $ProductionKeyId) { throw 'Release signing key ID mismatch' }
+}
+$keyN = $ProductionKeyN; $keyE = $ProductionKeyE
+if (-not [string]::IsNullOrWhiteSpace($TestReleasePublicKeyPath)) {
+  if ($Mode -ne 'Development' -or (-not $PlanOnly -and [string]::IsNullOrWhiteSpace($TestStoreRoot))) { throw 'Test release key requires Development PlanOnly or fake-store mode' }
+  $testKey = [IO.File]::ReadAllText((Assert-AbsoluteRegularPath $TestReleasePublicKeyPath 'TestReleasePublicKeyPath')) | ConvertFrom-Json
+  Assert-ExactProperties $testKey @('n', 'e') 'Test release public key'
+  $keyN = [string]$testKey.n; $keyE = [string]$testKey.e
+}
+$releaseRsa = New-ReleaseRsa $keyN $keyE
+try {
+  if (-not $releaseRsa.VerifyData((ConvertFrom-Hex $releaseDigest), $signatureBytes, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'Release manifest signature is invalid' }
+} finally { $releaseRsa.Dispose() }
+
 if ($Mode -eq 'Production') {
   $helperSignature = Get-AuthenticodeSignature -LiteralPath $PSCommandPath
-  $installerSignatureValid = $false
-  if ($helperSignature.Status -eq 'Valid' -and -not [string]::IsNullOrWhiteSpace($InstallerPath) -and [IO.Path]::IsPathRooted($InstallerPath)) {
-    $resolvedInstaller = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($InstallerPath)) 'InstallerPath'
-    if (Test-PathUnder $PayloadRoot $resolvedInstaller) { $installerSignatureValid = (Get-AuthenticodeSignature -LiteralPath $resolvedInstaller).Status -eq 'Valid' }
-  }
-  if ($helperSignature.Status -ne 'Valid' -or -not $installerSignatureValid) {
+  $installerSignature = Get-AuthenticodeSignature -LiteralPath $InstallerPath
+  $publisherMatches = $helperSignature.SignerCertificate.Subject -ceq [string]$release.publisher.subject -and $installerSignature.SignerCertificate.Subject -ceq [string]$release.publisher.subject -and $helperSignature.SignerCertificate.Thumbprint -ceq $publisherThumbprint -and $installerSignature.SignerCertificate.Thumbprint -ceq $publisherThumbprint
+  $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($InstallerPath)
+  if ($helperSignature.Status -ne 'Valid' -or $installerSignature.Status -ne 'Valid' -or -not $publisherMatches -or $versionInfo.ProductName -cne 'Innorder OCC' -or $versionInfo.InternalName -cne 'InnorderOCC' -or $versionInfo.ProductVersion -cne [string]$release.productVersion) {
     if ($PlanOnly) { [pscustomobject]@{ status = 'unavailable'; reason = 'AUTHENTICODE_REQUIRED'; action = 'none'; store = $StoreName } | ConvertTo-Json -Compress; exit 0 }
     throw 'Production enrollment requires valid Authenticode signatures on the helper and installer'
   }
@@ -183,39 +271,63 @@ $directorySecurity.SetAccessRuleProtection($true, $false)
 $directoryRule = New-Object Security.AccessControl.FileSystemAccessRule($currentIdentity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
 $directorySecurity.AddAccessRule($directoryRule)
 [IO.Directory]::SetAccessControl($StateRoot, $directorySecurity)
+$lifecycleLock = Enter-LifecycleLock $StateRoot
+try {
 
 $statePath = [string]$plan.statePath
 $profileReferences = @()
 $selectedProfileId = $null
+$priorOwned = $false
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
   $existingStateItem = Get-Item -LiteralPath $statePath -Force
   if (($existingStateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $existingStateItem.PSIsContainer -or $existingStateItem.Length -eq 0 -or $existingStateItem.Length -gt $MaximumStateBytes) { throw 'Existing certificate state must be a bounded regular non-reparse file' }
   $existing = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
-  Assert-ExactProperties $existing @('version', 'productId', 'deploymentId', 'importedByProduct', 'ownedThumbprint', 'store', 'profileReferences', 'selectedProfileId') 'Existing certificate state'
-  if ($existing.productId -cne $ProductId -or $existing.deploymentId -cne [string]$manifest.deploymentId -or $existing.ownedThumbprint -cne $fingerprint -or $existing.importedByProduct -ne $true -or $existing.store -cne $StoreName) { throw 'Existing certificate state ownership mismatch' }
+  Assert-ExactProperties $existing @('version', 'productId', 'deploymentId', 'importedByProduct', 'managed', 'ownedThumbprint', 'store', 'profileReferences', 'selectedProfileId') 'Existing certificate state'
+  if ($existing.productId -cne $ProductId -or $existing.deploymentId -cne [string]$manifest.deploymentId -or $existing.ownedThumbprint -cne $fingerprint -or $existing.importedByProduct -isnot [bool] -or $existing.managed -isnot [bool] -or $existing.managed -ne $true -or $existing.store -cne $StoreName) { throw 'Existing certificate state ownership mismatch' }
+  $priorOwned = $existing.importedByProduct -eq $true
   $profileReferences = @($existing.profileReferences)
+  foreach ($reference in $profileReferences) { if ([string]$reference -notmatch $UuidV4Pattern) { throw 'Existing certificate state contains a non-v4 profile reference' } }
   $selectedProfileId = $existing.selectedProfileId
 }
 
 $imported = $false
-$store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
-$store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-try {
-  $exact = @($store.Certificates | Where-Object { (Get-Sha256 $_.RawData) -ceq $fingerprint })
-  $subjectCollision = @($store.Certificates | Where-Object { $_.Subject -ceq $certificate.Subject -and (Get-Sha256 $_.RawData) -cne $fingerprint })
+$exactCount = 0
+if (-not [string]::IsNullOrWhiteSpace($TestStoreRoot)) {
+  if ($Mode -ne 'Development') { throw 'TestStoreRoot is unavailable outside Development mode' }
+  $fakeRoot = [IO.Path]::Combine([IO.Path]::GetFullPath($TestStoreRoot), 'Root')
+  [void][IO.Directory]::CreateDirectory($fakeRoot)
+  $exactPath = [IO.Path]::Combine($fakeRoot, "$fingerprint.cer")
+  $fakeCertificates = @(Get-ChildItem -LiteralPath $fakeRoot -Filter '*.cer' -File | ForEach-Object { [Security.Cryptography.X509Certificates.X509Certificate2]::new([IO.File]::ReadAllBytes($_.FullName)) })
+  $subjectCollision = @($fakeCertificates | Where-Object { $_.Subject -ceq $certificate.Subject -and (Get-Sha256 $_.RawData) -cne $fingerprint })
   if ($subjectCollision.Count -ne 0) { throw 'A different certificate with the same subject is already trusted' }
-  if ($exact.Count -eq 0) { $store.Add($certificate); $imported = $true }
-} finally { $store.Close() }
+  if (Test-Path -LiteralPath $exactPath -PathType Leaf) { $exactCount = 1 }
+  else { [IO.File]::WriteAllBytes($exactPath, $certificate.RawData); $imported = $true }
+} else {
+  $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
+  $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  try {
+    $exact = @($store.Certificates | Where-Object { (Get-Sha256 $_.RawData) -ceq $fingerprint })
+    $exactCount = $exact.Count
+    $subjectCollision = @($store.Certificates | Where-Object { $_.Subject -ceq $certificate.Subject -and (Get-Sha256 $_.RawData) -cne $fingerprint })
+    if ($subjectCollision.Count -ne 0) { throw 'A different certificate with the same subject is already trusted' }
+    if ($exact.Count -eq 0) { $store.Add($certificate); $imported = $true }
+  } finally { $store.Close() }
+}
 
-$state = [ordered]@{ version = 1; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; importedByProduct = $true; ownedThumbprint = $fingerprint; store = $StoreName; profileReferences = $profileReferences; selectedProfileId = $selectedProfileId }
+$owned = $priorOwned -or $imported
+$state = [ordered]@{ version = 1; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; importedByProduct = $owned; managed = $true; ownedThumbprint = $fingerprint; store = $StoreName; profileReferences = $profileReferences; selectedProfileId = $selectedProfileId }
 $temporaryState = "$statePath.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
 try {
   [IO.File]::WriteAllText($temporaryState, ($state | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-  if (Test-Path -LiteralPath $statePath -PathType Leaf) { [IO.File]::Replace($temporaryState, $statePath, $null) }
+  if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    $backupState = "$statePath.$PID.backup"
+    [IO.File]::Replace($temporaryState, $statePath, $backupState)
+    Remove-Item -LiteralPath $backupState -Force
+  }
   else { [IO.File]::Move($temporaryState, $statePath) }
 } catch {
   if (Test-Path -LiteralPath $temporaryState -PathType Leaf) { Remove-Item -LiteralPath $temporaryState -Force }
-  if ($imported) {
+  if ($imported -and [string]::IsNullOrWhiteSpace($TestStoreRoot)) {
     $rollbackStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'CurrentUser')
     $rollbackStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
     try {
@@ -223,6 +335,11 @@ try {
       if ($rollbackExact.Count -eq 1) { $rollbackStore.Remove($rollbackExact[0]) }
     } finally { $rollbackStore.Close() }
   }
+  if ($imported -and -not [string]::IsNullOrWhiteSpace($TestStoreRoot)) { Remove-Item -LiteralPath $exactPath -Force -ErrorAction SilentlyContinue }
   throw
 }
-[pscustomobject]@{ status = 'enrolled'; action = $(if ($exact.Count -eq 0) { 'imported' } else { 'already-present' }); store = $StoreName; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; ownedThumbprint = $fingerprint } | ConvertTo-Json -Compress
+[pscustomobject]@{ status = 'enrolled'; action = $(if ($imported) { 'imported' } else { 'already-present' }); importedByProduct = $owned; store = $StoreName; productId = $ProductId; deploymentId = [string]$manifest.deploymentId; ownedThumbprint = $fingerprint } | ConvertTo-Json -Compress
+} finally {
+  $lifecycleLock.Stream.Dispose()
+  Remove-Item -LiteralPath $lifecycleLock.Path -Force -ErrorAction SilentlyContinue
+}

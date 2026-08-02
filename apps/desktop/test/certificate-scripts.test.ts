@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { execFile } from "node:child_process";
-import { createHash, X509Certificate } from "node:crypto";
+import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +12,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import config from "../forge.config";
 import { createProfileStore } from "../src/profile-store";
-import { DEPLOYMENT_CA_PEM } from "./certificate-fixtures";
+import { certificateManifestContentSha256 } from "../src/certificate-manifest";
+import { DEPLOYMENT_CA_PEM, OTHER_CA_PEM } from "./certificate-fixtures";
 
 const execFileAsync = promisify(execFile);
 const desktopRoot = path.resolve(__dirname, "..");
@@ -33,9 +34,15 @@ async function payload() {
   const manifestPath = path.join(root, "certificate-manifest.json");
   const certificatePath = path.join(root, "deployment-ca.pem");
   const stateRoot = path.join(root, "userData", "state");
+  const releaseManifestPath = path.join(root, "release-manifest.json");
+  const installerPath = path.join(root, "InnorderOCC.exe");
+  const testPublicKeyPath = path.join(root, "test-release-key.json");
+  const testStoreRoot = path.join(root, "test-store");
   await mkdir(stateRoot, { recursive: true });
+  await mkdir(testStoreRoot, { recursive: true });
   await writeFile(certificatePath, DEPLOYMENT_CA_PEM, "ascii");
-  const manifest = {
+  await writeFile(installerPath, "test installer", "ascii");
+  const certificatePayload = {
     version: 1,
     productId: "com.innorder.occ",
     deploymentId,
@@ -49,14 +56,28 @@ async function payload() {
       validFrom: certificate.validFromDate.toISOString(),
       validTo: certificate.validToDate.toISOString(),
     },
-    releaseManifest: {
-      sha256: "ab".repeat(32),
-      signature: { algorithm: "RSA-SHA256", keyId: "innorder-release-2026", value: Buffer.alloc(64, 7).toString("base64") },
-    },
   };
+  const helperBytes = await readFile(enrollScript);
+  const releaseManifest = {
+    version: 1,
+    productId: "com.innorder.occ",
+    productVersion: "0.1.0",
+    installer: { file: "InnorderOCC.exe", sha256: sha256("test installer"), productName: "Innorder OCC", internalName: "InnorderOCC" },
+    helper: { file: "enroll-deployment-ca.ps1", sha256: sha256(helperBytes) },
+    certificateManifest: { file: "certificate-manifest.json", contentSha256: certificateManifestContentSha256(certificatePayload) },
+    publisher: { subject: "CN=Innorder Test", thumbprint: "AB".repeat(20) },
+  };
+  const releaseBytes = Buffer.from(JSON.stringify(releaseManifest));
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const releaseDigest = sha256(releaseBytes);
+  const signature = sign("RSA-SHA256", Buffer.from(releaseDigest, "hex"), privateKey).toString("base64");
+  const manifest = { ...certificatePayload, releaseManifest: { file: "release-manifest.json", sha256: releaseDigest, signature: { algorithm: "RSA-SHA256", keyId: "test-release", value: signature } } };
   const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const publicJwk = publicKey.export({ format: "jwk" });
+  await writeFile(releaseManifestPath, releaseBytes);
+  await writeFile(testPublicKeyPath, JSON.stringify({ n: publicJwk.n, e: publicJwk.e }));
   await writeFile(manifestPath, manifestBytes);
-  return { root, manifestPath, stateRoot, manifestBytes, fingerprint: manifest.certificate.thumbprint };
+  return { root, manifestPath, releaseManifestPath, installerPath, testPublicKeyPath, testStoreRoot, stateRoot, manifestBytes, fingerprint: manifest.certificate.thumbprint };
 }
 
 async function runPowerShell(script: string, arguments_: string[]) {
@@ -89,7 +110,8 @@ describe("bounded PowerShell certificate helpers", () => {
     expect(source.indexOf("Existing certificate state ownership mismatch")).toBeLessThan(source.indexOf("$store.Add"));
     expect(source).toMatch(/Test-Path[^\n]+\$statePath[\s\S]+\[IO\.File\]::Replace[\s\S]+else[\s\S]+\[IO\.File\]::Move/);
     expect(source).toMatch(/\$existingStateItem[\s\S]+ReparsePoint[\s\S]+Existing certificate state ownership mismatch/);
-    expect(source).toMatch(/\$imported[\s\S]+\$store\.Add[\s\S]+catch[\s\S]+if \(\$imported\)[\s\S]+\$rollbackStore\.Remove/);
+    expect(source).toMatch(/\$store\.Add\(\$certificate\)[\s\S]+\$imported = \$true/);
+    expect(source).toMatch(/catch[\s\S]+\$rollbackStore\.Remove/);
   });
 
   it("returns an exact development enrollment plan without touching the real store", async () => {
@@ -97,6 +119,9 @@ describe("bounded PowerShell certificate helpers", () => {
     const plan = await runPowerShell(enrollScript, [
       "-PayloadRoot", fixture.root,
       "-ManifestPath", fixture.manifestPath,
+      "-ReleaseManifestPath", fixture.releaseManifestPath,
+      "-InstallerPath", fixture.installerPath,
+      "-TestReleasePublicKeyPath", fixture.testPublicKeyPath,
       "-ExpectedManifestSha256", sha256(fixture.manifestBytes),
       "-ExpectedFingerprint", fixture.fingerprint,
       "-StateRoot", fixture.stateRoot,
@@ -121,6 +146,8 @@ describe("bounded PowerShell certificate helpers", () => {
     const plan = await runPowerShell(enrollScript, [
       "-PayloadRoot", fixture.root,
       "-ManifestPath", fixture.manifestPath,
+      "-ReleaseManifestPath", fixture.releaseManifestPath,
+      "-InstallerPath", fixture.installerPath,
       "-ExpectedManifestSha256", sha256(fixture.manifestBytes),
       "-ExpectedFingerprint", fixture.fingerprint,
       "-StateRoot", fixture.stateRoot,
@@ -139,6 +166,7 @@ describe("bounded PowerShell certificate helpers", () => {
       productId: "com.innorder.occ",
       deploymentId,
       importedByProduct: true,
+      managed: true,
       ownedThumbprint: fixture.fingerprint,
       store: "CurrentUser\\Root",
       profileReferences: ["8e635134-d8a0-4bbf-8472-e8e44a0c66e2"],
@@ -160,7 +188,45 @@ describe("bounded PowerShell certificate helpers", () => {
     await writeFile(path.join(fixture.stateRoot, `${deploymentId}.json`), JSON.stringify({ productId: "other.product", deploymentId }));
     await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-PlanOnly"]))
       .rejects.toThrow();
+    await writeFile(path.join(fixture.stateRoot, `${deploymentId}.json`), JSON.stringify({
+      version: 1, productId: "com.innorder.occ", deploymentId, importedByProduct: "true", managed: true,
+      ownedThumbprint: fixture.fingerprint, store: "CurrentUser\\Root", profileReferences: [], selectedProfileId: null,
+    }));
+    await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-PlanOnly"]))
+      .rejects.toThrow();
   }, 30_000);
+
+  it("executes imported and preexisting fake-store ownership lifecycles without touching Cert drive", async () => {
+    const fixture = await payload();
+    const common = [
+      "-PayloadRoot", fixture.root, "-ManifestPath", fixture.manifestPath,
+      "-ReleaseManifestPath", fixture.releaseManifestPath, "-InstallerPath", fixture.installerPath,
+      "-ExpectedManifestSha256", sha256(fixture.manifestBytes), "-ExpectedFingerprint", fixture.fingerprint,
+      "-StateRoot", fixture.stateRoot, "-Mode", "Development", "-InstallerConfirmed",
+      "-TestReleasePublicKeyPath", fixture.testPublicKeyPath, "-TestStoreRoot", fixture.testStoreRoot,
+    ];
+    await expect(runPowerShell(enrollScript, common)).resolves.toMatchObject({ status: "enrolled", action: "imported", importedByProduct: true });
+    await expect(runPowerShell(enrollScript, common)).resolves.toMatchObject({ status: "enrolled", action: "already-present", importedByProduct: true });
+    const statePath = path.join(fixture.stateRoot, `${deploymentId}.json`);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    await writeFile(statePath, JSON.stringify({ ...state, profileReferences: ["8e635134-d8a0-4bbf-8472-e8e44a0c66e2"], selectedProfileId: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2" }));
+    await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode"]))
+      .resolves.toMatchObject({ status: "retained", reason: "PROFILE_REFERENCES" });
+    await writeFile(statePath, JSON.stringify(state));
+    const fakeCertificatePath = path.join(fixture.testStoreRoot, "Root", `${fixture.fingerprint}.cer`);
+    await writeFile(fakeCertificatePath, new X509Certificate(OTHER_CA_PEM).raw);
+    await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode"]))
+      .resolves.toMatchObject({ status: "retained", reason: "STORE_EXACT_MATCH_REQUIRED" });
+    await writeFile(fakeCertificatePath, new X509Certificate(DEPLOYMENT_CA_PEM).raw);
+    await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode"]))
+      .resolves.toMatchObject({ status: "removed" });
+
+    await mkdir(path.join(fixture.testStoreRoot, "Root"), { recursive: true });
+    await writeFile(path.join(fixture.testStoreRoot, "Root", `${fixture.fingerprint}.cer`), new X509Certificate(DEPLOYMENT_CA_PEM).raw);
+    await expect(runPowerShell(enrollScript, common)).resolves.toMatchObject({ status: "enrolled", action: "already-present", importedByProduct: false });
+    await expect(runPowerShell(removeScript, ["-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId, "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode"]))
+      .resolves.toMatchObject({ status: "retained", reason: "PREEXISTING_CERTIFICATE" });
+  }, 60_000);
 });
 
 describe("main-process trust reference integration", () => {

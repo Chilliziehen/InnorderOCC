@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { open as openInspector } from "node:inspector";
 import path from "node:path";
@@ -9,6 +10,7 @@ import { createCoreClient } from "./core-client";
 import { createCommandIntentRegistry } from "./command-intents";
 import { synchronizeCertificateReferences } from "./certificate-manifest";
 import { createConnectivityTracker } from "./connectivity";
+import { handleDeploymentCaLifecycle } from "./deployment-ca-lifecycle";
 import {
   createAtomicJsonPersistence,
   createAtomicTextPersistence,
@@ -28,6 +30,7 @@ import {
   registerSingleInstanceLifecycle,
 } from "./electron-security";
 import { createProfileStore } from "./profile-store";
+import { createProfileTransport } from "./profile-transport";
 import { createReadCache, READ_CACHE_MAX_BYTES } from "./read-cache";
 import { createNotificationStream } from "./notification-stream";
 import { enablePackagedSmokeInspector } from "./packaged-smoke-inspector";
@@ -86,10 +89,32 @@ app.setAppUserModelId(SQUIRREL_APP_USER_MODEL_ID);
 const ownsInstance = registerSingleInstanceLifecycle(app, () => mainWindow);
 
 if (ownsInstance) void app.whenReady().then(async () => {
+  const lifecycle = await handleDeploymentCaLifecycle({
+    argv: process.argv,
+    resourcesPath: process.resourcesPath,
+    userData: app.getPath("userData"),
+    execPath: process.execPath,
+  }, {
+    exists: async (target) => fs.lstat(target).then((stat) => stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && stat.size <= 512 * 1024, () => false),
+    read: (target) => fs.readFile(target),
+    invoke: ({ script, arguments: args }) => new Promise((resolve, reject) => {
+      execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, ...args], { windowsHide: true, timeout: 30_000 }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      });
+    }),
+  });
+  if (lifecycle.handled) {
+    app.quit();
+    return;
+  }
   if (app.isPackaged) {
     registerProductionCsp(session.defaultSession.webRequest);
   }
   registerPermissionDenial(session.defaultSession);
+  const profileTransport = createProfileTransport({
+    fromPartition: (name) => session.fromPartition(name) as never,
+  });
 
   const userData = app.getPath("userData");
   const profilePersistence = createAtomicJsonPersistence(
@@ -132,7 +157,11 @@ if (ownsInstance) void app.whenReady().then(async () => {
     return selected;
   };
   const core = createCoreClient({
-    fetch,
+    fetch: (input, init) => profileTransport.fetch(
+      selectedProfile(),
+      input instanceof URL ? input : new URL(String(input)),
+      init,
+    ),
     getOrigin: () => selectedProfile().origin,
     getAccessToken: () => accessToken,
     timeoutMs: STATUS_TIMEOUT_MS,
@@ -186,6 +215,11 @@ if (ownsInstance) void app.whenReady().then(async () => {
       coreBaseUrl: profiles.selected()?.origin ?? CORE_BASE_URL,
       aiBaseUrl: AI_BASE_URL,
       timeoutMs: STATUS_TIMEOUT_MS,
+      coreFetch: (input, init) => profileTransport.fetch(
+        selectedProfile(),
+        input instanceof URL ? input : new URL(String(input)),
+        init,
+      ),
     }),
     clearProfile: async (profileId) => {
       await readCache.purgeProfile(profileId);

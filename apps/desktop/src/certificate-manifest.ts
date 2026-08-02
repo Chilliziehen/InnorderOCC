@@ -1,4 +1,4 @@
-import { createHash, X509Certificate } from "node:crypto";
+import { createHash, createPublicKey, type KeyObject, verify, X509Certificate } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
@@ -11,6 +11,14 @@ const MAX_CERTIFICATE_STATE_BYTES = 64 * 1024;
 const MAX_CERTIFICATE_STATES = 128;
 const PRODUCT_ID = "com.innorder.occ";
 const STORE_NAME = "CurrentUser\\Root";
+const PRODUCTION_RELEASE_KEY_ID = "innorder-release-2026";
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const uuidV4Schema = z.string().regex(UUID_V4_PATTERN, "Expected UUID v4");
+const PRODUCTION_RELEASE_PUBLIC_KEY = createPublicKey({ key: {
+  kty: "RSA",
+  n: "x-emz8UzYUFQWLVF8Ud4X1lC_iC8w2LF0hupPJyKHSnKZB2Vu98yjK1Y8Hqv1dxasqx03r3RSGheXj_i-OVD8eqeZ6WCe13T5Kml38JGXgF0TEtSO0mQ-ToziCAoX4u_dCn3Hs_WV87JgqPFJXz5QJuyj8enSj3jATk6VSY9ceYjuxPkmqgO996gYnY_dS2LfXG7KkfZc3nTzEMbh1U-IQ6rEvTzzNDLpLGY9MhcsBewH2q7Mik4rWNV1LEbSVYefdfnpMRYkfoCZ6UMfAv9C9pdHYZzVRjWeRxOKb47chV6_yWQLbq0hilTYNT64ZiySC62Js4vWYnuksmqSnuCnNdORvLqCdhodWvdd49gAQNO3cdOIcr6yHogCG8LUdReglgQsd_1XgHl68dsFdOH2CG8-Ph-aeZ_eBv5XW8L3osh_ztOn_s26Ii4By00_-ITW83eagKCXW8FiXjZ5WVnGo2BCJPVVH4oHdFNEZdySgpi4bCSwbSebah9ILyPpvEH",
+  e: "AQAB",
+}, format: "jwk" });
 
 export const CERTIFICATE_ENROLLMENT_STATUS = Object.freeze({
   state: "unavailable",
@@ -50,10 +58,10 @@ const dnsSanSchema = z.string().min(1).max(253).regex(
 ).transform((value) => value.toLowerCase());
 const ipSanSchema = z.string().refine((value) => isIP(value) !== 0, "Invalid IP SAN").transform(normalizeIp);
 
-const manifestSchema = z.object({
+const certificatePayloadSchema = z.object({
   version: z.literal(1),
   productId: z.literal(PRODUCT_ID),
-  deploymentId: z.uuid(),
+  deploymentId: uuidV4Schema,
   certificate: z.object({
     file: certificateFileSchema,
     sha256: sha256Schema,
@@ -68,10 +76,14 @@ const manifestSchema = z.object({
   }).refine(({ validFrom, validTo }) => Date.parse(validFrom) < Date.parse(validTo), {
     message: "Certificate validity bounds are invalid",
   }),
+}).strict();
+
+const manifestSchema = certificatePayloadSchema.extend({
   releaseManifest: z.object({
+    file: certificateFileSchema,
     sha256: sha256Schema,
     signature: z.object({
-      algorithm: z.enum(["RSA-SHA256", "ECDSA-SHA256", "Ed25519"]),
+      algorithm: z.literal("RSA-SHA256"),
       keyId: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
       value: z.string().min(80).max(16_384).regex(/^[A-Za-z0-9+/]+={0,2}$/).refine((value) => {
         const decoded = Buffer.from(value, "base64");
@@ -81,17 +93,37 @@ const manifestSchema = z.object({
   }).strict(),
 }).strict();
 
+const releaseManifestSchema = z.object({
+  version: z.literal(1),
+  productId: z.literal(PRODUCT_ID),
+  productVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  installer: z.object({
+    file: certificateFileSchema,
+    sha256: sha256Schema,
+    productName: z.literal("Innorder OCC"),
+    internalName: z.literal("InnorderOCC"),
+  }).strict(),
+  helper: z.object({ file: z.literal("enroll-deployment-ca.ps1"), sha256: sha256Schema }).strict(),
+  certificateManifest: z.object({ file: z.literal("certificate-manifest.json"), contentSha256: sha256Schema }).strict(),
+  publisher: z.object({
+    subject: z.string().min(1).max(4096),
+    thumbprint: z.string().regex(/^[0-9A-Fa-f]{40}$/).transform((value) => value.toUpperCase()),
+  }).strict(),
+}).strict();
+export type ReleaseManifest = z.infer<typeof releaseManifestSchema>;
+
 export type CertificateManifest = z.infer<typeof manifestSchema>;
 
 const certificateStateSchema = z.object({
   version: z.literal(1),
   productId: z.literal(PRODUCT_ID),
-  deploymentId: z.uuid(),
-  importedByProduct: z.literal(true),
+  deploymentId: uuidV4Schema,
+  importedByProduct: z.boolean(),
+  managed: z.literal(true),
   ownedThumbprint: z.string().regex(/^[0-9A-F]{64}$/),
   store: z.literal(STORE_NAME),
-  profileReferences: z.array(z.uuid()).max(10_000).refine((values) => new Set(values).size === values.length, "Profile references must be unique"),
-  selectedProfileId: z.uuid().nullable(),
+  profileReferences: z.array(uuidV4Schema).max(10_000).refine((values) => new Set(values).size === values.length, "Profile references must be unique"),
+  selectedProfileId: uuidV4Schema.nullable(),
 }).strict().refine(({ profileReferences, selectedProfileId }) =>
   selectedProfileId === null || profileReferences.includes(selectedProfileId),
 "Selected profile must reference the certificate");
@@ -100,6 +132,12 @@ export type CertificateState = z.infer<typeof certificateStateSchema>;
 
 export function parseCertificateState(value: unknown): CertificateState {
   return certificateStateSchema.parse(value);
+}
+
+export function certificateManifestContentSha256(value: unknown): string {
+  if (typeof value !== "object" || value === null) throw new Error("Certificate manifest payload is invalid");
+  const { releaseManifest: _releaseManifest, ...payload } = value as Record<string, unknown>;
+  return sha256(Buffer.from(JSON.stringify(certificatePayloadSchema.parse(payload)), "utf8"));
 }
 
 type DerNode = { tag: number; contentStart: number; contentEnd: number; next: number };
@@ -341,6 +379,74 @@ export async function verifyDeploymentCertificateManifest(
   return { manifest, certificate, certificatePath };
 }
 
+type ReleaseBundleInput = {
+  payloadRoot: string;
+  certificateManifestPath: string;
+  releaseManifestPath: string;
+  helperPath: string;
+  installerPath: string;
+  expectedFingerprint: string;
+  now?: Date;
+};
+
+async function verifyDeploymentReleaseBundle(
+  input: ReleaseBundleInput,
+  publicKey: KeyObject,
+  expectedKeyId: string,
+): Promise<{ releaseManifest: ReleaseManifest; certificateManifest: CertificateManifest; certificate: X509Certificate }> {
+  const root = path.resolve(input.payloadRoot);
+  for (const candidate of [input.certificateManifestPath, input.releaseManifestPath]) {
+    if (!path.isAbsolute(candidate) || !isUnder(root, path.resolve(candidate))) throw new Error("Release artifact must be an absolute path under payload root");
+  }
+  if (!path.isAbsolute(input.helperPath) || !path.isAbsolute(input.installerPath)) throw new Error("Release executable paths must be absolute");
+  const [certificateManifestBytes, releaseBytes, helperBytes, installerBytes] = await Promise.all([
+    readBoundedRegularFile(input.certificateManifestPath, MAX_CERTIFICATE_MANIFEST_BYTES, "Certificate manifest", defaultVerificationFileSystem),
+    readBoundedRegularFile(input.releaseManifestPath, MAX_CERTIFICATE_MANIFEST_BYTES, "Release manifest", defaultVerificationFileSystem),
+    readBoundedRegularFile(input.helperPath, MAX_CERTIFICATE_BYTES, "Enrollment helper", defaultVerificationFileSystem),
+    readBoundedRegularFile(input.installerPath, 512 * 1024 * 1024, "Installer", defaultVerificationFileSystem),
+  ]);
+  const certificateManifest = manifestSchema.parse(JSON.parse(certificateManifestBytes.toString("utf8")));
+  const releaseManifest = releaseManifestSchema.parse(JSON.parse(releaseBytes.toString("utf8")));
+  const exactPaths = [
+    [input.releaseManifestPath, certificateManifest.releaseManifest.file],
+    [input.certificateManifestPath, releaseManifest.certificateManifest.file],
+  ] as const;
+  for (const [actual, file] of exactPaths) {
+    if (path.resolve(actual) !== path.join(root, file)) throw new Error("Release artifact path does not match signed basename");
+  }
+  if (path.basename(input.helperPath) !== releaseManifest.helper.file || path.basename(input.installerPath) !== releaseManifest.installer.file) {
+    throw new Error("Release executable basename does not match signed manifest");
+  }
+  const releaseDigest = sha256(releaseBytes);
+  if (releaseDigest !== certificateManifest.releaseManifest.sha256) throw new Error("Release manifest SHA-256 mismatch");
+  if (certificateManifest.releaseManifest.signature.keyId !== expectedKeyId) throw new Error("Release signing key ID mismatch");
+  const signature = Buffer.from(certificateManifest.releaseManifest.signature.value, "base64");
+  if (!verify("RSA-SHA256", Buffer.from(releaseDigest, "hex"), publicKey, signature)) throw new Error("Release manifest signature is invalid");
+  if (sha256(helperBytes) !== releaseManifest.helper.sha256 || sha256(installerBytes) !== releaseManifest.installer.sha256) {
+    throw new Error("Signed release artifact SHA-256 mismatch");
+  }
+  if (certificateManifestContentSha256(certificateManifest) !== releaseManifest.certificateManifest.contentSha256) {
+    throw new Error("Certificate manifest content SHA-256 mismatch");
+  }
+  const verified = await verifyDeploymentCertificateManifest({
+    payloadRoot: root,
+    manifestPath: input.certificateManifestPath,
+    expectedManifestSha256: sha256(certificateManifestBytes),
+    expectedFingerprint: input.expectedFingerprint,
+    ...(input.now === undefined ? {} : { now: input.now }),
+  });
+  return { releaseManifest, certificateManifest, certificate: verified.certificate };
+}
+
+export function verifyProductionDeploymentReleaseBundle(input: ReleaseBundleInput) {
+  return verifyDeploymentReleaseBundle(input, PRODUCTION_RELEASE_PUBLIC_KEY, PRODUCTION_RELEASE_KEY_ID);
+}
+
+export function verifyDeploymentReleaseBundleForTest(input: ReleaseBundleInput, publicKey: KeyObject) {
+  if (process.env.NODE_ENV !== "test") return Promise.reject(new Error("Test release key override is unavailable in production"));
+  return verifyDeploymentReleaseBundle(input, publicKey, "test-release");
+}
+
 export function verifyServerCertificate(input: {
   certificate: string | Buffer;
   trustAnchor: string | Buffer;
@@ -362,26 +468,56 @@ export function verifyServerCertificate(input: {
 
 type CertificateProfileReference = { id: string; caFingerprint?: string | undefined };
 
-export async function synchronizeCertificateReferences(input: {
+export async function withCertificateLifecycleLock<T>(stateDirectory: string, operation: () => Promise<T>): Promise<T> {
+  await fs.mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+  const stateStat = await fs.lstat(stateDirectory);
+  if (stateStat.isSymbolicLink() || !stateStat.isDirectory()) throw new Error("Certificate state path must be a regular directory");
+  const lockPath = path.join(stateDirectory, ".deployment-ca.lifecycle.lock");
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  for (let attempt = 0; attempt < 100 && !handle; attempt += 1) {
+    try {
+      handle = await fs.open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  if (!handle) throw new Error("Timed out acquiring deployment CA lifecycle lock");
+  try {
+    await handle.writeFile(JSON.stringify({ pid: process.pid }));
+    return await operation();
+  } finally {
+    await handle.close();
+    await fs.rm(lockPath, { force: true });
+  }
+}
+
+type SynchronizeInput = {
   stateDirectory: string;
   profiles: CertificateProfileReference[];
   selectedId: string | null;
-}): Promise<void> {
+};
+
+export async function synchronizeCertificateReferences(input: SynchronizeInput): Promise<void> {
   if (!path.isAbsolute(input.stateDirectory) || path.basename(input.stateDirectory) !== "state") {
     throw new Error("Certificate state directory must be an absolute product state path");
   }
+  return withCertificateLifecycleLock(input.stateDirectory, () => synchronizeCertificateReferencesUnlocked(input));
+}
+
+async function synchronizeCertificateReferencesUnlocked(input: SynchronizeInput): Promise<void> {
   const profiles = z.array(z.object({
-    id: z.uuid(),
+    id: uuidV4Schema,
     caFingerprint: z.string().regex(/^[0-9A-F]{64}$/).optional(),
   }).strip()).max(10_000).parse(input.profiles);
-  const selectedId = z.uuid().nullable().parse(input.selectedId);
+  const selectedId = uuidV4Schema.nullable().parse(input.selectedId);
   if (selectedId !== null && !profiles.some(({ id }) => id === selectedId)) throw new Error("Selected certificate profile does not exist");
 
   await fs.mkdir(input.stateDirectory, { recursive: true, mode: 0o700 });
   const directoryStat = await fs.lstat(input.stateDirectory);
   if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) throw new Error("Certificate state path must be a regular directory");
   const entries = await fs.readdir(input.stateDirectory, { withFileTypes: true });
-  const stateEntries = entries.filter(({ name }) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/i.test(name));
+  const stateEntries = entries.filter(({ name }) => name.endsWith(".json") && UUID_V4_PATTERN.test(name.slice(0, -5)));
   if (stateEntries.length > MAX_CERTIFICATE_STATES) throw new Error("Too many deployment certificate states");
   for (const entry of stateEntries) {
     if (!entry.isFile() || entry.isSymbolicLink()) throw new Error("Certificate state must be a regular file");

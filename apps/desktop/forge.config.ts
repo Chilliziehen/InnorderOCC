@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
@@ -14,6 +15,7 @@ const description = "Innorder OCC 运营控制中心 / Operations Control Center
 const require = createRequire(import.meta.url);
 const desktopPackage = require("./package.json") as { version: string };
 const appVersion = desktopPackage.version;
+const deploymentPayload = path.resolve(__dirname, "assets", "deployment-ca");
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -28,6 +30,7 @@ const config: ForgeConfig = {
     extraResource: [
       path.resolve(__dirname, "scripts", "enroll-deployment-ca.ps1"),
       path.resolve(__dirname, "scripts", "remove-deployment-ca.ps1"),
+      ...(existsSync(deploymentPayload) ? [deploymentPayload] : []),
     ],
     win32metadata: {
       CompanyName: "Innorder",

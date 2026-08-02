@@ -47,6 +47,7 @@ function manifestFor(certificateBytes: Buffer, overrides: Record<string, unknown
       validTo: certificate.validToDate.toISOString(),
     },
     releaseManifest: {
+      file: "release-manifest.json",
       sha256: "ab".repeat(32),
       signature: {
         algorithm: "RSA-SHA256",
@@ -320,6 +321,7 @@ describe("owned certificate reference state", () => {
       productId: "com.innorder.occ",
       deploymentId,
       importedByProduct: true,
+      managed: true,
       ownedThumbprint: "AA".repeat(32),
       store: "CurrentUser\\Root",
       profileReferences: [],
@@ -341,6 +343,7 @@ describe("owned certificate reference state", () => {
       productId: "com.innorder.occ",
       deploymentId,
       importedByProduct: true,
+      managed: true,
       ownedThumbprint: "AA".repeat(32),
       store: "CurrentUser\\Root",
       profileReferences: [],
