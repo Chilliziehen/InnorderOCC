@@ -6,6 +6,7 @@ import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.IdempotencyConflictException
 import com.innorder.occ.command.OptimisticConflictException
 import com.innorder.occ.events.OutboxRepository
+import com.innorder.occ.iam.BootstrapIds
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
@@ -221,6 +222,13 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
             "UPDATE occ.resource_reservation SET time_range = tstzrange(?::timestamptz, ?::timestamptz, '[)') WHERE id = ?",
             instant(8, 30), instant(9, 30), ids[1],
         )
+        val appended = UUID.randomUUID()
+        jdbc.update(
+            """INSERT INTO occ.resource_reservation
+               (id, resource_id, requester_entity_id, time_range, capacity, exclusive, state)
+               VALUES (?, ?, ?, tstzrange(?::timestamptz, ?::timestamptz, '[)'), 1, false, 'PENDING')""",
+            appended, resource.id, requester, instant(9, 30), instant(10, 30),
+        )
         val second = resources.schedule(
             administratorId, UUID.randomUUID(), resource.id, instant(8), instant(13), 1, first.nextCursor,
         )
@@ -231,7 +239,19 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         assertThat(first.items.map { it.id }).containsExactly(ids[0])
         assertThat(second.items.map { it.id }).containsExactly(ids[1])
         assertThat(third.items.map { it.id }).containsExactly(ids[2])
+        assertThat(second.items.single().start).isEqualTo(instant(10))
+        assertThat(third.items.single().start).isEqualTo(instant(11))
+        assertThat(third.nextCursor).isNull()
         assertThat((first.items + second.items + third.items).map { it.id }).doesNotHaveDuplicates()
+        assertThat((first.items + second.items + third.items).map { it.id }).doesNotContain(appended)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.resource_reservation_history WHERE reservation_id = ?",
+            Long::class.java,
+            ids[0],
+        )).isEqualTo(2)
+        assertThatThrownBy {
+            jdbc.update("UPDATE occ.resource_reservation_history SET capacity = 9 WHERE reservation_id = ?", ids[0])
+        }.hasRootCauseInstanceOf(org.postgresql.util.PSQLException::class.java)
     }
 
     @Test
@@ -310,6 +330,19 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         postAvailability(0, "availability-first-${UUID.randomUUID()}", 201)
         assertThat(postAvailability(1, "availability-duplicate-${UUID.randomUUID()}", 409))
             .contains("OCC-RESOURCE-ID-CONFLICT")
+
+        val managedId = entity("duplicate-managed-resource")
+        val managed = CreateResourceRequest(managedId, "ROOM", 1.toBigDecimal())
+        fun postManaged(key: String, expectedStatus: Int): String = mockMvc.post("/api/v1/resources") {
+            header("Authorization", "Bearer $token")
+            header("X-Correlation-Id", UUID.randomUUID())
+            header("Idempotency-Key", key)
+            contentType = MediaType.APPLICATION_JSON
+            content = mapper.writeValueAsBytes(managed)
+        }.andExpect { status { isEqualTo(expectedStatus) } }.andReturn().response.contentAsString
+        postManaged("managed-first-${UUID.randomUUID()}", 201)
+        assertThat(postManaged("managed-duplicate-${UUID.randomUUID()}", 409))
+            .contains("OCC-RESOURCE-ID-CONFLICT").doesNotContain("23505", "PSQLException")
     }
 
     @Test
@@ -345,6 +378,32 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
             content = mapper.writeValueAsBytes(CancelReservationRequest(resource.id))
         }.andExpect { status { isNotFound() } }.andReturn().response.contentAsString
         assertThat(cancelled).contains("OCC-RESERVATION-NOT-FOUND")
+
+        val requesterDeniedReservation = reserve(resource.id, requester, instant(11), instant(12), 1)
+        val operator = operatorPrincipal()
+        val operatorChange = ChangeReservationRequest(resource.id, instant(12), instant(13), 1.toBigDecimal(), false)
+        val operatorMissing = runCatching {
+            resources.change(
+                UUID.randomUUID(), metadata(expectedVersion = 0).copy(principalId = operator),
+                mapper.writeValueAsBytes(operatorChange), operatorChange,
+            )
+        }.exceptionOrNull()
+        lockObserver.afterLockOnce(resource.id) {
+            jdbc.update(
+                """UPDATE authz.relationship SET revoked_at = transaction_timestamp()
+                   WHERE relation_definition_id = ? AND subject_entity_id = ?
+                     AND object_entity_id = ? AND revoked_at IS NULL""",
+                BootstrapIds.ROLE_ASSIGNMENT_RELATION, operator, BootstrapIds.OPERATOR_ROLE,
+            )
+        }
+        val denied = runCatching {
+            resources.change(
+                requesterDeniedReservation.id, metadata(expectedVersion = 0).copy(principalId = operator),
+                mapper.writeValueAsBytes(operatorChange), operatorChange,
+            )
+        }.exceptionOrNull()
+        assertThat(denied).isInstanceOf(ReservationNotFoundException::class.java)
+        assertThat(operatorMissing).isInstanceOf(ReservationNotFoundException::class.java)
     }
 
     @Test
@@ -598,4 +657,17 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
     }
 
     private data class WorkflowFixture(val processA: UUID, val processB: UUID, val taskA: UUID)
+
+    private fun operatorPrincipal(): UUID = entity("resource-operator").also { id ->
+        jdbc.update(
+            "INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, 'USER', 'Resource Operator', 'ACTIVE')",
+            id,
+        )
+        jdbc.update(
+            """INSERT INTO authz.relationship
+               (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+               VALUES (?, ?, ?, ?, 'SYSTEM', 'resource-integration-test')""",
+            UUID.randomUUID(), BootstrapIds.ROLE_ASSIGNMENT_RELATION, id, BootstrapIds.OPERATOR_ROLE,
+        )
+    }
 }

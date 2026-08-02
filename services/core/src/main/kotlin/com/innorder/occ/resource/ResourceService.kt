@@ -148,7 +148,9 @@ class ResourceService(
     private val transactions = TransactionTemplate(transactionManager)
 
     fun create(metadata: CommandMetadata, bytes: ByteArray, request: CreateResourceRequest): ResourceCommandResult<ManagedResource> =
-        decodeResource(commands.execute(metadata, bytes, createCommand(request)))
+        domainFailure(request.id, null, metadata) {
+            decodeResource(commands.execute(metadata, bytes, createCommand(request)))
+        }
 
     fun update(id: UUID, metadata: CommandMetadata, bytes: ByteArray, request: UpdateResourceRequest): ResourceCommandResult<ManagedResource> =
         domainFailure(id, repository.commitmentInterval(id)) {
@@ -267,28 +269,35 @@ class ResourceService(
             put("start", normalizedStart.toString())
             put("end", normalizedEnd.toString())
         })
-        val context = cursorContext("resource.schedule", filters, "reservation-created-id", sortVersion = 2)
+        val context = cursorContext("resource.schedule", filters, "reservation-start-id", sortVersion = 3)
         val tuple = cursor?.let { cursorCodec.decode(it, context) }
-        val afterCreatedAt = tuple?.get(0)?.textValue()?.let(OffsetDateTime::parse)
-        val afterId = tuple?.get(1)?.textValue()?.let(UUID::fromString)
-        val inclusive = tuple?.get(2)?.booleanValue() ?: false
+        val requestedSnapshot = tuple?.get(0)?.textValue()?.let(OffsetDateTime::parse)
+        val afterStart = tuple?.get(1)?.textValue()?.let(OffsetDateTime::parse)
+        val afterId = tuple?.get(2)?.textValue()?.let(UUID::fromString)
+        val inclusive = tuple?.get(3)?.booleanValue() ?: false
         val rowBudget = MAX_QUERY_AUTHORIZATION_CALLS - 1
-        val authorized = transactions.execute {
+        val scan = transactions.execute {
+            val snapshotAt = requestedSnapshot ?: repository.currentTimestamp()
             authorizeRequired(principalId, correlationId, resourceId, resourceId, READ_ACTION)
-            // Each page is a READ COMMITTED view; immutable creation order prevents range changes from shifting cursor position.
-            repository.schedule(resourceId, normalizedStart, normalizedEnd, afterCreatedAt, afterId, inclusive, minOf(limit + 1, rowBudget))
-                .map { revealOrRedactIdentity(principalId, correlationId, it) }
+            val rows = repository.schedule(
+                resourceId, normalizedStart, normalizedEnd, snapshotAt, afterStart, afterId, inclusive,
+                minOf(limit + 1, rowBudget),
+            ).map { revealOrRedactIdentity(principalId, correlationId, it) }
+            ScheduleScan(snapshotAt, rows)
         }!!
+        val authorized = scan.rows
         val page = authorized.take(limit)
         val next = if (authorized.size > limit) authorized[limit].let { reservation ->
             cursorCodec.encode(
                 context,
-                mapper.createArrayNode().add(reservation.createdAt.toString()).add(reservation.id.toString()).add(true),
+                mapper.createArrayNode().add(scan.snapshotAt.toString()).add(reservation.start.toString())
+                    .add(reservation.id.toString()).add(true),
             )
         } else if (authorized.size == rowBudget && limit + 1 > rowBudget) authorized.last().let { reservation ->
             cursorCodec.encode(
                 context,
-                mapper.createArrayNode().add(reservation.createdAt.toString()).add(reservation.id.toString()).add(false),
+                mapper.createArrayNode().add(scan.snapshotAt.toString()).add(reservation.start.toString())
+                    .add(reservation.id.toString()).add(false),
             )
         } else null
         return CursorPage(page, next)
@@ -348,7 +357,9 @@ class ResourceService(
         object : ResourceCommand(request.resourceId, request.resourceId, id, true, "resource-reservation") {
             override fun lockCurrentVersion(context: CommandContext): Long? {
                 if (repository.lockResource(request.resourceId) == null) throw InvalidCommandRequestException()
-                return repository.lockReservation(id, request.resourceId)?.version ?: throw ReservationNotFoundException()
+                val reservation = repository.lockReservation(id, request.resourceId) ?: throw ReservationNotFoundException()
+                authorizeRequesterMutation(context, reservation)
+                return reservation.version
             }
 
             override fun execute(context: CommandContext): CommandMutation {
@@ -364,7 +375,9 @@ class ResourceService(
         object : ResourceCommand(resourceId, resourceId, id, true, "resource-reservation") {
             override fun lockCurrentVersion(context: CommandContext): Long? {
                 if (repository.lockResource(resourceId) == null) throw InvalidCommandRequestException()
-                return repository.lockReservation(id, resourceId)?.version ?: throw ReservationNotFoundException()
+                val reservation = repository.lockReservation(id, resourceId) ?: throw ReservationNotFoundException()
+                authorizeRequesterMutation(context, reservation)
+                return reservation.version
             }
 
             override fun execute(context: CommandContext): CommandMutation {
@@ -498,6 +511,17 @@ class ResourceService(
         authorization.authorize(AuthorizationRequest(UUID.randomUUID(), principalId, action, entityId, resourceId, correlationId = correlationId))
     }
 
+    private fun authorizeRequesterMutation(context: CommandContext, reservation: Reservation) {
+        try {
+            authorizeRequired(
+                context.metadata.principalId, context.metadata.correlationId,
+                requireNotNull(reservation.requesterEntityId), reservation.resourceId, WRITE_ACTION,
+            )
+        } catch (_: AuthorizationDeniedException) {
+            throw ReservationNotFoundException()
+        }
+    }
+
     private fun revealOrRedactIdentity(
         principalId: UUID,
         correlationId: UUID,
@@ -609,8 +633,12 @@ class ResourceService(
             "resource_reservation_task_id_fkey",
             "fk_resource_reservation_task_process",
         )
-        private val ID_CONSTRAINTS = setOf("resource_reservation_pkey", "resource_availability_pkey")
+        private val ID_CONSTRAINTS = setOf(
+            "managed_resource_pkey", "resource_reservation_pkey", "resource_availability_pkey",
+        )
     }
+
+    private data class ScheduleScan(val snapshotAt: OffsetDateTime, val rows: List<Reservation>)
 }
 
 private fun AddAvailabilityRequest.normalized() = copy(start = utc(start), end = utc(end))

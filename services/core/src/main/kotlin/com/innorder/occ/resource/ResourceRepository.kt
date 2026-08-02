@@ -177,32 +177,45 @@ class ResourceRepository(
         resourceId: UUID,
         start: OffsetDateTime,
         end: OffsetDateTime,
-        afterCreatedAt: OffsetDateTime?,
+        snapshotAt: OffsetDateTime,
+        afterStart: OffsetDateTime?,
         afterId: UUID?,
         inclusive: Boolean,
         limit: Int,
     ): List<Reservation> {
-        val cursorClause = if (afterCreatedAt == null) "" else
-            "AND (created_at, id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
-        val arguments = mutableListOf<Any>(resourceId, start, end)
-        if (afterCreatedAt != null) {
-            arguments += afterCreatedAt
+        val cursorClause = if (afterStart == null) "" else
+            "AND (lower(time_range), id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
+        val arguments = mutableListOf<Any>(resourceId, snapshotAt, start, end)
+        if (afterStart != null) {
+            arguments += afterStart
             arguments += requireNotNull(afterId)
         }
         arguments += limit
         return jdbc.query(
-            """SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
+            """WITH history_at_snapshot AS (
+                   SELECT DISTINCT ON (reservation_id)
+                          reservation_id AS id, resource_id, requester_entity_id, process_instance_id, task_id,
+                          time_range, capacity, exclusive, state, row_version, created_at
+                   FROM occ.resource_reservation_history
+                   WHERE resource_id = ? AND recorded_at <= ?::timestamptz
+                   ORDER BY reservation_id, recorded_at DESC, history_id DESC
+               )
+               SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
                       lower(time_range) AS starts_at, upper(time_range) AS ends_at,
                       capacity, exclusive, state, row_version, created_at
-               FROM occ.resource_reservation
-               WHERE resource_id = ? AND state IN ('PENDING','CONFIRMED')
+               FROM history_at_snapshot
+               WHERE state IN ('PENDING','CONFIRMED')
                  AND time_range && tstzrange(?::timestamptz, ?::timestamptz, '[)')
                  $cursorClause
-               ORDER BY created_at, id LIMIT ?""",
+               ORDER BY lower(time_range), id LIMIT ?""",
             ::mapReservation,
             *arguments.toTypedArray(),
         )
     }
+
+    fun currentTimestamp(): OffsetDateTime = requireNotNull(
+        jdbc.queryForObject("SELECT clock_timestamp()", OffsetDateTime::class.java),
+    ).let(::utc)
 
     fun conflicts(resourceId: UUID, start: OffsetDateTime, end: OffsetDateTime): List<ReservationIdentityDetail> = jdbc.query(
         """SELECT id, requester_entity_id, lower(time_range) AS starts_at, upper(time_range) AS ends_at

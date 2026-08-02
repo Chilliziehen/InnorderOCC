@@ -212,10 +212,10 @@ const v14FunctionSecurity = await db.query(`
       'validate_risk_adjudication_insert', 'enforce_risk_occurrence_completeness',
       'validate_resource_availability',
       'validate_resource_reservation', 'reject_resource_reservation_delete',
-      'validate_managed_resource_change'
+      'validate_managed_resource_change', 'snapshot_resource_reservation'
     )
 `);
-if (v14FunctionSecurity.rows.length !== 14
+if (v14FunctionSecurity.rows.length !== 15
     || v14FunctionSecurity.rows.some((row) => row.prosecdef
       || row.runtime_execute || !row.trigger_only
       || row.proconfig?.[0] !== 'search_path=pg_catalog, occ, pg_temp')) {
@@ -569,6 +569,16 @@ await expectSqlState(`
 await expectSqlState(`
   DELETE FROM occ.resource_reservation WHERE id = '92000000-0000-7000-8000-000000000070'
 `, '55000', 'reservation deletion');
+const reservationHistory = await db.query(`
+  SELECT count(*)::integer AS versions
+  FROM occ.resource_reservation_history
+  WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
+`);
+if (reservationHistory.rows[0]?.versions !== 1) throw new Error('reservation insert history snapshot is missing');
+await expectSqlState(`
+  UPDATE occ.resource_reservation_history SET capacity = 9
+  WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
+`, '55000', 'reservation history mutation');
 console.log('passed portable V014 provenance, history, risk, reservation, and legal-hold behavior');
 
 await db.exec(`UPDATE audit.idempotency_record

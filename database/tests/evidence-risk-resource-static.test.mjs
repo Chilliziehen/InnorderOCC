@@ -141,6 +141,17 @@ test('serializes resource availability and reservation capacity on the parent ro
   assert.match(sql, /CREATE TRIGGER trg_resource_reservation_validate/i);
   assert.match(sql, /CREATE TRIGGER trg_resource_reservation_no_delete/i);
   assert.match(sql, /CREATE TRIGGER trg_managed_resource_capacity/i);
+  const historyTable = sql.match(/CREATE TABLE occ\.resource_reservation_history\b[\s\S]*?\);/i)?.[0] ?? '';
+  assert.ok(historyTable, 'resource reservation history table');
+  for (const field of [
+    'reservation_id', 'resource_id', 'requester_entity_id', 'process_instance_id', 'task_id',
+    'time_range', 'capacity', 'exclusive', 'state', 'row_version', 'created_at', 'updated_at',
+    'confirmed_at', 'cancelled_at', 'completed_at', 'recorded_at',
+  ]) assert.match(historyTable, new RegExp(`\\b${field}\\b`, 'i'), `history snapshots ${field}`);
+  assert.match(sql, /CREATE TRIGGER trg_resource_reservation_snapshot[\s\S]*AFTER INSERT OR UPDATE ON occ\.resource_reservation/i);
+  assert.match(sql, /CREATE TRIGGER trg_resource_reservation_history_immutable[\s\S]*platform\.reject_immutable_row/i);
+  assert.match(historyTable, /row_version bigint NOT NULL/i);
+  assert.match(historyTable, /recorded_at timestamptz NOT NULL/i);
 });
 
 test('preflights immutable legacy history and reservations under migration locks', () => {
