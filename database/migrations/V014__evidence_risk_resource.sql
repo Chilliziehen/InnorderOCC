@@ -888,6 +888,64 @@ ALTER TABLE occ.resource_reservation
     VALIDATE CONSTRAINT ck_resource_reservation_task_process_present,
     VALIDATE CONSTRAINT fk_resource_reservation_task_process;
 
+CREATE TABLE occ.resource_reservation_history (
+    history_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    reservation_id uuid NOT NULL REFERENCES occ.resource_reservation(id),
+    resource_id uuid NOT NULL,
+    requester_entity_id uuid NOT NULL,
+    process_instance_id uuid,
+    task_id uuid,
+    time_range tstzrange NOT NULL,
+    capacity numeric NOT NULL,
+    exclusive boolean NOT NULL,
+    state text NOT NULL,
+    row_version bigint NOT NULL,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    confirmed_at timestamptz,
+    cancelled_at timestamptz,
+    completed_at timestamptz,
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE INDEX ix_resource_reservation_history_latest
+ON occ.resource_reservation_history (resource_id, reservation_id, recorded_at DESC, history_id DESC);
+
+INSERT INTO occ.resource_reservation_history
+    (reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
+     time_range, capacity, exclusive, state, row_version, created_at,
+     updated_at, confirmed_at, cancelled_at, completed_at, recorded_at)
+SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
+       time_range, capacity, exclusive, state, row_version, created_at,
+       updated_at, confirmed_at, cancelled_at, completed_at, statement_timestamp()
+FROM occ.resource_reservation;
+
+CREATE FUNCTION occ.snapshot_resource_reservation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, occ, pg_temp
+AS $$
+BEGIN
+    INSERT INTO occ.resource_reservation_history
+        (reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
+         time_range, capacity, exclusive, state, row_version, created_at,
+         updated_at, confirmed_at, cancelled_at, completed_at)
+    VALUES
+        (NEW.id, NEW.resource_id, NEW.requester_entity_id, NEW.process_instance_id, NEW.task_id,
+         NEW.time_range, NEW.capacity, NEW.exclusive, NEW.state, NEW.row_version, NEW.created_at,
+         NEW.updated_at, NEW.confirmed_at, NEW.cancelled_at, NEW.completed_at);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_resource_reservation_snapshot
+AFTER INSERT OR UPDATE ON occ.resource_reservation
+FOR EACH ROW EXECUTE FUNCTION occ.snapshot_resource_reservation();
+
+CREATE TRIGGER trg_resource_reservation_history_immutable
+BEFORE UPDATE OR DELETE ON occ.resource_reservation_history
+FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+
 CREATE TABLE occ.resource_availability (
     id uuid PRIMARY KEY,
     resource_id uuid NOT NULL REFERENCES occ.managed_resource(id),
@@ -1168,6 +1226,7 @@ REVOKE EXECUTE ON FUNCTION occ.validate_resource_availability() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_resource_reservation() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.reject_resource_reservation_delete() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_managed_resource_change() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION occ.snapshot_resource_reservation() FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     occ.evidence_object_disposition,
@@ -1177,3 +1236,5 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     occ.risk_intervention,
     occ.resource_availability
 TO innorder_runtime;
+
+GRANT SELECT, INSERT ON TABLE occ.resource_reservation_history TO innorder_runtime;

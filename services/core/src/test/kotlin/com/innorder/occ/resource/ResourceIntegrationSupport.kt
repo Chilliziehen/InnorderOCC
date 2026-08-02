@@ -123,6 +123,8 @@ abstract class ResourceIntegrationSupport {
         @Volatile private var target: UUID? = null
         @Volatile private var arrivals = CountDownLatch(0)
         @Volatile private var release = CountDownLatch(0)
+        @Volatile private var afterTarget: UUID? = null
+        @Volatile private var afterAction: (() -> Unit)? = null
 
         @Synchronized
         fun arm(resourceId: UUID, contenders: Int) {
@@ -137,7 +139,19 @@ abstract class ResourceIntegrationSupport {
             check(release.await(10, TimeUnit.SECONDS))
         }
 
-        override fun afterLock(resourceId: UUID) = Unit
+        override fun afterLock(resourceId: UUID) {
+            if (resourceId != afterTarget) return
+            val action = afterAction
+            afterTarget = null
+            afterAction = null
+            action?.invoke()
+        }
+
+        @Synchronized
+        fun afterLockOnce(resourceId: UUID, action: () -> Unit) {
+            afterTarget = resourceId
+            afterAction = action
+        }
 
         fun releaseWhenContending() {
             check(arrivals.await(10, TimeUnit.SECONDS))
