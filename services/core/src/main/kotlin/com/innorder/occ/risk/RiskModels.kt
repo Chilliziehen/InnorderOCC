@@ -8,7 +8,7 @@ import java.util.Collections
 import java.util.UUID
 
 enum class RiskState { OPEN, ACKNOWLEDGED, RESOLVED, DISMISSED }
-enum class RiskActionType { ACKNOWLEDGED, ASSIGNED, ESCALATED, MITIGATED, RESOLVED, DISMISSED }
+enum class RiskActionType { ACKNOWLEDGED, ASSIGNED, ESCALATED, MITIGATED, SLA_BREACHED, RESOLVED, DISMISSED }
 enum class RiskSlaStatus { OVERDUE, DUE, NOT_DUE, NONE }
 enum class RiskAdjudicationOutcome { TRUE_POSITIVE, FALSE_POSITIVE, MISSED, NOT_APPLICABLE }
 
@@ -126,3 +126,5 @@ fun interface RiskNotificationPort {
 class RiskNotFoundException : RuntimeException("Risk was not found")
 class TerminalRiskException : RuntimeException("Terminal risk rejects actions")
 class InvalidRiskActionException : RuntimeException("Risk action is invalid")
+class EscalationLevelConflictException(val riskId: UUID, val level: Int) :
+    RuntimeException("Risk escalation level already exists")

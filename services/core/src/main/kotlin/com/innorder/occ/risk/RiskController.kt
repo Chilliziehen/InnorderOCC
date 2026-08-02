@@ -181,9 +181,14 @@ class RiskController(private val risks: RiskService) {
 
     @GetMapping("/metrics")
     fun metrics(
+        authentication: Authentication,
+        @RequestHeader("X-Correlation-ID") correlationId: UUID,
         @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) start: LocalDate,
         @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) end: LocalDate,
-    ): RiskMetrics = risks.metrics(start, end)
+    ): RiskMetrics {
+        val principal = accessTokenPrincipal(authentication)
+        return risks.metrics(principal.principalId, principal.customerInstanceId, correlationId, start, end)
+    }
 
     private fun response(result: CommandResult): ResponseEntity<RiskCommandResponse> = ResponseEntity.status(result.status).body(
         RiskCommandResponse(result.status, result.resourceId, result.replayed, result.body.toJsonNode()),

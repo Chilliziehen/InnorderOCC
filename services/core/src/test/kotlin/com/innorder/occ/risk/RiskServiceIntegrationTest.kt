@@ -2,9 +2,11 @@ package com.innorder.occ.risk
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.api.CursorCodec
+import com.innorder.occ.api.InvalidCursorException
 import com.innorder.occ.authz.AuthorizationDecision
 import com.innorder.occ.authz.AuthorizationDecisionValue
 import com.innorder.occ.authz.AuthorizationDeniedException
+import com.innorder.occ.authz.AuthorizationAvailabilityException
 import com.innorder.occ.authz.AuthorizationEntity
 import com.innorder.occ.authz.AuthorizationGrant
 import com.innorder.occ.authz.AuthorizationPrincipal
@@ -20,10 +22,13 @@ import com.innorder.occ.authz.GrantEffect
 import com.innorder.occ.authz.OpaClient
 import com.innorder.occ.authz.OpaProperties
 import com.innorder.occ.authz.PolicyLayer
+import com.innorder.occ.authz.PolicyDecisionClient
+import com.innorder.occ.authz.OpaClientException
 import com.innorder.occ.command.AuditRepository
 import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.CommandMetadata
 import com.innorder.occ.command.IdempotencyRepository
+import com.innorder.occ.command.IdempotencyConflictException
 import com.innorder.occ.command.OptimisticConflictException
 import com.innorder.occ.events.OutboxRepository
 import org.assertj.core.api.Assertions.assertThat
@@ -51,6 +56,10 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.UUID
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @Testcontainers
 class RiskServiceIntegrationTest {
@@ -58,6 +67,7 @@ class RiskServiceIntegrationTest {
     private lateinit var service: RiskService
     private lateinit var repository: RiskRepository
     private lateinit var authorization: TestAuthorizationSnapshots
+    private lateinit var policyDecisions: TestPolicyDecisions
     private lateinit var notifications: RecordingRiskNotifications
 
     @BeforeEach
@@ -65,9 +75,12 @@ class RiskServiceIntegrationTest {
         fixture = Fixture.seed()
         authorization = TestAuthorizationSnapshots(fixture.principal)
         notifications = RecordingRiskNotifications(RiskNotificationOutboxPort(runtimeJdbc))
+        policyDecisions = TestPolicyDecisions(
+            OpaClient(MAPPER, OpaProperties("http://${opa.host}:${opa.getMappedPort(8181)}")),
+        )
         val authorizationService = AuthorizationService(
             authorization,
-            OpaClient(MAPPER, OpaProperties("http://${opa.host}:${opa.getMappedPort(8181)}")),
+            policyDecisions,
             NoOpDecisionLog,
         )
         val transactionManager = DataSourceTransactionManager(runtimeDataSource)
@@ -88,6 +101,7 @@ class RiskServiceIntegrationTest {
             CursorCodec(CURSOR_SECRET, Clock.fixed(NOW, ZoneOffset.UTC)),
             transactionManager,
             notifications,
+            RiskMetricsProperties(reportResourceId = fixture.target),
         )
     }
 
@@ -245,6 +259,11 @@ class RiskServiceIntegrationTest {
         assertThat((first.items + second.items).map { it.id }).doesNotContain(deniedRed)
         assertThat(authorization.requests.count { it.action == "risk.read" }).isGreaterThanOrEqualTo(3)
         assertThat(authorization.requests.count { it.action == "risk.reason.read" }).isGreaterThanOrEqualTo(2)
+        assertThatThrownBy {
+            service.interventionQueue(
+                fixture.principal, UUID.randomUUID(), filters, NOW.plus(Duration.ofHours(4)), 10, first.nextCursor,
+            )
+        }.isInstanceOf(InvalidCursorException::class.java)
     }
 
     @Test
@@ -301,7 +320,10 @@ class RiskServiceIntegrationTest {
             reason = "adjudicator label conflicts with lifecycle",
         ))
 
-        val metrics = service.metrics(LocalDate.parse("2026-07-01"), LocalDate.parse("2026-08-01"))
+        val metrics = service.metrics(
+            fixture.principal, DEFAULT_CUSTOMER_ID, UUID.randomUUID(),
+            LocalDate.parse("2026-07-01"), LocalDate.parse("2026-08-01"),
+        )
         assertThat(metrics.severeMisses).isZero()
         assertThat(metrics.falsePositiveCount).isEqualTo(1)
         assertThat(metrics.adjudicatedSignificantRiskCount).isEqualTo(2)
@@ -309,6 +331,185 @@ class RiskServiceIntegrationTest {
         assertThat(repository.adjudications("known-severe", fixture.target).map { it.version }).containsExactly(1, 2)
         assertPostgresRejects("55000", "occ.risk_adjudication row is immutable") {
             runtimeJdbc.update("UPDATE occ.risk_adjudication SET reason = 'rewritten' WHERE known_event_key = 'known-severe'")
+        }
+    }
+
+    @Test
+    fun `linked adjudication locks matching risk target authorizes the risk and database rejects cross target facts`() {
+        val linkedRisk = requireNotNull(service.create(
+            metadata("linked-risk"), fixture.decision(targetEntityId = fixture.otherTarget),
+        ).resourceId)
+        val mismatched = RiskAdjudicationRequest(
+            LocalDate.parse("2024-07-01"), LocalDate.parse("2024-08-01"), "cross-target", fixture.target,
+            severeEvent = false, riskId = linkedRisk, outcome = RiskAdjudicationOutcome.FALSE_POSITIVE,
+            reason = "must not cross targets",
+        )
+
+        assertThatThrownBy { service.adjudicate(metadata("cross-target", 0), mismatched) }
+            .isInstanceOf(InvalidRiskActionException::class.java)
+        assertThat(runtimeJdbc.queryForObject(
+            "SELECT count(*) FROM occ.risk_adjudication WHERE known_event_key = 'cross-target'",
+            Long::class.java,
+        )).isZero()
+
+        service.adjudicate(metadata("linked-valid", 0), mismatched.copy(
+            knownEventKey = "linked-valid", targetEntityId = fixture.otherTarget, reason = "matching target",
+        ))
+        val authorizationRequest = authorization.requests.last { it.action == "risk.adjudicate" }
+        assertThat(authorizationRequest.entityId).isEqualTo(fixture.otherTarget)
+        assertThat(authorizationRequest.resourceId).isEqualTo(linkedRisk)
+
+        assertPostgresState("23503") {
+            runtimeJdbc.update(
+                """INSERT INTO occ.risk_adjudication
+                   (id, reporting_period_start, reporting_period_end, evaluator_id, known_event_key,
+                    target_entity_id, severe_event, risk_id, outcome, reason, adjudication_version)
+                    VALUES (?, '2024-07-01', '2024-08-01', ?, 'direct-cross-target', ?, false, ?,
+                           'FALSE_POSITIVE', 'invalid target', 1)""",
+                UUID.randomUUID(), fixture.principal, fixture.target, linkedRisk,
+            )
+        }
+    }
+
+    @Test
+    fun `canonical command fingerprints conflict when any mutation input changes`() {
+        val createMetadata = metadata("fingerprint-create")
+        service.create(createMetadata, fixture.decision(sla = Duration.ofHours(4)))
+        assertThatThrownBy { service.create(createMetadata, fixture.decision(sla = Duration.ofHours(5))) }
+            .isInstanceOf(IdempotencyConflictException::class.java)
+
+        val adjudicationMetadata = metadata("fingerprint-adjudication", 0)
+        val adjudication = RiskAdjudicationRequest(
+            LocalDate.parse("2025-07-01"), LocalDate.parse("2025-08-01"), "fingerprint-event", fixture.target,
+            severeEvent = true, riskId = null, outcome = RiskAdjudicationOutcome.MISSED, reason = "original reason",
+        )
+        service.adjudicate(adjudicationMetadata, adjudication)
+        assertThatThrownBy { service.adjudicate(adjudicationMetadata, adjudication.copy(reason = "changed reason")) }
+            .isInstanceOf(IdempotencyConflictException::class.java)
+
+        val riskId = requireNotNull(service.create(metadata("fingerprint-risk"), fixture.decision(
+            occurrence = "yellow", severity = RiskSeverity.YELLOW,
+        )).resourceId)
+        val escalationMetadata = metadata("fingerprint-escalation", 0)
+        service.escalate(
+            escalationMetadata, riskId, 0, "manual escalation", null, RiskSeverity.RED, NOW.plusSeconds(60),
+        )
+        assertThatThrownBy {
+            service.escalate(
+                escalationMetadata, riskId, 0, "manual escalation", null, RiskSeverity.RED, NOW.plusSeconds(120),
+            )
+        }.isInstanceOf(IdempotencyConflictException::class.java)
+    }
+
+    @Test
+    fun `configured due evaluator records one SLA breach without escalation steps and disabled evaluator is inert`() {
+        val riskId = requireNotNull(service.create(
+            metadata("sla-risk"), fixture.decision(sla = Duration.ofHours(4)),
+        ).resourceId)
+        val evaluationClock = Clock.fixed(NOW.plus(Duration.ofHours(5)), ZoneOffset.UTC)
+        val disabled = RiskDueEvaluator(
+            service, RiskDueProperties(enabled = false), evaluationClock,
+        )
+        assertThat(disabled.runOnce()).isEqualTo(RiskDueEvaluationResult(0, 0))
+
+        val evaluator = RiskDueEvaluator(
+            service,
+            RiskDueProperties(enabled = true, systemPrincipalId = fixture.principal, batchSize = 100),
+            evaluationClock,
+        )
+        assertThat(evaluator.runOnce().slaBreaches).isPositive()
+        assertThat(evaluator.runOnce()).isEqualTo(RiskDueEvaluationResult(0, 0))
+
+        assertThat(runtimeJdbc.queryForObject(
+            "SELECT count(*) FROM occ.risk_action WHERE risk_id = ? AND action_type = 'SLA_BREACHED'",
+            Long::class.java,
+            riskId,
+        )).isEqualTo(1)
+        assertThat(notifications.intents.count { it.type == "RISK_SLA_BREACHED" && it.resourceId == riskId }).isEqualTo(1)
+        assertThat(authorization.requests.any {
+            it.action == "risk.sla_breach" && it.principalId == fixture.principal && it.resourceId == riskId
+        }).isTrue()
+        assertThat(RiskRepository.DUE_SLA_BREACH_SQL).contains("FOR UPDATE", "SKIP LOCKED")
+    }
+
+    @Test
+    fun `metrics authorize configured report resource and fail closed on deny unavailable and stale decisions`() {
+        val start = LocalDate.parse("2026-07-01")
+        val end = LocalDate.parse("2026-08-01")
+
+        service.metrics(fixture.principal, DEFAULT_CUSTOMER_ID, UUID.randomUUID(), start, end)
+        val allowed = authorization.requests.last { it.action == "risk.metrics.read" }
+        assertThat(allowed.entityId).isEqualTo(fixture.target)
+        assertThat(allowed.resourceId).isEqualTo(fixture.target)
+        assertThat(allowed.context).containsEntry("customerInstanceId", DEFAULT_CUSTOMER_ID.toString())
+            .containsEntry("reportingPeriodStart", start.toString())
+            .containsEntry("reportingPeriodEnd", end.toString())
+
+        authorization.deniedResources += fixture.target
+        assertThatThrownBy {
+            service.metrics(fixture.principal, DEFAULT_CUSTOMER_ID, UUID.randomUUID(), start, end)
+        }.isInstanceOf(AuthorizationDeniedException::class.java)
+        authorization.deniedResources.clear()
+
+        policyDecisions.mode = TestPolicyDecisions.Mode.UNAVAILABLE
+        assertThatThrownBy {
+            service.metrics(fixture.principal, DEFAULT_CUSTOMER_ID, UUID.randomUUID(), start, end)
+        }.isInstanceOf(AuthorizationAvailabilityException::class.java)
+
+        policyDecisions.mode = TestPolicyDecisions.Mode.STALE
+        assertThatThrownBy {
+            service.metrics(fixture.principal, DEFAULT_CUSTOMER_ID, UUID.randomUUID(), start, end)
+        }.isInstanceOf(AuthorizationAvailabilityException::class.java)
+    }
+
+    @Test
+    fun `existing escalation level replays same key and conflicts with a new key under lock`() {
+        val riskId = requireNotNull(service.create(metadata("level-risk"), fixture.decision()).resourceId)
+        val firstMetadata = metadata("level-first", 0)
+        val first = service.escalate(
+            firstMetadata, riskId, 0, "level zero", null, RiskSeverity.RED, NOW.plusSeconds(60),
+        )
+
+        val replay = service.escalate(
+            firstMetadata, riskId, 0, "level zero", null, RiskSeverity.RED, NOW.plusSeconds(60),
+        )
+        assertThat(replay).isEqualTo(first.copy(replayed = true))
+        assertThatThrownBy {
+            service.escalate(
+                metadata("level-new-key", 1), riskId, 0, "level zero", null, RiskSeverity.RED,
+                NOW.plusSeconds(60),
+            )
+        }.isInstanceOf(EscalationLevelConflictException::class.java)
+        assertThat(repository.actions(riskId).count { it.escalationLevel == 0 }).isEqualTo(1)
+    }
+
+    @Test
+    fun `concurrent same level escalation has one success and one defined conflict`() {
+        val riskId = requireNotNull(service.create(metadata("concurrent-level-risk"), fixture.decision()).resourceId)
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val outcomes = listOf("concurrent-a", "concurrent-b").map { key ->
+                pool.submit<Throwable?> {
+                    start.await(10, TimeUnit.SECONDS)
+                    runCatching {
+                        service.escalate(
+                            metadata(key, 0), riskId, 0, "concurrent level", null, RiskSeverity.RED,
+                            NOW.plusSeconds(60),
+                        )
+                    }.exceptionOrNull()
+                }
+            }
+            start.countDown()
+            val errors = outcomes.map { it.get(30, TimeUnit.SECONDS) }
+            assertThat(errors.count { it == null }).isEqualTo(1)
+            assertThat(errors.filterNotNull()).singleElement().isInstanceOfAny(
+                OptimisticConflictException::class.java,
+                EscalationLevelConflictException::class.java,
+            )
+            assertThat(repository.actions(riskId).count { it.escalationLevel == 0 }).isEqualTo(1)
+        } finally {
+            pool.shutdownNow()
         }
     }
 
@@ -341,10 +542,19 @@ class RiskServiceIntegrationTest {
         assertThat(current.serverErrorMessage?.message).isEqualTo(message)
     }
 
+    private fun assertPostgresState(state: String, block: () -> Unit) {
+        val error = runCatching(block).exceptionOrNull()
+        assertThat(error).isInstanceOf(DataAccessException::class.java)
+        var current = error
+        while (current != null && current !is PSQLException) current = current.cause
+        assertThat((current as PSQLException).sqlState).isEqualTo(state)
+    }
+
     private class Fixture(
         val key: String,
         val packageVersion: UUID,
         val target: UUID,
+        val otherTarget: UUID,
         val principal: UUID,
         val ownerRelationship: UUID,
         val escalatedOwnerRelationship: UUID,
@@ -356,6 +566,7 @@ class RiskServiceIntegrationTest {
             severity: RiskSeverity = RiskSeverity.YELLOW,
             sla: Duration = Duration.ofHours(4),
             escalationSteps: List<EscalationStep> = emptyList(),
+            targetEntityId: UUID = target,
         ): RiskDecision {
             val ruleId = requireNotNull(rules[occurrence]) { "No fixture rule for $occurrence" }
             val parsed = RiskRule.parse(
@@ -371,7 +582,7 @@ class RiskServiceIntegrationTest {
             )
             return requireNotNull(RiskEvaluator().evaluate(
                 parsed,
-                RiskEvaluationFacts(target, listOf(if (occurrence == "default") fact else UUID.randomUUID()),
+                RiskEvaluationFacts(targetEntityId, listOf(if (occurrence == "default") fact else UUID.randomUUID()),
                     RiskFactValues.CriticalWork(NOW.minusSeconds(1), true)),
                 NOW,
             ))
@@ -392,9 +603,11 @@ class RiskServiceIntegrationTest {
                 val owner = UUID.randomUUID()
                 val escalatedOwner = UUID.randomUUID()
                 val target = UUID.randomUUID()
+                val otherTarget = UUID.randomUUID()
                 val ownerDefinition = UUID.randomUUID()
                 val escalatedDefinition = UUID.randomUUID()
                 val ownerRelationship = UUID.randomUUID()
+                val otherOwnerRelationship = UUID.randomUUID()
                 val escalatedOwnerRelationship = UUID.randomUUID()
                 val rules = mapOf(
                     "default" to UUID.randomUUID(),
@@ -441,6 +654,7 @@ class RiskServiceIntegrationTest {
                 entity(owner, userType, userTypeVersion, "owner")
                 entity(escalatedOwner, userType, userTypeVersion, "escalated")
                 entity(target, targetType, targetTypeVersion, "target")
+                entity(otherTarget, targetType, targetTypeVersion, "other-target")
                 listOf(principal to "Actor", owner to "Owner", escalatedOwner to "Escalated owner").forEach { (id, name) ->
                     adminJdbc.update(
                         "INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, 'USER', ?, 'ACTIVE')",
@@ -486,8 +700,14 @@ class RiskServiceIntegrationTest {
                         relationship, definition, subject, target, "risk-test-$key",
                     )
                 }
+                adminJdbc.update(
+                    """INSERT INTO authz.relationship
+                       (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                       VALUES (?, ?, ?, ?, 'SYSTEM', ?)""",
+                    otherOwnerRelationship, ownerDefinition, owner, otherTarget, "risk-test-other-$key",
+                )
                 return Fixture(
-                    key, packageVersion, target, principal, ownerRelationship,
+                    key, packageVersion, target, otherTarget, principal, ownerRelationship,
                     escalatedOwnerRelationship, rules, UUID.randomUUID(),
                 )
             }
@@ -497,7 +717,7 @@ class RiskServiceIntegrationTest {
     private class TestAuthorizationSnapshots(private val principalId: UUID) : AuthorizationSnapshotSource {
         val deniedResources = mutableSetOf<UUID>()
         val redactedResources = mutableSetOf<UUID>()
-        val requests = mutableListOf<AuthorizationRequest>()
+        val requests: MutableList<AuthorizationRequest> = Collections.synchronizedList(mutableListOf())
 
         override fun load(request: AuthorizationRequest): AuthorizationSnapshot {
             requests += request
@@ -534,6 +754,17 @@ class RiskServiceIntegrationTest {
         }
     }
 
+    private class TestPolicyDecisions(private val delegate: PolicyDecisionClient) : PolicyDecisionClient {
+        enum class Mode { NORMAL, UNAVAILABLE, STALE }
+        var mode = Mode.NORMAL
+
+        override fun decide(snapshot: AuthorizationSnapshot): AuthorizationDecision = when (mode) {
+            Mode.NORMAL -> delegate.decide(snapshot)
+            Mode.UNAVAILABLE -> throw OpaClientException()
+            Mode.STALE -> delegate.decide(snapshot).copy(authorizationRevision = snapshot.authorizationRevision + 1)
+        }
+    }
+
     private object NoOpDecisionLog : DecisionAuditLog {
         override fun persistInCallerTransaction(entry: DecisionLogEntry) = Unit
         override fun persistIndependently(entry: DecisionLogEntry) = Unit
@@ -547,6 +778,7 @@ class RiskServiceIntegrationTest {
         private const val CURSOR_SECRET = "risk-service-cursor-secret-for-tests-123456789"
         private val NOW = Instant.parse("2026-08-02T10:00:00Z")
         private val POLICY_RELEASE = UUID.fromString("0198a8aa-8794-7000-8000-000000000001")
+        private val DEFAULT_CUSTOMER_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
         private val MAPPER = ObjectMapper().findAndRegisterModules()
 
         @Container

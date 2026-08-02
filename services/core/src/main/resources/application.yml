@@ -66,6 +66,10 @@ occ:
     ack-timeout: ${OCC_OUTBOX_ACK_TIMEOUT:5s}
     stale-claim: 5m
     max-attempts: 10
+  risk-due:
+    enabled: ${OCC_RISK_DUE_ENABLED:false}
+    batch-size: ${OCC_RISK_DUE_BATCH_SIZE:50}
+    poll-interval: ${OCC_RISK_DUE_POLL_INTERVAL:1m}
   bootstrap-administrator:
     password-file: ${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:}
     username: ${OCC_BOOTSTRAP_ADMIN_USERNAME:admin}

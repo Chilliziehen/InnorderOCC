@@ -573,6 +573,7 @@ ALTER TABLE occ.risk
     ADD COLUMN owner_relationship_id uuid REFERENCES authz.relationship(id),
     ADD COLUMN last_escalation_level integer,
     ADD COLUMN last_escalated_at timestamptz,
+    ADD CONSTRAINT uq_risk_id_target UNIQUE (id, target_entity_id),
     ADD CONSTRAINT ck_risk_escalation_level CHECK (
         last_escalation_level IS NULL OR last_escalation_level >= 0
     );
@@ -597,7 +598,7 @@ CREATE TABLE occ.risk_action (
     risk_id uuid NOT NULL REFERENCES occ.risk(id),
     actor_id uuid NOT NULL REFERENCES iam.principal(id),
     action_type text NOT NULL CHECK (action_type IN (
-        'ACKNOWLEDGED', 'ASSIGNED', 'ESCALATED', 'MITIGATED', 'RESOLVED', 'DISMISSED'
+        'ACKNOWLEDGED', 'ASSIGNED', 'ESCALATED', 'MITIGATED', 'SLA_BREACHED', 'RESOLVED', 'DISMISSED'
     )),
     escalation_level integer CHECK (escalation_level IS NULL OR escalation_level >= 0),
     reason text,
@@ -614,7 +615,7 @@ CREATE TABLE occ.risk_adjudication (
     known_event_key text NOT NULL,
     target_entity_id uuid NOT NULL REFERENCES authz.entity(id),
     severe_event boolean NOT NULL,
-    risk_id uuid REFERENCES occ.risk(id),
+    risk_id uuid,
     outcome text NOT NULL CHECK (outcome IN (
         'TRUE_POSITIVE', 'FALSE_POSITIVE', 'MISSED', 'NOT_APPLICABLE'
     )),
@@ -624,6 +625,7 @@ CREATE TABLE occ.risk_adjudication (
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     CHECK (reporting_period_end > reporting_period_start),
     CHECK ((outcome = 'MISSED' AND risk_id IS NULL) OR outcome <> 'MISSED'),
+    FOREIGN KEY (risk_id, target_entity_id) REFERENCES occ.risk(id, target_entity_id),
     UNIQUE (known_event_key, target_entity_id, adjudication_version),
     UNIQUE (supersedes_adjudication_id)
 );
@@ -644,6 +646,10 @@ ON occ.risk_occurrence (target_entity_id, evaluated_at DESC, id);
 
 CREATE INDEX ix_risk_action_history
 ON occ.risk_action (risk_id, acted_at, id);
+
+CREATE UNIQUE INDEX uq_risk_action_sla_breach
+ON occ.risk_action (risk_id)
+WHERE action_type = 'SLA_BREACHED';
 
 CREATE INDEX ix_risk_adjudication_period
 ON occ.risk_adjudication (reporting_period_start, reporting_period_end, outcome);
