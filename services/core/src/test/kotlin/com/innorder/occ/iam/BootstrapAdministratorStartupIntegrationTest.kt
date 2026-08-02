@@ -6,6 +6,7 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import com.innorder.occ.authz.PolicyLayer
 import com.innorder.occ.authz.PolicyReleaseIntegrity
 import com.innorder.occ.authz.PolicyReleaseItemIntegrity
+import com.innorder.occ.catalog.WorkflowCatalogInstallationException
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.Test
 import org.postgresql.ds.PGSimpleDataSource
@@ -65,18 +66,25 @@ class BootstrapAdministratorStartupIntegrationTest {
     }
 
     @Test
-    fun `disabled bootstrap still installs upgrader and safely starts without policy data`() {
+    fun `fresh migrated startup without bootstrap fails safely before readiness`() {
         database { postgres, jdbc ->
             val disabledArguments = arguments(postgres).filterNot {
                 it.startsWith("--occ.bootstrap-administrator.")
             }.toTypedArray()
+            val ready = AtomicBoolean()
 
-            SpringApplicationBuilder(OccCoreApplication::class.java)
-                .run(*disabledArguments).use { context ->
-                    assertThat(context.getBean(PlatformPolicyV2Upgrader::class.java)).isNotNull()
-                    assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release", Long::class.java)).isZero()
-                    assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_bundle_version", Long::class.java)).isZero()
-                }
+            assertThatThrownBy {
+                SpringApplicationBuilder(OccCoreApplication::class.java)
+                    .listeners(ApplicationListener<ApplicationReadyEvent> { ready.set(true) })
+                    .run(*disabledArguments)
+            }.isInstanceOf(WorkflowCatalogInstallationException::class.java)
+                .hasMessage("Embedded workflow catalog installation conflicts with existing data")
+                .hasMessageNotContaining("SELECT")
+                .hasMessageNotContaining("catalog.entity_type")
+                .hasMessageNotContaining("platform.user")
+            assertThat(ready).isFalse()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release", Long::class.java)).isZero()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_bundle_version", Long::class.java)).isZero()
         }
     }
 
@@ -120,6 +128,17 @@ class BootstrapAdministratorStartupIntegrationTest {
         jdbc.update(
             "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
             BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)
+               VALUES (?, ?, 'platform.user', 'User', 'PRINCIPAL', true)""",
+            BootstrapIds.USER_TYPE, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type_version
+               (id, entity_type_id, package_version_id, schema_version, json_schema)
+               VALUES (?, ?, ?, 1, '{}'::jsonb)""",
+            BootstrapIds.USER_TYPE_VERSION, BootstrapIds.USER_TYPE, BootstrapIds.PACKAGE_VERSION,
         )
         jdbc.update(
             """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)

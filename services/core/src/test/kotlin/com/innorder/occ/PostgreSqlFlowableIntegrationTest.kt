@@ -40,7 +40,10 @@ import com.innorder.occ.config.FlowableTransactionBoundaryVerifier
 @Testcontainers(disabledWithoutDocker = true)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @ActiveProfiles("test")
-@Import(PostgreSqlFlowableIntegrationTest.AtomicityConfiguration::class)
+@Import(
+    PostgreSqlFlowableIntegrationTest.AtomicityConfiguration::class,
+    PlatformCatalogPrerequisiteTestConfiguration::class,
+)
 class PostgreSqlFlowableIntegrationTest(
     @param:Autowired private val jdbcTemplate: JdbcTemplate,
     @param:Autowired private val repositoryService: RepositoryService,

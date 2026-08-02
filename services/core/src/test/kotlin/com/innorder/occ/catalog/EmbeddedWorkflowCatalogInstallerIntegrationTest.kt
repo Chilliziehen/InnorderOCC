@@ -50,6 +50,38 @@ class EmbeddedWorkflowCatalogInstallerIntegrationTest {
     }
 
     @Test
+    fun `fresh migrated catalog without platform user prerequisites fails safely`() {
+        PostgreSQLContainer(DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres")).use { postgres ->
+            postgres.withDatabaseName("innorder_occ")
+                .withUsername("innorder_admin")
+                .withPassword("admin-test-only")
+                .withCopyFileToContainer(
+                    MountableFile.forClasspathResource("postgres-test-init.sql"),
+                    "/docker-entrypoint-initdb.d/010-test-roles.sql",
+                )
+                .start()
+            Flyway.configure().dataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only")
+                .locations("classpath:db/migration").load().migrate()
+            val dataSource = PGSimpleDataSource().apply {
+                setURL(postgres.jdbcUrl)
+                user = "innorder_flyway"
+                password = "flyway-test-only"
+            }
+            val installer = EmbeddedWorkflowCatalogInstaller(
+                JdbcTemplate(dataSource),
+                TransactionTemplate(DataSourceTransactionManager(dataSource)),
+            )
+
+            assertThatThrownBy { installer.installPackage() }
+                .isInstanceOf(WorkflowCatalogInstallationException::class.java)
+                .hasMessage("Embedded workflow catalog installation conflicts with existing data")
+                .hasMessageNotContaining("SELECT")
+                .hasMessageNotContaining("catalog.entity_type")
+                .hasMessageNotContaining("platform.user")
+        }
+    }
+
+    @Test
     fun `installer publishes stable workflow prerequisites idempotently and rejects drift`() {
         PostgreSQLContainer(DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres")).use { postgres ->
             postgres.withDatabaseName("innorder_occ")

@@ -46,7 +46,7 @@ class EmbeddedWorkflowCatalogInstaller(
             transactions.executeWithoutResult {
                 if (!catalogSchemaInstalled()) return@executeWithoutResult
                 jdbc.queryForObject("SELECT pg_advisory_xact_lock(?) IS NULL", Boolean::class.java, INSTALL_LOCK)
-                if (!platformUserTypeInstalled()) return@executeWithoutResult
+                if (!platformUserTypeInstalled()) fail()
                 installLocked()
             }
         } catch (failure: WorkflowCatalogInstallationException) {
@@ -62,13 +62,20 @@ class EmbeddedWorkflowCatalogInstaller(
     ) == 1L
 
     private fun platformUserTypeInstalled(): Boolean = count(
-        """SELECT count(*) FROM catalog.entity_type et
+        """SELECT count(*) FROM catalog.domain_package dp
+           JOIN catalog.package_version pv ON pv.package_id = dp.id
+           JOIN catalog.entity_type et ON et.package_id = dp.id
            JOIN catalog.entity_type_version etv ON etv.entity_type_id = et.id
-           WHERE et.id = ? AND et.package_id = ? AND et.type_key = 'platform.user'
+           WHERE dp.id = ? AND dp.package_key = 'platform-iam' AND dp.status = 'ACTIVE'
+             AND pv.id = ? AND pv.semver = '1.0.0' AND pv.status = 'PUBLISHED'
+             AND et.id = ? AND et.type_key = 'platform.user'
              AND et.entity_kind = 'PRINCIPAL' AND et.authorizable
-             AND etv.id = ? AND etv.schema_version = 1""",
-        BootstrapIds.USER_TYPE,
+             AND etv.id = ? AND etv.package_version_id = pv.id AND etv.schema_version = 1
+             AND etv.json_schema = '{}'::jsonb AND etv.ui_schema = '{}'::jsonb
+             AND etv.auth_schema = '{}'::jsonb AND etv.index_spec = '{}'::jsonb""",
         BootstrapIds.PACKAGE,
+        BootstrapIds.PACKAGE_VERSION,
+        BootstrapIds.USER_TYPE,
         BootstrapIds.USER_TYPE_VERSION,
     ) == 1L
 

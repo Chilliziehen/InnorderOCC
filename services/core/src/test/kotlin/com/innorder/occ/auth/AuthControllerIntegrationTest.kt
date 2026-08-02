@@ -6,6 +6,7 @@ import com.innorder.occ.authz.WorkflowAuthorizationRole
 import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import com.innorder.occ.iam.CurrentUser
 import com.innorder.occ.iam.PrincipalRepository
+import com.innorder.occ.PlatformCatalogPrerequisiteTestConfiguration
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
@@ -54,7 +55,7 @@ import org.springframework.security.crypto.password.PasswordEncoder
 @AutoConfigureMockMvc
 @Testcontainers(disabledWithoutDocker = true)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-@Import(AuthControllerIntegrationTest.ClockConfiguration::class)
+@Import(AuthControllerIntegrationTest.ClockConfiguration::class, PlatformCatalogPrerequisiteTestConfiguration::class)
 class AuthControllerIntegrationTest(
     @param:Autowired private val mockMvc: MockMvc,
     @param:Autowired private val objectMapper: ObjectMapper,

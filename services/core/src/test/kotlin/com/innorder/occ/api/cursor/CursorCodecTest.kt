@@ -1,5 +1,8 @@
 package com.innorder.occ.api.cursor
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -19,6 +22,7 @@ import java.util.UUID
 import java.util.function.Supplier
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import org.slf4j.LoggerFactory
 
 class CursorCodecTest {
     @TempDir
@@ -78,10 +82,44 @@ class CursorCodecTest {
             CursorProperties(
                 "current", current.toString(), "old", previous.toString(), NOW.plus(Duration.ofHours(24)).plusNanos(1),
             ),
-            CursorProperties("current", current.toString(), "old", previous.toString(), NOW.minusNanos(1)),
         ).forEach { properties ->
             assertThatThrownBy { CursorKeyRing.load(properties, Clock.fixed(NOW, ZoneOffset.UTC)) }
                 .isInstanceOf(CursorKeyConfigurationException::class.java)
+        }
+    }
+
+    @Test
+    fun `restart after previous deadline ignores old key and keeps current key operational with safe cleanup log`() {
+        val oldPath = key("restart-expired-old.key", 0x2b)
+        val currentPath = key("restart-current.key", 0x3c)
+        val deadline = NOW.minusSeconds(1)
+        val appender = ListAppender<ILoggingEvent>().also {
+            it.context = (LoggerFactory.getLogger(CursorKeyRing::class.java) as Logger).loggerContext
+            it.start()
+        }
+        val logger = LoggerFactory.getLogger(CursorKeyRing::class.java) as Logger
+        logger.addAppender(appender)
+        try {
+            val ring = CursorKeyRing.load(
+                CursorProperties("current", currentPath.toString(), "expired-old", oldPath.toString(), deadline),
+                Clock.fixed(NOW, ZoneOffset.UTC),
+            )
+            val restartedCodec = HmacCursorCodec(ring, ObjectMapper().findAndRegisterModules(), Clock.fixed(NOW, ZoneOffset.UTC))
+            val oldCursor = codec(oldPath, "expired-old", clock = Clock.fixed(deadline, ZoneOffset.UTC))
+                .encode(payload(keyId = "expired-old", issuedAt = deadline))
+            val currentCursor = codec(currentPath, "current").encode(payload())
+
+            assertThatThrownBy { restartedCodec.decode(oldCursor, binding()) }
+                .isInstanceOf(InvalidCursorException::class.java)
+            assertThat(restartedCodec.decode(currentCursor, binding()).keyId).isEqualTo("current")
+            assertThat(appender.list.map { it.formattedMessage }).containsExactly(
+                "Previous cursor key overlap expired; remove previous cursor key configuration",
+            )
+            assertThat(appender.list.single().formattedMessage)
+                .doesNotContain("expired-old", oldPath.toString(), deadline.toString())
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
         }
     }
 

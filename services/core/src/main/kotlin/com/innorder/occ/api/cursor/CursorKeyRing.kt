@@ -8,6 +8,7 @@ import java.time.Duration
 import java.time.Instant
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import org.slf4j.LoggerFactory
 
 class CursorKeyConfigurationException : IllegalArgumentException("Cursor key configuration is unavailable or invalid")
 
@@ -51,7 +52,16 @@ class CursorKeyRing private constructor(
                     (KEY_ID.matches(previousKeyId) && previousKeyId != properties.currentKeyId))
                 if (previousKeyNotAfter != null) {
                     val now = clock.instant()
-                    require(!previousKeyNotAfter.isBefore(now))
+                    if (previousKeyNotAfter.isBefore(now)) {
+                        logger.info("Previous cursor key overlap expired; remove previous cursor key configuration")
+                        return CursorKeyRing(
+                            properties.currentKeyId,
+                            loadKey(properties.currentKeyFile),
+                            null,
+                            null,
+                            null,
+                        )
+                    }
                     require(!previousKeyNotAfter.isAfter(now.plus(MAXIMUM_OVERLAP)))
                 }
                 return CursorKeyRing(
@@ -83,6 +93,7 @@ class CursorKeyRing private constructor(
 
         private const val MINIMUM_DISTINCT_BYTES = 8
         private val MAXIMUM_OVERLAP = Duration.ofHours(24)
+        private val logger = LoggerFactory.getLogger(CursorKeyRing::class.java)
 
         private fun mac(key: SecretKeySpec, payload: ByteArray): ByteArray =
             Mac.getInstance(ALGORITHM).run {
