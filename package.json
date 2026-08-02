@@ -17,6 +17,7 @@
     "test:database": "node --test database/tests/schema-static.test.mjs",
     "test:electron-provenance": "node --test scripts/electron-provenance.test.mjs",
     "test:deployment-docs": "node --test scripts/deployment-docs.test.mjs",
+    "make": "npm run make --workspace @innorder/desktop",
     "test:database:pglite": "node scripts/verify.mjs --pglite",
     "test:database:postgresql-race": "node --test database/tests/postgresql-idempotency-race.test.mjs",
     "build": "npm run build --workspace @innorder/contracts && npm run build --workspace @innorder/ai-service && npm run build --workspace @innorder/desktop",

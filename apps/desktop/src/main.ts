@@ -72,6 +72,7 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+app.setAppUserModelId("com.innorder.occ");
 const ownsInstance = registerSingleInstanceLifecycle(app, () => mainWindow);
 
 if (ownsInstance) void app.whenReady().then(async () => {

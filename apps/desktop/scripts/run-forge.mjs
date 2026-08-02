@@ -12,11 +12,11 @@ const require = createRequire(import.meta.url);
 await assertInstalledElectronVersion(require.resolve("electron/package.json"));
 
 const operation = process.argv[2];
-if (operation !== "start" && operation !== "package") {
+if (operation !== "start" && operation !== "package" && operation !== "make") {
   throw new Error(`Unsupported Forge operation: ${operation ?? "<missing>"}`);
 }
 const { api } = await import("@electron-forge/core");
-const options = operation === "package"
+const options = operation === "package" || operation === "make"
   ? { dir: process.cwd(), platform: "win32", arch: "x64" }
   : { dir: process.cwd() };
 await api[operation](options);

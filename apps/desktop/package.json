@@ -1,6 +1,10 @@
 {
   "name": "@innorder/desktop",
   "version": "0.1.0",
+  "productName": "Innorder OCC",
+  "description": "Innorder OCC 运营控制中心 / Operations Control Center",
+  "author": "Innorder",
+  "copyright": "Copyright (c) 2026 Innorder",
   "private": true,
   "main": ".vite/build/main.js",
   "scripts": {
@@ -9,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node scripts/run-forge.mjs package",
     "package": "node scripts/run-forge.mjs package",
+    "make": "node scripts/run-forge.mjs make",
     "smoke": "playwright test --config playwright.config.ts"
   },
   "dependencies": {
@@ -23,8 +28,11 @@
     "@axe-core/playwright": "4.10.2",
     "@electron-forge/cli": "8.0.0-alpha.10",
     "@electron-forge/core": "8.0.0-alpha.10",
+    "@electron-forge/maker-squirrel": "8.0.0-alpha.10",
+    "@electron-forge/plugin-fuses": "8.0.0-alpha.10",
     "@electron-forge/plugin-vite": "8.0.0-alpha.10",
     "@electron-forge/shared-types": "8.0.0-alpha.10",
+    "@electron/fuses": "2.1.3",
     "@testing-library/jest-dom": "6.6.4",
     "@testing-library/react": "16.3.0",
     "@types/jest-axe": "3.5.9",
