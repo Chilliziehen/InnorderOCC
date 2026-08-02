@@ -340,11 +340,8 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
           const invalidated = dependencies.profiles.selected()?.id === previous.id ? invalidateSessionScope() : null;
           if (invalidated && dependencies.uploadLifecycle) failures.push(...await settle([() => dependencies.uploadLifecycle!.abortScope(invalidated)]));
           failures.push(...await cleanup(previous.id));
-          let saved: Awaited<ReturnType<ProfileStore["save"]>> | undefined;
-          const saveFailures = await settle([async () => { saved = await dependencies.profiles.save(input); }]);
-          failures.push(...saveFailures);
           throwTransitionFailures(failures);
-          return saved!;
+          return dependencies.profiles.save(input);
         }
         return dependencies.profiles.save(input);
       }),

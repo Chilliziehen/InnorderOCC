@@ -72,9 +72,9 @@ describe("main command intent registry", () => {
       correlationId,
     }));
 
-    expect(intents.settle(handle, keyB)).toBe(false);
-    expect(intents.settle(handle, correlationId)).toBe(true);
-    expect(intents.settle(handle, correlationId)).toBe(false);
+    expect(intents.settle(handle, { state: "completed", correlationId: keyB })).toBe(false);
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(true);
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(false);
   });
 
   function registry() {
@@ -188,13 +188,29 @@ describe("main command intent registry", () => {
     const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
     const intents = registry();
     await intents.execute(command(), execute);
-    expect(intents.settle(handle)).toBe(true);
-    expect(intents.settle(handle)).toBe(false);
-    expect(() => intents.settle("not-a-uuid")).toThrow();
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(true);
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(false);
+    expect(() => intents.settle("not-a-uuid", { state: "completed", correlationId })).toThrow();
     await expect(intents.execute(command(), execute)).resolves.toEqual({ state: "completed", commandId: keyA, correlationId });
     await expect(intents.execute(command({ payload: { version: 3 } }), execute)).rejects.toThrow("Command intent mismatch");
     await expect(intents.execute(command({ targetId: "different-target" }), execute)).rejects.toThrow("Command intent mismatch");
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA]);
+  });
+
+  it("retains and replays a failed asynchronous command as a terminal problem", async () => {
+    const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
+    const intents = registry();
+    await intents.execute(command(), execute);
+    const settlement = {
+      state: "problem" as const,
+      correlationId,
+      problem: { title: "Command rejected", code: "VERSION_CONFLICT", status: 409, correlationId, currentVersion: 7, retryable: false },
+    };
+
+    expect(intents.settle(handle, settlement)).toBe(true);
+    await expect(intents.execute(command(), execute)).resolves.toEqual({ state: "problem", problem: settlement.problem });
+    await expect(intents.execute(command({ payload: { version: 3 } }), execute)).rejects.toThrow("Command intent mismatch");
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("expires notification-settled terminal tombstones after TTL", async () => {
@@ -203,7 +219,7 @@ describe("main command intent registry", () => {
     const intents = createCommandIntentRegistry({ now: () => now, createIdempotencyKey: () => keys.shift()! });
     const execute = vi.fn().mockResolvedValue({ state: "accepted", commandId: keyA, correlationId });
     await intents.execute(command(), execute);
-    expect(intents.settle(handle, correlationId)).toBe(true);
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(true);
     now += COMMAND_INTENT_ACCEPTED_TTL_MS + 1;
     await intents.execute(command(), execute);
     expect(execute.mock.calls.map(([input]) => input.idempotencyKey)).toEqual([keyA, keyB]);
@@ -214,10 +230,10 @@ describe("main command intent registry", () => {
     const execute = vi.fn(() => new Promise<CommandReceipt>((_resolve, fail) => void (reject = fail)));
     const intents = registry();
     const pending = intents.execute(command(), execute);
-    expect(intents.settle(handle)).toBe(false);
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(false);
     reject(new Error("offline"));
     await expect(pending).rejects.toThrow("offline");
-    expect(intents.settle(handle)).toBe(false);
+    expect(intents.settle(handle, { state: "completed", correlationId })).toBe(false);
     const retry = vi.fn().mockResolvedValue({ state: "completed", commandId: keyA, correlationId });
     await intents.execute(command(), retry);
     expect(retry.mock.calls[0]![0].idempotencyKey).toBe(keyA);

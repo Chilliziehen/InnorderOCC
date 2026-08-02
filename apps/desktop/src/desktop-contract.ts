@@ -159,6 +159,7 @@ export const problemReceiptSchema = z
     retryable: z.boolean().optional(),
     status: z.number().int().min(400).max(599),
     correlationId: z.uuid().optional(),
+    currentVersion: z.number().int().min(0).optional(),
   })
   .strict();
 export type ProblemReceipt = z.infer<typeof problemReceiptSchema>;
@@ -263,6 +264,20 @@ export const commandReceiptSchema = z.discriminatedUnion("state", [
 ]);
 export type CommandReceipt = z.infer<typeof commandReceiptSchema>;
 
+export const commandSettlementSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("completed"), correlationId: z.uuid() }).strict(),
+  z.object({
+    state: z.literal("problem"),
+    correlationId: z.uuid(),
+    problem: problemReceiptSchema.extend({ correlationId: z.uuid() }).strict(),
+  }).strict(),
+]).superRefine((settlement, context) => {
+  if (settlement.state === "problem" && settlement.problem.correlationId !== settlement.correlationId) {
+    context.addIssue({ code: "custom", message: "Command settlement correlation mismatch" });
+  }
+});
+export type CommandSettlement = z.infer<typeof commandSettlementSchema>;
+
 export const evidenceUploadMetadataSchema = z
   .object({
     workspace: z.string().trim().min(1).max(128),
@@ -333,8 +348,7 @@ export const uploadReceiptSchema = z.union([
 ]);
 export type UploadReceipt = z.infer<typeof uploadReceiptSchema>;
 
-export const notificationEventSchema = z
-  .object({
+const notificationEventBaseSchema = z.object({
     id: z.uuid(),
     cursor: z.string().min(1).max(2048).optional(),
     type: z.string().min(1).max(256),
@@ -343,11 +357,32 @@ export const notificationEventSchema = z
     body: z.string().max(4096).optional(),
     read: z.boolean(),
     data: z.record(z.string(), z.unknown()).optional(),
-    intentHandle: z.uuid().optional(),
-    correlationId: z.uuid().optional(),
-    commandState: z.enum(["completed", "problem"]).optional(),
-  })
-  .strict();
+  });
+const notificationCommandProblemSchema = z.object({
+  title: z.string().trim().min(1).max(256),
+  detail: z.string().max(4096).optional(),
+  code: z.string().trim().min(1).max(128).optional(),
+  retryable: z.boolean().optional(),
+  status: z.number().int().min(400).max(599),
+  currentVersion: z.number().int().min(0).optional(),
+}).strict();
+const notificationCommandEventSchema = z.discriminatedUnion("commandState", [
+  notificationEventBaseSchema.extend({
+    commandState: z.literal("completed"),
+    intentHandle: z.uuid(),
+    correlationId: z.uuid(),
+  }).strict(),
+  notificationEventBaseSchema.extend({
+    commandState: z.literal("problem"),
+    intentHandle: z.uuid(),
+    correlationId: z.uuid(),
+    commandProblem: notificationCommandProblemSchema,
+  }).strict(),
+]);
+export const notificationEventSchema = z.union([
+  notificationEventBaseSchema.strict(),
+  notificationCommandEventSchema,
+]);
 export type NotificationEvent = z.infer<typeof notificationEventSchema>;
 
 export const notificationConnectionStateSchema = z.object({

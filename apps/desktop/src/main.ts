@@ -135,7 +135,7 @@ if (ownsInstance) void app.whenReady().then(async () => {
   const notificationStream = createNotificationStream({
     persistence: notificationPersistence,
     getAccessToken: () => accessToken,
-    settleCommand: (intentHandle, correlationId) => commandIntents.settle(intentHandle, correlationId),
+    settleCommand: (intentHandle, settlement) => commandIntents.settle(intentHandle, settlement),
     connector: () => { throw new Error("Notification contract unavailable"); },
   });
   const disposeNotificationForwarder = notificationStream.subscribe((event) => {

@@ -4,6 +4,8 @@ import {
   notificationEventSchema,
   notificationConnectionStateSchema,
   notificationPageSchema,
+  commandSettlementSchema,
+  type CommandSettlement,
   type NotificationEvent,
   type NotificationConnectionState,
   type NotificationPage,
@@ -45,7 +47,7 @@ interface NotificationStreamOptions {
   readonly persistence: NotificationStreamPersistence;
   readonly getAccessToken: () => string | null;
   readonly listFallback?: (cursor?: string) => Promise<NotificationPage>;
-  readonly settleCommand?: (intentHandle: string, correlationId: string) => boolean;
+  readonly settleCommand?: (intentHandle: string, settlement: CommandSettlement) => boolean;
   readonly setTimeout?: (callback: () => void, delay: number) => unknown;
   readonly clearTimeout?: (timer: unknown) => void;
   readonly random?: () => number;
@@ -165,8 +167,15 @@ export function createNotificationStream(options: NotificationStreamOptions) {
     if (!session || expectedGeneration !== generation) return false;
     remember(seenEventIds, parsed.data.id);
     remember(seenCursors, cursor);
-    if (parsed.data.commandState && parsed.data.intentHandle && parsed.data.correlationId) {
-      options.settleCommand?.(parsed.data.intentHandle, parsed.data.correlationId);
+    if ("commandState" in parsed.data) {
+      const settlement = commandSettlementSchema.parse(parsed.data.commandState === "completed"
+        ? { state: "completed", correlationId: parsed.data.correlationId }
+        : {
+            state: "problem",
+            correlationId: parsed.data.correlationId,
+            problem: { ...parsed.data.commandProblem, correlationId: parsed.data.correlationId },
+          });
+      options.settleCommand?.(parsed.data.intentHandle, settlement);
     }
     for (const listener of listeners) listener(parsed.data);
     lastEventAt = new Date((options.now ?? Date.now)()).toISOString();

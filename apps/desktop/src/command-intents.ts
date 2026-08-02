@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-import { commandReceiptSchema, type CommandReceipt, type WorkspaceCommand } from "./desktop-contract";
+import { commandReceiptSchema, commandSettlementSchema, type CommandReceipt, type CommandSettlement, type WorkspaceCommand } from "./desktop-contract";
 import { prepareCommandPayload, type JsonObject } from "./command-payload";
 
 export interface InternalWorkspaceCommand {
@@ -39,7 +39,7 @@ export interface CommandIntentRegistry {
     command: WorkspaceCommand,
     invoke: (command: InternalWorkspaceCommand) => Promise<CommandReceipt>,
   ): Promise<CommandReceipt>;
-  settle(intentHandle: string, correlationId?: string): boolean;
+  settle(intentHandle: string, settlement: CommandSettlement): boolean;
 }
 
 /** Accepted bindings expire after 15 minutes if no terminal notification settles them. */
@@ -179,21 +179,20 @@ export function createCommandIntentRegistry(
       }
       return inFlight;
     },
-    settle(intentHandle, correlationId) {
+    settle(intentHandle, rawSettlement) {
       const parsed = intentHandleSchema.parse(intentHandle);
+      const settlement = commandSettlementSchema.parse(rawSettlement);
       const binding = bindings.get(parsed);
       if (!binding || binding.state !== "accepted" || binding.inFlight !== undefined) {
         return false;
       }
-      if (correlationId !== undefined && binding.correlationId !== correlationId) return false;
+      if (binding.correlationId !== settlement.correlationId) return false;
       if (!binding.commandId || !binding.correlationId) return false;
       binding.state = "terminal";
       binding.terminalAt = now();
-      binding.terminalReceipt = commandReceiptSchema.parse({
-        state: "completed",
-        commandId: binding.commandId,
-        correlationId: binding.correlationId,
-      });
+      binding.terminalReceipt = commandReceiptSchema.parse(settlement.state === "completed"
+        ? { state: "completed", commandId: binding.commandId, correlationId: binding.correlationId }
+        : { state: "problem", problem: settlement.problem });
       delete binding.acceptedAt;
       delete binding.commandId;
       delete binding.correlationId;

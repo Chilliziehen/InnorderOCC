@@ -859,6 +859,49 @@ describe("desktop main composition", () => {
     );
   });
 
+  it("preserves the old origin on restart when credential cleanup fails", async () => {
+    let persisted: unknown = { profiles: [profile], selectedId: profileId };
+    const write = vi.fn(async (value: unknown) => { persisted = structuredClone(value); });
+    const profiles = await createProfileStore({ read: async () => structuredClone(persisted), write, packaged: true });
+    let memoryAccessToken: string | null = "old-origin-access";
+    const persistedCredentials = new Map([[profileId, { refreshToken: "old-origin-refresh" }]]);
+    const session = {
+      restore: vi.fn(), login: vi.fn(), logout: vi.fn(),
+      profileSwitched: vi.fn(async () => {
+        memoryAccessToken = null;
+        throw new Error("vault remove failed");
+      }),
+    };
+    const clearProfile = vi.fn().mockRejectedValue(new Error("cache purge failed"));
+    const api = createDesktopApi({ profiles, session, statuses: vi.fn(), clearProfile });
+
+    let failure: unknown;
+    try {
+      await api.profiles.save({
+        id: profileId,
+        name: profile.name,
+        origin: "https://new.example.com",
+        environment: profile.environment,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("Desktop session transition cleanup failed");
+    expect((failure as Error).message).not.toContain("vault remove failed");
+    expect(session.profileSwitched).toHaveBeenCalledWith(profileId);
+    expect(clearProfile).toHaveBeenCalledWith(profileId);
+    expect(memoryAccessToken).toBeNull();
+    expect(write).not.toHaveBeenCalled();
+
+    const restartedProfiles = await createProfileStore({ read: async () => structuredClone(persisted), write: vi.fn(), packaged: true });
+    const restartedProfile = restartedProfiles.selected()!;
+    const restartedCredential = persistedCredentials.get(restartedProfile.id);
+    expect({ origin: restartedProfile.origin, refreshToken: restartedCredential?.refreshToken }).toEqual({ origin: profile.origin, refreshToken: "old-origin-refresh" });
+    expect(restartedProfile.origin).not.toBe("https://new.example.com");
+  });
+
   it("validates packaged profile changes before destructive cleanup", async () => {
     const store = await createProfileStore({
       read: async () => ({ profiles: [profile], selectedId: profileId }),

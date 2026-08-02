@@ -134,7 +134,7 @@ describe("notification stream", () => {
     expect(cursors[`${profileId}:${customerInstanceId}:${uploadId}`]).toBe("cursor-2");
   });
 
-  it("validates and bounds events, persists cursor before emit, and settles matching intents", async () => {
+  it("validates and bounds events, persists cursor before emit, and settles completed intents", async () => {
     const persistence = notificationPersistence();
     const harness = connectorHarness();
     const order: string[] = [];
@@ -152,9 +152,35 @@ describe("notification stream", () => {
     await harness.connections[0]!.request.onMessage({ data: "x".repeat(2 * 1024 * 1024 + 1), lastEventId: "cursor-large" });
 
     expect(order).toEqual(["persist", "settle", "emit"]);
-    expect(settle).toHaveBeenCalledWith(intentHandle, notificationId);
+    expect(settle).toHaveBeenCalledWith(intentHandle, { state: "completed", correlationId: notificationId });
     expect(listener).toHaveBeenCalledOnce();
     expect(persistence.value).toEqual({ version: 1, cursors: { [`${profileId}:${customerInstanceId}:${principalId}`]: "cursor-1" } });
+  });
+
+  it("maps validated asynchronous command failures without accepting mixed or incomplete states", async () => {
+    const harness = connectorHarness();
+    const settle = vi.fn().mockReturnValue(true);
+    const listener = vi.fn();
+    const stream = createNotificationStream({ connector: harness.connector, persistence: notificationPersistence(), getAccessToken: () => "token", settleCommand: settle });
+    await stream.setSession({ scope, origin: "https://core.example.test", endpointAvailable: true });
+    stream.subscribe(listener);
+    await stream.idle();
+    const commandProblem = { title: "Command rejected", detail: "Version changed", code: "VERSION_CONFLICT", status: 409, retryable: false, currentVersion: 7 };
+    const failed = { ...event("cursor-problem"), id: "77777777-7777-4777-8777-777777777777", intentHandle, correlationId: notificationId, commandState: "problem" as const, commandProblem };
+
+    await harness.connections[0]!.request.onMessage({ data: JSON.stringify(failed), lastEventId: "cursor-problem" });
+    await harness.connections[0]!.request.onMessage({ data: JSON.stringify({ ...event("cursor-mixed"), id: "88888888-8888-4888-8888-888888888888", intentHandle, correlationId: notificationId, commandState: "completed", commandProblem }), lastEventId: "cursor-mixed" });
+    await harness.connections[0]!.request.onMessage({ data: JSON.stringify({ ...event("cursor-incomplete"), id: "99999999-9999-4999-8999-999999999999", intentHandle, correlationId: notificationId, commandState: "problem" }), lastEventId: "cursor-incomplete" });
+    await harness.connections[0]!.request.onMessage({ data: JSON.stringify({ ...failed, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", cursor: "cursor-unsafe", commandProblem: { ...commandProblem, title: "x".repeat(257) } }), lastEventId: "cursor-unsafe" });
+
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(intentHandle, {
+      state: "problem",
+      correlationId: notificationId,
+      problem: { ...commandProblem, correlationId: notificationId },
+    });
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(failed);
   });
 
   it("uses bounded exponential backoff with jitter and queries missed notifications after reconnect", async () => {
