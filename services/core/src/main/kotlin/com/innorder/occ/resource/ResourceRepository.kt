@@ -190,30 +190,27 @@ class ResourceRepository(
         limit: Int,
     ): List<Reservation> {
         val cursorClause = if (afterStart == null) "" else
-            "AND (lower(time_range), id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
-        val arguments = mutableListOf<Any>(resourceId, snapshotAt, start, end)
+            "AND (lower(time_range), reservation_id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
+        val arguments = mutableListOf<Any>(resourceId, snapshotAt, snapshotAt, snapshotAt, end, start, start, end)
         if (afterStart != null) {
             arguments += afterStart
             arguments += requireNotNull(afterId)
         }
         arguments += limit
         return jdbc.query(
-            """WITH history_at_snapshot AS (
-                   SELECT DISTINCT ON (reservation_id)
-                          reservation_id AS id, resource_id, requester_entity_id, process_instance_id, task_id,
-                          time_range, capacity, exclusive, state, row_version, created_at
-                   FROM occ.resource_reservation_history
-                   WHERE resource_id = ? AND recorded_at <= ?::timestamptz
-                   ORDER BY reservation_id, recorded_at DESC, history_id DESC
-               )
-               SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
+            """SELECT reservation_id AS id, resource_id, requester_entity_id, process_instance_id, task_id,
                       lower(time_range) AS starts_at, upper(time_range) AS ends_at,
                       capacity, exclusive, state, row_version, created_at
-               FROM history_at_snapshot
-               WHERE state IN ('PENDING','CONFIRMED')
+               FROM occ.resource_reservation_history
+               WHERE resource_id = ? AND valid_from <= ?::timestamptz
+                 AND (valid_until IS NULL OR valid_until > ?::timestamptz)
+                 AND tstzrange(valid_from, valid_until, '[)') @> ?::timestamptz
+                 AND state IN ('PENDING','CONFIRMED')
+                 AND lower(time_range) < ?::timestamptz
+                 AND upper(time_range) > ?::timestamptz
                  AND time_range && tstzrange(?::timestamptz, ?::timestamptz, '[)')
                  $cursorClause
-               ORDER BY lower(time_range), id LIMIT ?""",
+               ORDER BY lower(time_range), reservation_id LIMIT ?""",
             ::mapReservation,
             *arguments.toTypedArray(),
         )

@@ -11,6 +11,10 @@ const fullSchema = readFileSync(
   fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)),
   'utf8',
 );
+const resourceRepository = readFileSync(
+  fileURLToPath(new URL('../../services/core/src/main/kotlin/com/innorder/occ/resource/ResourceRepository.kt', import.meta.url)),
+  'utf8',
+);
 
 test('extends evidence storage without invalidating legacy rows', () => {
   for (const column of [
@@ -146,16 +150,28 @@ test('serializes resource availability and reservation capacity on the parent ro
   for (const field of [
     'reservation_id', 'resource_id', 'requester_entity_id', 'process_instance_id', 'task_id',
     'time_range', 'capacity', 'exclusive', 'state', 'row_version', 'created_at', 'updated_at',
-    'confirmed_at', 'cancelled_at', 'completed_at', 'recorded_at',
+    'confirmed_at', 'cancelled_at', 'completed_at', 'valid_from', 'valid_until',
   ]) assert.match(historyTable, new RegExp(`\\b${field}\\b`, 'i'), `history snapshots ${field}`);
   assert.match(sql, /CREATE TRIGGER trg_resource_reservation_snapshot[\s\S]*AFTER INSERT OR UPDATE ON occ\.resource_reservation/i);
-  assert.match(sql, /CREATE TRIGGER trg_resource_reservation_history_immutable[\s\S]*platform\.reject_immutable_row/i);
+  assert.match(sql, /CREATE TRIGGER trg_resource_reservation_history_immutable[\s\S]*validate_resource_reservation_history_change/i);
   assert.match(sql, /CREATE FUNCTION occ\.snapshot_resource_reservation\(\)[\s\S]*SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, occ\s/i);
+  assert.match(sql, /snapshot_resource_reservation[\s\S]*valid_until\s*=\s*mutation_at/i);
   assert.match(sql, /snapshot_resource_reservation[\s\S]*clock_timestamp\(\)/i);
+  assert.match(sql, /validate_resource_reservation_history_change[\s\S]*FROM occ\.resource_reservation[\s\S]*FOR UPDATE[\s\S]*tstzrange\(existing\.valid_from, existing\.valid_until, '\[\)'\)[\s\S]*&&[\s\S]*tstzrange\(NEW\.valid_from, NEW\.valid_until, '\[\)'\)/i);
+  assert.match(sql, /CREATE UNIQUE INDEX uq_resource_reservation_history_current[\s\S]*reservation_id[\s\S]*WHERE valid_until IS NULL/i);
+  assert.match(sql, /CREATE INDEX ix_resource_reservation_history_temporal_schedule[\s\S]*USING gist[\s\S]*resource_id[\s\S]*tstzrange\(valid_from, valid_until, '\[\)'\)[\s\S]*time_range/i);
+  assert.match(sql, /CREATE INDEX ix_resource_reservation_history_schedule_order[\s\S]*resource_id[\s\S]*lower\(time_range\)[\s\S]*reservation_id/i);
   assert.match(sql, /REVOKE INSERT, UPDATE, DELETE ON TABLE occ\.resource_reservation_history FROM innorder_runtime/i);
   assert.doesNotMatch(sql, /GRANT[^;]*INSERT[^;]*ON TABLE occ\.resource_reservation_history TO innorder_runtime/i);
   assert.match(historyTable, /row_version bigint NOT NULL/i);
-  assert.match(historyTable, /recorded_at timestamptz NOT NULL/i);
+  assert.match(historyTable, /valid_from timestamptz NOT NULL/i);
+  assert.match(historyTable, /valid_until timestamptz/i);
+  assert.match(historyTable, /valid_until IS NULL OR valid_until > valid_from/i);
+  assert.doesNotMatch(resourceRepository, /DISTINCT ON|history_at_snapshot/i);
+  assert.match(resourceRepository, /resource_id = \? AND valid_from <= \?::timestamptz/i);
+  assert.match(resourceRepository, /valid_until IS NULL OR valid_until > \?::timestamptz/i);
+  assert.match(resourceRepository, /tstzrange\(valid_from, valid_until, '\[\)'\) @> \?::timestamptz/i);
+  assert.match(resourceRepository, /ORDER BY lower\(time_range\), reservation_id LIMIT \?/i);
 });
 
 test('preflights immutable legacy history and reservations under migration locks', () => {
