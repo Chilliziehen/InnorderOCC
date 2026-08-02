@@ -1,5 +1,6 @@
 package com.innorder.occ.iam
 
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
 import java.sql.ResultSet
@@ -192,10 +193,10 @@ class PrincipalRepository(private val jdbc: JdbcTemplate) {
         // Stable platform catalog identity reserved for the Task 7 role-assignment bootstrap.
         val PLATFORM_ROLE_ASSIGNMENT_RELATION_DEFINITION_ID: UUID =
             UUID.fromString("00000000-0000-7000-8000-000000000002")
-        private val ROLE_CAPABILITIES = mapOf(
+        private val ROLE_CAPABILITIES: Map<String, Collection<String>> = mapOf(
             "role:viewer" to listOf("occ.read"),
             "role:operator" to listOf("occ.execute", "occ.read"),
             "role:administrator" to listOf("occ.admin", "occ.execute", "occ.read"),
-        )
+        ) + WorkflowAuthorizationRoles.capabilitiesByRoleKey
     }
 }

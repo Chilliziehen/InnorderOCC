@@ -4,10 +4,20 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.authz.WorkflowAuthorizationRole
 import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.entry
 import org.junit.jupiter.api.Test
 import java.util.UUID
 
 class WorkflowAuthorizationRolesTest {
+    @Test
+    fun `workflow role capabilities match the exact action contract`() {
+        assertThat(WorkflowAuthorizationRoles.capabilitiesByRoleKey).containsExactly(
+            entry("role:process-owner", WorkflowAuthorizationRoles.processOwnerActions),
+            entry("role:participant", WorkflowAuthorizationRoles.participantActions),
+            entry("role:domain-modeler", emptySet()),
+        )
+    }
+
     @Test
     fun `workflow roles expose stable production identities and exact platform grants`() {
         assertThat(WorkflowAuthorizationRoles.all).containsExactly(
