@@ -22,6 +22,7 @@ test('extends evidence storage without invalidating legacy rows', () => {
     'quarantine_object_key', 'immutable_object_key', 'lease_owner',
     'lease_acquired_at', 'lease_heartbeat_at', 'lease_expires_at',
     'absolute_deadline_at', 'failure_code', 'detected_media_type',
+    'content_idempotency_key', 'content_request_hash', 'row_version',
   ]) {
     assert.match(sql, new RegExp(`ALTER TABLE occ\\.upload_session[\\s\\S]*ADD COLUMN ${column}\\b`, 'i'), column);
   }
@@ -43,7 +44,11 @@ test('extends evidence storage without invalidating legacy rows', () => {
 test('persists evidence application integration intents and resubmit provenance', () => {
   assert.match(sql, /ALTER TABLE occ\.upload_session[\s\S]*ADD COLUMN expected_evidence_version bigint/i);
   assert.match(sql, /ALTER TABLE occ\.upload_session[\s\S]*ADD COLUMN original_filename text/i);
-  assert.match(sql, /ALTER TABLE occ\.evidence_version[\s\S]*ADD COLUMN preview_content text/i);
+  for (const column of ['preview_object_key', 'preview_media_type', 'preview_size_bytes', 'preview_generated_at']) {
+    assert.match(sql, new RegExp(`ALTER TABLE occ\\.evidence_version[\\s\\S]*ADD COLUMN ${column}\\b`, 'i'), column);
+  }
+  assert.doesNotMatch(sql, /ADD COLUMN preview_content\b/i);
+  assert.match(sql, /content_idempotency_key[\s\S]*content_request_hash/i);
   assert.match(sql, /CREATE TABLE occ\.evidence_workflow_intent\b/i);
   assert.match(sql, /review_outcome text[\s\S]*gate_satisfied boolean[\s\S]*follow_up_required boolean/i);
   assert.match(sql, /prior_assignee_id uuid[\s\S]*correlation_id uuid/i);

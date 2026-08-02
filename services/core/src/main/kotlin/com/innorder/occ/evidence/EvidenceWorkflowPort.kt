@@ -22,13 +22,20 @@ data class EvidenceWorkflowIntent(
 )
 
 fun interface EvidenceWorkflowPort {
-    fun persist(intent: EvidenceWorkflowIntent)
+    fun dispatch(intent: EvidenceWorkflowIntent)
 }
 
-/** Transactional adapter boundary. A separate delivery adapter may claim these rows and call Flowable. */
+interface EvidenceWorkflowSnapshotPort : EvidenceWorkflowPort {
+    fun priorAssignee(evidenceId: UUID): UUID?
+}
+
+/** Marker contract for the agent01 adapter that participates in Core's caller transaction. */
+interface Agent01TransactionalEvidenceWorkflowPort : EvidenceWorkflowSnapshotPort
+
+/** Durable at-least-once source; delivery bindings are separate agent01-compatible ports. */
 @Component
-class EvidenceWorkflowIntentPort(private val jdbc: JdbcOperations) : EvidenceWorkflowPort {
-    override fun persist(intent: EvidenceWorkflowIntent) {
+class EvidenceWorkflowIntentPort(private val jdbc: JdbcOperations) {
+    fun persist(intent: EvidenceWorkflowIntent) {
         check(TransactionSynchronizationManager.isActualTransactionActive()) { "Workflow intent requires a transaction" }
         jdbc.update(
             """INSERT INTO occ.evidence_workflow_intent

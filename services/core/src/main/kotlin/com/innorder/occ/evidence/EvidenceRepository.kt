@@ -11,6 +11,7 @@ import java.util.UUID
 data class EvidenceHeadRecord(
     val id: UUID, val targetId: UUID, val requirementId: UUID, val slotKey: String,
     val state: EvidenceState, val currentVersion: Int?, val rowVersion: Long, val createdBy: UUID,
+    val createdAt: Instant, val updatedAt: Instant,
 )
 
 data class EvidenceSessionRecord(
@@ -19,22 +20,41 @@ data class EvidenceSessionRecord(
     val expectedSize: Long, val expectedEvidenceVersion: Long, val quarantineKey: String,
     val immutableKey: String, val status: UploadSessionStatus, val expiresAt: Instant,
     val absoluteDeadline: Instant, val leaseOwner: UUID?, val leaseExpiresAt: Instant?,
+    val actualSha256: String?, val actualSize: Long?, val detectedMediaType: String?, val failureCode: String?,
+    val createdAt: Instant, val rowVersion: Long, val contentIdempotencyKey: String? = null,
+    val contentRequestHash: String? = null,
 )
 
-data class RequirementRecord(val policy: EvidenceRequirementPolicy, val minimumCount: Int)
-data class DownloadRecord(val key: String, val mediaType: String, val size: Long, val fileName: String)
+data class RequirementRecord(val id: UUID, val code: String, val policy: EvidenceRequirementPolicy)
+data class DownloadRecord(
+    val key: String, val mediaType: String, val size: Long, val fileName: String, val sha256: String,
+    val evidenceVersion: Int,
+)
 data class EvidenceCleanupLease(val id: UUID, val objectKey: String, val owner: UUID)
+data class EvidencePreviewObject(val key: String, val mediaType: String, val size: Long)
 
 @Repository
 class EvidenceRepository(private val jdbc: JdbcOperations) {
     private val mapper = ObjectMapper().findAndRegisterModules()
 
+    fun transactionTime(): Instant = requireNotNull(
+        jdbc.queryForObject("SELECT transaction_timestamp()", Timestamp::class.java),
+    ).toInstant()
+
     fun requirement(id: UUID): RequirementRecord = jdbc.query(
-        "SELECT validation_schema::text, max_size_bytes, min_count FROM catalog.evidence_requirement WHERE id = ?",
+        "SELECT id,requirement_key,validation_schema::text FROM catalog.evidence_requirement WHERE id = ?",
         { row, _ -> RequirementRecord(
-            EvidenceRequirementPolicy.parse(mapper.readTree(row.getString(1)), row.getObject(2) as Long?), row.getInt(3),
+            row.getObject(1, UUID::class.java), row.getString(2), EvidenceRequirementPolicy.parse(mapper.readTree(row.getString(3))),
         ) }, id,
     ).singleOrNull() ?: throw InvalidEvidenceRequirementException()
+
+    fun requirements(afterId: UUID?, limit: Int): List<RequirementRecord> = jdbc.query(
+        """SELECT id,requirement_key,validation_schema::text FROM catalog.evidence_requirement
+           WHERE (?::uuid IS NULL OR id>?) ORDER BY id LIMIT ?""",
+        { row, _ -> RequirementRecord(
+            row.getObject(1, UUID::class.java), row.getString(2), EvidenceRequirementPolicy.parse(mapper.readTree(row.getString(3))),
+        ) }, afterId, afterId, limit,
+    )
 
     fun findHead(targetId: UUID, requirementId: UUID, slotKey: String): EvidenceHeadRecord? = jdbc.query(
         "SELECT * FROM occ.evidence WHERE target_entity_id=? AND requirement_id=? AND slot_key=?",
@@ -86,6 +106,21 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         "SELECT * FROM occ.upload_session WHERE id=?${if (lock) " FOR UPDATE" else ""}", ::session, id,
     ).singleOrNull() ?: throw EvidenceSessionNotFoundException()
 
+    fun bindContentCommand(id: UUID, idempotencyKey: String, requestHash: String): EvidenceSessionRecord {
+        val current = session(id, true)
+        if (current.contentIdempotencyKey == null) {
+            jdbc.update(
+                "UPDATE occ.upload_session SET content_idempotency_key=?,content_request_hash=? WHERE id=?",
+                idempotencyKey, requestHash, id,
+            )
+            return session(id)
+        }
+        if (current.contentIdempotencyKey != idempotencyKey || current.contentRequestHash != requestHash) {
+            throw EvidenceUploadConflictException()
+        }
+        return current
+    }
+
     fun acquireLease(id: UUID, owner: UUID, now: Instant, leaseUntil: Instant): EvidenceSessionRecord {
         val current = session(id, true)
         if (current.status == UploadSessionStatus.CONFIRMED) return current
@@ -96,9 +131,10 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         if (current.status in setOf(UploadSessionStatus.FAILED, UploadSessionStatus.EXPIRED) || !now.isBefore(current.absoluteDeadline)) {
             throw EvidenceUploadConflictException()
         }
-        if (current.status != UploadSessionStatus.CREATED &&
-            (current.status != UploadSessionStatus.STREAMING || current.leaseExpiresAt?.isAfter(now) == true)
-        ) {
+        if (current.status != UploadSessionStatus.CREATED && current.status !in ACTIVE_UPLOAD_PHASES) {
+            throw EvidenceUploadConflictException()
+        }
+        if (current.status in ACTIVE_UPLOAD_PHASES && current.leaseExpiresAt?.isAfter(now) == true) {
             throw EvidenceUploadConflictException()
         }
         jdbc.update(
@@ -147,6 +183,11 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         )
     }
 
+    fun recordFailureOnHead(id: UUID): EvidenceHeadRecord {
+        requireUpdated(jdbc.update("UPDATE occ.evidence SET updated_at=updated_at WHERE id=?", id))
+        return getHead(id)
+    }
+
     fun recordOrphan(sessionId: UUID, key: String, cleanupAfter: Instant) {
         jdbc.update(
             """INSERT INTO occ.evidence_object_disposition
@@ -156,7 +197,12 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         )
     }
 
-    fun confirm(session: EvidenceSessionRecord, inspected: InspectedEvidence, preview: String?, sourceCleanup: SourceCleanupDisposition): EvidenceVersion {
+    fun confirm(
+        session: EvidenceSessionRecord, inspected: InspectedEvidence, preview: EvidencePreviewObject?,
+        sourceCleanup: SourceCleanupDisposition,
+    ): EvidenceVersion {
+        lockObjectKey(session.immutableKey)
+        preview?.let { lockObjectKey(it.key) }
         val head = lockHead(session.evidenceId)
         if (head.rowVersion != session.expectedEvidenceVersion) throw com.innorder.occ.command.OptimisticConflictException(head.rowVersion)
         val version = (head.currentVersion ?: 0) + 1
@@ -164,11 +210,14 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         jdbc.update(
             """INSERT INTO occ.evidence_version
                (id,evidence_id,version,object_key,sha256,mime_type,size_bytes,submitted_by,upload_session_id,
-                detected_media_type,normalized_extension,scanner_engine,scanner_version,scanner_result,scanner_result_ref,preview_content)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'CLEAN',?,?)""",
+                  detected_media_type,normalized_extension,scanner_engine,scanner_version,scanner_result,scanner_result_ref,
+                  preview_object_key,preview_media_type,preview_size_bytes,preview_generated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'CLEAN',?,?,?,?,
+                         CASE WHEN ?::text IS NULL THEN NULL ELSE transaction_timestamp() END)""",
             versionId, session.evidenceId, version, session.immutableKey, inspected.sha256, inspected.detectedMediaType,
             inspected.sizeBytes, session.uploaderId, session.id, inspected.detectedMediaType, inspected.extension,
-            inspected.scannerResult.engine, inspected.scannerResult.engineVersion, inspected.scannerResult.reference, preview,
+            inspected.scannerResult.engine, inspected.scannerResult.engineVersion, inspected.scannerResult.reference,
+            preview?.key, preview?.mediaType, preview?.size, preview?.key,
         )
         jdbc.update("UPDATE occ.evidence SET current_version=?, state='PENDING' WHERE id=?", version, session.evidenceId)
         jdbc.update(
@@ -179,20 +228,24 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         )
         if (sourceCleanup == SourceCleanupDisposition.SWEEP_REQUIRED) jdbc.update(
             """INSERT INTO occ.evidence_object_disposition
-               (id,upload_session_id,object_key,disposition_state,retained_until)
-               VALUES (?,?,?,'CLEANUP_PENDING',statement_timestamp()+interval '5 minutes')""",
+                (id,upload_session_id,object_key,disposition_state,retained_until)
+                VALUES (?,?,?,'CLEANUP_PENDING',statement_timestamp()+interval '24 hours')""",
             UUID.randomUUID(), session.id, session.quarantineKey,
         )
         jdbc.update("UPDATE occ.upload_session SET status='CONFIRMED' WHERE id=?", session.id)
-        return EvidenceVersion(versionId, session.evidenceId, version, inspected.detectedMediaType, inspected.sizeBytes, getHead(session.evidenceId).rowVersion)
+        return versionById(versionId)
     }
 
     fun versionForSession(sessionId: UUID): EvidenceVersion = jdbc.query(
-        """SELECT ev.*, e.row_version FROM occ.evidence_version ev JOIN occ.evidence e ON e.id=ev.evidence_id
-           WHERE ev.upload_session_id=?""", ::version, sessionId,
+        "SELECT * FROM occ.evidence_version WHERE upload_session_id=?", ::version, sessionId,
     ).singleOrNull() ?: throw EvidenceSessionNotFoundException()
 
-    fun submit(id: UUID) {
+    fun versionById(id: UUID): EvidenceVersion = jdbc.query("SELECT * FROM occ.evidence_version WHERE id=?", ::version, id)
+        .singleOrNull() ?: throw EvidenceNotFoundException()
+
+    fun submit(id: UUID, evidenceVersion: Int) {
+        val head = lockHead(id)
+        if (head.currentVersion != evidenceVersion) throw EvidenceSubmitConflictException()
         requireUpdated(jdbc.update("UPDATE occ.evidence SET state='SUBMITTED' WHERE id=? AND state IN ('PENDING','REJECTED')", id))
     }
 
@@ -201,8 +254,11 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         ::head, targetId, requirementId,
     )
 
-    fun review(head: EvidenceHeadRecord, reviewerId: UUID, request: EvidenceReviewRequest, gate: Boolean): UUID {
-        if (head.state != EvidenceState.SUBMITTED || head.currentVersion == null) throw EvidenceStateConflictException()
+    fun review(
+        head: EvidenceHeadRecord, reviewerId: UUID, request: EvidenceReviewRequest, gate: Boolean, followUpDueAt: Instant?,
+    ): EvidenceReview {
+        if (head.state != EvidenceState.SUBMITTED || head.currentVersion == null) throw EvidenceReviewConflictException()
+        if (head.currentVersion != request.evidenceVersion) throw EvidenceReviewConflictException()
         val version = jdbc.queryForMap(
             "SELECT id,submitted_by FROM occ.evidence_version WHERE evidence_id=? AND version=?", head.id, head.currentVersion,
         )
@@ -212,16 +268,16 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
             """INSERT INTO occ.evidence_review
                (id,evidence_version_id,reviewer_id,decision,reason,conditions,follow_up_due_at,gate_satisfied)
                VALUES (?,?,?,?,?,?::jsonb,?,?)""",
-            id, version["id"], reviewerId, request.outcome.name, boundedReason(request.reason),
-            mapper.writeValueAsString(request.conditions), request.followUpDueAt?.let(Timestamp::from), gate,
+            id, version["id"], reviewerId, request.decision.name, boundedReason(request.reason),
+            mapper.writeValueAsString(request.conditions ?: emptyList<EvidenceReviewCondition>()), followUpDueAt?.let(Timestamp::from), gate,
         )
-        val state = when (request.outcome) {
+        val state = when (request.decision) {
             EvidenceReviewOutcome.ACCEPTED -> "ACCEPTED"
             EvidenceReviewOutcome.REJECTED -> "REJECTED"
             EvidenceReviewOutcome.CONDITIONAL -> if (gate) "ACCEPTED" else "REJECTED"
         }
         jdbc.update("UPDATE occ.evidence SET state=? WHERE id=?", state, head.id)
-        return id
+        return reviewById(id)
     }
 
     fun acceptedCount(targetId: UUID, requirementId: UUID, currentId: UUID, currentAccepted: Boolean): Int =
@@ -231,34 +287,38 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
             Int::class.java, targetId, requirementId, currentId, currentAccepted, currentId,
         ) ?: 0
 
-    fun history(id: UUID, afterVersion: Int?, limit: Int): List<EvidenceHistoryItem> = jdbc.query(
-        """SELECT ev.*, er.reviewer_id,er.decision,er.reason,er.gate_satisfied,er.follow_up_due_at,er.reviewed_at
-           FROM occ.evidence_version ev LEFT JOIN occ.evidence_review er ON er.evidence_version_id=ev.id
-           WHERE ev.evidence_id=? AND (?::integer IS NULL OR ev.version>?) ORDER BY ev.version LIMIT ?""",
-        { row, _ -> EvidenceHistoryItem(
-            row.getInt("version"), row.getObject("submitted_by", UUID::class.java), row.getTimestamp("submitted_at").toInstant(),
-            row.getString("detected_media_type"), row.getLong("size_bytes"),
-            row.getObject("reviewer_id", UUID::class.java)?.let { reviewer -> EvidenceReviewHistory(
-                reviewer, enumValueOf(row.getString("decision")), row.getString("reason"), row.getBoolean("gate_satisfied"),
-                row.getTimestamp("follow_up_due_at")?.toInstant(), row.getTimestamp("reviewed_at").toInstant(),
-            ) },
-        ) }, id, afterVersion, afterVersion, limit,
+    fun versions(id: UUID, afterVersion: Int?, limit: Int): List<EvidenceVersion> = jdbc.query(
+        """SELECT * FROM occ.evidence_version WHERE evidence_id=? AND (?::integer IS NULL OR version>?)
+           ORDER BY version LIMIT ?""", ::version, id, afterVersion, afterVersion, limit,
     )
 
+    fun reviews(id: UUID, afterReviewedAt: Instant?, afterId: UUID?, limit: Int): List<EvidenceReview> = jdbc.query(
+        """SELECT er.*,ev.evidence_id,ev.version AS evidence_version FROM occ.evidence_review er
+           JOIN occ.evidence_version ev ON ev.id=er.evidence_version_id WHERE ev.evidence_id=?
+             AND (?::timestamptz IS NULL OR (er.reviewed_at,er.id)>(?,?)) ORDER BY er.reviewed_at,er.id LIMIT ?""",
+        ::review, id, afterReviewedAt?.let(Timestamp::from), afterReviewedAt?.let(Timestamp::from), afterId, limit,
+    )
+
+    fun reviewById(id: UUID): EvidenceReview = jdbc.query(
+        """SELECT er.*,ev.evidence_id,ev.version AS evidence_version FROM occ.evidence_review er
+           JOIN occ.evidence_version ev ON ev.id=er.evidence_version_id WHERE er.id=?""", ::review, id,
+    ).singleOrNull() ?: throw EvidenceNotFoundException()
+
     fun download(id: UUID, version: Int): DownloadRecord = jdbc.query(
-        """SELECT ev.object_key,ev.detected_media_type,ev.size_bytes,us.original_filename
+        """SELECT ev.object_key,ev.detected_media_type,ev.size_bytes,us.original_filename,ev.sha256,ev.version
            FROM occ.evidence_version ev JOIN occ.evidence_object_disposition d ON d.evidence_version_id=ev.id
            JOIN occ.upload_session us ON us.id=ev.upload_session_id
            WHERE ev.evidence_id=? AND ev.version=? AND d.disposition_state='RETAINED'""",
-        { row, _ -> DownloadRecord(row.getString(1), row.getString(2), row.getLong(3), row.getString(4)) }, id, version,
+        { row, _ -> DownloadRecord(row.getString(1), row.getString(2), row.getLong(3), row.getString(4), row.getString(5), row.getInt(6)) }, id, version,
     ).singleOrNull() ?: throw EvidenceNotFoundException()
 
-    fun preview(id: UUID, version: Int): String? = jdbc.queryForList(
-        """SELECT ev.preview_content FROM occ.evidence_version ev
-           JOIN occ.evidence_object_disposition d ON d.evidence_version_id=ev.id
-           WHERE ev.evidence_id=? AND ev.version=? AND d.disposition_state='RETAINED'""",
-        String::class.java, id, version,
-    ).singleOrNull()
+    fun previewMetadata(id: UUID, version: Int): EvidencePreviewMetadata = jdbc.query(
+        """SELECT evidence_id,version,preview_media_type,preview_size_bytes,preview_generated_at
+           FROM occ.evidence_version WHERE evidence_id=? AND version=? AND preview_object_key IS NOT NULL""",
+        { row, _ -> EvidencePreviewMetadata(
+            row.getObject(1, UUID::class.java), row.getInt(2), row.getString(3), row.getLong(4), row.getTimestamp(5).toInstant(),
+        ) }, id, version,
+    ).singleOrNull() ?: throw EvidenceNotFoundException()
 
     fun claimCleanup(owner: UUID, now: Instant, leaseUntil: Instant, limit: Int): List<EvidenceCleanupLease> {
         val candidates = jdbc.query(
@@ -287,19 +347,22 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         return candidates
     }
 
-    fun lockCleanupEligibility(lease: EvidenceCleanupLease, now: Instant): Boolean = jdbc.query(
-        """SELECT disposition.id FROM occ.evidence_object_disposition disposition
-             JOIN occ.upload_session upload ON upload.id=disposition.upload_session_id
-             JOIN occ.evidence evidence ON evidence.id=upload.evidence_id
-             WHERE disposition.id=? AND disposition.object_key=? AND disposition.evidence_version_id IS NULL
-               AND disposition.disposition_state='DELETING' AND disposition.cleanup_lease_owner=?
-               AND disposition.cleanup_lease_expires_at>? AND disposition.retained_until<=?
-               AND disposition.legal_hold_at IS NULL AND disposition.backup_snapshot_id IS NULL
-               AND evidence.legal_hold_at IS NULL
-             FOR UPDATE OF disposition,evidence""",
-        { row, _ -> row.getObject(1, UUID::class.java) },
-        lease.id, lease.objectKey, lease.owner, Timestamp.from(now), Timestamp.from(now),
-    ).isNotEmpty()
+    fun lockCleanupEligibility(lease: EvidenceCleanupLease, now: Instant): Boolean {
+        lockObjectKey(lease.objectKey)
+        return jdbc.query(
+            """SELECT disposition.id FROM occ.evidence_object_disposition disposition
+               JOIN occ.upload_session upload ON upload.id=disposition.upload_session_id
+               JOIN occ.evidence evidence ON evidence.id=upload.evidence_id
+               WHERE disposition.id=? AND disposition.object_key=? AND disposition.evidence_version_id IS NULL
+                 AND disposition.disposition_state='DELETING' AND disposition.cleanup_lease_owner=?
+                 AND disposition.cleanup_lease_expires_at>? AND disposition.retained_until<=?
+                 AND disposition.legal_hold_at IS NULL AND disposition.backup_snapshot_id IS NULL
+                 AND evidence.legal_hold_at IS NULL
+               FOR UPDATE OF disposition,evidence""",
+            { row, _ -> row.getObject(1, UUID::class.java) },
+            lease.id, lease.objectKey, lease.owner, Timestamp.from(now), Timestamp.from(now),
+        ).isNotEmpty()
+    }
 
     fun cleanupDeleted(lease: EvidenceCleanupLease, at: Instant) {
         requireUpdated(jdbc.update(
@@ -317,10 +380,36 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         )
     }
 
+    fun lockUnreferencedObject(key: String): Boolean {
+        lockObjectKey(key)
+        return jdbc.queryForObject(
+            """SELECT NOT EXISTS (
+                 SELECT 1 FROM occ.evidence_object_disposition d
+                 WHERE d.object_key=? AND d.disposition_state<>'DELETED'
+                 UNION ALL
+                 SELECT 1 FROM occ.evidence_version v
+                 WHERE v.object_key=? OR v.preview_object_key=?
+                 UNION ALL
+                 SELECT 1 FROM occ.upload_session u JOIN occ.evidence e ON e.id=u.evidence_id
+                 WHERE (u.quarantine_object_key=? OR u.immutable_object_key=?)
+                   AND (u.status NOT IN ('FAILED','EXPIRED') OR e.legal_hold_at IS NOT NULL)
+               )""",
+            Boolean::class.java, key, key, key, key, key,
+        ) == true
+    }
+
+    private fun lockObjectKey(key: String) {
+        jdbc.queryForObject(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?,1163284055)) IS NULL",
+            Boolean::class.java, key,
+        )
+    }
+
     private fun head(row: ResultSet, ignored: Int) = EvidenceHeadRecord(
         row.getObject("id", UUID::class.java), row.getObject("target_entity_id", UUID::class.java),
         row.getObject("requirement_id", UUID::class.java), row.getString("slot_key"), enumValueOf(row.getString("state")),
         row.getObject("current_version") as Int?, row.getLong("row_version"), row.getObject("created_by", UUID::class.java),
+        row.getTimestamp("created_at").toInstant(), row.getTimestamp("updated_at").toInstant(),
     )
 
     private fun session(row: ResultSet, ignored: Int) = EvidenceSessionRecord(
@@ -331,12 +420,23 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         row.getLong("expected_evidence_version"), row.getString("quarantine_object_key"), row.getString("immutable_object_key"),
         enumValueOf(row.getString("status")), row.getTimestamp("expires_at").toInstant(),
         row.getTimestamp("absolute_deadline_at").toInstant(), row.getObject("lease_owner", UUID::class.java),
-        row.getTimestamp("lease_expires_at")?.toInstant(),
+        row.getTimestamp("lease_expires_at")?.toInstant(), row.getString("actual_sha256"),
+        row.getObject("actual_size_bytes") as Long?, row.getString("detected_media_type"), row.getString("failure_code"),
+        row.getTimestamp("created_at").toInstant(), row.getLong("row_version"), row.getString("content_idempotency_key"),
+        row.getString("content_request_hash"),
     )
 
     private fun version(row: ResultSet, ignored: Int) = EvidenceVersion(
         row.getObject("id", UUID::class.java), row.getObject("evidence_id", UUID::class.java), row.getInt("version"),
-        row.getString("detected_media_type"), row.getLong("size_bytes"), row.getLong("row_version"),
+        row.getObject("upload_session_id", UUID::class.java), row.getString("sha256"), row.getString("detected_media_type"),
+        row.getString("normalized_extension"), row.getLong("size_bytes"), row.getTimestamp("submitted_at").toInstant(),
+    )
+
+    private fun review(row: ResultSet, ignored: Int) = EvidenceReview(
+        row.getObject("id", UUID::class.java), row.getObject("evidence_id", UUID::class.java), row.getInt("evidence_version"),
+        enumValueOf(row.getString("decision")), row.getString("reason"),
+        mapper.readValue(row.getString("conditions"), mapper.typeFactory.constructCollectionType(List::class.java, EvidenceReviewCondition::class.java)),
+        row.getTimestamp("follow_up_due_at")?.toInstant(), row.getBoolean("gate_satisfied"), row.getTimestamp("reviewed_at").toInstant(),
     )
 
     private fun boundedReason(value: String): String {
@@ -345,4 +445,11 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
     }
 
     private fun requireUpdated(count: Int) { if (count != 1) throw EvidenceStateConflictException() }
+
+    private companion object {
+        val ACTIVE_UPLOAD_PHASES = setOf(
+            UploadSessionStatus.STREAMING, UploadSessionStatus.INSPECTING, UploadSessionStatus.SCANNING,
+            UploadSessionStatus.PROMOTING,
+        )
+    }
 }

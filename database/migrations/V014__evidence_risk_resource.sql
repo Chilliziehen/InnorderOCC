@@ -123,6 +123,9 @@ ALTER TABLE occ.upload_session
     ADD COLUMN absolute_deadline_at timestamptz,
     ADD COLUMN failure_code text,
     ADD COLUMN cleanup_after timestamptz,
+    ADD COLUMN content_idempotency_key text,
+    ADD COLUMN content_request_hash text,
+    ADD COLUMN row_version bigint NOT NULL DEFAULT 0,
     ADD COLUMN updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     ADD CONSTRAINT ck_upload_session_status CHECK (status IN (
         'CREATED', 'UPLOADED', 'STREAMING', 'INSPECTING', 'SCANNING', 'PROMOTING',
@@ -149,6 +152,11 @@ ALTER TABLE occ.upload_session
     ),
     ADD CONSTRAINT ck_upload_session_extension CHECK (
         normalized_extension IS NULL OR normalized_extension ~ '^[a-z0-9][a-z0-9._-]{0,31}$'
+    ),
+    ADD CONSTRAINT ck_upload_session_content_command CHECK (
+        (content_idempotency_key IS NULL AND content_request_hash IS NULL)
+        OR (pg_catalog.length(content_idempotency_key) BETWEEN 1 AND 255
+            AND content_request_hash ~ '^[0-9a-f]{64}$')
     );
 
 CREATE UNIQUE INDEX uq_upload_session_quarantine_object
@@ -190,21 +198,36 @@ ALTER TABLE occ.evidence_version
     ADD COLUMN scanner_version text,
     ADD COLUMN scanner_result text,
     ADD COLUMN scanner_result_ref text,
-    ADD COLUMN preview_content text,
+    ADD COLUMN preview_object_key text,
+    ADD COLUMN preview_media_type text,
+    ADD COLUMN preview_size_bytes bigint,
+    ADD COLUMN preview_generated_at timestamptz,
     ADD CONSTRAINT ck_evidence_version_scanner_result CHECK (
         scanner_result IS NULL OR scanner_result = 'CLEAN'
     ),
     ADD CONSTRAINT ck_evidence_version_preview CHECK (
-        preview_content IS NULL OR pg_catalog.octet_length(preview_content) <= 65536
+        (preview_object_key IS NULL AND preview_media_type IS NULL AND preview_size_bytes IS NULL AND preview_generated_at IS NULL)
+        OR (preview_object_key IS NOT NULL AND preview_media_type IN ('text/plain', 'text/markdown')
+            AND preview_size_bytes BETWEEN 1 AND 65536 AND preview_generated_at IS NOT NULL)
     );
 
+CREATE UNIQUE INDEX uq_evidence_version_preview_object
+ON occ.evidence_version (preview_object_key)
+WHERE preview_object_key IS NOT NULL;
+
 ALTER TABLE occ.evidence_review
+    DROP CONSTRAINT evidence_review_conditions_check,
+    ALTER COLUMN conditions SET DEFAULT '[]'::jsonb,
     ADD COLUMN follow_up_due_at timestamptz,
     ADD COLUMN gate_satisfied boolean,
     ADD CONSTRAINT ck_evidence_review_follow_up CHECK (
         (decision = 'CONDITIONAL' AND follow_up_due_at IS NOT NULL)
         OR (decision <> 'CONDITIONAL' AND follow_up_due_at IS NULL)
-    ) NOT VALID;
+    ) NOT VALID,
+    ADD CONSTRAINT ck_evidence_review_conditions_history CHECK (
+        pg_catalog.jsonb_typeof(conditions) = 'object'
+        OR (pg_catalog.jsonb_typeof(conditions) = 'array' AND pg_catalog.jsonb_array_length(conditions) <= 50)
+    );
 
 CREATE TABLE occ.evidence_object_disposition (
     id uuid PRIMARY KEY,
@@ -302,6 +325,10 @@ BEGIN
            OR NEW.normalized_extension IS DISTINCT FROM OLD.normalized_extension
            OR NEW.quarantine_object_key IS DISTINCT FROM OLD.quarantine_object_key
            OR NEW.immutable_object_key IS DISTINCT FROM OLD.immutable_object_key
+           OR NEW.content_idempotency_key IS DISTINCT FROM OLD.content_idempotency_key
+              AND OLD.content_idempotency_key IS NOT NULL
+           OR NEW.content_request_hash IS DISTINCT FROM OLD.content_request_hash
+              AND OLD.content_request_hash IS NOT NULL
            OR NEW.absolute_deadline_at IS DISTINCT FROM OLD.absolute_deadline_at
            OR NEW.created_at IS DISTINCT FROM OLD.created_at
            OR NEW.expires_at IS DISTINCT FROM OLD.expires_at THEN
@@ -317,10 +344,12 @@ BEGIN
             OR (OLD.status = 'INSPECTING' AND NEW.status IN ('SCANNING', 'FAILED'))
             OR (OLD.status = 'SCANNING' AND NEW.status IN ('PROMOTING', 'FAILED'))
             OR (OLD.status = 'PROMOTING' AND NEW.status IN ('CONFIRMED', 'FAILED'))
+            OR (OLD.status IN ('STREAMING', 'INSPECTING', 'SCANNING', 'PROMOTING') AND NEW.status = 'STREAMING')
         ) THEN
             RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'invalid upload session transition';
         END IF;
         NEW.updated_at := statement_timestamp();
+        NEW.row_version := OLD.row_version + 1;
     END IF;
     IF NEW.status IN ('STREAMING', 'INSPECTING', 'SCANNING', 'PROMOTING') AND (
         NEW.lease_owner IS NULL OR NEW.lease_acquired_at IS NULL
@@ -457,6 +486,10 @@ BEGIN
     END IF;
     IF NEW.gate_satisfied IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'review requires a gate result';
+    END IF;
+    IF pg_catalog.jsonb_typeof(NEW.conditions) <> 'array'
+       OR pg_catalog.jsonb_array_length(NEW.conditions) > 50 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'new evidence review conditions must be a bounded array';
     END IF;
     IF (NEW.decision = 'CONDITIONAL') IS DISTINCT FROM (NEW.follow_up_due_at IS NOT NULL) THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'conditional review requires a follow-up due time';

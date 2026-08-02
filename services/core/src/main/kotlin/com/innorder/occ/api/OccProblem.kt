@@ -108,8 +108,31 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun invalidEvidence(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 400, "invalid-evidence-request", "Invalid evidence request", "OCC-EVIDENCE-REQUEST")
 
-    fun evidenceConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
-        response(request, 409, "evidence-state-conflict", "Evidence state conflict", "OCC-EVIDENCE-CONFLICT")
+    fun evidenceTooLarge(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 413, "evidence-too-large", "Evidence content too large", "OCC-EVIDENCE-TOO-LARGE")
+
+    fun evidenceDigestMismatch(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 422, "evidence-digest-mismatch", "Evidence digest mismatch", "OCC-EVIDENCE-DIGEST-MISMATCH")
+
+    fun evidenceInvalidContent(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 422, "evidence-invalid-content", "Invalid evidence content", "OCC-EVIDENCE-INVALID-CONTENT")
+
+    fun evidenceInvalidRange(request: HttpServletRequest, completeLength: Long): ResponseEntity<OccProblem> {
+        val problem = requireNotNull(
+            response(request, 416, "invalid-range", "Invalid byte range", "OCC-INVALID-REQUEST").body,
+        )
+        return ResponseEntity.status(416)
+            .contentType(MediaType.APPLICATION_PROBLEM_JSON)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Range", "bytes */$completeLength")
+            .body(problem)
+    }
+
+    fun evidenceUploadConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "evidence-upload-conflict", "Evidence upload conflict", "OCC-EVIDENCE-UPLOAD-CONFLICT")
+
+    fun evidenceReviewConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "evidence-review-conflict", "Evidence review conflict", "OCC-EVIDENCE-REVIEW-CONFLICT")
 
     fun terminalRisk(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 409, "risk-terminal", "Risk is terminal", "OCC-RISK-TERMINAL")

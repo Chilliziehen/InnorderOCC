@@ -70,10 +70,13 @@ class MinioObjectStore internal constructor(
     private val closed = AtomicBoolean()
 
     override fun putQuarantine(request: ObjectPut): StoredObject =
-        withinOperation { deadline -> putQuarantineInternal(request, deadline) }
+        withinOperation { deadline -> putInternal(request, ObjectStore.QUARANTINE_PREFIX, deadline) }
 
-    private fun putQuarantineInternal(request: ObjectPut, deadline: OperationDeadline): StoredObject {
-        validateKey(request.key, ObjectStore.QUARANTINE_PREFIX)
+    override fun putPreview(request: ObjectPut): StoredObject =
+        withinOperation { deadline -> putInternal(request, ObjectStore.PREVIEW_PREFIX, deadline) }
+
+    private fun putInternal(request: ObjectPut, requiredPrefix: String, deadline: OperationDeadline): StoredObject {
+        validateKey(request.key, requiredPrefix)
         require(request.size in 0..ObjectStore.MAX_OBJECT_SIZE) { "Invalid object size" }
         validateHash(request.sha256)
         require(request.contentType.length in 1..255 && request.contentType.none { it.isISOControl() }) {
@@ -497,7 +500,8 @@ class MinioObjectStore internal constructor(
         }
 
     private fun validatePrefix(prefix: String) {
-        require(prefix.startsWith(ObjectStore.QUARANTINE_PREFIX) || prefix.startsWith(ObjectStore.IMMUTABLE_PREFIX)) {
+        require(prefix.startsWith(ObjectStore.QUARANTINE_PREFIX) || prefix.startsWith(ObjectStore.IMMUTABLE_PREFIX) ||
+            prefix.startsWith(ObjectStore.PREVIEW_PREFIX)) {
             "Invalid object prefix"
         }
         require(prefix.length <= MAX_KEY_LENGTH && validPath(prefix)) { "Invalid object prefix" }
@@ -506,7 +510,8 @@ class MinioObjectStore internal constructor(
     private fun validateKey(key: String, requiredPrefix: String? = null) {
         require(key.length in 1..MAX_KEY_LENGTH && validPath(key) && !key.endsWith('/')) { "Invalid object key" }
         require(
-            key.startsWith(ObjectStore.QUARANTINE_PREFIX) || key.startsWith(ObjectStore.IMMUTABLE_PREFIX),
+            key.startsWith(ObjectStore.QUARANTINE_PREFIX) || key.startsWith(ObjectStore.IMMUTABLE_PREFIX) ||
+                key.startsWith(ObjectStore.PREVIEW_PREFIX),
         ) { "Invalid object key" }
         require(requiredPrefix == null || key.startsWith(requiredPrefix)) { "Invalid object key" }
     }

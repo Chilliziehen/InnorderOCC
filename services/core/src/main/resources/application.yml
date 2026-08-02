@@ -58,6 +58,12 @@ flowable:
   database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:false}
 
 occ:
+  evidence:
+    production-enabled: ${OCC_EVIDENCE_PRODUCTION_ENABLED:false}
+    cleanup:
+      enabled: ${OCC_EVIDENCE_CLEANUP_ENABLED:false}
+      poll-interval: ${OCC_EVIDENCE_CLEANUP_POLL_INTERVAL:5m}
+      batch-size: ${OCC_EVIDENCE_CLEANUP_BATCH_SIZE:50}
   outbox:
     enabled: ${OCC_OUTBOX_ENABLED:true}
     topic: occ.events.v1

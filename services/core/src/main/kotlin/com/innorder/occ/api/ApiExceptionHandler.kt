@@ -30,6 +30,12 @@ import com.innorder.occ.evidence.EvidenceStateConflictException
 import com.innorder.occ.evidence.EvidenceUploadConflictException
 import com.innorder.occ.evidence.EvidenceReviewSegregationException
 import com.innorder.occ.evidence.EvidenceRejectedException
+import com.innorder.occ.evidence.EvidenceTooLargeException
+import com.innorder.occ.evidence.EvidenceDigestMismatchException
+import com.innorder.occ.evidence.EvidenceInvalidContentException
+import com.innorder.occ.evidence.EvidenceInvalidRangeException
+import com.innorder.occ.evidence.EvidenceSubmitConflictException
+import com.innorder.occ.evidence.EvidenceReviewConflictException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -176,21 +182,38 @@ class ApiExceptionHandler(
     fun evidenceNotFound(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
         responses.evidenceNotFound(request)
 
+    @ExceptionHandler(EvidenceTooLargeException::class)
+    fun evidenceTooLarge(exception: EvidenceTooLargeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.evidenceTooLarge(request)
+
+    @ExceptionHandler(EvidenceDigestMismatchException::class)
+    fun evidenceDigestMismatch(
+        exception: EvidenceDigestMismatchException, request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.evidenceDigestMismatch(request)
+
+    @ExceptionHandler(EvidenceInvalidContentException::class, EvidenceRejectedException::class)
+    fun evidenceInvalidContent(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.evidenceInvalidContent(request)
+
+    @ExceptionHandler(EvidenceInvalidRangeException::class)
+    fun evidenceInvalidRange(
+        exception: EvidenceInvalidRangeException, request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.evidenceInvalidRange(request, exception.completeLength)
+
     @ExceptionHandler(
         InvalidEvidenceRequirementException::class,
         InvalidEvidenceRequestException::class,
-        EvidenceRejectedException::class,
     )
     fun invalidEvidence(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
         responses.invalidEvidence(request)
 
-    @ExceptionHandler(
-        EvidenceStateConflictException::class,
-        EvidenceUploadConflictException::class,
-        EvidenceReviewSegregationException::class,
-    )
-    fun evidenceConflict(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
-        responses.evidenceConflict(request)
+    @ExceptionHandler(EvidenceStateConflictException::class, EvidenceUploadConflictException::class, EvidenceSubmitConflictException::class)
+    fun evidenceUploadConflict(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.evidenceUploadConflict(request)
+
+    @ExceptionHandler(EvidenceReviewConflictException::class, EvidenceReviewSegregationException::class)
+    fun evidenceReviewConflict(exception: RuntimeException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.evidenceReviewConflict(request)
 
     @ExceptionHandler(TerminalRiskException::class)
     fun terminalRisk(exception: TerminalRiskException, request: HttpServletRequest): ResponseEntity<OccProblem> =

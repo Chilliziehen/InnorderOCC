@@ -264,6 +264,8 @@ test("Compose wiring follows application config and completion gates", () => {
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
     "OBJECT_STORAGE_ENDPOINT",
+    "OCC_EVIDENCE_CLEANUP_ENABLED",
+    "OCC_EVIDENCE_PRODUCTION_ENABLED",
     "OCC_RISK_DUE_ENABLED",
     "OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID",
     "OCC_RISK_METRICS_ENABLED",
@@ -287,6 +289,8 @@ test("Compose wiring follows application config and completion gates", () => {
     "npm_package_version",
   ]);
   assert.equal(core.environment.APP_VERSION, "${APP_VERSION:-0.1.0}");
+  assert.equal(core.environment.OCC_EVIDENCE_PRODUCTION_ENABLED, "true");
+  assert.equal(core.environment.OCC_EVIDENCE_CLEANUP_ENABLED, "true");
   assert.equal(ai.environment.npm_package_version, "${APP_VERSION:-0.1.0}");
   assert.deepEqual(core.depends_on, {
     "flowable-init": { condition: "service_completed_successfully" },

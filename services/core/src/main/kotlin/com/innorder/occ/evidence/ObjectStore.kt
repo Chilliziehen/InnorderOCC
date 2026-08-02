@@ -7,6 +7,8 @@ import java.time.Instant
 interface ObjectStore : AutoCloseable {
     fun putQuarantine(request: ObjectPut): StoredObject
 
+    fun putPreview(request: ObjectPut): StoredObject
+
     fun promote(
         quarantineKey: String,
         immutableKey: String,
@@ -25,6 +27,7 @@ interface ObjectStore : AutoCloseable {
     companion object {
         const val QUARANTINE_PREFIX = "quarantine/"
         const val IMMUTABLE_PREFIX = "evidence/"
+        const val PREVIEW_PREFIX = "previews/"
         const val MAX_OBJECT_SIZE = 100L * 1024 * 1024
         const val DEFAULT_LIST_LIMIT = 1_000
     }

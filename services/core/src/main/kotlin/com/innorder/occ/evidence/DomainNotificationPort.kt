@@ -18,12 +18,15 @@ data class DomainNotificationIntent(
 )
 
 fun interface DomainNotificationPort {
-    fun persist(intent: DomainNotificationIntent)
+    fun dispatch(intent: DomainNotificationIntent)
 }
 
+/** Marker contract for a notification sink that rejects or commits in the caller transaction. */
+interface TransactionalDomainNotificationPort : DomainNotificationPort
+
 @Component
-class EvidenceDomainNotificationPort(private val jdbc: JdbcOperations) : DomainNotificationPort {
-    override fun persist(intent: DomainNotificationIntent) {
+class EvidenceDomainNotificationPort(private val jdbc: JdbcOperations) {
+    fun persist(intent: DomainNotificationIntent) {
         check(TransactionSynchronizationManager.isActualTransactionActive()) { "Notification intent requires a transaction" }
         val payload = MAPPER.valueToTree<com.fasterxml.jackson.databind.JsonNode>(intent.payload)
         EventPayloadPolicy.validate(payload)
