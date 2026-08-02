@@ -7,14 +7,21 @@ import { buildApp } from "./app.js";
 import type { ServiceConfig } from "./config.js";
 import { CoreClient, readBoundedFile } from "./core/core-client.js";
 import { GrantConsumer } from "./core/grant-consumer.js";
+import { PostgresGuidanceRepository } from "./guidance/guidance-repository.js";
+import { GuidanceRunner } from "./guidance/guidance-runner.js";
 import { ParserSidecarClient } from "./ingestion/parser-sidecar.js";
+import type { MinioArtifactObjectStore } from "./object-store/minio-object-store.js";
 import { createPostgresPool, PostgresAiRepository } from "./persistence/postgres.js";
+import type { OpenAiCompatibleProvider } from "./provider/openai-compatible.js";
+import { HybridRetriever } from "./retrieval/hybrid-retriever.js";
+import { PostgresRetrievalRepository } from "./retrieval/postgres-retrieval-repository.js";
 import { parseRevokedSerials, verifyServiceIdentity } from "./security/service-identity.js";
 
 export interface CompositionRoot {
   app: FastifyInstance;
   grantConsumer?: GrantConsumer;
   parserSidecar?: ParserSidecarClient;
+  createGuidanceRunner?: (provider: OpenAiCompatibleProvider, artifactStore: MinioArtifactObjectStore) => GuidanceRunner;
   close(): Promise<void>;
 }
 
@@ -48,6 +55,13 @@ export async function createCompositionRoot(config: ServiceConfig): Promise<Comp
   const repository = new PostgresAiRepository(pool);
   const grantConsumer = new GrantConsumer({ keys: grantKeys }, repository);
   const core = new CoreClient({ origin: config.coreOrigin!, key, cert: certificates, ca: cas, revokedSerials: revoked });
+  const guidanceRepository = new PostgresGuidanceRepository(pool);
+  const retrievalRepository = new PostgresRetrievalRepository(pool);
+  const createGuidanceRunner = (provider: OpenAiCompatibleProvider, artifactStore: MinioArtifactObjectStore): GuidanceRunner => new GuidanceRunner({
+    repository: guidanceRepository,
+    retriever: new HybridRetriever({ provider, repository: retrievalRepository }),
+    provider, artifactStore, core, grantConsumer,
+  });
   const app = buildApp(config, {
     https: { key, cert: certificates, ca: cas, requestCert: true, rejectUnauthorized: false, minVersion: "TLSv1.3" },
     authenticateCore: (request) => {
@@ -65,5 +79,5 @@ export async function createCompositionRoot(config: ServiceConfig): Promise<Comp
     core.close();
     await pool.end();
   });
-  return { app, grantConsumer, ...(parserSidecar === undefined ? {} : { parserSidecar }), close: async () => app.close() };
+  return { app, grantConsumer, createGuidanceRunner, ...(parserSidecar === undefined ? {} : { parserSidecar }), close: async () => app.close() };
 }

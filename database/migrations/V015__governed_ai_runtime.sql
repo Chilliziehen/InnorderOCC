@@ -58,6 +58,7 @@ CREATE TABLE authz.ai_authorized_document (
 ALTER TABLE ai.ai_run
     ADD COLUMN authorization_grant_id uuid UNIQUE REFERENCES authz.ai_authorization_grant(id),
     ADD COLUMN embedding_space_id uuid REFERENCES ai.embedding_space(id),
+    ADD COLUMN recommendation_id uuid,
     ADD CONSTRAINT uq_ai_run_grant UNIQUE (id, authorization_grant_id);
 ALTER TABLE ai.ai_run
     ADD CONSTRAINT fk_ai_run_grant_configuration
@@ -1723,6 +1724,118 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION ai.get_guidance_run_configuration(
+    p_run_id uuid, p_agent_version_id uuid, p_model_profile_id uuid,
+    p_prompt_version_id uuid, p_package_version_id uuid, p_embedding_space_id uuid,
+    p_policy_release_digest text
+)
+RETURNS TABLE (
+    run_id uuid, run_status text, operation text, target_entity_id uuid,
+    agent_version_id uuid, model_profile_id uuid, prompt_version_id uuid,
+    package_version_id uuid, policy_release_digest text, embedding_space_id uuid,
+    prompt_status text, prompt_template text, prompt_hash text,
+    input_schema jsonb, output_schema jsonb, input_schema_hash text,
+    output_schema_hash text, agent_hash text, package_status text,
+    provider_state text, profile_state text, max_classification text,
+    max_input_bytes integer, capability_hash text, capability_snapshot jsonb, space_status text,
+    dimensions integer, manifest_digest text, embedding_profile_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_run_id IS NULL OR p_agent_version_id IS NULL OR p_model_profile_id IS NULL
+       OR p_prompt_version_id IS NULL OR p_package_version_id IS NULL
+       OR p_embedding_space_id IS NULL OR p_policy_release_digest !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid guidance configuration binding';
+    END IF;
+    RETURN QUERY
+    SELECT run.id, run.status, grant_row.purpose, run.target_entity_id,
+           run.agent_version_id, run.model_profile_id, run.prompt_version_id,
+           run.package_version_id, grant_row.policy_release_digest, run.embedding_space_id,
+           prompt.status, prompt.template, prompt.content_hash,
+           agent.input_schema, agent.output_schema,
+           encode(public.digest(convert_to(agent.input_schema::text, 'UTF8'), 'sha256'), 'hex'),
+           encode(public.digest(convert_to(agent.output_schema::text, 'UTF8'), 'sha256'), 'hex'),
+           agent.content_hash, package.status, provider.state, profile.state,
+           provider.data_policy ->> 'maxClassification',
+           (profile.capability_snapshot ->> 'maxInputTokens')::integer,
+           profile.capability_snapshot ->> 'snapshotHash', profile.capability_snapshot, space.status,
+           space.dimensions, space.corpus_version, space.model_profile_id
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row
+      ON grant_row.id = run.authorization_grant_id AND grant_row.run_id = run.id
+    JOIN ai.agent_definition_version agent ON agent.id = run.agent_version_id
+    JOIN ai.prompt_template_version prompt ON prompt.id = run.prompt_version_id
+    JOIN catalog.package_version package ON package.id = run.package_version_id
+    JOIN authz.policy_release release ON release.id = run.policy_release_id
+    JOIN ai.model_profile profile ON profile.id = run.model_profile_id
+    JOIN ai.model_provider provider ON provider.id = profile.provider_id
+    JOIN ai.embedding_space space ON space.id = run.embedding_space_id
+    WHERE run.id = p_run_id AND run.agent_version_id = p_agent_version_id
+      AND run.model_profile_id = p_model_profile_id AND run.prompt_version_id = p_prompt_version_id
+      AND run.package_version_id = p_package_version_id AND run.embedding_space_id = p_embedding_space_id
+      AND grant_row.policy_release_digest = p_policy_release_digest
+      AND release.content_hash = p_policy_release_digest
+      AND agent.prompt_version_id = run.prompt_version_id
+      AND agent.package_version_id = run.package_version_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'guidance configuration binding is stale';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.get_guidance_terminal_result(p_run_id uuid)
+RETURNS TABLE (operation_id uuid, recommendation_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN QUERY SELECT run.id, run.recommendation_id
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row
+      ON grant_row.id = run.authorization_grant_id AND grant_row.run_id = run.id
+    WHERE run.id = p_run_id AND run.status = 'COMPLETED' AND run.recommendation_id IS NOT NULL;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_guidance_run(p_run_id uuid, p_status text, p_error_code text, p_recommendation_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    old_status text;
+BEGIN
+    SELECT status INTO STRICT old_status FROM ai.ai_run
+    WHERE id = p_run_id AND authorization_grant_id IS NOT NULL FOR UPDATE;
+    IF p_status = 'RUNNING' THEN
+        IF old_status <> 'QUEUED' OR p_error_code IS NOT NULL OR p_recommendation_id IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid guidance run start';
+        END IF;
+    ELSIF p_status = 'COMPLETED' THEN
+        IF old_status <> 'RUNNING' OR p_error_code IS NOT NULL OR p_recommendation_id IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid successful guidance outcome';
+        END IF;
+    ELSIF p_status IN ('FAILED', 'CANCELLED') THEN
+        IF old_status <> 'RUNNING' OR p_error_code !~ '^OCC-AI-[A-Z0-9-]{1,112}$' OR p_recommendation_id IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid unsuccessful guidance outcome';
+        END IF;
+    ELSE
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid guidance run status';
+    END IF;
+    UPDATE ai.ai_run SET status = p_status, error_code = p_error_code,
+        recommendation_id = p_recommendation_id,
+        started_at = CASE WHEN p_status = 'RUNNING' THEN statement_timestamp() ELSE started_at END,
+        completed_at = CASE WHEN p_status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN statement_timestamp() ELSE NULL END
+    WHERE id = p_run_id;
+    RETURN p_status;
+END;
+$$;
+
 CREATE FUNCTION ai.start_model_invocation(
     p_id uuid, p_run_id uuid, p_model_profile_id uuid, p_operation text,
     p_request_hash text, p_capability_hash text
@@ -2158,6 +2271,7 @@ CREATE FUNCTION ai.authorized_hybrid_retrieval(
 )
 RETURNS TABLE (
     chunk_id uuid, document_version_id uuid, content text,
+    data_classification text, document_version integer, content_hash text,
     lexical_score double precision, vector_score double precision,
     fused_score double precision, rank bigint
 )
@@ -2226,8 +2340,10 @@ BEGIN
         FROM fused
     )
     SELECT ranked.id, ranked.document_version_id, chunk.content,
+           document.data_classification, document.version, chunk.content_hash,
            ranked.lexical_score, ranked.vector_score, ranked.fused_score, ranked.final_rank
     FROM ranked JOIN ai.knowledge_chunk chunk ON chunk.id = ranked.id
+    JOIN ai.knowledge_document_version document ON document.id = ranked.document_version_id
     ORDER BY ranked.final_rank LIMIT p_result_limit;
 END;
 $$;
@@ -2266,6 +2382,9 @@ REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FR
 REVOKE ALL ON FUNCTION ai.release_legal_hold(uuid, uuid) FROM PUBLIC, innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.get_ai_operation_status(uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_guidance_run_configuration(uuid, uuid, uuid, uuid, uuid, uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_guidance_terminal_result(uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_guidance_run(uuid, text, text, uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.heartbeat_ingestion_job(uuid, text, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;

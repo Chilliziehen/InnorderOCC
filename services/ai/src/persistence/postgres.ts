@@ -5,6 +5,17 @@ import type { VerifiedAiGrant } from "../security/grant-verifier.js";
 
 export interface ConsumedGrant {
   runId: string;
+  operationId: string;
+  operation: string;
+  targetEntityId: string;
+  agentVersionId: string;
+  modelProfileId: string;
+  promptVersionId: string;
+  packageVersionId: string;
+  embeddingSpaceId: string;
+  policyReleaseDigest: string;
+  authorizedSetDigest: string;
+  classificationCeiling: "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "RESTRICTED";
   authorizedDocumentVersionIds: string[];
   boundedContext: Record<string, unknown>;
   replayed: boolean;
@@ -52,6 +63,17 @@ export class PostgresAiRepository {
       const row = result.rows[0] as Record<string, unknown>;
       return {
         runId: String(row.run_id),
+        operationId: c.operationId,
+        operation: c.purpose,
+        targetEntityId: c.targetId,
+        agentVersionId: c.agentVersionId,
+        modelProfileId: c.modelProfileId,
+        promptVersionId: c.promptVersionId,
+        packageVersionId: c.packageVersionId,
+        embeddingSpaceId: c.embeddingSpaceId,
+        policyReleaseDigest: c.policyReleaseDigest,
+        authorizedSetDigest: c.authorizedSetDigest,
+        classificationCeiling: c.classificationCeiling,
         authorizedDocumentVersionIds: row.authorized_document_version_ids as string[],
         boundedContext: row.bounded_context as Record<string, unknown>,
         replayed: row.replayed === true,

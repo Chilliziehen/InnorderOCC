@@ -1,7 +1,24 @@
 import { readFile } from "node:fs/promises";
 import { Agent, request as httpsRequest, type RequestOptions } from "node:https";
 
+import { serviceRecommendationSubmissionSchema } from "@innorder/contracts";
+import { z } from "zod";
+
 import { verifyServiceIdentity } from "../security/service-identity.js";
+
+const recommendationResponseSchema = z.object({ recommendationId: z.uuid() }).strict();
+
+export function validateRecommendationSubmission(value: unknown): ReturnType<typeof serviceRecommendationSubmissionSchema.parse> {
+  const parsed = serviceRecommendationSubmissionSchema.safeParse(value);
+  if (!parsed.success || Buffer.byteLength(JSON.stringify(parsed.data), "utf8") > 256 * 1024) throw new Error("OCC-AI-CORE-PAYLOAD");
+  return parsed.data;
+}
+
+export function validateRecommendationResponse(value: unknown): ReturnType<typeof recommendationResponseSchema.parse> {
+  const parsed = recommendationResponseSchema.safeParse(value);
+  if (!parsed.success) throw new Error("OCC-AI-CORE-RESPONSE");
+  return parsed.data;
+}
 
 export function validateInternalOrigin(value: string): URL {
   try {
@@ -57,6 +74,11 @@ export class CoreClient {
     return this.send("POST", "/internal/v1/ai/grants/claim", { operationId }, idempotencyKey, signal);
   }
 
+  async submitRecommendation(body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<Readonly<{ recommendationId: string }>> {
+    const payload = validateRecommendationSubmission(body);
+    return validateRecommendationResponse(await this.send("POST", "/internal/v1/ai/recommendations", payload, idempotencyKey, signal));
+  }
+
   submit(path: string, body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown> {
     if (!path.startsWith("/internal/v1/ai/")) return Promise.reject(new Error("Invalid Core route"));
     return this.send("POST", path, body, idempotencyKey, signal);
@@ -66,6 +88,9 @@ export class CoreClient {
 
   private send(method: string, path: string, body: unknown, idempotencyKey: string, signal?: AbortSignal): Promise<unknown> {
     const payload = Buffer.from(JSON.stringify(body), "utf8");
+    if (payload.length < 1 || payload.length > 256 * 1024 || idempotencyKey.length < 1 || idempotencyKey.length > 128 || /[\u0000-\u001f\u007f]/u.test(idempotencyKey)) {
+      return Promise.reject(new Error("Core service request is invalid"));
+    }
     return new Promise((resolve, reject) => {
       const options: RequestOptions = {
         protocol: "https:", hostname: this.origin.hostname, port: this.origin.port || 443, method, path,
