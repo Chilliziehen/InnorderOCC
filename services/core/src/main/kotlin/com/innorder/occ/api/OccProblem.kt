@@ -110,6 +110,9 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun reservationStateConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 409, "reservation-state-conflict", "Reservation state conflict", "OCC-RESERVATION-STATE-CONFLICT")
 
+    fun resourceQueryValidation(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "resource-query-validation", "Invalid resource query", "OCC-RESOURCE-QUERY-VALIDATION")
+
     fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
 

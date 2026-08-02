@@ -2,6 +2,7 @@ package com.innorder.occ.resource
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.command.CommandMetadata
+import com.innorder.occ.api.CursorCodec
 import com.innorder.occ.iam.BootstrapSecretMaterial
 import com.innorder.occ.iam.BootstrapSecretReader
 import com.innorder.occ.iam.SecretCharacters
@@ -49,6 +50,7 @@ abstract class ResourceIntegrationSupport {
     @Autowired protected lateinit var jdbc: JdbcTemplate
     @Autowired protected lateinit var mapper: ObjectMapper
     @Autowired protected lateinit var mockMvc: MockMvc
+    @Autowired protected lateinit var cursorCodec: CursorCodec
 
     protected val administratorId: UUID
         get() = jdbc.queryForObject(

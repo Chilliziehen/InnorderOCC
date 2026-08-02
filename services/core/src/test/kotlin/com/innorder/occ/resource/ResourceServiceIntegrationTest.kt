@@ -1,13 +1,18 @@
 package com.innorder.occ.resource
 
+import com.innorder.occ.api.CursorContext
+import com.innorder.occ.api.CursorDirection
+import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.IdempotencyConflictException
 import com.innorder.occ.command.OptimisticConflictException
+import com.innorder.occ.events.OutboxRepository
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.post
 import org.springframework.test.web.servlet.patch
+import org.springframework.test.web.servlet.get
 import java.util.UUID
 
 class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
@@ -124,7 +129,110 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         val page = resources.inventory(administratorId, UUID.randomUUID(), 1, null)
 
         assertThat(page.items.map { it.id }).containsExactly(ids[2])
-        assertThat(page.nextCursor).isNull()
+    }
+
+    @Test
+    fun `inventory caps denied OPA calls and resumes after last examined row`() {
+        val denied = (1..ResourceService.MAX_QUERY_AUTHORIZATION_CALLS).map(::pagedId)
+        val allowed = pagedId(ResourceService.MAX_QUERY_AUTHORIZATION_CALLS + 1)
+        (denied + allowed).forEach { id ->
+            entity(id, "capped-resource")
+            jdbc.update(
+                "INSERT INTO occ.managed_resource(id, resource_type, capacity, state) VALUES (?, 'ROOM', 1, 'AVAILABLE')",
+                id,
+            )
+        }
+        jdbc.update(
+            "UPDATE authz.entity SET state = 'ARCHIVED' WHERE id IN (${denied.joinToString(",") { "?" }})",
+            *denied.toTypedArray(),
+        )
+        val initialCursor = inventoryCursor(pagedId(0), inclusive = false)
+        val deniesBefore = jdbc.queryForObject(
+            """SELECT count(*) FROM authz.decision_log WHERE principal_entity_id = ?
+               AND action_key = 'occ.read' AND decision = 'DENY'""",
+            Long::class.java,
+            administratorId,
+        )!!
+
+        val capped = resources.inventory(administratorId, UUID.randomUUID(), 1, initialCursor)
+
+        assertThat(capped.items).isEmpty()
+        assertThat(capped.nextCursor).isNotNull()
+        assertThat(jdbc.queryForObject(
+            """SELECT count(*) FROM authz.decision_log WHERE principal_entity_id = ?
+               AND action_key = 'occ.read' AND decision = 'DENY'""",
+            Long::class.java,
+            administratorId,
+        )).isEqualTo(deniesBefore + ResourceService.MAX_QUERY_AUTHORIZATION_CALLS)
+
+        val resumed = resources.inventory(administratorId, UUID.randomUUID(), 1, capped.nextCursor)
+        assertThat(resumed.items.map { it.id }).containsExactly(allowed)
+    }
+
+    @Test
+    fun `schedule caps identity OPA calls and continues from its last examined tuple`() {
+        val resource = createResource(capacity = 100)
+        val requester = entity("capped-schedule-requester")
+        repeat(ResourceService.MAX_QUERY_AUTHORIZATION_CALLS + 1) {
+            jdbc.update(
+                """INSERT INTO occ.resource_reservation
+                   (id, resource_id, requester_entity_id, time_range, capacity, exclusive, state)
+                   VALUES (?, ?, ?, tstzrange(?::timestamptz, ?::timestamptz, '[)'), 1, false, 'PENDING')""",
+                UUID.randomUUID(), resource.id, requester, instant(9), instant(10),
+            )
+        }
+        val readBefore = decisionCount("occ.read")
+        val identityBefore = decisionCount("occ.reservation.identity.read")
+
+        val first = resources.schedule(administratorId, UUID.randomUUID(), resource.id, instant(8), instant(11), 100, null)
+
+        assertThat(first.items).hasSize(ResourceService.MAX_QUERY_AUTHORIZATION_CALLS - 1)
+        assertThat(first.nextCursor).isNotNull()
+        assertThat(decisionCount("occ.read") - readBefore).isEqualTo(1)
+        assertThat(decisionCount("occ.reservation.identity.read") - identityBefore)
+            .isEqualTo(ResourceService.MAX_QUERY_AUTHORIZATION_CALLS - 1L)
+        val second = resources.schedule(
+            administratorId, UUID.randomUUID(), resource.id, instant(8), instant(11), 100, first.nextCursor,
+        )
+        assertThat(second.items).hasSize(2)
+        assertThat(second.nextCursor).isNull()
+    }
+
+    @Test
+    fun `HTTP query boundaries return bounded validation problems before database access`() {
+        val resource = createResource()
+        val token = loginToken()
+        val equal = instant(9)
+        val reversedStart = instant(10)
+        val reversedEnd = instant(9)
+        val requests = listOf(
+            "/api/v1/resources?limit=0",
+            "/api/v1/resources?limit=101",
+            "/api/v1/resources/${resource.id}/schedule?start=${instant(8)}&end=${instant(9)}&limit=0",
+            "/api/v1/resources/${resource.id}/schedule?start=${instant(8)}&end=${instant(9)}&limit=101",
+            "/api/v1/resources/${resource.id}/schedule?start=$equal&end=$equal&limit=1",
+            "/api/v1/resources/${resource.id}/schedule?start=$reversedStart&end=$reversedEnd&limit=1",
+            "/api/v1/resources/${resource.id}/availability?start=$equal&end=$equal",
+            "/api/v1/resources/${resource.id}/availability?start=$reversedStart&end=$reversedEnd",
+        )
+        val decisionsBefore = jdbc.queryForObject(
+            "SELECT count(*) FROM authz.decision_log WHERE principal_entity_id = ?",
+            Long::class.java,
+            administratorId,
+        )!!
+
+        requests.forEach { path ->
+            val body = mockMvc.get(path) {
+                header("Authorization", "Bearer $token")
+                header("X-Correlation-Id", UUID.randomUUID())
+            }.andExpect { status { isBadRequest() } }.andReturn().response.contentAsString
+            assertThat(body).contains("OCC-RESOURCE-QUERY-VALIDATION").doesNotContain("PSQLException", "Internal server error")
+        }
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM authz.decision_log WHERE principal_entity_id = ?",
+            Long::class.java,
+            administratorId,
+        )).isEqualTo(decisionsBefore)
     }
 
     @Test
@@ -134,6 +242,12 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         reserve(resource.id, requester, instant(9), instant(10), 6)
         reserve(resource.id, requester, instant(9, 30), instant(10), 4)
         reserve(resource.id, requester, instant(10), instant(11), 6)
+        val identityDenialsBefore = jdbc.queryForObject(
+            """SELECT count(*) FROM authz.decision_log
+               WHERE principal_entity_id = ? AND action_key = 'occ.reservation.identity.read' AND decision = 'DENY'""",
+            Long::class.java,
+            administratorId,
+        )!!
 
         assertThatThrownBy { reserve(resource.id, requester, instant(9, 45), instant(10, 15), 1) }
             .isInstanceOfSatisfying(ReservationConflictException::class.java) { conflict ->
@@ -149,7 +263,7 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
                WHERE principal_entity_id = ? AND action_key = 'occ.reservation.identity.read' AND decision = 'DENY'""",
             Long::class.java,
             administratorId,
-        )).isEqualTo(1)
+        )).isEqualTo(identityDenialsBefore + 1)
         val event = mapper.readTree(jdbc.queryForObject(
             """SELECT payload::text FROM audit.outbox_event
                WHERE aggregate_id IN (SELECT id FROM occ.resource_reservation WHERE resource_id = ?)
@@ -263,4 +377,23 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         }.andExpect { status { isOk() } }.andReturn().response.contentAsString
         return mapper.readTree(response).path("accessToken").textValue()
     }
+
+    private fun inventoryCursor(id: UUID, inclusive: Boolean): String = cursorCodec.encode(
+        CursorContext(
+            "resource.inventory", OutboxRepository.DEFAULT_CUSTOMER_INSTANCE_ID,
+            CanonicalJsonObject.from(mapper.createObjectNode()), "resource-id", 1, CursorDirection.FORWARD,
+        ),
+        mapper.createArrayNode().add(id.toString()).add(inclusive),
+    )
+
+    private fun pagedId(index: Int): UUID = UUID.fromString(
+        "f0000000-0000-7000-8000-${index.toString(16).padStart(12, '0')}",
+    )
+
+    private fun decisionCount(action: String): Long = jdbc.queryForObject(
+        "SELECT count(*) FROM authz.decision_log WHERE principal_entity_id = ? AND action_key = ?",
+        Long::class.java,
+        administratorId,
+        action,
+    )!!
 }

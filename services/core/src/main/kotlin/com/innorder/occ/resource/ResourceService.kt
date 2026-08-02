@@ -127,6 +127,7 @@ class ReservationConflictException(
 ) : RuntimeException("Reservation conflicts with resource availability or capacity")
 
 class ReservationStateConflictException : RuntimeException("Reservation state does not permit this command")
+class ResourceQueryValidationException : RuntimeException("Resource query is invalid")
 
 @Service
 class ResourceService(
@@ -186,16 +187,21 @@ class ResourceService(
     }
 
     fun inventory(principalId: UUID, correlationId: UUID, limit: Int, cursor: String?): CursorPage<ManagedResource> {
-        require(limit in 1..100)
+        validateQueryLimit(limit)
         val context = cursorContext("resource.inventory", CanonicalJsonObject.from(mapper.createObjectNode()), "resource-id")
         val tuple = cursor?.let { cursorCodec.decode(it, context) }
         var examined = tuple?.get(0)?.textValue()?.let(UUID::fromString)
         var inclusive = tuple?.get(1)?.booleanValue() ?: false
         var exhausted = false
+        var authorizationCalls = 0
         val authorized = transactions.execute {
             buildList {
-                while (size < limit + 1 && !exhausted) {
-                    val rows = repository.inventory(examined, inclusive, maxOf(limit + 1, DATABASE_PAGE_SIZE))
+                while (size < limit + 1 && !exhausted && authorizationCalls < MAX_QUERY_AUTHORIZATION_CALLS) {
+                    val batchLimit = minOf(
+                        maxOf(limit + 1, DATABASE_PAGE_SIZE),
+                        MAX_QUERY_AUTHORIZATION_CALLS - authorizationCalls,
+                    )
+                    val rows = repository.inventory(examined, inclusive, batchLimit)
                     if (rows.isEmpty()) {
                         exhausted = true
                         break
@@ -203,16 +209,19 @@ class ResourceService(
                     inclusive = false
                     for (row in rows) {
                         examined = row.id
+                        authorizationCalls += 1
                         if (authorizeRow(principalId, correlationId, row.id, row.id)) add(row)
-                        if (size == limit + 1) break
+                        if (size == limit + 1 || authorizationCalls == MAX_QUERY_AUTHORIZATION_CALLS) break
                     }
-                    if (rows.size < maxOf(limit + 1, DATABASE_PAGE_SIZE)) exhausted = true
+                    if (rows.size < batchLimit) exhausted = true
                 }
             }
         }!!
         val page = authorized.take(limit)
         val next = if (authorized.size > limit) authorized[limit].let { resource ->
             cursorCodec.encode(context, mapper.createArrayNode().add(resource.id.toString()).add(true))
+        } else if (!exhausted && examined != null) {
+            cursorCodec.encode(context, mapper.createArrayNode().add(examined.toString()).add(false))
         } else null
         return CursorPage(page, next)
     }
@@ -223,10 +232,13 @@ class ResourceService(
         resourceId: UUID,
         start: OffsetDateTime,
         end: OffsetDateTime,
-    ): List<AvailabilityWindow> = transactions.execute {
-        authorizeRequired(principalId, correlationId, resourceId, resourceId, READ_ACTION)
-        repository.availability(resourceId, utc(start), utc(end))
-    }!!
+    ): List<AvailabilityWindow> {
+        validateQueryRange(start, end)
+        return transactions.execute {
+            authorizeRequired(principalId, correlationId, resourceId, resourceId, READ_ACTION)
+            repository.availability(resourceId, utc(start), utc(end))
+        }!!
+    }
 
     fun schedule(
         principalId: UUID,
@@ -237,10 +249,10 @@ class ResourceService(
         limit: Int,
         cursor: String?,
     ): CursorPage<Reservation> {
-        require(limit in 1..100)
+        validateQueryLimit(limit)
         val normalizedStart = utc(start)
         val normalizedEnd = utc(end)
-        validateRange(normalizedStart, normalizedEnd)
+        validateQueryRange(normalizedStart, normalizedEnd)
         val filters = CanonicalJsonObject.from(mapper.createObjectNode().apply {
             put("resourceId", resourceId.toString())
             put("start", normalizedStart.toString())
@@ -251,9 +263,10 @@ class ResourceService(
         val afterStart = tuple?.get(0)?.textValue()?.let(OffsetDateTime::parse)
         val afterId = tuple?.get(1)?.textValue()?.let(UUID::fromString)
         val inclusive = tuple?.get(2)?.booleanValue() ?: false
+        val rowBudget = MAX_QUERY_AUTHORIZATION_CALLS - 1
         val authorized = transactions.execute {
             authorizeRequired(principalId, correlationId, resourceId, resourceId, READ_ACTION)
-            repository.schedule(resourceId, normalizedStart, normalizedEnd, afterStart, afterId, inclusive, limit + 1)
+            repository.schedule(resourceId, normalizedStart, normalizedEnd, afterStart, afterId, inclusive, minOf(limit + 1, rowBudget))
                 .map { revealOrRedactIdentity(principalId, correlationId, it) }
         }!!
         val page = authorized.take(limit)
@@ -261,6 +274,11 @@ class ResourceService(
             cursorCodec.encode(
                 context,
                 mapper.createArrayNode().add(reservation.start.toString()).add(reservation.id.toString()).add(true),
+            )
+        } else if (authorized.size == rowBudget && limit + 1 > rowBudget) authorized.last().let { reservation ->
+            cursorCodec.encode(
+                context,
+                mapper.createArrayNode().add(reservation.start.toString()).add(reservation.id.toString()).add(false),
             )
         } else null
         return CursorPage(page, next)
@@ -538,6 +556,14 @@ class ResourceService(
         return null
     }
 
+    private fun validateQueryLimit(limit: Int) {
+        if (limit !in 1..MAX_QUERY_LIMIT) throw ResourceQueryValidationException()
+    }
+
+    private fun validateQueryRange(start: OffsetDateTime, end: OffsetDateTime) {
+        if (!start.toInstant().isBefore(end.toInstant())) throw ResourceQueryValidationException()
+    }
+
     companion object {
         private const val WRITE_ACTION = "occ.execute"
         private const val READ_ACTION = "occ.read"
@@ -546,6 +572,10 @@ class ResourceService(
         private const val STATE_SQLSTATE = "55000"
         private const val CONSTRAINT_SQLSTATE = "23514"
         private const val DATABASE_PAGE_SIZE = 32
+        private const val MAX_QUERY_LIMIT = 100
+
+        /** Bounds rows examined and OPA decisions made by one inventory or schedule request. */
+        const val MAX_QUERY_AUTHORIZATION_CALLS = 32
     }
 }
 
