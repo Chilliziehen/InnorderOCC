@@ -94,6 +94,7 @@ Kafka 使用单节点 KRaft：
 | `postgres_admin_password` | `postgres` | `/run/secrets/postgres_admin_password` |
 | `postgres_flyway_password` | `postgres`、`core` | PostgreSQL 初始化文件；Core 的 `/run/secrets/spring.flyway.password` |
 | `postgres_runtime_password` | `postgres`、`core` | PostgreSQL 初始化文件；Core 的 `/run/secrets/spring.datasource.password` |
+| `postgres_ai_runtime_password` | `postgres` | PostgreSQL 初始化文件；主机路径由 `AI_DATABASE_PASSWORD_FILE` 提供 |
 | `redis_password` | `redis`、`core` | Redis 文件；Core 的 `/run/secrets/spring.data.redis.password` |
 | `minio_root_user` | `minio`、`minio-init` | `/run/secrets/minio_root_user` |
 | `minio_root_password` | `minio`、`minio-init` | `/run/secrets/minio_root_password` |

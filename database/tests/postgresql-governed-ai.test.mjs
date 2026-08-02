@@ -688,6 +688,11 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   assert.equal(claimed, '1');
   assert.equal(execAiSql(`SELECT status || '|' || worker_id FROM ai.ingestion_attempt
     WHERE job_id = '${id('000000000026')}' AND attempt_number = 1;`), 'RUNNING|worker-a');
+  assert.match(execAiSql(`SELECT ai.heartbeat_ingestion_job('${id('000000000026')}', 'worker-a', interval '45 seconds')::text;`), /\+00$/u);
+  assert.equal(execAiSql(`SELECT job.lease_expires_at = attempt.lease_expires_at FROM ai.ingestion_job job
+    JOIN ai.ingestion_attempt attempt ON attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+    WHERE job.id = '${id('000000000026')}';`), 't');
+  expectAiFailure(`SELECT ai.heartbeat_ingestion_job('${id('000000000026')}', 'worker-a', interval '16 minutes');`, /invalid ingestion heartbeat bounds/iu);
   assert.equal(execAiSql(`SELECT count(*) FROM ai.claim_ingestion_jobs('lease-cleaner', 10, interval '30 seconds');`), '0');
   assert.equal(execAiSql(`SELECT status || '|' || sanitized_error || '|' || (completed_at IS NOT NULL)
     FROM ai.ingestion_job WHERE id = '${id('000000000058')}';`),
@@ -708,6 +713,10 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   /content hash does not match claimed job/iu);
   execAiSql(`SELECT ai.persist_ingestion_document_version('${id('000000000026')}', 'worker-b',
     '${id('000000000037')}', 2, 'ingested-${fixture}', repeat('8',64), 'text/plain', 'PUBLIC');`);
+  execAiSql(`SELECT ai.persist_ingestion_document_version('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', 2, 'ingested-${fixture}', repeat('8',64), 'text/plain', 'PUBLIC');`);
+  expectAiFailure(`SELECT ai.persist_ingestion_document_version('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', 2, 'ingested-${fixture}', repeat('8',64), 'application/pdf', 'PUBLIC');`, /conflicting ingestion document replay/iu);
   expectAiFailure(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
     '${id('00000000004b')}', '${id('00000000004d')}', 0, 'old', repeat('d',64), 1,
     '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`, /produced document version/iu);
@@ -717,6 +726,22 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   execAiSql(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
     '${id('000000000037')}', '${id('000000000038')}', 0, 'candidate knowledge', repeat('9',64),
     2, '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`);
+  execAiSql(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', '${id('000000000038')}', 0, 'candidate knowledge', repeat('9',64),
+    2, '{}', '${id('000000000029')}', '[1,0,0]'::public.vector);`);
+  expectAiFailure(`SELECT ai.persist_ingestion_chunk_embedding('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', '${id('000000000038')}', 0, 'candidate knowledge', repeat('9',64),
+    2, '{}', '${id('000000000029')}', '[0,1,0]'::public.vector);`, /conflicting ingestion embedding replay/iu);
+  assert.equal(execAiSql(`SELECT ai.persist_ingestion_embedding_batch('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', '${id('000000000029')}',
+    '[{"id":"${id('000000000039')}","ordinal":10,"content":"batch knowledge","contentHash":"${'7'.repeat(64)}","tokenCount":2,"metadata":{},"embedding":[0,1,0]}]',
+    '{"embeddedThrough":11}');`), '1');
+  assert.equal(execAiSql(`SELECT checkpoint->>'embeddedThrough' FROM ai.ingestion_job WHERE id = '${id('000000000026')}';`), '11');
+  assert.equal(execAiSql(`SELECT ai.persist_ingestion_embedding_batch('${id('000000000026')}', 'worker-b',
+    '${id('000000000037')}', '${id('000000000029')}',
+    '[{"id":"${id('000000000039')}","ordinal":10,"content":"batch knowledge","contentHash":"${'7'.repeat(64)}","tokenCount":2,"metadata":{},"embedding":[0,1,0]}]',
+    '{"embeddedThrough":11}');`), '1');
+  assert.equal(execAiSql(`SELECT count(*) FROM ai.knowledge_chunk WHERE id IN ('${id('000000000038')}', '${id('000000000039')}');`), '2');
   execAiSql(`SELECT ai.finalize_ingestion_job('${id('000000000026')}', 'worker-b', '{"done":true}');`);
   assert.equal(execAiSql(`SELECT status || '|' || stage || '|' || (completed_at IS NOT NULL)
     FROM ai.ingestion_attempt WHERE job_id = '${id('000000000026')}' AND attempt_number = 2;`),
@@ -834,9 +859,10 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     '${id('000000000028')}', 'test.event', 1, 'document', '${id('000000000036')}', 1);`), eventId,
   'terminal event dedup returns the durable record');
 
-  const gateEvidence = (evaluationId, start, count, numerator, denominator, recall) =>
+  const gateEvidence = (evaluationId, start, count, numerator, denominator, recall, leakage = 0, outcomeStatus = 'MATCH') =>
     Array.from({ length: count }, (_, index) => `SELECT ai.record_embedding_gate_case('${evaluationId}',
-      '${id(String(start + index).padStart(12, '0'))}', ${numerator}, ${denominator}, ${recall}, repeat('b',64));`).join('\n');
+      '${id(String(start + index).padStart(12, '0'))}', ${numerator}, ${denominator}, ${Math.round(recall * 100)}, 100,
+      ${leakage}, repeat('${outcomeStatus === 'MATCH' ? 'c' : 'd'}',64), repeat('${outcomeStatus === 'MATCH' ? 'c' : 'e'}',64), '${outcomeStatus}', repeat('b',64));`).join('\n');
 
   execSql(`INSERT INTO ai.knowledge_document_version
       (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
@@ -941,8 +967,9 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   execAiSql(gateEvidence(id('000000000068'), 400, 19, 1, 1, 1));
   expectAiFailure(gateEvidence(id('000000000068'), 419, 1, 1, 1, 1), /evaluation case must contain non-empty input and expected properties/iu);
   execSql(`INSERT INTO ai.embedding_space_gate_case_evidence
-    (evaluation_id, case_id, citation_numerator, citation_denominator, recall_at_10, evidence_hash)
-    VALUES ('${id('000000000068')}', '${id('000000000419')}', 1, 1, 1, repeat('4',64));`);
+    (evaluation_id, case_id, citation_numerator, citation_denominator, recall_numerator, recall_denominator,
+     leakage_count, expected_outcome_hash, actual_outcome_hash, outcome_status, evidence_hash)
+    VALUES ('${id('000000000068')}', '${id('000000000419')}', 1, 1, 1, 1, 0, repeat('4',64), repeat('4',64), 'MATCH', repeat('4',64));`);
   expectAiFailure(`SELECT ai.finalize_embedding_space_gate('${id('000000000068')}');`, /evaluation dataset contains empty cases/iu);
 
   execAiSql(gateEvidence(id('000000000046'), 100, 20, 1, 1, 1));
@@ -951,7 +978,7 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   execAiSql(gateEvidence(id('000000000046'), 120, 10, 0, 1, 0));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000046')}');`), 'FAIL');
   assert.equal(execAiSql(`SELECT dataset_content_hash || '|' || citation_numerator || '|' || citation_denominator ||
-    '|' || recall_sum || '|' || recall_count FROM ai.embedding_space_gate_result
+    '|' || recall_sum::float8 || '|' || recall_count FROM ai.embedding_space_gate_result
     WHERE id = '${id('000000000046')}';`), `${'1'.repeat(64)}|20|30|20|30`);
 
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000047')}', '${id('00000000003b')}',
@@ -987,6 +1014,51 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     /ingestion completion is blocked by finalized gate/iu);
   expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('000000000048')}', '${id('000000000013')}',
     '${id('000000000029')}', repeat('8',64), '${id('000000000009')}', repeat('e',64));`, /stale corpus manifest/iu);
+
+  execSql(`
+    INSERT INTO ai.embedding_space (id, model_profile_id, dimensions, distance_metric, corpus_version, status, coverage) VALUES
+      ('${id('000000000900')}', '${id('000000000008')}', 3, 'COSINE', repeat('f',64), 'BUILDING', 0),
+      ('${id('000000000910')}', '${id('000000000008')}', 3, 'COSINE', repeat('e',64), 'BUILDING', 0),
+      ('${id('000000000920')}', '${id('000000000008')}', 3, 'COSINE', repeat('d',64), 'BUILDING', 0);
+    SELECT ai.create_embedding_partition('${id('000000000900')}', 3, 'COSINE');
+    SELECT ai.create_embedding_partition('${id('000000000910')}', 3, 'COSINE');
+    SELECT ai.create_embedding_partition('${id('000000000920')}', 3, 'COSINE');
+    INSERT INTO ai.knowledge_document_version
+      (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification) VALUES
+      ('${id('000000000901')}', '${id('000000000036')}', 20, 'coverage-${fixture}', repeat('1',64), 'text/plain', 'parser-v1', 'PUBLIC'),
+      ('${id('000000000911')}', '${id('000000000036')}', 21, 'leakage-${fixture}', repeat('2',64), 'text/plain', 'parser-v1', 'PUBLIC'),
+      ('${id('000000000921')}', '${id('000000000036')}', 22, 'outcome-${fixture}', repeat('3',64), 'text/plain', 'parser-v1', 'PUBLIC');
+    INSERT INTO ai.knowledge_chunk (id, document_version_id, ordinal, content, content_hash, token_count, metadata) VALUES
+      ('${id('000000000902')}', '${id('000000000901')}', 0, 'coverage case', repeat('4',64), 2, '{}'),
+      ('${id('000000000912')}', '${id('000000000911')}', 0, 'leakage case', repeat('5',64), 2, '{}'),
+      ('${id('000000000922')}', '${id('000000000921')}', 0, 'outcome case', repeat('6',64), 2, '{}');
+    INSERT INTO ai.chunk_embedding (embedding_space_id, chunk_id, embedding) VALUES
+      ('${id('000000000910')}', '${id('000000000912')}', '[1,0,0]'),
+      ('${id('000000000910')}', '${id('00000000004c')}', '[0,1,0]'),
+      ('${id('000000000920')}', '${id('000000000922')}', '[1,0,0]');
+    INSERT INTO ai.ingestion_job
+      (id, source_id, document_id, produced_document_version_id, source_version, source_object_hash,
+       normalized_content_hash, parser_version, chunker_version, candidate_embedding_space_id,
+       corpus_manifest_digest, checkpoint, stage, status, attempts, completed_at) VALUES
+      ('${id('000000000903')}', '${id('000000000014')}', '${id('000000000036')}', '${id('000000000901')}', 'coverage', repeat('7',64), repeat('1',64), 'parser-v1', 'chunker-v2', '${id('000000000900')}', repeat('f',64), '{}', 'COMPLETE', 'COMPLETED', 1, now()),
+      ('${id('000000000913')}', '${id('000000000014')}', '${id('000000000036')}', '${id('000000000911')}', 'leakage', repeat('8',64), repeat('2',64), 'parser-v1', 'chunker-v2', '${id('000000000910')}', repeat('e',64), '{}', 'COMPLETE', 'COMPLETED', 1, now()),
+      ('${id('000000000923')}', '${id('000000000014')}', '${id('000000000036')}', '${id('000000000921')}', 'outcome', repeat('9',64), repeat('3',64), 'parser-v1', 'chunker-v2', '${id('000000000920')}', repeat('d',64), '{}', 'COMPLETE', 'COMPLETED', 1, now());
+  `);
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000904')}', '${id('00000000003b')}', '${id('000000000900')}', repeat('f',64), '${id('000000000009')}', repeat('1',64));`);
+  execAiSql(gateEvidence(id('000000000904'), 130, 20, 1, 1, 1));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000904')}');`), 'FAIL');
+  assert.equal(execAiSql(`SELECT embedded_count || '|' || eligible_count FROM ai.embedding_space_gate_result WHERE id = '${id('000000000904')}';`), '0|1');
+
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000914')}', '${id('00000000003b')}', '${id('000000000910')}', repeat('e',64), '${id('000000000009')}', repeat('2',64));`);
+  execAiSql(gateEvidence(id('000000000914'), 130, 20, 1, 1, 1));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000914')}');`), 'FAIL');
+  assert.equal(execAiSql(`SELECT leakage_count FROM ai.embedding_space_gate_result WHERE id = '${id('000000000914')}';`), '1');
+
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000924')}', '${id('00000000003b')}', '${id('000000000920')}', repeat('d',64), '${id('000000000009')}', repeat('3',64));`);
+  execAiSql(gateEvidence(id('000000000924'), 130, 20, 1, 1, 1, 0, 'MISMATCH'));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000924')}');`), 'FAIL');
+  assert.equal(execAiSql(`SELECT count(*) FROM ai.embedding_space_gate_case_evidence WHERE evaluation_id = '${id('000000000924')}' AND outcome_status = 'MISMATCH';`), '20');
+
   assert.equal(execAiSql(`SELECT minimum_coverage || '|' || maximum_leakage || '|' ||
     minimum_citation_precision || '|' || minimum_recall_at_10
     FROM ai.embedding_space_gate_result WHERE id = '${id('000000000046')}';`), '1.0|0|0.95|0.85');

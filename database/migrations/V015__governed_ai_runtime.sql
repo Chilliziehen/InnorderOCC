@@ -333,7 +333,12 @@ CREATE TABLE ai.embedding_space_gate_case_evidence (
     case_id uuid NOT NULL REFERENCES ai.evaluation_case(id),
     citation_numerator bigint NOT NULL CHECK (citation_numerator >= 0),
     citation_denominator bigint NOT NULL CHECK (citation_denominator > 0 AND citation_denominator >= citation_numerator),
-    recall_at_10 numeric NOT NULL CHECK (recall_at_10 BETWEEN 0 AND 1),
+    recall_numerator bigint NOT NULL CHECK (recall_numerator >= 0),
+    recall_denominator bigint NOT NULL CHECK (recall_denominator > 0 AND recall_denominator >= recall_numerator),
+    leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
+    expected_outcome_hash text NOT NULL CHECK (expected_outcome_hash ~ '^[0-9a-f]{64}$'),
+    actual_outcome_hash text NOT NULL CHECK (actual_outcome_hash ~ '^[0-9a-f]{64}$'),
+    outcome_status text NOT NULL CHECK (outcome_status IN ('MATCH', 'MISMATCH')),
     evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
@@ -353,6 +358,7 @@ CREATE TABLE ai.embedding_space_gate_result (
     eligible_count bigint NOT NULL CHECK (eligible_count > 0),
     embedded_count bigint NOT NULL CHECK (embedded_count >= 0 AND embedded_count <= eligible_count),
     leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
+    outcome_mismatch_count bigint NOT NULL DEFAULT 0 CHECK (outcome_mismatch_count >= 0),
     citation_numerator bigint NOT NULL CHECK (citation_numerator >= 0),
     citation_denominator bigint NOT NULL CHECK (citation_denominator > 0 AND citation_denominator >= citation_numerator),
     citation_precision numeric GENERATED ALWAYS AS (citation_numerator::numeric / citation_denominator) STORED,
@@ -372,6 +378,7 @@ CREATE TABLE ai.embedding_space_gate_result (
     CHECK ((decision = 'PASS') = (
         embedded_count::numeric / eligible_count >= minimum_coverage
         AND leakage_count <= maximum_leakage
+        AND outcome_mismatch_count = 0
         AND citation_numerator::numeric / citation_denominator >= minimum_citation_precision
         AND recall_sum / recall_count >= minimum_recall_at_10
     )),
@@ -440,6 +447,44 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is not active';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION ai.heartbeat_ingestion_job(p_job_id uuid, p_worker_id text, p_lease interval)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_id uuid;
+    extended_until timestamptz;
+BEGIN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = '' OR p_lease IS NULL
+       OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion heartbeat bounds';
+    END IF;
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    UPDATE ai.ingestion_job
+    SET lease_expires_at = transaction_timestamp() + p_lease, updated_at = statement_timestamp()
+    WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp()
+    RETURNING lease_expires_at INTO extended_until;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_attempt attempt
+    SET lease_expires_at = extended_until
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    RETURN extended_until;
 END;
 $$;
 
@@ -1245,6 +1290,7 @@ AS $$
 DECLARE
     job ai.ingestion_job%ROWTYPE;
     candidate_id uuid;
+    existing ai.knowledge_document_version%ROWTYPE;
 BEGIN
     SELECT candidate_embedding_space_id INTO STRICT candidate_id
     FROM ai.ingestion_job WHERE id = p_job_id;
@@ -1264,6 +1310,27 @@ BEGIN
           AND gate_result.decision = 'PASS'
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion mutation is blocked by finalized gate';
+    END IF;
+    SELECT version.* INTO existing
+    FROM ai.knowledge_document_version version
+    WHERE version.id = p_document_version_id
+       OR (version.document_id = job.document_id AND version.version = p_version)
+       OR version.object_key = p_object_key
+    ORDER BY CASE WHEN version.id = p_document_version_id THEN 0 ELSE 1 END
+    LIMIT 1;
+    IF FOUND THEN
+        IF existing.id <> p_document_version_id OR existing.document_id <> job.document_id
+           OR existing.version <> p_version OR existing.object_key <> p_object_key
+           OR existing.content_hash <> p_normalized_content_hash OR existing.mime_type <> p_mime_type
+           OR existing.parser_version <> job.parser_version OR existing.data_classification <> p_data_classification
+           OR (job.produced_document_version_id IS NOT NULL AND job.produced_document_version_id <> p_document_version_id) THEN
+            RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion document replay';
+        END IF;
+        UPDATE ai.ingestion_job SET produced_document_version_id = p_document_version_id WHERE id = p_job_id;
+        RETURN p_document_version_id;
+    END IF;
+    IF job.produced_document_version_id IS NOT NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion document replay';
     END IF;
     INSERT INTO ai.knowledge_document_version
         (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
@@ -1291,6 +1358,8 @@ DECLARE
     space_manifest text;
     space_status text;
     candidate_id uuid;
+    existing_chunk ai.knowledge_chunk%ROWTYPE;
+    existing_embedding public.vector;
 BEGIN
     SELECT candidate_embedding_space_id INTO STRICT candidate_id
     FROM ai.ingestion_job WHERE id = p_job_id;
@@ -1329,10 +1398,75 @@ BEGIN
     END IF;
     INSERT INTO ai.knowledge_chunk
         (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
-    VALUES (p_chunk_id, p_document_version_id, p_ordinal, p_content, p_content_hash, p_token_count, p_metadata);
+    VALUES (p_chunk_id, p_document_version_id, p_ordinal, p_content, p_content_hash, p_token_count, p_metadata)
+    ON CONFLICT DO NOTHING;
+    SELECT chunk.* INTO STRICT existing_chunk FROM ai.knowledge_chunk chunk
+    WHERE chunk.id = p_chunk_id OR (chunk.document_version_id = p_document_version_id AND chunk.ordinal = p_ordinal)
+    ORDER BY CASE WHEN chunk.id = p_chunk_id THEN 0 ELSE 1 END LIMIT 1;
+    IF existing_chunk.id <> p_chunk_id OR existing_chunk.document_version_id <> p_document_version_id
+       OR existing_chunk.ordinal <> p_ordinal OR existing_chunk.content <> p_content
+       OR existing_chunk.content_hash <> p_content_hash OR existing_chunk.token_count <> p_token_count
+       OR existing_chunk.metadata <> p_metadata THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion chunk replay';
+    END IF;
     INSERT INTO ai.chunk_embedding (embedding_space_id, chunk_id, embedding)
-    VALUES (p_embedding_space_id, p_chunk_id, p_embedding);
+    VALUES (p_embedding_space_id, p_chunk_id, p_embedding)
+    ON CONFLICT DO NOTHING;
+    SELECT embedding.embedding INTO STRICT existing_embedding FROM ai.chunk_embedding embedding
+    WHERE embedding.embedding_space_id = p_embedding_space_id AND embedding.chunk_id = p_chunk_id;
+    IF existing_embedding::text <> p_embedding::text THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion embedding replay';
+    END IF;
     RETURN p_chunk_id;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_ingestion_embedding_batch(
+    p_job_id uuid, p_worker_id text, p_document_version_id uuid,
+    p_embedding_space_id uuid, p_chunks jsonb, p_checkpoint jsonb
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_id uuid;
+    item jsonb;
+BEGIN
+    IF jsonb_typeof(p_chunks) <> 'array' OR jsonb_array_length(p_chunks) NOT BETWEEN 1 AND 100
+       OR jsonb_typeof(p_checkpoint) <> 'object' OR octet_length(p_checkpoint::text) > 1048576 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion embedding batch';
+    END IF;
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    FOR item IN SELECT value FROM jsonb_array_elements(p_chunks)
+    LOOP
+        IF jsonb_typeof(item) <> 'object' OR jsonb_typeof(item->'embedding') <> 'array' THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion embedding batch';
+        END IF;
+        PERFORM ai.persist_ingestion_chunk_embedding(
+            p_job_id, p_worker_id, p_document_version_id, (item->>'id')::uuid,
+            (item->>'ordinal')::integer, item->>'content', item->>'contentHash',
+            (item->>'tokenCount')::integer, item->'metadata', p_embedding_space_id,
+            (item->'embedding')::text::public.vector
+        );
+    END LOOP;
+    UPDATE ai.ingestion_attempt attempt
+    SET stage = 'EMBED', checkpoint = p_checkpoint
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_job SET stage = 'EMBED', checkpoint = p_checkpoint,
+        updated_at = statement_timestamp() WHERE id = p_job_id;
+    RETURN jsonb_array_length(p_chunks);
 END;
 $$;
 
@@ -1762,10 +1896,19 @@ BEGIN
       AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
     ORDER BY job.id
     FOR UPDATE;
+    PERFORM 1
+    FROM ai.knowledge_document document
+    JOIN ai.ingestion_job job ON job.document_id = document.id
+    WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
+      AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY document.id
+    FOR UPDATE OF document;
     WITH eligible_versions AS MATERIALIZED (
-        SELECT DISTINCT version.id, version.content_hash
+        SELECT DISTINCT version.id, version.document_id, version.version AS version_number,
+               version.content_hash, document.current_version AS expected_head
         FROM ai.ingestion_job job
         JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+        JOIN ai.knowledge_document document ON document.id = version.document_id
         WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
           AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
     ), eligible_chunks AS (
@@ -1777,7 +1920,13 @@ BEGIN
            (SELECT count(*) FROM ai.chunk_embedding all_embedding
             LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
             WHERE all_embedding.embedding_space_id = p_candidate_embedding_space_id AND allowed.id IS NULL),
-           (SELECT string_agg(version.id::text || ':' || version.content_hash, ',' ORDER BY version.id)
+           (SELECT string_agg(
+                version.document_id::text || ':' || coalesce(version.expected_head::text, 'null') || '>' ||
+                version.id::text || ':' || version.version_number::text || ':' || version.content_hash || '[' ||
+                coalesce((SELECT string_agg(chunk.id::text || ':' || chunk.ordinal::text || ':' || chunk.content_hash,
+                                            ';' ORDER BY chunk.ordinal, chunk.id)
+                          FROM ai.knowledge_chunk chunk WHERE chunk.document_version_id = version.id), '') || ']',
+                ',' ORDER BY version.document_id, version.id)
             FROM eligible_versions version)
     INTO eligible, embedded, leakage, document_manifest
     FROM eligible_chunks eligible_chunk
@@ -1797,7 +1946,9 @@ $$;
 
 CREATE FUNCTION ai.record_embedding_gate_case(
     p_evaluation_id uuid, p_case_id uuid, p_citation_numerator bigint,
-    p_citation_denominator bigint, p_recall_at_10 numeric, p_evidence_hash text
+    p_citation_denominator bigint, p_recall_numerator bigint, p_recall_denominator bigint,
+    p_leakage_count bigint, p_expected_outcome_hash text, p_actual_outcome_hash text,
+    p_outcome_status text, p_evidence_hash text
 )
 RETURNS uuid
 LANGUAGE plpgsql
@@ -1822,9 +1973,16 @@ BEGIN
        OR NOT (jsonb_typeof(case_expected_properties) = 'object' AND case_expected_properties <> '{}'::jsonb) THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation case must contain non-empty input and expected properties';
     END IF;
+    IF (p_expected_outcome_hash = p_actual_outcome_hash) IS DISTINCT FROM (p_outcome_status = 'MATCH') THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'gate outcome status does not match evidence hashes';
+    END IF;
     INSERT INTO ai.embedding_space_gate_case_evidence
-        (evaluation_id, case_id, citation_numerator, citation_denominator, recall_at_10, evidence_hash)
-    VALUES (p_evaluation_id, p_case_id, p_citation_numerator, p_citation_denominator, p_recall_at_10, p_evidence_hash);
+        (evaluation_id, case_id, citation_numerator, citation_denominator,
+         recall_numerator, recall_denominator, leakage_count, expected_outcome_hash,
+         actual_outcome_hash, outcome_status, evidence_hash)
+    VALUES (p_evaluation_id, p_case_id, p_citation_numerator, p_citation_denominator,
+            p_recall_numerator, p_recall_denominator, p_leakage_count, p_expected_outcome_hash,
+            p_actual_outcome_hash, p_outcome_status, p_evidence_hash);
     RETURN p_case_id;
 END;
 $$;
@@ -1849,6 +2007,8 @@ DECLARE
     citation_num bigint;
     citation_den bigint;
     recall_total numeric;
+    case_leakage bigint;
+    outcome_mismatches bigint;
     cases bigint;
     dataset_cases bigint;
     evidence_cases bigint;
@@ -1882,6 +2042,13 @@ BEGIN
     ORDER BY job.id
     FOR UPDATE;
     PERFORM 1
+    FROM ai.knowledge_document document
+    JOIN ai.ingestion_job job ON job.document_id = document.id
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY document.id
+    FOR UPDATE OF document;
+    PERFORM 1
     FROM ai.ingestion_job job
     JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
     WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
@@ -1895,9 +2062,11 @@ BEGIN
       AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
     FOR SHARE OF chunk;
     WITH eligible_versions AS MATERIALIZED (
-        SELECT DISTINCT version.id, version.content_hash
+        SELECT DISTINCT version.id, version.document_id, version.version AS version_number,
+               version.content_hash, document.current_version AS expected_head
         FROM ai.ingestion_job job
         JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+        JOIN ai.knowledge_document document ON document.id = version.document_id
         WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
           AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
     ), eligible_chunks AS (
@@ -1909,7 +2078,13 @@ BEGIN
            (SELECT count(*) FROM ai.chunk_embedding all_embedding
             LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
             WHERE all_embedding.embedding_space_id = evaluation.candidate_embedding_space_id AND allowed.id IS NULL),
-           (SELECT string_agg(version.id::text || ':' || version.content_hash, ',' ORDER BY version.id)
+           (SELECT string_agg(
+                version.document_id::text || ':' || coalesce(version.expected_head::text, 'null') || '>' ||
+                version.id::text || ':' || version.version_number::text || ':' || version.content_hash || '[' ||
+                coalesce((SELECT string_agg(chunk.id::text || ':' || chunk.ordinal::text || ':' || chunk.content_hash,
+                                            ';' ORDER BY chunk.ordinal, chunk.id)
+                          FROM ai.knowledge_chunk chunk WHERE chunk.document_version_id = version.id), '') || ']',
+                ',' ORDER BY version.document_id, version.id)
             FROM eligible_versions version)
     INTO current_eligible, current_embedded, current_leakage, current_document_manifest
     FROM eligible_chunks eligible_chunk
@@ -1944,8 +2119,9 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'partial evidence cannot finalize a complete evaluation dataset';
     END IF;
     SELECT coalesce(sum(evidence.citation_numerator), 0), coalesce(sum(evidence.citation_denominator), 0),
-           coalesce(sum(evidence.recall_at_10), 0), count(*)
-    INTO citation_num, citation_den, recall_total, cases
+           coalesce(sum(evidence.recall_numerator::numeric / evidence.recall_denominator), 0), count(*),
+           coalesce(sum(evidence.leakage_count), 0), count(*) FILTER (WHERE evidence.outcome_status = 'MISMATCH')
+    INTO citation_num, citation_den, recall_total, cases, case_leakage, outcome_mismatches
     FROM ai.embedding_space_gate_case_evidence evidence
     JOIN ai.evaluation_case evaluation_case ON evaluation_case.id = evidence.case_id
     WHERE evidence.evaluation_id = p_evaluation_id;
@@ -1953,18 +2129,19 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: citation evidence is required';
     END IF;
     gate_decision := CASE WHEN evaluation.embedded_count = evaluation.eligible_count
-        AND evaluation.leakage_count = 0
+        AND evaluation.leakage_count + case_leakage = 0
+        AND outcome_mismatches = 0
         AND citation_num::numeric / citation_den >= 0.95
         AND recall_total / cases >= 0.85 THEN 'PASS' ELSE 'FAIL' END;
     INSERT INTO ai.embedding_space_gate_result
         (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, document_manifest, candidate_embedding_space_id,
-         expected_active_space_id, eligible_count, embedded_count, leakage_count,
+         expected_active_space_id, eligible_count, embedded_count, leakage_count, outcome_mismatch_count,
          citation_numerator, citation_denominator, recall_sum, recall_count,
          decision, evidence_hash)
     VALUES (evaluation.id, evaluation.dataset_version_id, evaluation.dataset_content_hash, evaluation.corpus_manifest_digest,
             evaluation.document_manifest,
             evaluation.candidate_embedding_space_id, evaluation.expected_active_space_id,
-            evaluation.eligible_count, evaluation.embedded_count, evaluation.leakage_count,
+                evaluation.eligible_count, evaluation.embedded_count, evaluation.leakage_count + case_leakage, outcome_mismatches,
             citation_num, citation_den, recall_total, cases, gate_decision, evaluation.evidence_hash);
     RETURN gate_decision;
 END;
@@ -2090,12 +2267,14 @@ REVOKE ALL ON FUNCTION ai.release_legal_hold(uuid, uuid) FROM PUBLIC, innorder_a
 GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.get_ai_operation_status(uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.heartbeat_ingestion_job(uuid, text, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.release_legal_hold(uuid, uuid) TO innorder_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_chunk_embedding(uuid, text, uuid, uuid, integer, text, text, integer, jsonb, uuid, public.vector) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_ingestion_embedding_batch(uuid, text, uuid, uuid, jsonb, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.checkpoint_ingestion_attempt(uuid, text, text, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.finalize_ingestion_job(uuid, text, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.fail_ingestion_job(uuid, text, text, interval) TO innorder_ai_runtime;
@@ -2109,5 +2288,5 @@ GRANT EXECUTE ON FUNCTION ai.persist_run_artifact(uuid, uuid, text, text, text, 
 GRANT EXECUTE ON FUNCTION ai.record_retrieval_trace(uuid, uuid, uuid, text, integer, integer, integer, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.record_retrieval_hit(uuid, uuid, uuid, double precision, double precision, double precision, integer, text, boolean) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.begin_embedding_space_gate(uuid, uuid, uuid, text, uuid, text) TO innorder_ai_runtime;
-GRANT EXECUTE ON FUNCTION ai.record_embedding_gate_case(uuid, uuid, bigint, bigint, numeric, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.record_embedding_gate_case(uuid, uuid, bigint, bigint, bigint, bigint, bigint, text, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.finalize_embedding_space_gate(uuid) TO innorder_ai_runtime;

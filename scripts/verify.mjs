@@ -183,6 +183,10 @@ async function main() {
   ]);
   await run("TypeScript workspace typechecks", npm, ["run", "typecheck", "--workspaces", "--if-present"]);
   await run("AI service build", npm, ["run", "build", "--workspace", "@innorder/ai-service"]);
+  if (full) {
+    await run("parser sandbox container integration", process.execPath, ["--test", "services/ai/test/parser-container.test.mjs"]);
+    await run("MinIO and ClamAV ingestion integration", process.execPath, ["--test", "services/ai/test/ingestion-container.test.mjs"]);
+  }
   await run("Electron package build", npm, ["run", "build", "--workspace", "@innorder/desktop"]);
 
   if (extended && process.platform === "win32") {

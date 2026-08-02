@@ -23,7 +23,7 @@ function dependencies(overrides: Record<string, unknown> = {}) {
     repository,
     dataset: { id: "dataset-id", contentHash: digest("dataset"), status: "PUBLISHED", cases },
     candidateSpaceId: "candidate-id", expectedActiveSpaceId: "active-id", corpusManifestDigest: digest("manifest"),
-    evaluate: vi.fn(async (item: typeof cases[number]) => ({ supportedCitations: 19, totalCitations: 20, relevantFoundAt10: item.expectedProperties.relevantChunkIds.length, relevantExpected: item.expectedProperties.relevantChunkIds.length, outcome: item.expectedProperties.expectedOutcome, evidenceHash: digest(item.caseKey) })),
+    evaluate: vi.fn(async (item: typeof cases[number]) => ({ supportedCitations: 19, totalCitations: 20, relevantFoundAt10: item.expectedProperties.relevantChunkIds.length, relevantExpected: item.expectedProperties.relevantChunkIds.length, leakageCount: 0, outcome: item.expectedProperties.expectedOutcome, evidenceHash: digest(item.caseKey) })),
     ...overrides,
   };
 }
@@ -35,7 +35,7 @@ describe("fixed quality gate runner", () => {
     expect(result).toEqual({ evaluationId: "evaluation-id", decision: "PASS" });
     expect(input.repository.begin).toHaveBeenCalledWith(expect.objectContaining({ evidenceHash: expect.stringMatching(/^[a-f0-9]{64}$/u) }), expect.any(AbortSignal));
     expect(input.repository.recordCase).toHaveBeenCalledTimes(20);
-    expect(input.repository.recordCase.mock.calls[0]?.[0]).toMatchObject({ citationNumerator: 19, citationDenominator: 20, recallAt10: 1, evidenceHash: digest("case-01") });
+    expect(input.repository.recordCase.mock.calls[0]?.[0]).toMatchObject({ citationNumerator: 19, citationDenominator: 20, recallNumerator: 1, recallDenominator: 1, leakageCount: 0, expectedOutcomeHash: digest("ANSWER"), actualOutcomeHash: digest("ANSWER"), outcomeStatus: "MATCH", evidenceHash: digest("case-01") });
     expect(input.repository.finalize).toHaveBeenCalledAfter(input.repository.recordCase);
   });
 
@@ -50,14 +50,19 @@ describe("fixed quality gate runner", () => {
   });
 
   it.each([
-    ["empty citation denominator", { supportedCitations: 0, totalCitations: 0, relevantFoundAt10: 1, relevantExpected: 1, outcome: "ANSWER", evidenceHash: digest("x") }],
-    ["empty recall denominator", { supportedCitations: 1, totalCitations: 1, relevantFoundAt10: 0, relevantExpected: 0, outcome: "ANSWER", evidenceHash: digest("x") }],
-    ["extra citations", { supportedCitations: 2, totalCitations: 1, relevantFoundAt10: 1, relevantExpected: 1, outcome: "ANSWER", evidenceHash: digest("x") }],
-    ["wrong adversarial outcome", { supportedCitations: 1, totalCitations: 1, relevantFoundAt10: 1, relevantExpected: 1, outcome: "ANSWER", evidenceHash: digest("x") }],
+    ["empty citation denominator", { supportedCitations: 0, totalCitations: 0, relevantFoundAt10: 1, relevantExpected: 1, leakageCount: 0, outcome: "ANSWER", evidenceHash: digest("x") }],
+    ["empty recall denominator", { supportedCitations: 1, totalCitations: 1, relevantFoundAt10: 0, relevantExpected: 0, leakageCount: 0, outcome: "ANSWER", evidenceHash: digest("x") }],
+    ["extra citations", { supportedCitations: 2, totalCitations: 1, relevantFoundAt10: 1, relevantExpected: 1, leakageCount: 0, outcome: "ANSWER", evidenceHash: digest("x") }],
   ])("rejects %s without finalization", async (name, evidence) => {
     const input = dependencies({ evaluate: vi.fn(async (item: typeof cases[number]) => name === "wrong adversarial outcome" && !item.expectedProperties.adversarial ? { ...evidence, outcome: item.expectedProperties.expectedOutcome } : evidence) });
     await expect(new EvaluationRunner(input as never).run(new AbortController().signal)).rejects.toThrow(/^OCC-AI-EVALUATION-/u);
     expect(input.repository.finalize).not.toHaveBeenCalled();
+  });
+
+  it("persists adversarial outcome mismatch as immutable FAIL evidence", async () => {
+    const input = dependencies({ evaluate: vi.fn(async (item: typeof cases[number]) => ({ supportedCitations: 1, totalCitations: 1, relevantFoundAt10: 1, relevantExpected: 1, leakageCount: 0, outcome: item.expectedProperties.adversarial ? "ANSWER" : item.expectedProperties.expectedOutcome, evidenceHash: digest(item.caseKey) })), repository: { begin: vi.fn().mockResolvedValue("evaluation-id"), recordCase: vi.fn(), finalize: vi.fn().mockResolvedValue("FAIL") } });
+    await expect(new EvaluationRunner(input as never).run(new AbortController().signal)).resolves.toEqual({ evaluationId: "evaluation-id", decision: "FAIL" });
+    expect(input.repository.recordCase).toHaveBeenCalledWith(expect.objectContaining({ caseId: cases[19]!.id, outcomeStatus: "MISMATCH", expectedOutcomeHash: digest("SAFE_REFUSAL"), actualOutcomeHash: digest("ANSWER") }), expect.any(AbortSignal));
   });
 
   it("does not expose caller-controlled quality thresholds", () => {
@@ -74,7 +79,7 @@ describe("V015 evaluation repository", () => {
       .mockResolvedValueOnce({ rows: [{ decision: "PASS" }] });
     const repository = new PostgresEvaluationRepository({ query } as never);
     await repository.begin({ evaluationId: "evaluation-id", datasetVersionId: "dataset-id", candidateSpaceId: "candidate-id", corpusManifestDigest: digest("manifest"), expectedActiveSpaceId: "active-id", evidenceHash: digest("begin") }, new AbortController().signal);
-    await repository.recordCase({ evaluationId: "evaluation-id", caseId: cases[0]!.id, citationNumerator: 19, citationDenominator: 20, recallAt10: 0.9, evidenceHash: digest("case") }, new AbortController().signal);
+    await repository.recordCase({ evaluationId: "evaluation-id", caseId: cases[0]!.id, citationNumerator: 19, citationDenominator: 20, recallNumerator: 9, recallDenominator: 10, leakageCount: 0, expectedOutcomeHash: digest("ANSWER"), actualOutcomeHash: digest("ANSWER"), outcomeStatus: "MATCH", evidenceHash: digest("case") }, new AbortController().signal);
     await expect(repository.finalize("evaluation-id", new AbortController().signal)).resolves.toBe("PASS");
     const sql = query.mock.calls.map((call) => call[0]).join("\n");
     expect(sql).toContain("ai.begin_embedding_space_gate");

@@ -3,13 +3,38 @@ import { SaxesParser } from "saxes";
 
 import { decodeDocumentText, DocumentPolicyError, inspectDocument, type DocumentInput } from "./document-policy.js";
 
-export type ParsedRegion = Readonly<{ start: number; end: number; source: string; injectionMarked: boolean }>;
+export type ParsedRegion = Readonly<{ start: number; end: number; source: string; injectionMarked: boolean; categories?: readonly string[] | undefined }>;
 export type ParsedDocument = Readonly<{ text: string; regions: readonly ParsedRegion[]; parserVersion: string }>;
 export const PARSER_VERSION = "governed-parser-v1";
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 function normalize(value: string): string {
   return value.replaceAll("\r\n", "\n").replaceAll("\r", "\n").normalize("NFC").trim();
+}
+
+const INSTRUCTION_PATTERNS: readonly Readonly<{ category: string; pattern: RegExp }>[] = [
+  { category: "prompt_override", pattern: /(?:ignore|disregard|override)\s+(?:all\s+)?(?:previous|prior|system|prompt)\s+(?:instructions?|prompts?)/giu },
+  { category: "prompt_override", pattern: /(?:忽略|覆盖).{0,12}(?:之前|系统|提示|指令)/gu },
+  { category: "credential_exfiltration", pattern: /(?:reveal|show|leak|print|expose).{0,24}(?:credentials?|secrets?|passwords?|tokens?|api\s+keys?)/giu },
+  { category: "credential_exfiltration", pattern: /(?:泄露|显示|输出).{0,12}(?:密码|凭据|密钥|令牌)/gu },
+  { category: "authorization_change", pattern: /(?:bypass|change|remove|elevate).{0,24}(?:authori[sz]ation|permissions?|gates?|polic(?:y|ies))/giu },
+  { category: "authorization_change", pattern: /(?:绕过|更改|提升).{0,12}(?:授权|权限|门禁|策略)/gu },
+  { category: "control_disable", pattern: /(?:disable|turn\s+off|remove).{0,24}(?:controls?|security|guards?|filters?)/giu },
+  { category: "control_disable", pattern: /(?:禁用|关闭|移除).{0,12}(?:安全|控制|防护|过滤)/gu },
+  { category: "tool_execution", pattern: /(?:execute|run|invoke|call).{0,20}(?:tools?|commands?|shell|code)/giu },
+  { category: "tool_execution", pattern: /(?:执行|调用|运行).{0,12}(?:工具|命令|代码)/gu },
+];
+
+export function detectInstructionSpans(value: string): readonly Readonly<{ start: number; end: number; category: string }>[] {
+  const normalized = value.normalize("NFKC");
+  const spans: { start: number; end: number; category: string }[] = [];
+  for (const { category, pattern } of INSTRUCTION_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const match of normalized.matchAll(pattern)) {
+      if (match.index !== undefined && match[0].length > 0) spans.push({ start: match.index, end: match.index + match[0].length, category });
+    }
+  }
+  return spans.sort((left, right) => left.start - right.start || left.end - right.end || left.category.localeCompare(right.category));
 }
 
 function result(values: readonly Readonly<{ text: string; source: string }>[]): ParsedDocument {
@@ -24,7 +49,11 @@ function result(values: readonly Readonly<{ text: string; source: string }>[]): 
     regions.push({ start, end: text.length, source: value.source, injectionMarked: false });
   }
   if (!text || Buffer.byteLength(text) > MAX_OUTPUT_BYTES) throw new DocumentPolicyError("OCC-AI-DOCUMENT-NO-TEXT");
-  return { text, regions, parserVersion: PARSER_VERSION };
+  const injectionRegions = detectInstructionSpans(text).map((span) => {
+    const source = regions.find((region) => region.end > span.start && region.start < span.end)?.source ?? "document";
+    return { start: span.start, end: span.end, source, injectionMarked: true, categories: [span.category] } satisfies ParsedRegion;
+  });
+  return { text, regions: [...regions, ...injectionRegions], parserVersion: PARSER_VERSION };
 }
 
 function parseXml(xml: string, handlers: Readonly<{ open(name: string, attributes: Readonly<Record<string, string>>): void; text(value: string): void; close(name: string): void }>): void {

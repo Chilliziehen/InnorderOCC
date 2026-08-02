@@ -44,13 +44,14 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 
 桶名必须为小写 S3 风格名称，不得以点开头或结尾，只能使用小写字母、数字、点和连字符。更改桶名不会迁移旧桶中的对象。
 
-## 八个文件、唯一性和消费者
+## 九个文件、唯一性和消费者
 
 | 主机文件用途 | Compose secret | 消费者 | 最终目标 |
 |---|---|---|---|
 | PostgreSQL admin 密码 | `postgres_admin_password` | `postgres` | `/run/secrets/postgres_admin_password` |
 | PostgreSQL Flyway 密码 | `postgres_flyway_password` | `postgres`、`core` | 初始化文件；`spring.flyway.password` |
 | PostgreSQL runtime 密码 | `postgres_runtime_password` | `postgres`、`core` | 初始化文件；`spring.datasource.password` |
+| PostgreSQL AI runtime 密码 | `postgres_ai_runtime_password` | `postgres` | 初始化文件；主机路径为 `AI_DATABASE_PASSWORD_FILE` |
 | Redis 密码 | `redis_password` | `redis`、`core` | Redis 文件；`spring.data.redis.password` |
 | MinIO root 用户名 | `minio_root_user` | `minio`、`minio-init` | `/run/secrets/minio_root_user` |
 | MinIO root 密码 | `minio_root_password` | `minio`、`minio-init` | `/run/secrets/minio_root_password` |
@@ -59,7 +60,7 @@ Compose 从 `infra/compose/.env` 插值，八个必填变量使用 `${VAR:?messa
 
 唯一性规则：
 
-- 三个 PostgreSQL 密码必须两两不同；初始化脚本会强制检查。
+- 四个 PostgreSQL 密码必须两两不同；初始化脚本会强制检查。
 - MinIO root 用户名与应用用户名必须不同。
 - MinIO root 密码与应用密码必须不同。
 - 运维基线要求八个值全部独立，禁止跨 PostgreSQL、Redis 和 MinIO 复用。

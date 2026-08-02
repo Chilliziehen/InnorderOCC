@@ -566,6 +566,17 @@ test('persists bounded ingestion attempt history and terminalizes exhausted leas
   assert.match(eventClaim, /LEASE_EXPIRED_MAX_ATTEMPTS/iu);
   assert.match(eventClaim, /status = 'DEAD'/iu);
   assert.match(eventClaim, /dead_at = statement_timestamp\(\)/iu);
+  const heartbeat = sql.match(/CREATE FUNCTION ai\.heartbeat_ingestion_job\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(heartbeat, /p_lease[^\n]*interval/iu);
+  assert.match(heartbeat, /lease_expires_at = transaction_timestamp\(\) \+ p_lease/iu);
+  assert.match(heartbeat, /ingestion lease is not owned or has expired/iu);
+  const batch = sql.match(/CREATE FUNCTION ai\.persist_ingestion_embedding_batch\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(batch, /jsonb_array_length\(p_chunks\).*BETWEEN 1 AND 100/isu);
+  assert.match(batch, /PERFORM ai\.persist_ingestion_chunk_embedding/iu);
+  assert.match(sql.match(/CREATE FUNCTION ai\.persist_ingestion_chunk_embedding\([\s\S]*?\$\$;/iu)?.[0] ?? '', /conflicting ingestion (?:chunk|embedding) replay/iu);
+  assert.match(batch, /checkpoint = p_checkpoint/iu);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ai\.heartbeat_ingestion_job/iu);
+  assert.match(sql, /GRANT EXECUTE ON FUNCTION ai\.persist_ingestion_embedding_batch/iu);
 });
 
 test('keeps first-release tool metadata inaccessible to AI', () => {
@@ -590,6 +601,12 @@ test('binds gate metrics to every case in an immutable published dataset version
   assert.match(finalize, /evidence_cases <> dataset_cases/iu);
   assert.match(finalize, /foreign_cases <> 0/iu);
   assert.match(finalize, /dataset_content_hash, corpus_manifest_digest/iu);
+  for (const column of ['recall_numerator', 'recall_denominator', 'leakage_count', 'expected_outcome_hash', 'actual_outcome_hash', 'outcome_status']) {
+    assert.match(sql, new RegExp(`CREATE TABLE ai\\.embedding_space_gate_case_evidence[\\s\\S]*\\b${column}\\b`, 'iu'), column);
+  }
+  assert.match(finalize, /outcome_status = 'MISMATCH'/iu);
+  assert.match(sql, /outcome_mismatch_count bigint NOT NULL DEFAULT 0/iu);
+  assert.match(finalize, /sum\(evidence\.leakage_count\)/iu);
 
   assert.match(sql, /CREATE FUNCTION ai\.enforce_evaluation_dataset_version_lifecycle\(\)/iu);
   assert.match(sql, /OLD\.status = 'PUBLISHED'[\s\S]*NEW\.status = 'RETIRED'/iu);

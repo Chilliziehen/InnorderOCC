@@ -4,7 +4,7 @@ import { stat, readFile } from "node:fs/promises";
 import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client, type S3ClientConfig } from "@aws-sdk/client-s3";
 
 type Client = Pick<S3Client, "send">;
-type Config = Readonly<{ endpoint: string; bucket: string; prefix: string; accessKeyFile: string; secretKeyFile: string; forcePathStyle: boolean; maxObjectBytes?: number; client?: Client }>;
+type Config = Readonly<{ endpoint: string; bucket: string; prefix: string; accessKeyFile: string; secretKeyFile: string; forcePathStyle: boolean; allowInsecureLocalhost?: boolean; maxObjectBytes?: number; client?: Client }>;
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
 
@@ -23,7 +23,9 @@ export class MinioQuarantineObjectStore {
 
   static async create(config: Config): Promise<MinioQuarantineObjectStore> {
     const endpoint = new URL(config.endpoint);
-    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || !/^[a-z0-9][a-z0-9.-]{0,62}$/u.test(config.bucket) || !config.prefix.startsWith("quarantine/") || !KEY.test(config.prefix)) throw new Error("OCC-AI-OBJECT-STORE-CONFIG");
+    const secure = endpoint.protocol === "https:";
+    const localHttp = config.allowInsecureLocalhost === true && endpoint.protocol === "http:" && ["127.0.0.1", "localhost"].includes(endpoint.hostname);
+    if ((!secure && !localHttp) || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || !/^[a-z0-9][a-z0-9.-]{0,62}$/u.test(config.bucket) || !config.prefix.startsWith("quarantine/") || !KEY.test(config.prefix)) throw new Error("OCC-AI-OBJECT-STORE-CONFIG");
     const max = config.maxObjectBytes ?? 32 * 1024 * 1024;
     if (!Number.isSafeInteger(max) || max < 1 || max > 100 * 1024 * 1024) throw new Error("OCC-AI-OBJECT-STORE-CONFIG");
     const [accessKeyId, secretAccessKey] = await Promise.all([credential(config.accessKeyFile), credential(config.secretKeyFile)]);
@@ -40,9 +42,18 @@ export class MinioQuarantineObjectStore {
     if (bytes.length < 1 || bytes.length > this.maxObjectBytes || !HASH.test(expectedHash) || createHash("sha256").update(bytes).digest("hex") !== expectedHash) throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
     const checksum = createHash("sha256").update(bytes).digest("base64");
     const Key = this.key(objectId);
-    await this.client.send(new PutObjectCommand({ Bucket: this.config.bucket, Key, Body: bytes, ContentLength: bytes.length, ChecksumSHA256: checksum, ServerSideEncryption: "AES256" }), { abortSignal: signal });
-    const head = await this.client.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key, ChecksumMode: "ENABLED" }), { abortSignal: signal });
-    if (head.ContentLength !== bytes.length || head.ChecksumSHA256 !== checksum || head.ServerSideEncryption !== "AES256") throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
+    let created = false;
+    try {
+      await this.client.send(new PutObjectCommand({ Bucket: this.config.bucket, Key, Body: bytes, ContentLength: bytes.length, ChecksumSHA256: checksum, ServerSideEncryption: "AES256", IfNoneMatch: "*" }), { abortSignal: signal });
+      created = true;
+      const head = await this.client.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key, ChecksumMode: "ENABLED" }), { abortSignal: signal });
+      if (head.ContentLength !== bytes.length || head.ChecksumSHA256 !== checksum || head.ServerSideEncryption !== "AES256") throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
+    } catch (error) {
+      const status = typeof error === "object" && error !== null && "$metadata" in error ? (error.$metadata as { httpStatusCode?: number }).httpStatusCode : undefined;
+      if (status === 412 || (error instanceof Error && error.name === "PreconditionFailed")) throw new Error("OCC-AI-OBJECT-STORE-CONFLICT");
+      if (created) await this.client.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key })).catch(() => undefined);
+      throw error;
+    }
   }
 
   async readObject(objectId: string, expectedHash: string, signal: AbortSignal): Promise<Uint8Array> {

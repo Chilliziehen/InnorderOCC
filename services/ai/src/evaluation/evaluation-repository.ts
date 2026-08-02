@@ -2,7 +2,7 @@ import type { QueryResult } from "pg";
 
 type Queryable = { query(text: string, values?: unknown[]): Promise<QueryResult> };
 export type BeginGate = Readonly<{ evaluationId: string; datasetVersionId: string; candidateSpaceId: string; corpusManifestDigest: string; expectedActiveSpaceId: string; evidenceHash: string }>;
-export type GateCase = Readonly<{ evaluationId: string; caseId: string; citationNumerator: number; citationDenominator: number; recallAt10: number; evidenceHash: string }>;
+export type GateCase = Readonly<{ evaluationId: string; caseId: string; citationNumerator: number; citationDenominator: number; recallNumerator: number; recallDenominator: number; leakageCount: number; expectedOutcomeHash: string; actualOutcomeHash: string; outcomeStatus: "MATCH" | "MISMATCH"; evidenceHash: string }>;
 
 function stale(error: unknown): never {
   const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
@@ -23,7 +23,7 @@ export class PostgresEvaluationRepository {
 
   async recordCase(input: GateCase, signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw new Error("OCC-AI-EVALUATION-CANCELLED");
-    try { await this.database.query("SELECT ai.record_embedding_gate_case($1,$2,$3,$4,$5,$6) AS id", [input.evaluationId, input.caseId, input.citationNumerator, input.citationDenominator, input.recallAt10, input.evidenceHash]); }
+    try { await this.database.query("SELECT ai.record_embedding_gate_case($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS id", [input.evaluationId, input.caseId, input.citationNumerator, input.citationDenominator, input.recallNumerator, input.recallDenominator, input.leakageCount, input.expectedOutcomeHash, input.actualOutcomeHash, input.outcomeStatus, input.evidenceHash]); }
     catch (error) { stale(error); }
   }
 
