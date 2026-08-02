@@ -84,6 +84,7 @@ describe("signed deployment release binding", () => {
     const fixture = await releasePayload();
     await expect(verifyDeploymentReleaseBundleForTest({
       payloadRoot: fixture.root,
+      purpose: "enroll",
       certificateManifestPath: fixture.certificateManifestPath,
       releaseManifestPath: fixture.releaseManifestPath,
       enrollmentHelperPath: fixture.helperPath,
@@ -104,6 +105,7 @@ describe("signed deployment release binding", () => {
     await writeFile(targetPath, Buffer.concat([await readFile(targetPath), Buffer.from("changed")]));
     await expect(verifyDeploymentReleaseBundleForTest({
       payloadRoot: fixture.root,
+      purpose: "enroll",
       certificateManifestPath: fixture.certificateManifestPath,
       releaseManifestPath: fixture.releaseManifestPath,
       enrollmentHelperPath: fixture.helperPath,
@@ -120,6 +122,7 @@ describe("signed deployment release binding", () => {
     const other = generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey;
     await expect(verifyDeploymentReleaseBundleForTest({
       payloadRoot: fixture.root,
+      purpose: "enroll",
       certificateManifestPath: fixture.certificateManifestPath,
       releaseManifestPath: fixture.releaseManifestPath,
       enrollmentHelperPath: fixture.helperPath,
@@ -134,6 +137,7 @@ describe("signed deployment release binding", () => {
     try {
       await expect(verifyDeploymentReleaseBundleForTest({
         payloadRoot: fixture.root,
+        purpose: "enroll",
         certificateManifestPath: fixture.certificateManifestPath,
         releaseManifestPath: fixture.releaseManifestPath,
         enrollmentHelperPath: fixture.helperPath,
@@ -145,6 +149,26 @@ describe("signed deployment release binding", () => {
     } finally {
       process.env.NODE_ENV = originalNodeEnv;
     }
+  });
+
+  it("requires current CA validity for enrollment but permits expired identity verification for removal", async () => {
+    const fixture = await releasePayload();
+    const input = {
+      payloadRoot: fixture.root,
+      certificateManifestPath: fixture.certificateManifestPath,
+      releaseManifestPath: fixture.releaseManifestPath,
+      enrollmentHelperPath: fixture.helperPath,
+      removalHelperPath: fixture.removalHelperPath,
+      installerPath: fixture.installerPath,
+      expectedCertificateManifestSha256: sha256(fixture.certificateManifestBytes),
+      expectedFingerprint: new X509Certificate(DEPLOYMENT_CA_PEM).fingerprint256,
+      now: new Date("2100-01-01T00:00:00Z"),
+    } as const;
+    await expect(verifyDeploymentReleaseBundleForTest({ ...input, purpose: "enroll" }, fixture.publicKey)).rejects.toThrow(/expired|valid/i);
+    await expect(verifyDeploymentReleaseBundleForTest({ ...input, purpose: "remove" }, fixture.publicKey)).resolves.toMatchObject({ certificateManifest: { deploymentId } });
+    const notYetValid = { ...input, now: new Date("1900-01-01T00:00:00Z") };
+    await expect(verifyDeploymentReleaseBundleForTest({ ...notYetValid, purpose: "enroll" }, fixture.publicKey)).rejects.toThrow(/expired|valid/i);
+    await expect(verifyDeploymentReleaseBundleForTest({ ...notYetValid, purpose: "remove" }, fixture.publicKey)).resolves.toMatchObject({ certificateManifest: { deploymentId } });
   });
 });
 

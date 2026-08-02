@@ -320,16 +320,19 @@ async function readBoundedRegularFile(
   return bytes;
 }
 
-export async function verifyDeploymentCertificateManifest(
-  input: {
-    payloadRoot: string;
-    manifestPath: string;
-    expectedManifestSha256: string;
-    expectedFingerprint: string;
-    expectedHost?: string;
-    now?: Date;
-  },
+type DeploymentCertificateManifestInput = {
+  payloadRoot: string;
+  manifestPath: string;
+  expectedManifestSha256: string;
+  expectedFingerprint: string;
+  expectedHost?: string;
+  now?: Date;
+};
+
+async function verifyDeploymentCertificateManifestInternal(
+  input: DeploymentCertificateManifestInput,
   overrides: Partial<VerificationFileSystem> = {},
+  requireCurrentValidity = true,
 ): Promise<{ manifest: CertificateManifest; certificate: X509Certificate; certificatePath: string }> {
   if (!path.isAbsolute(input.payloadRoot) || !path.isAbsolute(input.manifestPath)) throw new Error("Payload root and manifest path must be absolute");
   const fileSystem = { ...defaultVerificationFileSystem, ...overrides };
@@ -370,7 +373,7 @@ export async function verifyDeploymentCertificateManifest(
   if (JSON.stringify(sans.dnsSans) !== JSON.stringify(manifest.certificate.dnsSans) || JSON.stringify(sans.ipSans) !== JSON.stringify(manifest.certificate.ipSans)) {
     throw new Error("Certificate SAN values do not match the manifest");
   }
-  assertValidity(certificate, input.now ?? new Date());
+  if (requireCurrentValidity) assertValidity(certificate, input.now ?? new Date());
   if (input.expectedHost) {
     const hostMatches = isIP(input.expectedHost)
       ? certificate.checkIP(input.expectedHost) !== undefined
@@ -380,7 +383,15 @@ export async function verifyDeploymentCertificateManifest(
   return { manifest, certificate, certificatePath };
 }
 
+export function verifyDeploymentCertificateManifest(
+  input: DeploymentCertificateManifestInput,
+  overrides: Partial<VerificationFileSystem> = {},
+) {
+  return verifyDeploymentCertificateManifestInternal(input, overrides, true);
+}
+
 type ReleaseBundleInput = {
+  purpose: "enroll" | "remove";
   payloadRoot: string;
   certificateManifestPath: string;
   releaseManifestPath: string;
@@ -438,13 +449,13 @@ async function verifyDeploymentReleaseBundle(
   if (certificateManifestContentSha256(certificateManifest) !== releaseManifest.certificateManifest.contentSha256) {
     throw new Error("Certificate manifest content SHA-256 mismatch");
   }
-  const verified = await verifyDeploymentCertificateManifest({
+  const verified = await verifyDeploymentCertificateManifestInternal({
     payloadRoot: root,
     manifestPath: input.certificateManifestPath,
     expectedManifestSha256: sha256(certificateManifestBytes),
     expectedFingerprint: input.expectedFingerprint,
     ...(input.now === undefined ? {} : { now: input.now }),
-  });
+  }, {}, input.purpose === "enroll");
   return { releaseManifest, certificateManifest, certificate: verified.certificate };
 }
 

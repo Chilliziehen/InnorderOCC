@@ -31,6 +31,7 @@ describe("bounded Squirrel deployment CA lifecycle", () => {
     await handleDeploymentCaLifecycle({ argv: ["app.exe", "--squirrel-install"], resourcesPath: "C:\\app\\resources", userData: "C:\\userData", execPath: "C:\\app\\InnorderOCC.exe" }, { exists, read, verify, preflight, invoke });
     expect(order).toEqual(["verify", "preflight", "invoke"]);
     expect(verify).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: "enroll",
       certificateManifestPath: "C:\\app\\resources\\deployment-ca\\certificate-manifest.json",
       releaseManifestPath: "C:\\app\\resources\\deployment-ca\\release-manifest.json",
       enrollmentHelperPath: "C:\\app\\resources\\enroll-deployment-ca.ps1",
@@ -42,6 +43,22 @@ describe("bounded Squirrel deployment CA lifecycle", () => {
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ script: "C:\\app\\resources\\enroll-deployment-ca.ps1", mode: "enroll" }));
     expect(invoke.mock.calls[0]?.[0].arguments).toEqual(expect.arrayContaining(["-ExpectedManifestSha256", "AA".repeat(32), "-ExpectedFingerprint", "BB".repeat(32)]));
     expect(JSON.stringify(invoke.mock.calls)).not.toMatch(/Invoke-Expression|Start-Process/);
+  });
+
+  it("uses removal-purpose verification before an owned uninstall helper", async () => {
+    const verify = vi.fn(async () => verifiedRelease);
+    const preflight = vi.fn().mockResolvedValue(undefined);
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const confirmation = Buffer.from(JSON.stringify({ version: 1, productId: "com.innorder.occ", deploymentId: "9d564974-1f4f-4cc8-987a-4f2f09790d13", confirmed: true, certificateManifestSha256: "aa".repeat(32), caFingerprint: "BB".repeat(32) }));
+    await expect(handleDeploymentCaLifecycle({ argv: ["app.exe", "--squirrel-uninstall"], resourcesPath: "C:\\app\\resources", userData: "C:\\userData", execPath: "C:\\app\\InnorderOCC.exe" }, {
+      exists: async () => true,
+      read: async () => confirmation,
+      verify,
+      preflight,
+      invoke,
+    })).resolves.toEqual({ handled: true, status: "invoked" });
+    expect(verify).toHaveBeenCalledWith(expect.objectContaining({ purpose: "remove" }));
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ mode: "remove" }));
   });
 
   it("makes zero process calls when trusted bundle verification detects a modified artifact", async () => {

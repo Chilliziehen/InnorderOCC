@@ -184,6 +184,8 @@ if ($LASTEXITCODE -ne 0) { throw '无法列出 Compose 服务' }
 
 产品状态保存在桌面 `userData/state` 下。登记、profile 引用同步和移除使用同一个 `.deployment-ca.lifecycle.lock`，移除在持锁后重新严格读取状态。只有本次实际导入或已有有效 ownership 状态才能令 `importedByProduct=true`；预先存在的精确证书可以被管理和引用，但卸载不得移除。所有 deployment/profile ID 和状态文件名只接受 UUID v4。
 
+release bundle 验证必须声明用途。`enroll` 要求 CA 在当前时间有效；`remove` 仍验证 release 签名、全部文件哈希、CA 结构/身份/指纹和 Authenticode，受信任的移除 helper 仍严格验证 ownership，但仅为清理已拥有状态而允许 CA 已过期或尚未生效。该时间例外不得用于登记、profile 连接或服务器证书验证。
+
 当前 `unsigned-dev` 安装包不是生产登记入口。`-PlanOnly` 可返回不访问真实证书 store 的确定性 JSON 计划；`-TestStoreRoot` 和测试发布公钥只允许 Development 测试路径，Production 会拒绝重定向。受信任的 ASAR main 必须先完成 release RSA 和全部文件哈希验证，再用固定 `-NoProfile -NonInteractive -Command` 逻辑验证目标 helper/installer 的 Authenticode、同一批准发布者 subject/thumbprint 和 PE 产品身份，最后才用精确 `-File` 路径执行 helper；不得使用 execution-policy bypass。任一门禁失败不得启动 helper 或写入 enrolled 状态。签名证书、RSA 私钥和时间戳凭据保持在仓库外。发布候选先执行 `npm run cert:verify`，再执行完整 type/package/make/smoke 门禁。
 
 ## 镜像构建

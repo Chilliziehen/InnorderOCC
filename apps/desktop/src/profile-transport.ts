@@ -29,7 +29,7 @@ function chainContains(certificate: Certificate, expected: string): boolean {
 }
 
 export function createProfileTransport(dependencies: { fromPartition(name: string): SessionLike }) {
-  type Binding = { key: string; profile: Profile; session: SessionLike; requests: number; drained: Array<() => void>; retirement: number };
+  type Binding = { session: SessionLike; requests: number; drained: Array<() => void>; generation: number };
   const bindings = new Map<string, Binding>();
   let active: Binding | undefined;
 
@@ -49,7 +49,7 @@ export function createProfileTransport(dependencies: { fromPartition(name: strin
           || (expectedFingerprint.length === 64 && chainContains(request.certificate, expectedFingerprint)));
       callback(valid ? USE_CHROMIUM_RESULT : DENY);
     });
-    const binding = { key, profile: { ...profile }, session, requests: 0, drained: [], retirement: 0 };
+    const binding = { session, requests: 0, drained: [], generation: 0 };
     bindings.set(key, binding);
     return binding;
   };
@@ -58,29 +58,34 @@ export function createProfileTransport(dependencies: { fromPartition(name: strin
     ? Promise.resolve()
     : new Promise<void>((resolve) => binding.drained.push(resolve));
 
-  const transition = (profile: Profile | null): { binding?: Binding; cleanup: Promise<void> } => {
-    const next = profile ? bindingFor(profile) : undefined;
-    if (active === next) return { ...(next ? { binding: next } : {}), cleanup: Promise.resolve() };
-    const previous = active;
-    active = next;
-    if (!previous) return { ...(next ? { binding: next } : {}), cleanup: Promise.resolve() };
-    const retirement = ++previous.retirement;
-    const cleanup = waitForDrain(previous).then(async () => {
-      if (active !== previous && previous.retirement === retirement) await previous.session.clearStorageData();
-    });
-    return { ...(next ? { binding: next } : {}), cleanup };
+  const retire = (binding: Binding) => {
+    const generation = binding.generation;
+    void waitForDrain(binding)
+      .then(async () => {
+        if (active !== binding && binding.generation === generation) await binding.session.clearStorageData();
+      })
+      .catch(() => undefined);
   };
 
-  const setProfile = async (profile: Profile | null) => transition(profile).cleanup;
+  const transition = (profile: Profile | null): Binding | undefined => {
+    const next = profile ? bindingFor(profile) : undefined;
+    if (active === next) return next;
+    const previous = active;
+    active = next;
+    if (next) next.generation += 1;
+    if (previous) retire(previous);
+    return next;
+  };
+
+  const setProfile = async (profile: Profile | null) => { transition(profile); };
   return {
     setProfile,
     async fetch(profile: Profile, input: URL, init?: RequestInit) {
       if (input.origin !== new URL(profile.origin).origin) throw new Error("Profile transport origin mismatch");
-      const { binding, cleanup } = transition(profile);
+      const binding = transition(profile);
       if (!binding) throw new Error("Profile transport unavailable");
       binding.requests += 1;
       try {
-        await cleanup;
         return await binding.session.fetch(input, init);
       } finally {
         binding.requests -= 1;

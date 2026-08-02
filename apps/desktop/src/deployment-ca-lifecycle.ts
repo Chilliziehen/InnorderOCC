@@ -4,6 +4,7 @@ import { z } from "zod";
 type Input = { argv: string[]; resourcesPath: string; userData: string; execPath: string };
 type Invocation = { script: string; mode: "enroll" | "remove"; arguments: string[] };
 type VerificationInput = {
+  purpose: "enroll" | "remove";
   payloadRoot: string;
   certificateManifestPath: string;
   releaseManifestPath: string;
@@ -55,6 +56,7 @@ export async function handleDeploymentCaLifecycle(
   let verified: VerifiedRelease;
   try {
     verified = await dependencies.verify({
+      purpose: removing ? "remove" : "enroll",
       payloadRoot: payload,
       certificateManifestPath: required[1]!,
       releaseManifestPath: required[0]!,
