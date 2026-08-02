@@ -7,6 +7,7 @@ import com.innorder.occ.api.CursorCodec
 import com.innorder.occ.api.CursorContext
 import com.innorder.occ.api.CursorDirection
 import com.innorder.occ.authz.AuthorizationDeniedException
+import com.innorder.occ.authz.AuthorizationAvailabilityException
 import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationService
 import com.innorder.occ.command.AuthorizedCommand
@@ -37,6 +38,7 @@ class RiskService(
     private val cursors: CursorCodec,
     transactionManager: PlatformTransactionManager,
     private val notifications: RiskNotificationPort,
+    private val metricsProperties: RiskMetricsProperties,
 ) {
     private val transactions = TransactionTemplate(transactionManager).apply {
         propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRED
@@ -46,7 +48,7 @@ class RiskService(
         if (metadata.expectedVersion != null) throw InvalidExpectedVersionException()
         val id = RiskRepository.deterministicRiskId(decision)
         return try {
-            commands.execute(metadata, requestBytes(mapOf("occurrenceKey" to decision.occurrenceKey)), CreateRiskCommand(id, decision))
+            commands.execute(metadata, requestBytes(decisionRequest(decision)), CreateRiskCommand(id, decision))
                 .copy(resourceId = id)
         } catch (failure: DataIntegrityViolationException) {
             risks.findByOccurrence(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
@@ -107,6 +109,24 @@ class RiskService(
         }!!
     }
 
+    fun recordDueSlaBreaches(principalId: UUID, at: Instant, limit: Int, correlationId: UUID): List<CommandResult> {
+        require(limit in 1..100)
+        return transactions.execute {
+            risks.dueSlaBreaches(at, limit).map { risk ->
+                action(
+                    CommandMetadata(
+                        principalId, "risk.sla_breach", "sla-${risk.id}-${risk.dueAt}",
+                        risk.rowVersion, correlationId,
+                    ),
+                    risk.id,
+                    RiskActionType.SLA_BREACHED,
+                    "Risk SLA breached",
+                    at = at,
+                )
+            }
+        }!!
+    }
+
     fun interventionQueue(
         principalId: UUID,
         correlationId: UUID,
@@ -128,7 +148,7 @@ class RiskService(
         cursor: String? = null,
     ): RiskQueuePage {
         require(limit in 1..100)
-        val context = queueContext(customerInstanceId, filters)
+        val context = queueContext(customerInstanceId, filters, at)
         val after = cursor?.let { decodeTuple(cursors.decode(it, context)) }
         return transactions.execute {
             val authorized = mutableListOf<RiskQueueItem>()
@@ -155,21 +175,53 @@ class RiskService(
     }
 
     fun adjudicate(metadata: CommandMetadata, request: RiskAdjudicationRequest): CommandResult {
-        val aggregateId = adjudicationAggregateId(request.knownEventKey, request.targetEntityId)
-        return commands.execute(
-            metadata,
-            requestBytes(mapOf(
-                "knownEventKey" to request.knownEventKey,
-                "outcome" to request.outcome.name,
-                "riskId" to request.riskId?.toString(),
-            )),
-            AdjudicateRiskCommand(aggregateId, request),
-        )
+        return transactions.execute {
+            val linkedRisk = request.riskId?.let(risks::lock)
+            if (linkedRisk != null && linkedRisk.targetEntityId != request.targetEntityId) {
+                throw InvalidRiskActionException()
+            }
+            val aggregateId = adjudicationAggregateId(request.knownEventKey, request.targetEntityId)
+            commands.execute(
+                metadata,
+                requestBytes(mapOf(
+                    "reportingPeriodStart" to request.reportingPeriodStart.toString(),
+                    "reportingPeriodEnd" to request.reportingPeriodEnd.toString(),
+                    "knownEventKey" to request.knownEventKey,
+                    "targetEntityId" to request.targetEntityId.toString(),
+                    "severeEvent" to request.severeEvent,
+                    "riskId" to request.riskId?.toString(),
+                    "outcome" to request.outcome.name,
+                    "reason" to request.reason,
+                )),
+                AdjudicateRiskCommand(
+                    aggregateId, request, linkedRisk?.targetEntityId ?: request.targetEntityId,
+                    linkedRisk?.id ?: request.targetEntityId,
+                ),
+            )
+        }!!
     }
 
-    fun metrics(start: LocalDate, end: LocalDate): RiskMetrics {
+    fun metrics(
+        principalId: UUID,
+        customerInstanceId: UUID,
+        correlationId: UUID,
+        start: LocalDate,
+        end: LocalDate,
+    ): RiskMetrics {
         require(end > start)
-        return risks.metrics(start, end)
+        val reportResourceId = metricsProperties.reportResourceId ?: throw AuthorizationAvailabilityException()
+        return transactions.execute {
+            authorization.authorize(AuthorizationRequest(
+                UUID.randomUUID(), principalId, "risk.metrics.read", reportResourceId, reportResourceId,
+                mapOf(
+                    "customerInstanceId" to customerInstanceId.toString(),
+                    "reportingPeriodStart" to start.toString(),
+                    "reportingPeriodEnd" to end.toString(),
+                ),
+                correlationId,
+            ))
+            risks.metrics(start, end)
+        }!!
     }
 
     private fun action(
@@ -187,9 +239,9 @@ class RiskService(
         return commands.execute(
             metadata,
             requestBytes(mapOf(
-                "riskId" to riskId.toString(), "reason" to reason, "data" to data,
+                "riskId" to riskId.toString(), "actionType" to type.name, "reason" to reason, "data" to data,
                 "ownerRelationshipId" to ownerRelationshipId?.toString(), "severity" to severity?.name,
-                "escalationLevel" to escalationLevel,
+                "escalationLevel" to escalationLevel, "evaluatedAt" to at?.toString(),
             )),
             RiskActionCommand(riskId, type, reason, data, ownerRelationshipId, severity, escalationLevel, at),
         )
@@ -212,7 +264,7 @@ class RiskService(
         false
     }
 
-    private fun queueContext(customerInstanceId: UUID, filters: RiskQueueFilters) = CursorContext(
+    private fun queueContext(customerInstanceId: UUID, filters: RiskQueueFilters, evaluatedAt: Instant) = CursorContext(
         "risk.intervention-queue",
         customerInstanceId,
         json(mapOf(
@@ -221,6 +273,7 @@ class RiskService(
             "slaStatus" to filters.slaStatus?.name,
             "targetEntityId" to filters.targetEntityId?.toString(),
             "ownerRelationshipId" to filters.ownerRelationshipId?.toString(),
+            "evaluatedAt" to evaluatedAt.toString(),
         )),
         "risk-due-severity-id",
         1,
@@ -288,7 +341,7 @@ class RiskService(
         private val escalationLevel: Int?,
         private val at: Instant?,
     ) : AuthorizedCommand {
-        override val action = "risk.${type.name.lowercase()}"
+        override val action = if (type == RiskActionType.SLA_BREACHED) "risk.sla_breach" else "risk.${type.name.lowercase()}"
         override val entityId = id
         override val resourceId = id
         override val aggregateType = "risk"
@@ -309,6 +362,11 @@ class RiskService(
             if (ownerRelationshipId != null && !risks.ownerBelongsToTarget(ownerRelationshipId, current.targetEntityId)) {
                 throw InvalidRiskActionException()
             }
+            if (type == RiskActionType.ESCALATED && escalationLevel != null &&
+                risks.escalationLevelExists(id, escalationLevel)
+            ) {
+                throw EscalationLevelConflictException(id, escalationLevel)
+            }
             val actionData = LinkedHashMap(data).apply {
                 ownerRelationshipId?.let { put("ownerRelationshipId", it.toString()) }
                 severity?.let { put("severity", it.name) }
@@ -327,12 +385,16 @@ class RiskService(
             )
             val updated = risks.get(id)
             val eventType = "risk.${type.name.lowercase()}"
-            if (type == RiskActionType.ESCALATED) {
+            if (type == RiskActionType.ESCALATED || type == RiskActionType.SLA_BREACHED) {
+                val notificationType = if (type == RiskActionType.ESCALATED) "RISK_ESCALATED" else "RISK_SLA_BREACHED"
                 notifications.emit(RiskNotificationIntent(
                     UUID.randomUUID(), context.metadata.principalId, context.metadata.correlationId, context.transactionId,
-                    requireNotNull(updated.ownerRelationshipId), "RISK_ESCALATED", updated.severity, id,
-                    mapOf("riskId" to id.toString(), "severity" to updated.severity.name,
-                        "level" to requireNotNull(escalationLevel).toString()),
+                    requireNotNull(updated.ownerRelationshipId), notificationType, updated.severity, id,
+                    buildMap {
+                        put("riskId", id.toString())
+                        put("severity", updated.severity.name)
+                        escalationLevel?.let { put("level", it.toString()) }
+                    },
                 ))
             }
             return mutation(
@@ -348,10 +410,10 @@ class RiskService(
     private inner class AdjudicateRiskCommand(
         private val id: UUID,
         private val request: RiskAdjudicationRequest,
+        override val entityId: UUID,
+        override val resourceId: UUID,
     ) : AuthorizedCommand {
         override val action = "risk.adjudicate"
-        override val entityId = request.targetEntityId
-        override val resourceId = request.targetEntityId
         override val aggregateType = "risk-adjudication"
         override val aggregateId = id
         override val expectedVersionRequired = true
@@ -403,6 +465,53 @@ class RiskService(
 
     private fun requestBytes(fields: Map<String, Any?>): ByteArray = MAPPER.writeValueAsBytes(fields)
     private fun json(fields: Map<String, Any?>): CanonicalJsonObject = CanonicalJsonObject.from(MAPPER.valueToTree(fields))
+
+    private fun decisionRequest(decision: RiskDecision): Map<String, Any?> = mapOf(
+        "occurrenceKey" to decision.occurrenceKey,
+        "ruleDefinitionId" to decision.ruleDefinitionId.toString(),
+        "packageId" to decision.packageId,
+        "packageVersion" to decision.packageVersion,
+        "ruleId" to decision.ruleId,
+        "targetEntityId" to decision.targetEntityId.toString(),
+        "severity" to decision.severity.name,
+        "reason" to decision.reason,
+        "dueAt" to decision.dueAt.toString(),
+        "ownerRelationship" to decision.ownerRelationship,
+        "escalationSteps" to decision.escalationSteps.map { step ->
+            mapOf(
+                "after" to step.after.toString(),
+                "ownerRelationship" to step.ownerRelationship,
+                "severity" to step.severity?.name,
+            )
+        },
+        "evaluatedAt" to decision.evaluatedAt.toString(),
+        "detectedAt" to decision.detectedAt.toString(),
+        "calendarVersion" to decision.calendarVersion,
+        "thresholdKind" to decision.thresholdKind.name,
+        "triggeringFactIds" to decision.triggeringFactIds.map(UUID::toString),
+        "thresholdWindowIdentity" to decision.thresholdWindowIdentity,
+        "factValues" to factValuesRequest(decision.factValues),
+    )
+
+    private fun factValuesRequest(values: RiskFactValues): Map<String, Any?> = when (values) {
+        is RiskFactValues.CriticalWork -> mapOf(
+            "type" to "CRITICAL_WORK", "dueAt" to values.dueAt.toString(), "critical" to values.critical,
+            "completedAt" to values.completedAt?.toString(),
+        )
+        RiskFactValues.ConsecutiveReturns -> mapOf("type" to "CONSECUTIVE_RETURNS")
+        is RiskFactValues.Inactivity -> mapOf("type" to "INACTIVITY", "lastActivityAt" to values.lastActivityAt.toString())
+        is RiskFactValues.Blocker -> mapOf(
+            "type" to "BLOCKER", "blockedAt" to values.blockedAt.toString(),
+            "resolvedAt" to values.resolvedAt?.toString(),
+        )
+        is RiskFactValues.EvidenceFailure -> mapOf("type" to "EVIDENCE_FAILURE", "failed" to values.failed)
+        is RiskFactValues.MissingEvidence -> mapOf(
+            "type" to "MISSING_EVIDENCE", "critical" to values.critical, "missing" to values.missing,
+        )
+        is RiskFactValues.ResourceConflict -> mapOf(
+            "type" to "RESOURCE_CONFLICT", "startsAt" to values.startsAt.toString(),
+        )
+    }
 
     companion object {
         private const val QUEUE_BATCH_SIZE = 128

@@ -152,6 +152,11 @@ class RiskRepository(private val jdbc: JdbcOperations) {
         ) }, id,
     )
 
+    fun escalationLevelExists(riskId: UUID, level: Int): Boolean = jdbc.queryForObject(
+        "SELECT EXISTS (SELECT 1 FROM occ.risk_action WHERE risk_id = ? AND escalation_level = ?)",
+        Boolean::class.java, riskId, level,
+    ) == true
+
     fun dueEscalations(at: Instant, limit: Int): List<DueRiskEscalation> = jdbc.query(
         DUE_ESCALATION_SQL,
         { row, _ -> DueRiskEscalation(
@@ -160,6 +165,10 @@ class RiskRepository(private val jdbc: JdbcOperations) {
             row.getObject("owner_relationship_id", UUID::class.java),
             row.getString("severity")?.let(RiskSeverity::valueOf),
         ) }, Timestamp.from(at), limit,
+    )
+
+    fun dueSlaBreaches(at: Instant, limit: Int): List<RiskRecord> = jdbc.query(
+        DUE_SLA_BREACH_SQL, ::risk, Timestamp.from(at), limit,
     )
 
     data class QueuePosition(val dueAt: Instant?, val severityRank: Int, val id: UUID)
@@ -285,6 +294,14 @@ class RiskRepository(private val jdbc: JdbcOperations) {
                                 AND action.escalation_level = (intervention.intervention_data->>'level')::integer)
             ORDER BY intervention.due_at, intervention.risk_id,
                      (intervention.intervention_data->>'level')::integer
+            FOR UPDATE OF risk SKIP LOCKED LIMIT ?"""
+
+        const val DUE_SLA_BREACH_SQL = """SELECT risk.*
+            FROM occ.risk risk
+            WHERE risk.due_at <= ? AND risk.state IN ('OPEN','ACKNOWLEDGED')
+              AND NOT EXISTS (SELECT 1 FROM occ.risk_action action
+                              WHERE action.risk_id = risk.id AND action.action_type = 'SLA_BREACHED')
+            ORDER BY risk.due_at, risk.id
             FOR UPDATE OF risk SKIP LOCKED LIMIT ?"""
 
         fun deterministicRiskId(decision: RiskDecision): UUID = UUID.nameUUIDFromBytes(
