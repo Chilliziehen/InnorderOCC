@@ -2,7 +2,7 @@ import { useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
-import { CommandPanel } from "../components/CommandPanel";
+import { CommandPanel, useMainOperationAvailability } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, commandFor, type WorkspaceOperation } from "./workspace-definitions";
@@ -75,12 +75,12 @@ function command(name: string) {
   return operation;
 }
 
-function mutationReason(operationName: string, capabilities: readonly string[], online: boolean, authenticated: boolean): string | undefined {
+function mutationReason(operationName: string, capabilities: readonly string[], online: boolean, authenticated: boolean, available: (operation: string) => boolean): string | undefined {
   const operation = command(operationName);
   if (!authenticated) return "需要有效登录会话";
   if (!online) return "离线时更改操作已锁定";
   if (!capabilities.includes(operation.capability)) return `缺少能力：${operation.capability}`;
-  if (operation.availability.state === "unavailable") return operation.availability.message;
+  if (!available(operation.operation)) return operation.availability.state === "unavailable" ? operation.availability.message : "操作接口不可用";
   return undefined;
 }
 
@@ -190,7 +190,9 @@ export function MyWork({
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
   const [guidanceQuestion, setGuidanceQuestion] = useState("");
-  const uploadReason = mutationReason("submitEvidence", capabilities, online, authenticated);
+  const operationAvailable = useMainOperationAvailability("my-work");
+  const reasonFor = (operation: string) => mutationReason(operation, capabilities, online, authenticated, operationAvailable);
+  const uploadReason = reasonFor("submitEvidence");
   const uploadBlocked = Boolean(uploadReason);
   const taskPayload = selectedTask ? { taskId: selectedTask.id } : {};
   const claimShape = guard(selectedTask?.id.trim() ? undefined : "请选择任务后再领取");
@@ -330,9 +332,9 @@ export function MyWork({
       <section role="region" aria-label="资源预留">
         <h2>资源预留</h2>
         <p>{selectedTask?.reservation ?? "没有预留信息"}</p>
-        <label>资源 ID<input value={resourceId} disabled={Boolean(mutationReason("reserve", capabilities, online, authenticated))} onChange={(event) => setResourceId(event.currentTarget.value)} /></label>
-        <label>开始时间<input type="datetime-local" value={startsAt} disabled={Boolean(mutationReason("reserve", capabilities, online, authenticated))} onChange={(event) => setStartsAt(event.currentTarget.value)} /></label>
-        <label>结束时间<input type="datetime-local" value={endsAt} disabled={Boolean(mutationReason("reserve", capabilities, online, authenticated))} onChange={(event) => setEndsAt(event.currentTarget.value)} /></label>
+        <label>资源 ID<input value={resourceId} disabled={Boolean(reasonFor("reserve"))} onChange={(event) => setResourceId(event.currentTarget.value)} /></label>
+        <label>开始时间<input type="datetime-local" value={startsAt} disabled={Boolean(reasonFor("reserve"))} onChange={(event) => setStartsAt(event.currentTarget.value)} /></label>
+        <label>结束时间<input type="datetime-local" value={endsAt} disabled={Boolean(reasonFor("reserve"))} onChange={(event) => setEndsAt(event.currentTarget.value)} /></label>
         <GuardedCommand
           operation={command("reserve")}
           shape={reservationShape}
@@ -352,7 +354,7 @@ export function MyWork({
         <p>建议仅供参考，不能替代流程、证据、审核或权限决定。</p>
         {guidanceStatus.state === "stale" ? <p>智能建议已过期，请勿据此执行变更。</p> : null}
         {guidanceStatus.citations?.length ? <ul aria-label="建议引用">{guidanceStatus.citations.map((citation) => <li key={citation}>{citation}</li>)}</ul> : null}
-        <label>问题<textarea value={guidanceQuestion} disabled={Boolean(mutationReason("guidance", capabilities, online, authenticated))} onChange={(event) => setGuidanceQuestion(event.currentTarget.value)} /></label>
+        <label>问题<textarea value={guidanceQuestion} disabled={Boolean(reasonFor("guidance"))} onChange={(event) => setGuidanceQuestion(event.currentTarget.value)} /></label>
         <GuardedCommand
           operation={command("guidance")}
           shape={guidanceShape}

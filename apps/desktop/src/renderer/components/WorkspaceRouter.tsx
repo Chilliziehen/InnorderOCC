@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { z } from "zod";
 
 import type {
@@ -10,6 +10,7 @@ import type {
 } from "../../desktop-contract";
 import type { ShellState } from "./AppShell";
 import type { WorkspaceQueryValue } from "./QueryToolbar";
+import { MainOperationAvailabilityProvider } from "./CommandPanel";
 import { failedWorkspaceResult, unavailableWorkspaceResult, workspaceQueryInput } from "../workspace-client";
 import { WORKSPACE_DEFINITIONS, type WorkspaceId } from "../workspaces/workspace-definitions";
 import { Administration } from "../workspaces/Administration";
@@ -387,24 +388,27 @@ export function WorkspaceRouter({ workspaceId, queryAllowed, state, statuses, on
       }
     : result;
   const common = { result: routedResult, query: visibleQuery, capabilities: identity.capabilities, online, authenticated: online, onQueryChange: changeQuery, onRefresh: refresh, onExecute: execute };
+  const available = (children: ReactNode) => "availableOperations" in result
+    ? <MainOperationAvailabilityProvider operations={result.availableOperations ?? []}>{children}</MainOperationAvailabilityProvider>
+    : children;
 
   switch (workspaceId) {
     case "overview":
-      return <Overview definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />;
+      return available(<Overview definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />);
     case "my-work":
-      return <MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTaskId ? { selectedId: selectedTaskId } : {})} onSelect={(id) => { if (id !== selectedTaskId) { uploadSequence.current += 1; setUpload({ state: "idle" }); setUploadReference(undefined); uploadRetry.current = undefined; } setSelectedTaskId(id); }} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={callable(window.occ?.uploads?.subscribeProgress)} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId, retry.intentHandle); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />;
+      return available(<MyWork {...common} activeTab={activeTab as MyWorkTab} {...(selectedTaskId ? { selectedId: selectedTaskId } : {})} onSelect={(id) => { if (id !== selectedTaskId) { uploadSequence.current += 1; setUpload({ state: "idle" }); setUploadReference(undefined); uploadRetry.current = undefined; } setSelectedTaskId(id); }} {...(selectedTask ? { selectedTask } : {})} upload={upload} {...(uploadReference ? { uploadReference } : {})} uploadProgressAvailable={callable(window.occ?.uploads?.subscribeProgress)} onTabChange={(tab) => changeTab(tab)} onStartUpload={(file, targetId) => void startEvidenceUpload(file, targetId)} onRetryUpload={() => { const retry = uploadRetry.current; if (retry) void startEvidenceUpload(retry.file, retry.targetId, retry.intentHandle); }} onCancelUpload={(uploadId) => { const cancel = window.occ?.uploads?.cancel; if (callable(cancel)) void cancel(uploadId); }} />);
     case "processes":
-      return <Processes {...common} activeTab={activeTab as ProcessesTab} {...(selectedProcessId ? { selectedId: selectedProcessId } : {})} onSelect={setSelectedProcessId} {...(selectedProcess ? { selectedProcess } : {})} onTabChange={(tab) => changeTab(tab)} />;
+      return available(<Processes {...common} activeTab={activeTab as ProcessesTab} {...(selectedProcessId ? { selectedId: selectedProcessId } : {})} onSelect={setSelectedProcessId} {...(selectedProcess ? { selectedProcess } : {})} onTabChange={(tab) => changeTab(tab)} />);
     case "interventions":
-      return <Interventions {...common} activeTab={activeTab as InterventionTab} {...(selectedInterventionIsCurrent && selectedIntervention ? { selectedItemId: selectedIntervention } : {})} onTabChange={(tab) => changeTab(tab)} onSelectItem={setSelectedIntervention} />;
+      return available(<Interventions {...common} activeTab={activeTab as InterventionTab} {...(selectedInterventionIsCurrent && selectedIntervention ? { selectedItemId: selectedIntervention } : {})} onTabChange={(tab) => changeTab(tab)} onSelectItem={setSelectedIntervention} />);
     case "risks":
-      return <Risks {...common} activeTab={activeTab as RiskTab} {...(selectedRiskIsCurrent && selectedRisk ? { selectedRiskId: selectedRisk } : {})} onTabChange={(tab) => changeTab(tab)} onSelectRisk={setSelectedRisk} />;
+      return available(<Risks {...common} activeTab={activeTab as RiskTab} {...(selectedRiskIsCurrent && selectedRisk ? { selectedRiskId: selectedRisk } : {})} onTabChange={(tab) => changeTab(tab)} onSelectRisk={setSelectedRisk} />);
     case "resources":
-      return <Resources {...common} activeTab={activeTab} onConflictRefresh={refresh} onTabChange={changeTab} />;
+      return available(<Resources {...common} activeTab={activeTab} onConflictRefresh={refresh} onTabChange={changeTab} />);
     case "domain-design":
-      return <DomainDesign {...common} activeTab={activeTab} onConflictRefresh={refresh} maxArchiveBytes={100 * 1024 * 1024} onArchiveUpload={(file) => archiveUpload(file)} onTabChange={changeTab} />;
+      return available(<DomainDesign {...common} activeTab={activeTab} onConflictRefresh={refresh} maxArchiveBytes={100 * 1024 * 1024} onArchiveUpload={(file) => archiveUpload(file)} onTabChange={changeTab} />);
     case "administration":
-      return <Administration result={result} query={visibleQuery} activeTab={activeTab} capabilities={identity.capabilities} connectivity={connectivity} authenticated={online} onQueryChange={changeQuery} onRefresh={refresh} onExecute={execute} onTabChange={changeTab} />;
+      return available(<Administration result={result} query={visibleQuery} activeTab={activeTab} capabilities={identity.capabilities} connectivity={connectivity} authenticated={online} onQueryChange={changeQuery} onRefresh={refresh} onExecute={execute} onTabChange={changeTab} />);
     case "system":
       return <SystemOperations definition={definition} result={result} statuses={statuses} query={visibleQuery} activeTab={activeTab} environment={state.profile.environment} configurationFreshness={new Date(state.lastFreshAt).toISOString()} onTabChange={changeTab} onQueryChange={changeQuery} onRefresh={refresh} />;
     case "settings":

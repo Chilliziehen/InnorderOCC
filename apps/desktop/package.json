@@ -14,8 +14,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node scripts/run-forge.mjs package",
     "package": "node scripts/run-forge.mjs package",
+    "package:smoke": "node scripts/run-forge.mjs package:smoke",
     "make": "node scripts/run-forge.mjs make",
-    "smoke": "playwright test --config playwright.config.ts"
+    "smoke": "playwright test --config playwright.config.ts",
+    "smoke:reliability": "playwright test --config playwright.reliability.config.ts"
   },
   "dependencies": {
     "@innorder/contracts": "0.1.0",

@@ -39,6 +39,21 @@ describe("profile-scoped Electron transport", () => {
     expect(callback).toHaveBeenCalledWith(-2);
   });
 
+  it("uses an explicitly injected build verifier without changing the default fail-closed policy", async () => {
+    const setCertificateVerifyProc = vi.fn();
+    const verifyCertificate = vi.fn().mockReturnValue(true);
+    const transport = createProfileTransport({
+      fromPartition: () => ({ setCertificateVerifyProc, fetch: vi.fn(), clearStorageData: vi.fn() }),
+      verifyCertificate,
+    });
+    await transport.setProfile(profile);
+    const request = { hostname: "occ.example", verificationResult: "net::ERR_CERT_AUTHORITY_INVALID", errorCode: -202, certificate: { fingerprint: "AA".repeat(32) } };
+    const callback = vi.fn();
+    setCertificateVerifyProc.mock.calls[0]?.[0](request, callback);
+    expect(verifyCertificate).toHaveBeenCalledWith(profile, request);
+    expect(callback).toHaveBeenCalledWith(-3);
+  });
+
   it("preserves exact Chromium system verification for profiles without a private CA pin", async () => {
     const setCertificateVerifyProc = vi.fn();
     const transport = createProfileTransport({ fromPartition: () => ({ setCertificateVerifyProc, fetch: vi.fn(), clearStorageData: vi.fn() }) });

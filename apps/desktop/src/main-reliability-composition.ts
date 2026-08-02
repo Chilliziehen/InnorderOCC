@@ -6,7 +6,7 @@ import type { ConnectivityTracker } from "./connectivity";
 
 interface MainReliabilityCompositionOptions extends Pick<
   DesktopApiDependencies,
-  "profiles" | "session" | "statuses" | "clearProfile"
+  "profiles" | "session" | "statuses" | "clearProfile" | "operationPolicy" | "workspaceQuery" | "executeCommand" | "notifications"
 > {
   readonly readCache: NonNullable<DesktopApiDependencies["readCache"]>;
   readonly notificationStream: { setSession(session: NotificationSession | null): Promise<void> };
@@ -79,14 +79,15 @@ export function createMainReliabilityApi(options: MainReliabilityCompositionOpti
         ? { profileId: profile.id, customerInstanceId, principalId }
         : null;
     },
-    workspaceQuery: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/workspaces"),
-    executeCommand: async (input) => mainUnavailableOperation(input.workspace, input.operation, "/commands"),
+    workspaceQuery: options.workspaceQuery ?? (async (input) => mainUnavailableOperation(input.workspace, input.operation, "/workspaces")),
+    executeCommand: options.executeCommand ?? (async (input) => mainUnavailableOperation(input.workspace, input.operation, "/commands")),
+    ...(options.operationPolicy ? { operationPolicy: options.operationPolicy } : {}),
     isOnline: options.connectivity.isOnline,
     uploads: options.uploads,
     ...(options.uploads.setScope && options.uploads.abortScope && options.uploads.abortAll ? {
       uploadLifecycle: { setScope: options.uploads.setScope, abortScope: options.uploads.abortScope, abortAll: options.uploads.abortAll },
     } : {}),
-    notifications: { list: async () => mainUnavailableNotificationList() },
+    notifications: options.notifications ?? { list: async () => mainUnavailableNotificationList() },
     onSessionScopeChanged: (scope, generation) => {
       activeGeneration = generation;
       if (!scope) {

@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from "react";
+import { createContext, useContext, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { prepareCommandPayload } from "../../command-payload";
 import type { CommandReceipt, WorkspaceCommand } from "../../desktop-contract";
@@ -8,6 +8,7 @@ interface CommandPanelProps {
   readonly workspace: WorkspaceId;
   readonly command: WorkspaceOperation;
   readonly capabilities: readonly string[];
+  readonly availableOperations?: readonly string[];
   readonly online: boolean;
   readonly authenticated: boolean;
   readonly payload: Readonly<Record<string, unknown>>;
@@ -22,6 +23,17 @@ interface IntentState {
   status: "retryable" | "accepted";
 }
 
+const MainOperationAvailability = createContext<readonly string[] | undefined>(undefined);
+
+export function MainOperationAvailabilityProvider({ operations, children }: { readonly operations: readonly string[]; readonly children: ReactNode }) {
+  return <MainOperationAvailability value={operations}>{children}</MainOperationAvailability>;
+}
+
+export function useMainOperationAvailability(workspace?: WorkspaceId): (operation: string) => boolean {
+  const operations = useContext(MainOperationAvailability);
+  return (operation) => operations ? operations.includes(operation) : workspace === "resources" || commandFor(workspace!, operation)?.availability.state === "available";
+}
+
 function disabledReason({ registered, online, authenticated, capable }: { registered: boolean; online: boolean; authenticated: boolean; capable: boolean }): string | undefined {
   if (!registered) return "未注册的操作";
   if (!authenticated) return "需要有效登录会话";
@@ -30,18 +42,22 @@ function disabledReason({ registered, online, authenticated, capable }: { regist
   return undefined;
 }
 
-export function CommandPanel({ workspace, command, capabilities, online, authenticated, payload, targetId, onExecute, onConflictRefresh }: CommandPanelProps) {
+export function CommandPanel({ workspace, command, capabilities, availableOperations, online, authenticated, payload, targetId, onExecute, onConflictRefresh }: CommandPanelProps) {
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const intentRef = useRef<IntentState | undefined>(undefined);
   const [receipt, setReceipt] = useState<CommandReceipt>();
   const canonical = commandFor(workspace, command.operation);
+  const reportedOperations = useContext(MainOperationAvailability);
+  const effectiveOperations = availableOperations ?? reportedOperations;
   const registered = canonical !== undefined;
-  const operationAvailable = registered && canonical.availability.state === "available";
+  const operationAvailable = registered && (effectiveOperations
+    ? effectiveOperations.includes(canonical.operation)
+    : canonical.availability.state === "available");
   const capable = registered && capabilities.includes(canonical.capability);
   const baseReason = disabledReason({ registered, online, authenticated, capable });
   const reason = baseReason === "missing-capability" ? `缺少能力：${canonical?.capability ?? command.capability}` : baseReason;
-  const unavailableReason = registered && canonical.availability.state === "unavailable" ? canonical.availability.message : undefined;
+  const unavailableReason = registered && !operationAvailable && canonical.availability.state === "unavailable" ? canonical.availability.message : undefined;
   const preparedPayload = prepareCommandPayload(payload);
   const payloadReason = preparedPayload.success ? undefined : "命令数据必须是严格 JSON";
   const blockedReason = reason ?? unavailableReason ?? payloadReason;
@@ -87,7 +103,7 @@ export function CommandPanel({ workspace, command, capabilities, online, authent
     <form className="command-panel" onSubmit={(event) => void submit(event)}>
       <button type="submit" disabled={pending || acceptedLocked || Boolean(blockedReason)} aria-describedby={blockedReason ? reasonId : undefined}>{pending ? "正在提交" : command.label}</button>
       {blockedReason ? <p id={reasonId}>{blockedReason}</p> : null}
-      {registered && canonical.availability.state === "unavailable" ? <p>所需 API：{canonical.availability.resourceGroups.join("、")}</p> : null}
+      {registered && !operationAvailable && canonical.availability.state === "unavailable" ? <p>所需 API：{canonical.availability.resourceGroups.join("、")}</p> : null}
       {receipt ? (
         <section role="status" aria-label="命令回执" aria-live="polite" aria-atomic="true">
           {receipt.state === "accepted" ? <><strong>命令已接收</strong><code>{receipt.correlationId}</code></> : null}

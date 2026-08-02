@@ -2,7 +2,7 @@ import { useRef, useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
-import { CommandPanel } from "../components/CommandPanel";
+import { CommandPanel, useMainOperationAvailability } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
@@ -99,8 +99,9 @@ function WorkspaceAction({ command, schema, payload, targetId, targetGateReason,
   readonly onExecute: (intent: WorkspaceCommand) => Promise<CommandReceipt>;
   readonly onRefresh: () => void;
 }) {
+  const available = useMainOperationAvailability("interventions");
   const parsed = schema.safeParse(payload);
-  const operationBlocksFirst = command.availability.state === "unavailable" || !online || !authenticated || !capabilities.includes(command.capability);
+  const operationBlocksFirst = !available(command.operation) || !online || !authenticated || !capabilities.includes(command.capability);
   if (!operationBlocksFirst && targetGateReason) {
     const reasonId = `interventions-${command.operation}-review-target-reason`;
     return <div><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{targetGateReason}</p></div>;
@@ -119,6 +120,7 @@ export function Interventions({ result, query, activeTab, selectedItemId, capabi
   const [followUp, setFollowUp] = useState("");
   const [dueAt, setDueAt] = useState("");
   const [returnReason, setReturnReason] = useState("");
+  const operationAvailable = useMainOperationAvailability("interventions");
   const mutationOnline = online && result.state !== "offline" && result.state !== "stale";
   const selectedItem = result.state === "ready" || result.state === "stale" || result.state === "offline"
     ? result.items.map((item) => interventionItemSchema.safeParse(item)).find((entry) => entry.success && entry.data.id === selectedItemId)?.data
@@ -148,7 +150,7 @@ export function Interventions({ result, query, activeTab, selectedItemId, capabi
   const action = (operation: keyof typeof interventionCommandPayloadSchemas, payload: Record<string, unknown>) => {
     const command = definition.commands.find((entry) => entry.operation === operation)!;
     const targetGateReason = reviewTargetGateReason({
-      operationAvailable: command.availability.state === "available",
+      operationAvailable: operationAvailable(command.operation),
       online: mutationOnline,
       authenticated,
       capable: capabilities.includes(command.capability),

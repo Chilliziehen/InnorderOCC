@@ -6,14 +6,16 @@ const DENY = -2;
 const DEFAULT_RETIRED_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RETIRED_BINDINGS = 8;
 
-type Certificate = { fingerprint?: string; issuerCert?: Certificate };
-type VerifyRequest = { hostname: string; verificationResult: string; errorCode: number; certificate: Certificate };
+export type ProfileCertificate = { fingerprint?: string; issuerCert?: ProfileCertificate };
+export type ProfileCertificateVerifyRequest = { hostname: string; verificationResult: string; errorCode: number; certificate: ProfileCertificate };
+type VerifyRequest = ProfileCertificateVerifyRequest;
 type SessionLike = {
   setCertificateVerifyProc(handler: ((request: VerifyRequest, callback: (result: number) => void) => void) | null): void;
   fetch(input: URL, init?: RequestInit): Promise<Response>;
   clearStorageData(): Promise<void>;
 };
-type Profile = { id: string; origin: string; caFingerprint?: string | undefined };
+export type ProfileTransportProfile = { id: string; origin: string; caFingerprint?: string | undefined };
+type Profile = ProfileTransportProfile;
 type BodyTracker = { expire(): void };
 type Binding = {
   key: string;
@@ -32,9 +34,9 @@ function normalize(value: string | undefined): string {
   return (value ?? "").replaceAll(":", "").toUpperCase();
 }
 
-function chainContains(certificate: Certificate, expected: string): boolean {
-  let current: Certificate | undefined = certificate;
-  const seen = new Set<Certificate>();
+function chainContains(certificate: ProfileCertificate, expected: string): boolean {
+  let current: ProfileCertificate | undefined = certificate;
+  const seen = new Set<ProfileCertificate>();
   for (let depth = 0; current && depth < 10 && !seen.has(current); depth += 1) {
     seen.add(current);
     if (normalize(current.fingerprint) === expected) return true;
@@ -47,6 +49,7 @@ export function createProfileTransport(dependencies: {
   fromPartition(name: string): SessionLike;
   retiredTimeoutMs?: number;
   maxRetiredBindings?: number;
+  verifyCertificate?: (profile: ProfileTransportProfile, request: ProfileCertificateVerifyRequest) => boolean;
 }) {
   const retiredTimeoutMs = dependencies.retiredTimeoutMs ?? DEFAULT_RETIRED_TIMEOUT_MS;
   const maxRetiredBindings = dependencies.maxRetiredBindings ?? DEFAULT_MAX_RETIRED_BINDINGS;
@@ -70,12 +73,14 @@ export function createProfileTransport(dependencies: {
     const suffix = randomBytes(32).toString("hex");
     const session = dependencies.fromPartition(`persist:occ-profile-${profile.id}-${suffix}`);
     session.setCertificateVerifyProc((request, callback) => {
-      const valid = request.hostname.toLowerCase() === expectedOrigin.hostname.toLowerCase()
+      const systemValid = request.hostname.toLowerCase() === expectedOrigin.hostname.toLowerCase()
         && request.verificationResult === OK
         && request.errorCode === 0
         && (expectedFingerprint.length === 0
           || (expectedFingerprint.length === 64 && chainContains(request.certificate, expectedFingerprint)));
-      callback(valid ? USE_CHROMIUM_RESULT : DENY);
+      let buildValid = false;
+      try { buildValid = dependencies.verifyCertificate?.(profile, request) === true; } catch { buildValid = false; }
+      callback(systemValid || buildValid ? USE_CHROMIUM_RESULT : DENY);
     });
     return { key, session, requests: 0, pending: new Set(), bodies: new Set(), retired: false, cleanupStarted: false, expirationStarted: false };
   };

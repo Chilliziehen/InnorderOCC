@@ -165,17 +165,21 @@ export const problemReceiptSchema = z
 export type ProblemReceipt = z.infer<typeof problemReceiptSchema>;
 
 const workspaceItemSchema = z.record(z.string(), z.unknown());
+const availableOperationsSchema = z.array(z.string().trim().min(1).max(128)).max(128)
+  .refine((operations) => new Set(operations).size === operations.length, "Available operations must be unique");
 const workspaceDataSchema = {
   items: z.array(workspaceItemSchema).min(1),
   count: z.number().int().min(1),
   nextCursor: z.string().min(1).max(2048).optional(),
   fetchedAt: z.iso.datetime({ offset: true }),
+  availableOperations: availableOperationsSchema.optional(),
 } as const;
 const staleWorkspaceDataSchema = {
   items: z.array(workspaceItemSchema),
   count: z.number().int().min(0),
   nextCursor: z.string().min(1).max(2048).optional(),
   fetchedAt: z.iso.datetime({ offset: true }),
+  availableOperations: availableOperationsSchema.optional(),
 } as const;
 export const workspaceResultSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("loading"), label: z.string().trim().min(1).max(256) }).strict(),

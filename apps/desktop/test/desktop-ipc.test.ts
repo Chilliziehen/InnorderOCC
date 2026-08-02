@@ -493,6 +493,32 @@ describe("desktop main composition", () => {
     expect(readCache.purgeAccount).toHaveBeenCalledWith(cacheScope);
   });
 
+  it("enforces main-owned operation capabilities and decorates only authorized registered commands", async () => {
+    const deps = dependencies();
+    const principalId = "33333333-3333-4333-8333-333333333333";
+    deps.session.login.mockResolvedValue({ state: "authenticated", user: { id: principalId, username: "teacher", displayName: "Teacher", status: "ACTIVE", capabilities: ["risks.query", "risks.acknowledge"] }, expiresAt: "2026-08-03T00:00:00.000Z" });
+    const workspaceQuery = vi.fn().mockResolvedValue({ state: "ready", items: [{ id: "risk-1" }], count: 1, fetchedAt: "2026-08-02T00:00:00.000Z" });
+    const executeCommand = vi.fn().mockResolvedValue({ state: "completed", commandId: profileId, correlationId: profileId });
+    const api = createDesktopApi({
+      profiles: { ...deps.profiles, selected: () => profile } as never,
+      session: { ...deps.session, profileSwitched: vi.fn() }, statuses: deps.runtime.statuses, clearProfile: vi.fn(),
+      workspaceQuery, executeCommand, isOnline: () => true,
+      operationPolicy: {
+        queryCapability: (workspace, operation) => workspace === "risks" && operation === "risks.query" ? "risks.query" : undefined,
+        commandCapability: (workspace, operation) => workspace === "risks" && operation === "acknowledge" ? "risks.acknowledge" : workspace === "risks" && operation === "resolve" ? "risks.resolve" : undefined,
+        availableCommands: (workspace) => workspace === "risks" ? ["acknowledge", "resolve", "forged"] : [],
+      },
+    });
+    await api.session.login({ username: "teacher", password: "long-password" });
+
+    await expect(api.workspaces.query({ workspace: "risks", operation: "risks.query" })).resolves.toMatchObject({ state: "ready", availableOperations: ["acknowledge"] });
+    await expect(api.workspaces.query({ workspace: "risks", operation: "forged" })).resolves.toMatchObject({ state: "error", problem: { status: 403, code: "OPERATION_FORBIDDEN" } });
+    await expect(api.commands.execute({ workspace: "risks", operation: "resolve", targetId: "risk-1", payload: { expectedVersion: 1 }, idempotencyKey: profileId })).resolves.toMatchObject({ state: "problem", problem: { status: 403, code: "OPERATION_FORBIDDEN" } });
+    await expect(api.commands.execute({ workspace: "risks", operation: "forged", targetId: "risk-1", payload: {}, idempotencyKey: profileId })).resolves.toMatchObject({ state: "problem", problem: { status: 403, code: "OPERATION_FORBIDDEN" } });
+    expect(workspaceQuery).toHaveBeenCalledOnce();
+    expect(executeCommand).not.toHaveBeenCalled();
+  });
+
   it("closes the authenticated cache gate before profile cleanup completes", async () => {
     let selected = profile;
     let releaseSelect!: () => void;

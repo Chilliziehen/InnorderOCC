@@ -2,7 +2,7 @@ import { useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
-import { CommandPanel } from "../components/CommandPanel";
+import { CommandPanel, useMainOperationAvailability } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
@@ -108,6 +108,7 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
   const [versionId, setVersionId] = useState("");
   const [baseVersion, setBaseVersion] = useState("");
   const [expectedVersion, setExpectedVersion] = useState("");
+  const operationAvailable = useMainOperationAvailability("domain-design");
   const commands = {
     import: operation("import"),
     validate: operation("validate"),
@@ -116,9 +117,9 @@ export function DomainDesign({ result, query, capabilities, online, authenticate
     publish: operation("publish"),
   };
   const commandProps = { capabilities, online, authenticated, onExecute, onConflictRefresh };
-  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || command.availability.state !== "available" || !capabilities.includes(command.capability);
+  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || !operationAvailable(command.operation) || !capabilities.includes(command.capability);
   const archiveBoundValid = Number.isSafeInteger(maxArchiveBytes) && maxArchiveBytes > 0;
-  const importEnabled = archiveBoundValid && online && authenticated && commands.import.availability.state === "available" && capabilities.includes(commands.import.capability);
+  const importEnabled = archiveBoundValid && online && authenticated && operationAvailable(commands.import.operation) && capabilities.includes(commands.import.capability);
   const selectArchive = async (event: ChangeEvent<HTMLInputElement>) => {
     if (!importEnabled) return;
     const file = event.currentTarget.files?.[0];

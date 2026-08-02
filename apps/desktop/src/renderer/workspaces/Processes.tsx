@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
-import { CommandPanel } from "../components/CommandPanel";
+import { CommandPanel, useMainOperationAvailability } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, commandFor, type WorkspaceOperation } from "./workspace-definitions";
@@ -58,9 +58,9 @@ function command(name: string) {
   return operation;
 }
 
-function controlDisabled(operationName: string, capabilities: readonly string[], online: boolean, authenticated: boolean): boolean {
+function controlDisabled(operationName: string, capabilities: readonly string[], online: boolean, authenticated: boolean, available: (operation: string) => boolean): boolean {
   const operation = command(operationName);
-  return !authenticated || !online || !capabilities.includes(operation.capability) || operation.availability.state !== "available";
+  return !authenticated || !online || !capabilities.includes(operation.capability) || !available(operation.operation);
 }
 
 interface ClientGuard {
@@ -153,6 +153,7 @@ export function Processes({
   onExecute,
 }: ProcessesProps) {
   const queryRef = useRef(query);
+  const operationAvailable = useMainOperationAvailability("processes");
   const [cohortName, setCohortName] = useState("");
   const [processDefinition, setProcessDefinition] = useState("");
   const [reason, setReason] = useState("");
@@ -221,7 +222,7 @@ export function Processes({
 
       <section aria-label="流程命令">
         <h2>流程命令</h2>
-        <label>群组名称<input value={cohortName} disabled={controlDisabled("create", capabilities, online, authenticated)} onChange={(event) => setCohortName(event.currentTarget.value)} /></label>
+        <label>群组名称<input value={cohortName} disabled={controlDisabled("create", capabilities, online, authenticated, operationAvailable)} onChange={(event) => setCohortName(event.currentTarget.value)} /></label>
         <GuardedCommand
           operation={command("create")}
           shape={createShape}
@@ -232,7 +233,7 @@ export function Processes({
           onExecute={onExecute}
           onRefresh={onRefresh}
         />
-        <label>流程定义<input value={processDefinition} disabled={controlDisabled("start", capabilities, online, authenticated)} onChange={(event) => setProcessDefinition(event.currentTarget.value)} /></label>
+        <label>流程定义<input value={processDefinition} disabled={controlDisabled("start", capabilities, online, authenticated, operationAvailable)} onChange={(event) => setProcessDefinition(event.currentTarget.value)} /></label>
         <GuardedCommand
           operation={command("start")}
           shape={startShape}
@@ -244,7 +245,7 @@ export function Processes({
           onExecute={onExecute}
           onRefresh={onRefresh}
         />
-        <label>暂停或取消原因<textarea value={reason} disabled={controlDisabled("suspend", capabilities, online, authenticated) && controlDisabled("cancel", capabilities, online, authenticated)} onChange={(event) => setReason(event.currentTarget.value)} /></label>
+        <label>暂停或取消原因<textarea value={reason} disabled={controlDisabled("suspend", capabilities, online, authenticated, operationAvailable) && controlDisabled("cancel", capabilities, online, authenticated, operationAvailable)} onChange={(event) => setReason(event.currentTarget.value)} /></label>
         {(["suspend", "cancel"] as const).map((operation) => (
           <GuardedCommand
             operation={command(operation)}

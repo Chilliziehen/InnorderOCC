@@ -51,20 +51,19 @@ test("administrator bootstraps HTTPS profile, logs in, and executes the exact ad
 
     await page.getByLabel("人员姓名").fill("Pilot Person");
     await page.getByLabel("人员邮箱").fill("person@example.test");
-    await expect(page.getByRole("button", { name: "创建人员" })).toBeDisabled();
-    await expect(page.getByText("人员创建 API 合同尚未集成").first()).toBeVisible();
-    expect(await executeFixtureCommand(page, "administration", "create", { name: "Pilot Person", email: "person@example.test" })).toMatchObject({ state: "completed", correlationId: ids.correlation });
-    for (const [operation, payload, targetId] of [
-      ["assignRelationship", { relatedPersonId: "person-2", relationshipType: "manager" }, "person-1"],
-      ["assign", { roleId: "role-admin" }, "person-1"],
-      ["release", { expectedVersion: 3, approved: true }, "policy-1"],
-      ["test", { endpoint: "https://ai.example.test", model: "pilot-model", secret: "provider-secret-value" }, "provider-1"],
-      ["ingest", { uploadRef: "knowledge/upload-1", target: "pilot" }, "pilot"],
-      ["inspect", { target: "person-1" }, "person-1"],
-    ] as const) expect(await executeFixtureCommand(page, "administration", operation, payload, targetId)).toMatchObject({ state: "completed", correlationId: ids.correlation });
+    await page.getByRole("button", { name: "创建人员" }).click();
+    await page.getByRole("tab", { name: "关系" }).click();
+    await page.getByLabel("关系主体 ID").fill("person-1"); await page.getByLabel("关系对象 ID").fill("person-2"); await page.getByLabel("关系类型").fill("manager");
+    await page.getByRole("button", { name: "分配关系" }).click();
+    await page.getByRole("tab", { name: "角色" }).click();
+    await page.getByLabel("人员 ID").fill("person-1"); await page.getByLabel("角色 ID").fill("role-admin"); await page.getByRole("button", { name: "分配角色" }).click();
+    await page.getByRole("tab", { name: "策略发布" }).click();
+    await page.getByLabel("策略发布 ID").fill("policy-1"); await page.getByLabel("策略版本").fill("3"); await page.getByLabel("已批准发布").check(); await page.getByRole("button", { name: "发布策略" }).click();
     await page.getByRole("tab", { name: "智能服务" }).click();
-    await page.getByLabel("服务密钥").fill("provider-secret-value");
+    await page.getByLabel("服务配置 ID").fill("provider-1"); await page.getByLabel("服务地址").fill("https://ai.example.test"); await page.getByLabel("服务模型").fill("pilot-model"); await page.getByLabel("服务密钥").fill("provider-secret-value"); await page.getByRole("button", { name: "测试智能服务" }).click();
     await page.getByRole("tab", { name: "知识" }).click();
+    await page.getByLabel("上传引用").fill("knowledge/upload-1"); await page.getByLabel("知识目标").fill("pilot"); await page.getByRole("button", { name: "导入知识" }).click();
+    await page.getByRole("tab", { name: "审计" }).click(); await page.getByLabel("审计目标").fill("person-1"); await page.getByRole("button", { name: "检查审计" }).click();
     await page.getByRole("tab", { name: "智能服务" }).click();
     await expect(page.getByLabel("服务密钥")).toHaveValue("");
     await assertNoSeriousAxeViolations(page);
@@ -88,37 +87,18 @@ test("participant claims explicit work, uploads evidence, reserves resources, an
     await expect(page.getByRole("cell", { name: "Submit identity evidence", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "选择任务：Submit identity evidence" }).click();
     await expect(page.getByText("Signed checklist")).toBeVisible();
-    expect(await executeFixtureCommand(page, "my-work", "claim", { taskId: "task-1" }, "task-1")).toMatchObject({ state: "completed" });
-    const upload = await page.evaluate(async ({ uploadId }) => {
-      const metadata = { workspace: "my-work", taskId: "task-1", fileName: "evidence.txt", mediaType: "text/plain", size: 12, intentHandle: crypto.randomUUID() };
-      const progress: number[] = [];
-      const dispose = window.occ.uploads.subscribeProgress((event) => progress.push(event.percent));
-      const preflight = await window.occ.uploads.preflight(metadata);
-      const begun = await window.occ.uploads.begin(metadata);
-      const chunk = await window.occ.uploads.append({ uploadId, sequence: 0, data: new TextEncoder().encode("pilot proof") });
-      const finished = await window.occ.uploads.finish(uploadId);
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      dispose();
-      return { preflight, begun, chunk, finished, progress };
-    }, { uploadId: ids.upload });
-    expect(upload).toMatchObject({
-      preflight: { state: "available" }, begun: { state: "started", uploadId: ids.upload },
-      chunk: { acceptedBytes: 11, receivedBytes: 11 },
-      finished: { state: "completed", kind: "evidence", quarantineStatus: "quarantined", uploadReference: "quarantine/evidence-1" },
-      progress: [92],
-    });
-    for (const [operation, payload] of [
-      ["submitEvidence", { taskId: "task-1", uploadReference: "quarantine/evidence-1", note: "Signed" }],
-      ["reserve", { taskId: "task-1", resourceId: "resource-1", startsAt: "2026-08-03T08:00:00.000Z", endsAt: "2026-08-03T09:00:00.000Z" }],
-      ["guidance", { taskId: "task-1", question: "What is required?" }],
-    ] as const) expect(await executeFixtureCommand(page, "my-work", operation, payload, "task-1")).toMatchObject({ state: "completed" });
+    await page.getByRole("button", { name: "领取任务" }).click();
+    await page.getByLabel("选择证据文件").setInputFiles({ name: "evidence.txt", mimeType: "text/plain", buffer: Buffer.alloc(1024 * 1024 + 17, 0x61) });
+    await page.getByLabel("提交说明").fill("Signed"); await page.getByRole("button", { name: "开始上传" }).click();
+    await expect(page.getByRole("status", { name: "证据上传完成" })).toBeVisible(); await page.getByRole("button", { name: "提交证据" }).click();
+    await page.getByLabel("资源 ID").fill("resource-1"); await page.getByLabel("开始时间").fill("2026-08-03T08:00"); await page.getByLabel("结束时间").fill("2026-08-03T09:00"); await page.getByRole("button", { name: "预留资源" }).click();
+    await page.getByLabel("问题").fill("What is required?"); await page.getByRole("button", { name: "请求智能建议" }).click();
     await expect(page.getByText("已退回").first()).toBeVisible();
     await expect(page.getByText("智能建议 API 合同尚未集成").first()).toBeVisible();
     await expect(page.getByText("建议仅供参考，不能替代流程、证据、审核或权限决定。")).toBeVisible();
     await assertNoSeriousAxeViolations(page);
     await page.getByRole("tab", { name: "已退回" }).click();
     await expect(page.getByRole("cell", { name: "RETURNED", exact: true })).toBeVisible();
-    expect(await executeFixtureCommand(page, "my-work", "submitEvidence", { taskId: "task-1", uploadReference: "quarantine/evidence-1", note: "Resubmitted" }, "task-1")).toMatchObject({ state: "completed" });
     await page.getByRole("tab", { name: "已完成" }).click();
     await expect(page.getByRole("cell", { name: "COMPLETED", exact: true })).toBeVisible();
     await page.getByRole("link", { name: "介入中心", exact: true }).click();
@@ -134,20 +114,14 @@ test("domain modeler uploads ZIP and performs validate, diff, approve, and publi
     await page.getByRole("link", { name: "领域设计", exact: true }).click();
     await expect(page.getByText("pilot-operations")).toBeVisible();
     await expect(page.getByText(/批准人与导入或修改该版本的人员必须不同/)).toBeVisible();
-    const archive = await page.evaluate(async ({ uploadId }) => {
-      const metadata = { workspace: "domain-design", taskId: "package-import", fileName: "pilot.zip", mediaType: "application/zip", size: 4, intentHandle: crypto.randomUUID() };
-      await window.occ.uploads.preflight(metadata); await window.occ.uploads.begin(metadata);
-      await window.occ.uploads.append({ uploadId, sequence: 0, data: new Uint8Array([0x50, 0x4b, 0x03, 0x04]) });
-      return window.occ.uploads.finish(uploadId);
-    }, { uploadId: ids.upload });
-    expect(archive).toMatchObject({ state: "completed", kind: "archive", sha256: "a".repeat(64) });
-    for (const [operation, payload, target] of [
-      ["import", { packageName: "pilot-operations", packageVersion: "1.4.0", packageType: "process", uploadId: ids.upload, sha256: "a".repeat(64) }],
-      ["validate", { packageId: "package-1" }, "version-1"],
-      ["diff", { packageId: "package-1", baseVersion: "1.3.0" }, "version-1"],
-      ["approve", { expectedVersion: 4 }, "version-1"],
-      ["publish", { expectedVersion: 4 }, "version-1"],
-    ] as const) expect(await executeFixtureCommand(page, "domain-design", operation, payload, target)).toMatchObject({ state: "completed" });
+    await page.getByLabel("包名称").fill("pilot-operations"); await page.getByLabel("包版本").fill("1.4.0"); await page.getByLabel("包类型").fill("process");
+    const zip = Buffer.alloc(1024 * 1024 + 17); zip.set([0x50, 0x4b, 0x05, 0x06]);
+    await page.getByLabel("签名领域包归档").setInputFiles({ name: "pilot.zip", mimeType: "application/zip", buffer: zip });
+    await page.getByRole("button", { name: "上传归档" }).click();
+    await expect(page.getByRole("region", { name: "归档上传引用" })).toBeVisible(); await page.getByRole("button", { name: "导入" }).click();
+    await page.getByLabel("领域包编号").fill("package-1"); await page.getByLabel("版本编号").fill("version-1");
+    await page.getByRole("button", { name: "校验" }).click(); await page.getByLabel("比较基准版本").fill("1.3.0"); await page.getByRole("button", { name: "比较版本" }).click();
+    await page.getByLabel("预期版本").fill("4"); await page.getByRole("button", { name: "批准" }).click(); await page.getByRole("button", { name: "发布" }).click();
     await assertNoSeriousAxeViolations(page);
   } finally { await fixture.close(); }
 });
@@ -160,11 +134,12 @@ test("resource manager covers inventory, reservations, redacted conflicts, and 4
     await expect(page.getByText("Assembly line A")).toBeVisible();
     await page.getByRole("tab", { name: "冲突" }).click();
     await expect(page.getByText("参与者信息已按权限隐藏")).toBeVisible();
-    expect(await executeFixtureCommand(page, "resources", "create", { name: "Assembly line B", type: "line", capacity: 8 })).toMatchObject({ state: "completed" });
-    expect(await executeFixtureCommand(page, "resources", "reserve", { start: "2026-08-03T08:00:00.000Z", end: "2026-08-03T09:00:00.000Z", capacity: 2, expectedVersion: 2, exclusive: false }, "resource-1")).toMatchObject({ state: "completed" });
-    expect(await executeFixtureCommand(page, "resources", "cancel", { expectedVersion: 1 }, "reservation-1")).toMatchObject({ state: "completed" });
-    expect(await executeFixtureCommand(page, "resources", "change", { expectedVersion: 2, capacity: 14 }, "resource-1")).toMatchObject({ state: "completed" });
-    expect(await executeFixtureCommand(page, "resources", "change", { expectedVersion: 1, capacity: 14 }, "resource-1")).toEqual({ state: "conflict", correlationId: ids.correlation, currentVersion: 2, detail: "Resource changed" });
+    await page.getByLabel("资源名称").fill("Assembly line B"); await page.getByLabel("新资源类型").fill("line"); await page.getByRole("spinbutton", { name: "容量", exact: true }).fill("8"); await page.getByRole("button", { name: "创建资源" }).click();
+    await page.getByLabel("预留资源编号").fill("resource-1"); await page.getByLabel("开始时间").fill("2026-08-03T08:00"); await page.getByLabel("结束时间").fill("2026-08-03T09:00"); await page.getByLabel("预留容量").fill("2"); await page.getByLabel("资源预期版本").fill("2"); await page.getByRole("button", { name: "创建预留" }).click();
+    await page.getByLabel("预留编号").fill("reservation-1"); await page.getByLabel("预留版本").fill("1"); await page.getByRole("button", { name: "取消预留" }).click();
+    await page.getByLabel("变更资源编号").fill("resource-1"); await page.getByLabel("当前版本").fill("2"); await page.getByLabel("新容量").fill("14"); await page.getByRole("button", { name: "变更资源" }).click();
+    await expect(page.getByRole("status", { name: "命令回执" }).last()).toContainText("命令已完成");
+    await page.getByLabel("当前版本").fill("1"); await expect(page.getByRole("button", { name: "变更资源" })).toBeEnabled(); await page.getByRole("button", { name: "变更资源" }).click(); await expect(page.getByText("版本冲突").last()).toBeVisible();
     await fixture.setQueryState("resources", "conflict");
     await page.getByRole("button", { name: "刷新" }).click();
     await expect(page.getByRole("region", { name: "版本冲突" })).toContainText(`当前版本 9`);
@@ -211,6 +186,15 @@ for (const role of ["administrator", "teacher", "participant", "modeler", "resou
         : ["总览", "我的工作", "流程", "介入中心", "风险", "资源", "系统", "设置"];
       await expect(nav.getByRole("link")).toHaveText(expectedRoutes);
       await expect(page.getByText("Pilot order exception", { exact: true })).toBeVisible();
+      const denied = role === "administrator"
+        ? { workspace: "risks", query: "risks.query", command: "acknowledge" }
+        : { workspace: "administration", query: "administration.query", command: "create" };
+      const directDenials = await page.evaluate(async (request) => ({
+        query: await window.occ.workspaces.query({ workspace: request.workspace, operation: request.query, filters: {}, limit: 25 }),
+        command: await window.occ.commands.execute({ workspace: request.workspace, operation: request.command, payload: {}, intentHandle: crypto.randomUUID() }),
+      }), denied);
+      expect(directDenials.query).toMatchObject({ state: "error", problem: { status: 403, code: "OPERATION_FORBIDDEN" } });
+      expect(directDenials.command).toMatchObject({ state: "problem", problem: { status: 403, code: "OPERATION_FORBIDDEN" } });
       if (!mayAdminister) {
         const before = (await fixture.calls()).filter(({ channel }) => channel === "workspaces:query").length;
         await page.evaluate(() => { window.location.hash = "/administration"; });
@@ -241,23 +225,13 @@ test("teacher journey exposes process, review, risk, conflict, and correlation r
     const { page } = fixture;
     await page.getByRole("link", { name: "流程", exact: true }).click();
     await expect(page.getByRole("cell", { name: "Pilot onboarding", exact: true })).toBeVisible();
-    for (const [workspace, operation, payload, target] of [
-      ["processes", "create", { name: "September cohort" }],
-      ["processes", "start", { processDefinition: "pilot-v1", processId: "process-1" }, "process-1"],
-      ["interventions", "accept", { evidenceVersion: 3, expectedVersion: 4 }, "review-1"],
-      ["interventions", "conditional", { evidenceVersion: 3, expectedVersion: 4, followUp: "Add signature", dueAt: "2026-08-05" }, "review-1"],
-      ["interventions", "reject", { evidenceVersion: 3, expectedVersion: 4 }, "review-1"],
-      ["risks", "acknowledge", { expectedVersion: 5 }, "risk-1"],
-      ["risks", "mitigate", { expectedVersion: 5, mitigation: "Daily review" }, "risk-1"],
-      ["risks", "resolve", { expectedVersion: 5, resolution: "Evidence accepted" }, "risk-1"],
-    ] as const) {
-      const receipt = await executeFixtureCommand(page, workspace, operation, payload, target);
-      expect(receipt).toMatchObject({ state: "completed", correlationId: ids.correlation });
-    }
+    await page.getByRole("button", { name: "选择流程：Pilot onboarding" }).click(); await page.getByLabel("群组名称").fill("September cohort"); await page.getByRole("button", { name: "创建群组" }).click(); await page.getByLabel("流程定义").fill("pilot-v1"); await page.getByRole("button", { name: "启动流程" }).click();
     await page.getByRole("link", { name: "介入中心", exact: true }).click();
     await expect(page.getByText("Pilot handbook section 4.2")).toBeVisible();
+    await page.getByRole("button", { name: "选择介入事项：Identity evidence review" }).click(); await page.getByRole("button", { name: "接受", exact: true }).click(); await page.getByLabel("有条件接受后续要求").fill("Add signature"); await page.getByLabel("有条件接受到期日").fill("2026-08-05"); await page.getByRole("button", { name: "有条件接受" }).click(); await page.getByRole("button", { name: "拒绝", exact: true }).click();
     await page.getByRole("link", { name: "风险", exact: true }).click();
     await expect(page.getByText("Participant deadline at risk")).toBeVisible();
+    await page.getByRole("button", { name: "选择风险：Participant deadline at risk" }).click(); await page.getByLabel("预期风险版本").fill("5"); await page.getByRole("button", { name: "确认风险" }).click(); await page.getByLabel("缓解措施").fill("Daily review"); await page.getByRole("button", { name: "记录缓解" }).click(); await page.getByLabel("解决说明").fill("Evidence accepted"); await page.getByRole("button", { name: "解决风险" }).click();
     await assertNoSeriousAxeViolations(page);
   } finally {
     await fixture.close();

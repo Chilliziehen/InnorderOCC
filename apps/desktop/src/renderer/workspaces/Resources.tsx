@@ -2,7 +2,7 @@ import { useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
-import { CommandPanel } from "../components/CommandPanel";
+import { CommandPanel, useMainOperationAvailability } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
@@ -132,8 +132,9 @@ export function Resources({ result, query, capabilities, online, authenticated, 
   const [changePayload, setChangePayload] = useState({ resourceId: "", expectedVersion: "", capacity: "" });
   const [reservePayload, setReservePayload] = useState({ resourceId: "", start: "", end: "", capacity: "", expectedVersion: "", exclusive: false });
   const [cancelPayload, setCancelPayload] = useState({ reservationId: "", expectedVersion: "" });
+  const operationAvailable = useMainOperationAvailability("resources");
   const commandProps = { capabilities, online, authenticated, onExecute, onConflictRefresh };
-  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || !capabilities.includes(command.capability);
+  const controlDisabled = (command: WorkspaceOperation) => !online || !authenticated || !capabilities.includes(command.capability) || !operationAvailable(command.operation);
   const create = operation("create");
   const change = operation("change");
   const reserve = operation("reserve");

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ROUTES } from "../src/renderer/routes";
 import { WORKSPACE_MANIFEST } from "../src/renderer/workspace-manifest";
 import { WORKSPACE_DEFINITIONS } from "../src/renderer/workspaces/workspace-definitions";
+import { createMainOperationPolicy } from "../src/main-operation-policy";
 
 const EXACT_POLICY = {
   overview: ["/overview", ["/me", "/tasks", "/processes", "/risks", "/system"], "overview.query:overview.query", []],
@@ -76,5 +77,22 @@ describe("canonical workspace manifest", () => {
       expect(workspace.query).toBe(manifest.query);
       expect(workspace.commands).toBe(manifest.commands);
     }
+  });
+
+  it("keeps the main generated registry in exact capability parity and production unavailable", () => {
+    const production = createMainOperationPolicy(false);
+    const smoke = createMainOperationPolicy(true);
+    for (const workspace of WORKSPACE_MANIFEST) {
+      expect(production.queryCapability(workspace.id, workspace.query.operation)).toBe(workspace.query.capability);
+      expect(production.availableCommands(workspace.id)).toEqual([]);
+      expect(smoke.availableCommands(workspace.id)).toEqual(workspace.commands
+        .filter(({ availability }) => availability.state === "unavailable")
+        .map(({ operation }) => operation));
+      for (const command of workspace.commands) {
+        expect(production.commandCapability(workspace.id, command.operation)).toBe(command.capability);
+      }
+    }
+    expect(smoke.queryCapability("risks", "forged")).toBeUndefined();
+    expect(smoke.commandCapability("risks", "forged")).toBeUndefined();
   });
 });

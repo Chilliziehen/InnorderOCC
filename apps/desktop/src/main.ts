@@ -39,6 +39,7 @@ import { createSessionManager, customerInstanceIdFromAccessToken } from "./sessi
 import { createMainReliabilityApi } from "./main-reliability-composition";
 import { fetchSystemStatuses } from "./system-status-ipc";
 import { resolveTrustedPowerShell } from "./trusted-powershell";
+import { runtimeBuild } from "./runtime-adapter";
 
 const CORE_BASE_URL = process.env.CORE_BASE_URL ?? "http://127.0.0.1:8080";
 const AI_BASE_URL = process.env.AI_BASE_URL ?? "http://127.0.0.1:3100";
@@ -156,6 +157,7 @@ void app.whenReady().then(async () => {
   registerPermissionDenial(session.defaultSession);
   const profileTransport = createProfileTransport({
     fromPartition: (name) => session.fromPartition(name) as never,
+    ...(runtimeBuild.verifyCertificate ? { verifyCertificate: runtimeBuild.verifyCertificate } : {}),
   });
 
   const userData = app.getPath("userData");
@@ -220,11 +222,17 @@ void app.whenReady().then(async () => {
   });
   const readCache = createReadCache({ persistence: readCachePersistence });
   const commandIntents = createCommandIntentRegistry();
+  const runtimeServices = runtimeBuild.createServices({
+    fetch: (input, init) => profileTransport.fetch(selectedProfile(), input, init),
+    getOrigin: () => selectedProfile().origin,
+    getAccessToken: () => accessToken,
+  });
   const notificationStream = createNotificationStream({
     persistence: notificationPersistence,
     getAccessToken: () => accessToken,
     settleCommand: (intentHandle, settlement) => commandIntents.settle(intentHandle, settlement),
-    connector: () => { throw new Error("Notification contract unavailable"); },
+    connector: runtimeServices.notificationConnector,
+    ...(runtimeServices.notifications ? { listFallback: runtimeServices.notifications.list } : {}),
   });
   const disposeNotificationForwarder = notificationStream.subscribe((event) => {
     if (mainWindow) sendDesktopNotification(mainWindow.webContents, event);
@@ -234,10 +242,10 @@ void app.whenReady().then(async () => {
   });
   const uploads = createEvidenceUploadService({
     spoolDirectory: path.join(userData, "upload-spool"),
-    getProfile: () => ({ origin: selectedProfile().origin, endpointAvailable: false }),
+    getProfile: () => ({ origin: selectedProfile().origin, endpointAvailable: runtimeServices.evidenceEndpointAvailable }),
     getAccessToken: () => accessToken,
     isOnline: connectivity.isOnline,
-    transport: async () => { throw new Error("Evidence contract unavailable"); },
+    transport: runtimeServices.evidenceTransport,
     onProgress: (progress) => {
       if (mainWindow) sendDesktopUploadProgress(mainWindow.webContents, progress);
     },
@@ -271,6 +279,11 @@ void app.whenReady().then(async () => {
     getCustomerInstanceId: () => customerInstanceId,
     connectivity,
     uploads,
+    operationPolicy: runtimeBuild.operationPolicy,
+    ...(runtimeServices.workspaceQuery ? { workspaceQuery: runtimeServices.workspaceQuery } : {}),
+    ...(runtimeServices.executeCommand ? { executeCommand: runtimeServices.executeCommand } : {}),
+    ...(runtimeServices.notifications ? { notifications: runtimeServices.notifications } : {}),
+    getNotificationSession: (scope) => ({ scope, origin: selectedProfile().origin, endpointAvailable: runtimeServices.notificationEndpointAvailable }),
   });
 
   disposeDesktopIpc = registerDesktopIpc(rendererDocumentUrl(), api, { commandIntents });

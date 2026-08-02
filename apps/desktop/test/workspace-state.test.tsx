@@ -139,6 +139,17 @@ describe("canonical workspace contracts", () => {
     expect(workspaceResultSchema.parse(result)).toEqual(result);
   });
 
+  it("validates bounded duplicate-free main operation availability", () => {
+    expect(workspaceResultSchema.parse({
+      state: "ready", items: [{ id: "risk-1" }], count: 1, fetchedAt,
+      availableOperations: ["acknowledge", "mitigate"],
+    })).toMatchObject({ availableOperations: ["acknowledge", "mitigate"] });
+    expect(() => workspaceResultSchema.parse({
+      state: "ready", items: [{ id: "risk-1" }], count: 1, fetchedAt,
+      availableOperations: ["acknowledge", "acknowledge"],
+    })).toThrow();
+  });
+
   it("requires a validated currentVersion on conflict command receipts", () => {
     const receipt = { state: "conflict", currentVersion: 9, correlationId };
     expect(commandReceiptSchema.parse(receipt)).toEqual(receipt);
@@ -380,6 +391,16 @@ describe("CommandPanel", () => {
     fireEvent.submit(container.querySelector("form") as HTMLFormElement);
     expect(onExecute).not.toHaveBeenCalled();
     expect(screen.getByText(/风险解决 API 合同尚未集成/)).toBeInTheDocument();
+  });
+
+  it("enables a canonical command only when main reports it and capability matches", async () => {
+    const onExecute = vi.fn().mockResolvedValue({ state: "completed", commandId: "00000000-0000-4000-8000-000000000088", correlationId });
+    const { rerender } = render(<CommandPanel workspace="risks" command={unavailableCommand} availableOperations={[]} capabilities={[unavailableCommand.capability]} online authenticated payload={{ expectedVersion: 1, resolution: "resolved" }} onExecute={onExecute} />);
+    expect(screen.getByRole("button", { name: unavailableCommand.label })).toBeDisabled();
+    rerender(<CommandPanel workspace="risks" command={unavailableCommand} availableOperations={["resolve"]} capabilities={[unavailableCommand.capability]} online authenticated payload={{ expectedVersion: 1, resolution: "resolved" }} onExecute={onExecute} />);
+    fireEvent.click(screen.getByRole("button", { name: unavailableCommand.label }));
+    await waitFor(() => expect(onExecute).toHaveBeenCalledOnce());
+    expect(onExecute.mock.calls[0]![0]).toMatchObject({ workspace: "risks", operation: "resolve", payload: { expectedVersion: 1, resolution: "resolved" } });
   });
 
   it("coalesces double submission under one intent handle and renders a safe receipt", async () => {

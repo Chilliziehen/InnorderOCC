@@ -2,7 +2,7 @@ import { useRef, useState, type KeyboardEvent } from "react";
 import { z } from "zod";
 
 import type { CommandReceipt, WorkspaceCommand, WorkspaceResult } from "../../desktop-contract";
-import { CommandPanel } from "../components/CommandPanel";
+import { CommandPanel, useMainOperationAvailability } from "../components/CommandPanel";
 import { QueryToolbar, type WorkspaceQueryValue } from "../components/QueryToolbar";
 import { WorkspaceState } from "../components/WorkspaceState";
 import { WORKSPACE_DEFINITIONS, type WorkspaceOperation } from "./workspace-definitions";
@@ -60,8 +60,9 @@ function WorkspaceAction({ command, schema, payload, targetId, capabilities, onl
   readonly onExecute: (intent: WorkspaceCommand) => Promise<CommandReceipt>;
   readonly onRefresh: () => void;
 }) {
+  const available = useMainOperationAvailability("risks");
   const parsed = schema.safeParse(payload);
-  const operationBlocksFirst = command.availability.state === "unavailable" || !online || !authenticated || !capabilities.includes(command.capability);
+  const operationBlocksFirst = !available(command.operation) || !online || !authenticated || !capabilities.includes(command.capability);
   if (!operationBlocksFirst && (!targetId || !parsed.success)) {
     const reasonId = `risks-${command.operation}-form-reason`;
     return <div><button type="button" disabled aria-describedby={reasonId}>{command.label}</button><p id={reasonId}>{targetId ? "请完成必填操作字段" : "请选择风险"}</p></div>;

@@ -6,6 +6,7 @@ import path from "node:path";
 import { _electron as electron, expect, type ElectronApplication, type Page } from "playwright/test";
 
 import { packagedSmokeLaunchOptions, preflightPackagedExecutable } from "../packaged-app";
+import { WORKSPACE_MANIFEST } from "../../src/renderer/workspace-manifest";
 
 export type SmokeRole = "administrator" | "teacher" | "participant" | "modeler" | "resource-manager";
 
@@ -33,6 +34,11 @@ const roleCapabilities: Record<SmokeRole, readonly string[]> = {
     "reservations.create", "reservations.cancel",
   ],
 };
+
+const operationPolicy = Object.fromEntries(WORKSPACE_MANIFEST.map((workspace) => [workspace.id, {
+  query: { operation: workspace.query.operation, capability: workspace.query.capability },
+  commands: Object.fromEntries(workspace.commands.map((command) => [command.operation, command.capability])),
+}])) as Record<string, { query: { operation: string; capability: string }; commands: Record<string, string> }>;
 
 const ids = {
   profile: "10000000-0000-4000-8000-000000000001",
@@ -123,14 +129,14 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
     } as const;
     type FixtureState = {
       profiles: Array<Record<string, unknown>>; current: Record<string, unknown> | null; authenticated: boolean;
-      calls: Array<{ channel: string; input?: unknown }>; uploadBytes: number; uploadSize: number; uploadIntent: string; uploadKind: "evidence" | "archive";
+      calls: Array<{ channel: string; input?: unknown }>; uploadBytes: number; uploadSize: number; uploadSequence: number; uploadIntent: string; uploadKind: "evidence" | "archive"; uploadActive: boolean;
       online: boolean; queryStates: Record<string, "ready" | "stale" | "conflict">;
     };
     const state: FixtureState = {
       profiles: fixture.startWithoutProfile ? [] : [fixture.profile],
       current: fixture.startWithoutProfile ? null : fixture.profile,
       authenticated: !fixture.startWithoutProfile,
-      calls: [], uploadBytes: 0, uploadSize: 1, uploadIntent: fixture.ids.correlation, uploadKind: "evidence", online: true, queryStates: {},
+      calls: [], uploadBytes: 0, uploadSize: 1, uploadSequence: 0, uploadIntent: fixture.ids.correlation, uploadKind: "evidence", uploadActive: false, online: true, queryStates: {},
     };
     (globalThis as typeof globalThis & { __occSmokeFixture?: FixtureState }).__occSmokeFixture = state;
     const scrub = (value: unknown): unknown => {
@@ -167,7 +173,10 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
     install(channels.query, (_event, input: Record<string, unknown>) => {
       assertObject(channels.query, input); record(channels.query, input);
       const workspace = String(input.workspace ?? "");
-      if (input.operation !== (fixture.operations as Record<string, string>)[workspace] || typeof input.filters !== "object") throw new Error(`invalid ${workspace} query`);
+      const policy = (fixture.policy as Record<string, { query: { operation: string; capability: string }; commands: Record<string, string> }>)[workspace];
+      if (!policy || input.operation !== policy.query.operation || typeof input.filters !== "object" || !fixture.capabilities.includes(policy.query.capability)) {
+        return { state: "error", problem: { title: "Operation forbidden", code: "OPERATION_FORBIDDEN", status: 403 } };
+      }
       let items = fixture.queryItems[workspace] ?? [];
       if (workspace === "my-work") {
         const tab = String((input.filters as Record<string, unknown>).tab ?? "available");
@@ -177,31 +186,38 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
       if (state.queryStates[workspace] === "conflict") return { state: "conflict", currentVersion: 9, correlationId: fixture.ids.correlation };
       if (state.queryStates[workspace] === "stale") return { state: "stale", items, count: items.length, fetchedAt: "2026-08-01T08:00:00.000Z" };
       if (!state.online && items.length) return { state: "offline", items, count: items.length, fetchedAt: "2026-08-01T08:00:00.000Z" };
-      return items.length ? { state: "ready", items, count: items.length, fetchedAt: fixture.now } : { state: "empty", fetchedAt: fixture.now };
+      const availableOperations = Object.entries(policy.commands).filter(([, capability]) => fixture.capabilities.includes(capability)).map(([operation]) => operation);
+      return items.length ? { state: "ready", items, count: items.length, fetchedAt: fixture.now, availableOperations } : { state: "empty", fetchedAt: fixture.now };
     });
     install(channels.command, (_event, input: Record<string, unknown>) => {
       assertObject(channels.command, input); record(channels.command, input);
       if (typeof input.workspace !== "string" || typeof input.operation !== "string" || typeof input.intentHandle !== "string" || typeof input.payload !== "object") throw new Error("invalid command");
+      const policy = (fixture.policy as Record<string, { commands: Record<string, string> }>)[input.workspace];
+      const capability = policy?.commands[input.operation];
+      if (!capability || !fixture.capabilities.includes(capability)) return { state: "problem", problem: { title: "Operation forbidden", code: "OPERATION_FORBIDDEN", status: 403, correlationId: fixture.ids.correlation } };
       if (!state.online) return { state: "problem", problem: { title: "Offline mutations are locked", code: "OFFLINE_READ_ONLY", status: 503, correlationId: fixture.ids.correlation } };
       if (input.operation === "change" && (input.payload as Record<string, unknown>).expectedVersion === 1) return { state: "conflict", correlationId: fixture.ids.correlation, currentVersion: 2, detail: "Resource changed" };
       return { state: "completed", commandId: fixture.ids.command, correlationId: fixture.ids.correlation, result: { version: 2 } };
     });
     install(channels.uploadPreflight, (_event, input: Record<string, unknown>) => { assertObject(channels.uploadPreflight, input); record(channels.uploadPreflight, input); return { state: "available", maxBytes: 100 * 1024 * 1024 }; });
-    install(channels.uploadBegin, (_event, input: Record<string, unknown>) => { assertObject(channels.uploadBegin, input); record(channels.uploadBegin, input); state.uploadBytes = 0; state.uploadSize = Number(input.size); state.uploadIntent = String(input.intentHandle); state.uploadKind = input.workspace === "domain-design" ? "archive" : "evidence"; return { state: "started", uploadId: fixture.ids.upload }; });
+    install(channels.uploadBegin, (_event, input: Record<string, unknown>) => { assertObject(channels.uploadBegin, input); record(channels.uploadBegin, input); state.uploadBytes = 0; state.uploadSize = Number(input.size); state.uploadSequence = 0; state.uploadIntent = String(input.intentHandle); state.uploadKind = input.workspace === "domain-design" ? "archive" : "evidence"; state.uploadActive = true; return { state: "started", uploadId: fixture.ids.upload }; });
     install(channels.uploadAppend, (_event, input: Record<string, unknown>) => {
       assertObject(channels.uploadAppend, input); record(channels.uploadAppend, { ...input, data: "[BINARY]" });
-      const bytes = (input.data as { byteLength?: number }).byteLength ?? 0; if (bytes <= 0 || bytes > 1024 * 1024) throw new Error("invalid chunk");
+      const bytes = (input.data as { byteLength?: number }).byteLength ?? 0;
+      if (!state.uploadActive || input.uploadId !== fixture.ids.upload || input.sequence !== state.uploadSequence || bytes <= 0 || bytes > 1024 * 1024 || state.uploadBytes + bytes > state.uploadSize) throw new Error("invalid chunk");
+      state.uploadSequence += 1;
       state.uploadBytes += bytes;
       BrowserWindow.getAllWindows()[0]?.webContents.send("uploads:progress", { uploadId: fixture.ids.upload, intentHandle: state.uploadIntent, percent: Math.min(100, Math.round(state.uploadBytes / state.uploadSize * 100)) });
       return { acceptedBytes: bytes, receivedBytes: state.uploadBytes };
     });
     install(channels.uploadFinish, (_event, uploadId: string) => {
-      record(channels.uploadFinish, uploadId); if (uploadId !== fixture.ids.upload) throw new Error("invalid upload id");
+      record(channels.uploadFinish, uploadId); if (!state.uploadActive || uploadId !== fixture.ids.upload || state.uploadBytes !== state.uploadSize) throw new Error("invalid upload finish");
+      state.uploadActive = false;
       return state.uploadKind === "archive"
         ? { state: "completed", uploadId, kind: "archive", uploadReference: "packages/pilot-operations.zip", sha256: "a".repeat(64) }
         : { state: "completed", uploadId, kind: "evidence", evidenceId: fixture.ids.evidence, uploadReference: "quarantine/evidence-1", quarantineStatus: "quarantined", processingStatus: "scanning", reviewStatus: "pending" };
     });
-    install(channels.uploadCancel, (_event, uploadId: string) => { record(channels.uploadCancel, uploadId); });
+    install(channels.uploadCancel, (_event, uploadId: string) => { record(channels.uploadCancel, uploadId); if (uploadId === fixture.ids.upload) { state.uploadActive = false; state.uploadBytes = 0; state.uploadSequence = 0; } });
     install(channels.notificationsList, (_event, cursor?: string) => { record(channels.notificationsList, cursor); return { items: fixture.notifications, nextCursor: "cursor-2" }; });
     BrowserWindow.getAllWindows()[0]?.webContents.send("notifications:state", { state: "online", changedAt: fixture.now, lastEventAt: fixture.now });
   }, {
@@ -209,8 +225,9 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
     ids,
     profile: { id: ids.profile, name: "Pilot OCC", origin: "https://pilot.example.test", environment: "pilot" },
     session: { state: "authenticated", user: { id: ids.user, username: `${role}-operator`, displayName: `${role} operator`, status: "ACTIVE", capabilities: roleCapabilities[role] }, expiresAt: "2099-08-02T12:00:00.000Z" },
+    capabilities: roleCapabilities[role],
+    policy: operationPolicy,
     statuses: [{ service: "occ-core", version: "1.4.0", state: "READY", checkedAt: "2026-08-02T08:00:00.000Z", components: [] }],
-    operations: { overview: "overview.query", "my-work": "tasks.query", processes: "processes.query", interventions: "interventions.query", risks: "risks.query", resources: "resources.query", "domain-design": "packages.query", administration: "administration.query" },
     queryItems,
     now: "2026-08-02T08:00:00.000Z",
     notifications: [{ id: "10000000-0000-4000-8000-000000000007", cursor: "cursor-1", type: "task.updated", occurredAt: "2026-08-02T08:00:00.000Z", title: "Task updated", body: "Evidence is ready", read: false }],

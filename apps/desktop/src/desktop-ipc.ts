@@ -18,7 +18,7 @@ import type { ProfileStore } from "./profile-store";
 import type { CredentialVault, SessionManager, VaultCredential } from "./session-manager";
 import { serializedSize } from "./serialized-size";
 import { createCommandIntentRegistry, type CommandIntentRegistry, type InternalWorkspaceCommand } from "./command-intents";
-import type { CommandReceipt } from "./desktop-contract";
+import type { CommandReceipt, WorkspaceResult } from "./desktop-contract";
 import type { ReadCacheScope } from "./read-cache";
 import { mainUnavailableOperation } from "./main-operation-registry";
 
@@ -254,6 +254,11 @@ export interface DesktopApiDependencies {
     abortAll(): Promise<void>;
   };
   notifications?: Pick<OccApi["notifications"], "list">;
+  operationPolicy?: {
+    queryCapability(workspace: string, operation: string): string | undefined;
+    commandCapability(workspace: string, operation: string): string | undefined;
+    availableCommands(workspace: string): readonly string[];
+  };
   onSessionScopeChanged?: (scope: ReadCacheScope | null, generation: number) => void;
 }
 
@@ -294,10 +299,12 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     return result;
   };
   let authenticatedCacheScope: ReadCacheScope | null = null;
+  let authenticatedCapabilities = new Set<string>();
   let sessionGeneration = 0;
   const invalidateSessionScope = () => {
     const previous = authenticatedCacheScope;
     authenticatedCacheScope = null;
+    authenticatedCapabilities = new Set();
     dependencies.uploadLifecycle?.setScope(null);
     sessionGeneration += 1;
     dependencies.onSessionScopeChanged?.(null, sessionGeneration);
@@ -319,6 +326,7 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
     authenticatedCacheScope = candidate && snapshot.state === "authenticated" && candidate.principalId === snapshot.user.id
       ? candidate
       : null;
+    authenticatedCapabilities = new Set(snapshot.state === "authenticated" ? snapshot.user.capabilities : []);
     dependencies.uploadLifecycle?.setScope(authenticatedCacheScope);
     sessionGeneration += 1;
     dependencies.onSessionScopeChanged?.(authenticatedCacheScope, sessionGeneration);
@@ -414,18 +422,34 @@ export function createDesktopApi(dependencies: DesktopApiDependencies): InvokeAp
           if (cached?.state === "stale") return cached;
           return { state: "error", problem: { title: "Offline cache unavailable", code: "OFFLINE_NO_CACHE", status: 503 } };
         }
+        const queryCapability = dependencies.operationPolicy?.queryCapability(input.workspace, input.operation);
+        if (dependencies.operationPolicy && (!queryCapability || !authenticatedCapabilities.has(queryCapability))) {
+          return { state: "error", problem: { title: "Operation forbidden", code: "OPERATION_FORBIDDEN", status: 403 } };
+        }
         if (!dependencies.workspaceQuery) return mainUnavailableOperation(input.workspace, input.operation, "/workspaces");
+        const decorate = (result: WorkspaceResult): WorkspaceResult => {
+          if (!dependencies.operationPolicy || !(result.state === "ready" || result.state === "stale" || result.state === "offline")) return result;
+          const availableOperations = dependencies.operationPolicy.availableCommands(input.workspace).filter((operation) => {
+            const capability = dependencies.operationPolicy?.commandCapability(input.workspace, operation);
+            return capability !== undefined && authenticatedCapabilities.has(capability);
+          });
+          return { ...result, availableOperations: [...new Set(availableOperations)] };
+        };
         if (dependencies.readCache && scope) {
-          return dependencies.readCache.query(scope, input, scope, () => dependencies.workspaceQuery!(input), isCurrent);
+          return decorate(await dependencies.readCache.query(scope, input, scope, () => dependencies.workspaceQuery!(input), isCurrent));
         }
         const result = await dependencies.workspaceQuery(input);
         if (!isCurrent()) throw new Error("Session scope changed");
-        return result;
+        return decorate(result);
       },
     },
     commands: {
       execute: async (input) => {
         if (dependencies.isOnline?.() === false) throw new Error("Command rejected while offline");
+        const capability = dependencies.operationPolicy?.commandCapability(input.workspace, input.operation);
+        if (dependencies.operationPolicy && (!capability || !authenticatedCapabilities.has(capability))) {
+          return { state: "problem", problem: { title: "Operation forbidden", code: "OPERATION_FORBIDDEN", status: 403 } };
+        }
         return dependencies.executeCommand
           ? dependencies.executeCommand(input)
           : mainUnavailableOperation(input.workspace, input.operation, "/commands");
