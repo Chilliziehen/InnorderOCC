@@ -1,10 +1,12 @@
 package com.innorder.occ
 
+import com.innorder.occ.iam.PlatformSecurityBaseline
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.mock.mockito.MockBean
 import org.springframework.core.env.Environment
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.web.servlet.MockMvc
@@ -26,6 +28,9 @@ class OccCoreApplicationTest(
     @param:Autowired private val environment: Environment,
     @param:Autowired private val jdbcTemplate: JdbcTemplate,
 ) {
+    @MockBean
+    private lateinit var platformSecurityBaseline: PlatformSecurityBaseline
+
     @Test
     fun `application enables bounded graceful shutdown`() {
         assertThat(environment.getProperty("server.shutdown")).isEqualTo("graceful")

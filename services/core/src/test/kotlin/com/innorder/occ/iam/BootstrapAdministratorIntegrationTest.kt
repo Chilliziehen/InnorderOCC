@@ -162,6 +162,7 @@ class BootstrapAdministratorIntegrationTest {
 
     @Test
     fun `risk runtime runners execute after administrator bootstrap and before validation`() {
+        assertThat(PlatformSecurityBaseline.ORDER).isLessThan(BootstrapAdministrator.ORDER)
         assertThat(BootstrapAdministrator.ORDER).isLessThan(RiskRuntimeIdentityProvisioner.ORDER)
         assertThat(RiskRuntimeIdentityProvisioner.ORDER).isLessThan(RiskRuntimeIdentityValidator.ORDER)
     }
@@ -691,6 +692,7 @@ class BootstrapAdministratorIntegrationTest {
             .withBean(JdbcTemplate::class.java, { mock(JdbcTemplate::class.java) })
             .withBean(TransactionTemplate::class.java, { mock(TransactionTemplate::class.java) })
             .withBean(PasswordService::class.java, { PasswordService() })
+            .withBean(PlatformSecurityBaseline::class.java, { mock(PlatformSecurityBaseline::class.java) })
             .withPropertyValues("occ.bootstrap-administrator.password-file=configured-secret")
             .run { context ->
                 assertThat(context).hasSingleBean(BootstrapAdministrator::class.java)
