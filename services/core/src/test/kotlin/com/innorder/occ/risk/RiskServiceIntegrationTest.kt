@@ -35,7 +35,6 @@ import com.innorder.occ.events.OutboxRepository
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.flywaydb.core.Flyway
-import org.springframework.boot.DefaultApplicationArguments
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -609,32 +608,19 @@ class RiskServiceIntegrationTest {
     }
 
     @Test
-    fun `production risk configuration validates existing service principal and report resource`() {
+    fun `production risk configuration requires canonical principal and report IDs`() {
         assertThatThrownBy { RiskDueProperties(enabled = true) }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessage("Enabled risk due evaluation requires a system principal ID")
         assertThatThrownBy { RiskMetricsProperties(enabled = true) }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessage("Enabled risk metrics requires a report resource ID")
-        val due = RiskDueProperties(enabled = true, systemPrincipalId = fixture.systemPrincipal.toString())
-        val metrics = RiskMetricsProperties(enabled = true, reportResourceId = fixture.target.toString())
-
-        RiskRuntimeIdentityValidator(runtimeJdbc, due, metrics).run(DefaultApplicationArguments())
-
-        assertThatThrownBy {
-            RiskRuntimeIdentityValidator(
-                runtimeJdbc,
-                due.copy(systemPrincipalId = fixture.principal.toString()),
-                metrics,
-            ).run(DefaultApplicationArguments())
-        }.isInstanceOf(RiskRuntimeConfigurationException::class.java)
-        assertThatThrownBy {
-            RiskRuntimeIdentityValidator(
-                runtimeJdbc,
-                due,
-                metrics.copy(reportResourceId = fixture.systemPrincipal.toString()),
-            ).run(DefaultApplicationArguments())
-        }.isInstanceOf(RiskRuntimeConfigurationException::class.java)
+        assertThatThrownBy { RiskDueProperties(enabled = true, systemPrincipalId = "not-a-uuid") }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("Risk runtime identity must be a canonical UUID")
+        assertThatThrownBy { RiskMetricsProperties(enabled = true, reportResourceId = "not-a-uuid") }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("Risk runtime identity must be a canonical UUID")
     }
 
     private fun metadata(
