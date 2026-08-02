@@ -218,6 +218,7 @@ workflow_relationship_constraint(grant) if {
     grant.action == "task.complete"
     input.action == "task.complete"
     workflow_relationship("TASK_ASSIGNEE", input.resource.id)
+    input.context.taskState == "CLAIMED"
     input.context.processState == "RUNNING"
     input.context.hardBlockersAbsent == true
 }

@@ -133,6 +133,17 @@ open class AuthorizationSnapshotIntegrityIntegrationTest {
         }
     }
 
+    protected fun adminScenario(block: (JdbcTemplate) -> Unit) {
+        val jdbc = JdbcTemplate(adminDataSource())
+        TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!)).execute { status ->
+            try {
+                block(jdbc)
+            } finally {
+                status.setRollbackOnly()
+            }
+        }
+    }
+
     protected fun seedActiveRelease(jdbc: JdbcTemplate, manifests: Map<PolicyLayer, String>): UUID {
         val items = manifests.map { (layer, manifest) -> bundle(jdbc, layer, manifest) }
         return activate(jdbc, items)
@@ -263,14 +274,8 @@ open class AuthorizationSnapshotIntegrityIntegrationTest {
             jdbc.update("INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable) VALUES (?, ?, 'matrix.subject', 'Subject', 'PRINCIPAL', true), (?, ?, 'matrix.role', 'Role', 'PRINCIPAL', true)", TYPE_ID, PACKAGE_ID, ROLE_TYPE_ID, PACKAGE_ID)
             jdbc.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, 1, '{}'::jsonb), (?, ?, ?, 1, '{}'::jsonb)", TYPE_VERSION_ID, TYPE_ID, PACKAGE_VERSION_ID, ROLE_TYPE_VERSION_ID, ROLE_TYPE_ID, PACKAGE_VERSION_ID)
             jdbc.update("INSERT INTO catalog.relation_definition(id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant) VALUES (?, ?, 'platform.role-assignment', ?, ?, 'MANY_TO_MANY', true)", RELATION_ID, PACKAGE_VERSION_ID, TYPE_ID, ROLE_TYPE_ID)
-            listOf(
-                "74000000-0000-7000-8000-000000000001" to "cohort_owner",
-                "74000000-0000-7000-8000-000000000002" to "cohort_teacher",
-                "74000000-0000-7000-8000-000000000003" to "cohort_participant",
-                "74000000-0000-7000-8000-000000000004" to "task_candidate",
-                "74000000-0000-7000-8000-000000000005" to "task_assignee",
-                "74000000-0000-7000-8000-000000000006" to "unrelated_authority",
-            ).forEach { (id, key) ->
+            (WorkflowAuthorizationRelationDefinitions.all.map { it.id.toString() to it.key } +
+                ("74000000-0000-7000-8000-000000000006" to "unrelated_authority")).forEach { (id, key) ->
                 jdbc.update(
                     """INSERT INTO catalog.relation_definition
                        (id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
@@ -278,6 +283,22 @@ open class AuthorizationSnapshotIntegrityIntegrationTest {
                     id, PACKAGE_VERSION_ID, key, TYPE_ID, TYPE_ID,
                 )
             }
+            jdbc.update(
+                """INSERT INTO catalog.workflow_definition
+                   (id, package_version_id, workflow_key, bpmn_object_key, content_hash)
+                   VALUES ('75000000-0000-7000-8000-000000000001', ?, 'task-authz',
+                           'task-authz.bpmn', repeat('c', 64))""",
+                PACKAGE_VERSION_ID,
+            )
+            jdbc.update(
+                """INSERT INTO occ.process_definition_binding
+                   (id, workflow_definition_id, package_version_id, bpmn_key,
+                    flowable_deployment_id, flowable_definition_id, content_hash)
+                   VALUES ('75000000-0000-7000-8000-000000000002',
+                           '75000000-0000-7000-8000-000000000001', ?, 'task-authz',
+                           'task-authz-deployment', 'task-authz-definition', repeat('d', 64))""",
+                PACKAGE_VERSION_ID,
+            )
             listOf(
                 arrayOf(PRINCIPAL_ID, TYPE_ID, TYPE_VERSION_ID, "matrix:user"),
                 arrayOf(ENTITY_ID, TYPE_ID, TYPE_VERSION_ID, "matrix:entity"),
@@ -293,6 +314,12 @@ open class AuthorizationSnapshotIntegrityIntegrationTest {
             setURL(postgres.jdbcUrl)
             user = "innorder_runtime"
             password = "runtime-test-only"
+        }
+
+        private fun adminDataSource() = PGSimpleDataSource().apply {
+            setURL(postgres.jdbcUrl)
+            user = postgres.username
+            password = postgres.password
         }
     }
 }

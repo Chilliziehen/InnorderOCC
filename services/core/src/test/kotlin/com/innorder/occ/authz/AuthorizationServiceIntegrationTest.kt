@@ -1452,6 +1452,14 @@ class AuthorizationServiceIntegrationTest {
             jdbc.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, 1, '{}'::jsonb), (?, ?, ?, 1, '{}'::jsonb)", TYPE_VERSION_ID, TYPE_ID, PACKAGE_VERSION_ID, ROLE_TYPE_VERSION_ID, ROLE_TYPE_ID, PACKAGE_VERSION_ID)
             jdbc.update("INSERT INTO catalog.relation_definition(id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant) VALUES (?, ?, 'platform.role-assignment', ?, ?, 'MANY_TO_MANY', true)", RELATION_ID, PACKAGE_VERSION_ID, TYPE_ID, ROLE_TYPE_ID)
             jdbc.update("INSERT INTO catalog.relation_definition(id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant) VALUES (?, ?, 'authz.wrong-relation', ?, ?, 'MANY_TO_MANY', true)", WRONG_RELATION_ID, PACKAGE_VERSION_ID, TYPE_ID, ROLE_TYPE_ID)
+            WorkflowAuthorizationRelationDefinitions.all.forEach { definition ->
+                jdbc.update(
+                    """INSERT INTO catalog.relation_definition
+                       (id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
+                       VALUES (?, ?, ?, ?, ?, 'MANY_TO_MANY', true)""",
+                    definition.id, PACKAGE_VERSION_ID, definition.key, TYPE_ID, TYPE_ID,
+                )
+            }
             listOf(
                 arrayOf(PRINCIPAL_ID, TYPE_ID, TYPE_VERSION_ID, "user:authz"),
                 arrayOf(ENTITY_ID, TYPE_ID, TYPE_VERSION_ID, "entity:authz"),

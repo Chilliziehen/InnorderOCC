@@ -274,7 +274,7 @@ test_candidate_claim_and_assignee_complete_require_exact_task_facts if {
     complete_grant := workflow_grant("task.complete")
     complete_request := object.union(base_input, {
         "action": "task.complete",
-        "context": {"processState": "RUNNING", "hardBlockersAbsent": true},
+        "context": {"taskState": "CLAIMED", "processState": "RUNNING", "hardBlockersAbsent": true},
         "relationships": [assignee],
         "grants": [complete_grant],
     })
@@ -286,6 +286,26 @@ test_candidate_claim_and_assignee_complete_require_exact_task_facts if {
     blocked_request := object.union(complete_request, {"context": {"processState": "RUNNING", "hardBlockersAbsent": false}})
     blocked_result := decision with input as blocked_request
     not blocked_result.allow
+}
+
+test_task_complete_requires_claimed_authoritative_task_state if {
+    assignee := relationship("TASK_ASSIGNEE", principal_id, resource_id)
+    grant_value := workflow_grant("task.complete")
+    every task_state in ["AVAILABLE", "COMPLETED", "CANCELLED", "FAILED"] {
+        request := object.union(base_input, {
+            "action": "task.complete",
+            "context": {
+                "taskState": task_state,
+                "processState": "RUNNING",
+                "hardBlockersAbsent": true,
+            },
+            "relationships": [assignee],
+            "grants": [grant_value],
+        })
+        result := decision with input as request
+        not result.allow
+        result.reasonCodes == ["NO_MATCHING_ALLOW"]
+    }
 }
 
 workflow_case(action) := {"relationships": [], "context": base_input.context} if {
@@ -313,7 +333,7 @@ workflow_case(action) := {
 
 workflow_case(action) := {
     "relationships": [relationship("TASK_ASSIGNEE", principal_id, resource_id)],
-    "context": {"processState": "RUNNING", "hardBlockersAbsent": true},
+    "context": {"taskState": "CLAIMED", "processState": "RUNNING", "hardBlockersAbsent": true},
 } if {
     action == "task.complete"
 }
@@ -401,7 +421,7 @@ test_workflow_wildcard_deny_remains_authoritative_in_every_layer if {
         })
         request := object.union(base_input, {
             "action": "task.complete",
-            "context": {"processState": "RUNNING", "hardBlockersAbsent": true},
+            "context": {"taskState": "CLAIMED", "processState": "RUNNING", "hardBlockersAbsent": true},
             "relationships": [relationship("TASK_ASSIGNEE", principal_id, resource_id)],
             "grants": [allow_grant, deny_grant],
         })
