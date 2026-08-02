@@ -26,6 +26,12 @@ class ResourceRepository(
         ).singleOrNull().also { lockObserver.afterLock(id) }
     }
 
+    fun lockResourceForShare(id: UUID): Boolean = jdbc.query(
+        "SELECT id FROM occ.managed_resource WHERE id = ? FOR SHARE",
+        { rs, _ -> rs.getObject(1, UUID::class.java) },
+        id,
+    ).singleOrNull() == id
+
     fun lockResourceEntity(id: UUID) {
         check(jdbc.query(
             "SELECT id FROM authz.entity WHERE id = ? AND state = 'ACTIVE' FOR UPDATE",

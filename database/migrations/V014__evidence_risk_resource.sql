@@ -923,17 +923,18 @@ FROM occ.resource_reservation;
 CREATE FUNCTION occ.snapshot_resource_reservation()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, occ, pg_temp
+SECURITY DEFINER
+SET search_path = pg_catalog, occ
 AS $$
 BEGIN
     INSERT INTO occ.resource_reservation_history
         (reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
          time_range, capacity, exclusive, state, row_version, created_at,
-         updated_at, confirmed_at, cancelled_at, completed_at)
+         updated_at, confirmed_at, cancelled_at, completed_at, recorded_at)
     VALUES
         (NEW.id, NEW.resource_id, NEW.requester_entity_id, NEW.process_instance_id, NEW.task_id,
          NEW.time_range, NEW.capacity, NEW.exclusive, NEW.state, NEW.row_version, NEW.created_at,
-         NEW.updated_at, NEW.confirmed_at, NEW.cancelled_at, NEW.completed_at);
+         NEW.updated_at, NEW.confirmed_at, NEW.cancelled_at, NEW.completed_at, clock_timestamp());
     RETURN NEW;
 END;
 $$;
@@ -1210,8 +1211,8 @@ CREATE TRIGGER trg_managed_resource_capacity
 BEFORE UPDATE OF capacity, state ON occ.managed_resource
 FOR EACH ROW EXECUTE FUNCTION occ.validate_managed_resource_change();
 
--- V014 exposes no callable function API. Trigger functions stay invoker-rights and
--- cannot be attached or invoked directly by the runtime role.
+-- V014 exposes no callable function API. The history snapshot trigger runs as the
+-- migration owner; all functions remain unavailable to the runtime role.
 REVOKE EXECUTE ON FUNCTION occ.validate_upload_session_lifecycle() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_version_provenance() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_evidence_review_insert() FROM PUBLIC;
@@ -1237,4 +1238,5 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     occ.resource_availability
 TO innorder_runtime;
 
-GRANT SELECT, INSERT ON TABLE occ.resource_reservation_history TO innorder_runtime;
+REVOKE INSERT, UPDATE, DELETE ON TABLE occ.resource_reservation_history FROM innorder_runtime;
+GRANT SELECT ON TABLE occ.resource_reservation_history TO innorder_runtime;
