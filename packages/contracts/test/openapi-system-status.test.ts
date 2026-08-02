@@ -78,6 +78,7 @@ import {
   reservationAvailabilityRequestSchema,
   reservationAvailabilitySchema,
   reservationConflictSchema,
+  redactedReservationConflictDescriptorSchema,
   reservationEventPayloadSchema,
   reservationSchedulePageSchema,
   reservationScheduleFiltersSchema,
@@ -96,6 +97,7 @@ import {
   resourceEventPayloadSchema,
   submitEvidenceRequestSchema,
   updateResourceRequestSchema,
+  unredactedReservationConflictDescriptorSchema,
 } from "../src/evidence-risk-resource.js";
 import {
   OCC_PROBLEM_CODES,
@@ -111,6 +113,7 @@ interface OpenApiSchema extends OpenApiSchemaProperty {
   additionalProperties?: boolean;
   properties?: Record<string, OpenApiSchemaProperty>;
   required?: string[];
+  "x-occ-problem-details"?: boolean;
 }
 
 interface OpenApiSchemaProperty {
@@ -157,7 +160,9 @@ interface OpenApiDocument {
 
 interface OpenApiPathItem {
   get?: OpenApiOperation;
+  patch?: OpenApiOperation;
   post?: OpenApiOperation;
+  put?: OpenApiOperation;
 }
 
 interface OpenApiOperation {
@@ -265,6 +270,7 @@ const derivesFromProblemDetails = (
   seen = new Set<string>(),
 ): boolean => {
   if (schema?.$ref === "#/components/schemas/ProblemDetails") return true;
+  if ((schema as OpenApiSchema | undefined)?.["x-occ-problem-details"] === true) return true;
   if (schema?.$ref) {
     const name = schema.$ref.replace("#/components/schemas/", "");
     if (seen.has(name)) return false;
@@ -598,7 +604,8 @@ describe("OCC Core OpenAPI system status", () => {
       "ManagedResource",
       "AvailabilityWindow",
       "Reservation",
-      "ReservationConflict",
+      "RedactedReservationConflictDescriptor",
+      "UnredactedReservationConflictDescriptor",
     ];
     for (const name of strictSchemas) {
       expect(schemas[name]?.type).toBe("object");
@@ -842,7 +849,6 @@ describe("OCC Core OpenAPI system status", () => {
       AvailabilityWindow: availabilityWindowSchema,
       CreateAvailabilityWindowRequest: createAvailabilityWindowRequestSchema,
       AvailabilityWindowPage: availabilityWindowPageSchema,
-      ReservationConflict: reservationConflictSchema,
       ReservationAvailabilityRequest: reservationAvailabilityRequestSchema,
       ReservationAvailability: reservationAvailabilitySchema,
       Reservation: reservationSchema,
@@ -859,6 +865,16 @@ describe("OCC Core OpenAPI system status", () => {
     for (const [name, schema] of Object.entries(contracts)) {
       expectStrictObjectParity(schemas[name], schema.shape, name);
     }
+    expectStrictObjectParity(
+      schemas.RedactedReservationConflictDescriptor,
+      redactedReservationConflictDescriptorSchema.shape,
+      "RedactedReservationConflictDescriptor",
+    );
+    expectStrictObjectParity(
+      schemas.UnredactedReservationConflictDescriptor,
+      unredactedReservationConflictDescriptorSchema.shape,
+      "UnredactedReservationConflictDescriptor",
+    );
   });
 
   it("keeps status public while protecting authenticated operations", async () => {
@@ -970,19 +986,19 @@ describe("OCC Core OpenAPI system status", () => {
     );
     const document = parse(source) as OpenApiDocument;
     const expected = [
-      ["/api/v1/evidence/upload-sessions", "post", "409", "EvidenceUploadConflict"],
-      ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "409", "EvidenceUploadConflict"],
+      ["/api/v1/evidence/upload-sessions", "post", "409", "EvidenceUploadSessionConflict"],
+      ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "409", "EvidenceContentConflict"],
       ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "413", "PayloadTooLarge"],
       ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "422", "UnprocessableContent"],
-      ["/api/v1/evidence/{evidenceId}/submit", "post", "409", "VersionConflict"],
-      ["/api/v1/evidence/{evidenceId}/reviews", "post", "409", "EvidenceReviewConflict"],
-      ["/api/v1/risks/{riskId}/actions", "post", "409", "RiskInvalidTransition"],
-      ["/api/v1/risks/adjudications", "post", "409", "VersionConflict"],
-      ["/api/v1/resources/{resourceId}", "patch", "409", "ResourceUnavailable"],
-      ["/api/v1/resources/{resourceId}/availability", "post", "409", "ResourceUnavailable"],
-      ["/api/v1/reservations", "post", "409", "ReservationConflict"],
-      ["/api/v1/reservations/{reservationId}/change", "post", "409", "ReservationConflict"],
-      ["/api/v1/reservations/{reservationId}/cancel", "post", "409", "VersionConflict"],
+      ["/api/v1/evidence/{evidenceId}/submit", "post", "409", "EvidenceSubmitConflict"],
+      ["/api/v1/evidence/{evidenceId}/reviews", "post", "409", "EvidenceReviewCommandConflict"],
+      ["/api/v1/risks/{riskId}/actions", "post", "409", "RiskActionConflict"],
+      ["/api/v1/risks/adjudications", "post", "409", "RiskAdjudicationConflict"],
+      ["/api/v1/resources/{resourceId}", "patch", "409", "ResourceUpdateConflict"],
+      ["/api/v1/resources/{resourceId}/availability", "post", "409", "ResourceAvailabilityConflict"],
+      ["/api/v1/reservations", "post", "409", "ReservationCreateConflict"],
+      ["/api/v1/reservations/{reservationId}/change", "post", "409", "ReservationChangeConflict"],
+      ["/api/v1/reservations/{reservationId}/cancel", "post", "409", "ReservationCancelConflict"],
       ["/api/v1/evidence/{evidenceId}/download", "get", "416", "InvalidRange"],
     ] as const;
 
@@ -992,6 +1008,72 @@ describe("OCC Core OpenAPI system status", () => {
         `#/components/responses/${responseName}`,
       );
     }
+  });
+
+  it("composes endpoint conflict unions from applicable kernel and domain variants", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const schemas = document.components.schemas;
+    const idempotency = [
+      "IdempotencyConflictProblem",
+      "IdempotencyInProgressProblem",
+      "IdempotencyExpiredProblem",
+    ];
+    const expected = {
+      EvidenceUploadSessionConflictProblem: [...idempotency, "VersionConflictProblem", "EvidenceUploadConflictProblem"],
+      EvidenceContentConflictProblem: [...idempotency, "EvidenceUploadConflictProblem"],
+      EvidenceSubmitConflictProblem: [...idempotency, "VersionConflictProblem", "EvidenceUploadConflictProblem"],
+      EvidenceReviewCommandConflictProblem: [...idempotency, "VersionConflictProblem", "EvidenceReviewConflictProblem"],
+      RiskActionConflictProblem: [...idempotency, "VersionConflictProblem", "RiskInvalidTransitionProblem"],
+      RiskAdjudicationConflictProblem: idempotency,
+      ResourceUpdateConflictProblem: [...idempotency, "VersionConflictProblem", "ResourceUnavailableProblem", "ReservationConflictProblem"],
+      ResourceAvailabilityConflictProblem: [...idempotency, "VersionConflictProblem", "ResourceUnavailableProblem", "ReservationConflictProblem"],
+      ReservationCreateConflictProblem: [...idempotency, "ResourceUnavailableProblem", "ReservationConflictProblem"],
+      ReservationChangeConflictProblem: [...idempotency, "VersionConflictProblem", "ResourceUnavailableProblem", "ReservationConflictProblem"],
+      ReservationCancelConflictProblem: [...idempotency, "VersionConflictProblem"],
+    };
+
+    for (const [name, variants] of Object.entries(expected)) {
+      expect(schemas[name]?.oneOf, name).toEqual(
+        variants.map((variant) => ({ $ref: `#/components/schemas/${variant}` })),
+      );
+    }
+    expect(schemas.RiskAdjudicationConflictProblem?.oneOf).not.toContainEqual({
+      $ref: "#/components/schemas/VersionConflictProblem",
+    });
+  });
+
+  it("documents fixed 503 variants for every protected domain operation", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const domainPrefixes = ["/api/v1/evidence", "/api/v1/risks", "/api/v1/resources", "/api/v1/reservations"];
+
+    for (const [path, pathItem] of Object.entries(document.paths)) {
+      if (!domainPrefixes.some((prefix) => path.startsWith(prefix))) continue;
+      for (const [method, operation] of Object.entries(pathItem)) {
+        if (!HTTP_METHODS.has(method)) continue;
+        const command = operation.parameters?.some(
+          (parameter) => parameter.$ref === "#/components/parameters/IdempotencyKey",
+        );
+        expect(operation.responses?.["503"]?.$ref, `${method.toUpperCase()} ${path}`).toBe(
+          command
+            ? "#/components/responses/CommandUnavailable"
+            : "#/components/responses/AuthorizationUnavailable",
+        );
+      }
+    }
+    expect(document.components.responses?.AuthorizationUnavailable?.content?.["application/problem+json"]?.schema?.$ref).toBe(
+      "#/components/schemas/AuthorizationUnavailableProblem",
+    );
+    expect(document.components.responses?.CommandUnavailable?.content?.["application/problem+json"]?.schema?.$ref).toBe(
+      "#/components/schemas/ProtectedCommandUnavailableProblem",
+    );
   });
 
   it("fixes status and code for every domain Problem Details variant", async () => {
@@ -1005,8 +1087,6 @@ describe("OCC Core OpenAPI system status", () => {
       EvidenceReviewConflictProblem: [409, "OCC-EVIDENCE-REVIEW-CONFLICT"],
       RiskInvalidTransitionProblem: [409, "OCC-RISK-INVALID-TRANSITION"],
       ResourceUnavailableProblem: [409, "OCC-RESOURCE-UNAVAILABLE"],
-      ReservationConflictProblem: [409, "OCC-RESERVATION-CONFLICT"],
-      VersionConflictProblem: [409, "OCC-VERSION-CONFLICT"],
       EvidenceTooLargeProblem: [413, "OCC-EVIDENCE-TOO-LARGE"],
       EvidenceDigestMismatchProblem: [422, "OCC-EVIDENCE-DIGEST-MISMATCH"],
       EvidenceInvalidContentProblem: [422, "OCC-EVIDENCE-INVALID-CONTENT"],
@@ -1028,6 +1108,49 @@ describe("OCC Core OpenAPI system status", () => {
       { $ref: "#/components/schemas/EvidenceDigestMismatchProblem" },
       { $ref: "#/components/schemas/EvidenceInvalidContentProblem" },
     ]);
+
+    const validateVersionConflict = createOpenApiSchemaValidator(schemas, "VersionConflictProblem");
+    const versionConflict = {
+      ...base,
+      status: 409,
+      code: "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+      currentVersion: 3,
+    };
+    expect(validateVersionConflict(versionConflict), JSON.stringify(validateVersionConflict.errors)).toBe(true);
+    expect(validateVersionConflict({ ...versionConflict, currentVersion: undefined })).toBe(false);
+
+    for (const [name, code] of [
+      ["AuthorizationUnavailableProblem", "OCC-AUTHZ-UNAVAILABLE"],
+      ["CommandIntegrityProblem", "OCC-COMMAND-INTEGRITY"],
+    ] as const) {
+      const validate = createOpenApiSchemaValidator(schemas, name);
+      expect(validate({ ...base, status: 503, code }), JSON.stringify(validate.errors)).toBe(true);
+    }
+  });
+
+  it("discriminates typed reservation conflict descriptors and redacts identity", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const descriptor = schemas.ReservationConflictDescriptor;
+    const interval = { start: "2026-08-01T10:30:00+02:00", end: "2026-08-01T11:30:00+02:00" };
+    const resourceId = "11111111-1111-4111-8111-111111111111";
+    const validate = createOpenApiSchemaValidator(schemas, "ReservationConflictProblem");
+    const base = {
+      type: "https://innorder.local/problems/reservation-conflict",
+      title: "Reservation conflict",
+      status: 409,
+      code: "OCC-RESERVATION-CONFLICT",
+      correlationId: resourceId,
+    };
+
+    expect(descriptor?.discriminator?.propertyName).toBe("redacted");
+    expect(validate({ ...base, conflict: { resourceId, interval, kind: "CAPACITY", redacted: true } })).toBe(true);
+    expect(validate({ ...base, conflict: { resourceId, interval, kind: "CAPACITY", redacted: true, reservationId: resourceId } })).toBe(false);
+    expect(validate({ ...base, conflict: { resourceId, interval, kind: "CAPACITY", redacted: false, reservationId: resourceId, requesterEntityId: resourceId } })).toBe(true);
+    expect(validate(base)).toBe(false);
   });
 
   it("matches all strict platform Zod contracts", async () => {

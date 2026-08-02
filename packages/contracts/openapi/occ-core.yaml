@@ -129,6 +129,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/requirements/{requirementId}:
@@ -149,6 +151,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/upload-sessions:
@@ -179,7 +183,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/EvidenceUploadConflict"
+          $ref: "#/components/responses/EvidenceUploadSessionConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/upload-sessions/{uploadSessionId}:
@@ -200,6 +206,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/upload-sessions/{uploadSessionId}/content:
@@ -231,11 +239,13 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/EvidenceUploadConflict"
+          $ref: "#/components/responses/EvidenceContentConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/UnprocessableContent"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}:
@@ -256,6 +266,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/submit:
@@ -285,7 +297,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/VersionConflict"
+          $ref: "#/components/responses/EvidenceSubmitConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/reviews:
@@ -311,6 +325,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
     post:
@@ -337,7 +353,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/EvidenceReviewConflict"
+          $ref: "#/components/responses/EvidenceReviewCommandConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/versions:
@@ -363,6 +381,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/preview:
@@ -383,6 +403,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/download:
@@ -451,6 +473,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "416":
           $ref: "#/components/responses/InvalidRange"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/download-metadata:
@@ -471,6 +495,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks:
@@ -498,6 +524,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/{riskId}:
@@ -518,6 +546,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/{riskId}/actions:
@@ -543,6 +573,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
     post:
@@ -569,7 +601,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/RiskInvalidTransition"
+          $ref: "#/components/responses/RiskActionConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/interventions:
@@ -596,6 +630,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/adjudications:
@@ -617,6 +653,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
     post:
@@ -643,7 +681,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/VersionConflict"
+          $ref: "#/components/responses/RiskAdjudicationConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/metrics:
@@ -662,6 +702,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/evaluations/latest:
@@ -680,6 +722,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources:
@@ -704,6 +748,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources/{resourceId}:
@@ -724,6 +770,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
     patch:
@@ -750,7 +798,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/ResourceUnavailable"
+          $ref: "#/components/responses/ResourceUpdateConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources/{resourceId}/availability:
@@ -776,6 +826,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
     post:
@@ -802,7 +854,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/ResourceUnavailable"
+          $ref: "#/components/responses/ResourceAvailabilityConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources/{resourceId}/availability-checks:
@@ -831,6 +885,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources/{resourceId}/schedule:
@@ -862,6 +918,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/reservations:
@@ -889,7 +947,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/ReservationConflict"
+          $ref: "#/components/responses/ReservationCreateConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/reservations/{reservationId}:
@@ -910,6 +970,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthorizationUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/reservations/{reservationId}/change:
@@ -939,7 +1001,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/ReservationConflict"
+          $ref: "#/components/responses/ReservationChangeConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/reservations/{reservationId}/cancel:
@@ -969,7 +1033,9 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/VersionConflict"
+          $ref: "#/components/responses/ReservationCancelConflict"
+        "503":
+          $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
 components:
@@ -1289,6 +1355,71 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/VersionConflictProblem"
+    EvidenceUploadSessionConflict:
+      description: Upload-session kernel, version, or evidence lifecycle conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/EvidenceUploadSessionConflictProblem" }
+    EvidenceContentConflict:
+      description: Evidence-content kernel or upload lifecycle conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/EvidenceContentConflictProblem" }
+    EvidenceSubmitConflict:
+      description: Evidence submission kernel, optimistic, or upload lifecycle conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/EvidenceSubmitConflictProblem" }
+    EvidenceReviewCommandConflict:
+      description: Evidence review kernel, optimistic, or lifecycle conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/EvidenceReviewCommandConflictProblem" }
+    RiskActionConflict:
+      description: Risk action kernel, optimistic, or lifecycle conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/RiskActionConflictProblem" }
+    RiskAdjudicationConflict:
+      description: Risk adjudication idempotency conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/RiskAdjudicationConflictProblem" }
+    ResourceUpdateConflict:
+      description: Resource update kernel, optimistic, availability, or reservation conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ResourceUpdateConflictProblem" }
+    ResourceAvailabilityConflict:
+      description: Availability command kernel, optimistic, resource, or reservation conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ResourceAvailabilityConflictProblem" }
+    ReservationCreateConflict:
+      description: Reservation create kernel, resource, or reservation conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ReservationCreateConflictProblem" }
+    ReservationChangeConflict:
+      description: Reservation change kernel, optimistic, resource, or reservation conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ReservationChangeConflictProblem" }
+    ReservationCancelConflict:
+      description: Reservation cancellation kernel or optimistic conflict
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ReservationCancelConflictProblem" }
+    AuthorizationUnavailable:
+      description: Authorization policy is unavailable or stale
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/AuthorizationUnavailableProblem" }
+    CommandUnavailable:
+      description: Authorization or command integrity prevents a protected mutation
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/ProtectedCommandUnavailableProblem" }
     PayloadTooLarge:
       description: Evidence content exceeds the declared or 100 MiB limit
       content:
@@ -1388,20 +1519,143 @@ components:
           properties:
             status: { const: 409 }
             code: { const: OCC-RESOURCE-UNAVAILABLE }
-    ReservationConflictProblem:
+    IdempotencyConflictProblem:
       allOf:
         - $ref: "#/components/schemas/ProblemDetails"
         - type: object
           properties:
             status: { const: 409 }
-            code: { const: OCC-RESERVATION-CONFLICT }
+            code: { const: OCC-COMMAND-IDEMPOTENCY-CONFLICT }
+    IdempotencyInProgressProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS }
+    IdempotencyExpiredProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-COMMAND-IDEMPOTENCY-EXPIRED }
+    ReservationConflictProblem:
+      type: object
+      additionalProperties: false
+      x-occ-problem-details: true
+      required: [type, title, status, code, correlationId, conflict]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 409 }
+        code: { type: string, const: OCC-RESERVATION-CONFLICT }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        currentVersion: { $ref: "#/components/schemas/SafeVersion" }
+        conflict: { $ref: "#/components/schemas/ReservationConflictDescriptor" }
     VersionConflictProblem:
       allOf:
         - $ref: "#/components/schemas/ProblemDetails"
         - type: object
+          required: [currentVersion]
           properties:
             status: { const: 409 }
-            code: { const: OCC-VERSION-CONFLICT }
+            code: { const: OCC-COMMAND-OPTIMISTIC-CONFLICT }
+    AuthorizationUnavailableProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 503 }
+            code: { const: OCC-AUTHZ-UNAVAILABLE }
+    CommandIntegrityProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 503 }
+            code: { const: OCC-COMMAND-INTEGRITY }
+    ProtectedCommandUnavailableProblem:
+      oneOf:
+        - $ref: "#/components/schemas/AuthorizationUnavailableProblem"
+        - $ref: "#/components/schemas/CommandIntegrityProblem"
+    EvidenceUploadSessionConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/EvidenceUploadConflictProblem"
+    EvidenceContentConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/EvidenceUploadConflictProblem"
+    EvidenceSubmitConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/EvidenceUploadConflictProblem"
+    EvidenceReviewCommandConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/EvidenceReviewConflictProblem"
+    RiskActionConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/RiskInvalidTransitionProblem"
+    RiskAdjudicationConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+    ResourceUpdateConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/ResourceUnavailableProblem"
+        - $ref: "#/components/schemas/ReservationConflictProblem"
+    ResourceAvailabilityConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/ResourceUnavailableProblem"
+        - $ref: "#/components/schemas/ReservationConflictProblem"
+    ReservationCreateConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/ResourceUnavailableProblem"
+        - $ref: "#/components/schemas/ReservationConflictProblem"
+    ReservationChangeConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
+        - $ref: "#/components/schemas/ResourceUnavailableProblem"
+        - $ref: "#/components/schemas/ReservationConflictProblem"
+    ReservationCancelConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/IdempotencyConflictProblem"
+        - $ref: "#/components/schemas/IdempotencyInProgressProblem"
+        - $ref: "#/components/schemas/IdempotencyExpiredProblem"
+        - $ref: "#/components/schemas/VersionConflictProblem"
     EvidenceTooLargeProblem:
       allOf:
         - $ref: "#/components/schemas/ProblemDetails"
@@ -2245,6 +2499,24 @@ components:
         nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
         previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
     ReservationConflict:
+      oneOf:
+        - $ref: "#/components/schemas/RedactedReservationConflictDescriptor"
+        - $ref: "#/components/schemas/UnredactedReservationConflictDescriptor"
+      discriminator:
+        propertyName: redacted
+        mapping:
+          "true": "#/components/schemas/RedactedReservationConflictDescriptor"
+          "false": "#/components/schemas/UnredactedReservationConflictDescriptor"
+    ReservationConflictDescriptor:
+      oneOf:
+        - $ref: "#/components/schemas/RedactedReservationConflictDescriptor"
+        - $ref: "#/components/schemas/UnredactedReservationConflictDescriptor"
+      discriminator:
+        propertyName: redacted
+        mapping:
+          "true": "#/components/schemas/RedactedReservationConflictDescriptor"
+          "false": "#/components/schemas/UnredactedReservationConflictDescriptor"
+    RedactedReservationConflictDescriptor:
       type: object
       additionalProperties: false
       required: [resourceId, interval, kind, redacted]
@@ -2252,8 +2524,18 @@ components:
         resourceId: { type: string, format: uuid }
         interval: { $ref: "#/components/schemas/HalfOpenInterval" }
         kind: { $ref: "#/components/schemas/ReservationConflictKind" }
-        redacted: { type: boolean }
+        redacted: { type: boolean, const: true }
+    UnredactedReservationConflictDescriptor:
+      type: object
+      additionalProperties: false
+      required: [resourceId, interval, kind, redacted]
+      properties:
+        resourceId: { type: string, format: uuid }
+        interval: { $ref: "#/components/schemas/HalfOpenInterval" }
+        kind: { $ref: "#/components/schemas/ReservationConflictKind" }
+        redacted: { type: boolean, const: false }
         reservationId: { type: string, format: uuid }
+        requesterEntityId: { type: string, format: uuid }
     ReservationAvailabilityRequest:
       type: object
       additionalProperties: false
