@@ -9,7 +9,6 @@ import org.springframework.core.annotation.Order
 import org.springframework.jdbc.core.JdbcOperations
 import org.springframework.stereotype.Component
 import org.springframework.transaction.support.TransactionOperations
-import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.util.UUID
 
@@ -357,14 +356,7 @@ class EmbeddedWorkflowCatalogInstaller(
             relation(3, EmbeddedWorkflowCatalogIds.TASK_TYPE, "MANY_TO_MANY"),
             relation(4, EmbeddedWorkflowCatalogIds.TASK_TYPE, "ONE_TO_MANY"),
         )
-        private val CONTENT_HASH = MessageDigest.getInstance("SHA-256")
-            .digest(
-                buildString {
-                    append(MANIFEST)
-                    TYPES.forEach { append('|').append(it) }
-                    RELATIONS.forEach { append('|').append(it) }
-                }.toByteArray(Charsets.UTF_8),
-            ).joinToString("") { "%02x".format(it) }
+        private val CONTENT_HASH = EmbeddedWorkflowCatalogContentHash.contentHash()
 
         private fun relation(index: Int, objectTypeId: UUID, cardinality: String): RelationSpec {
             val definition = WorkflowAuthorizationRelationDefinitions.all[index]

@@ -69,6 +69,53 @@ class CursorCodecTest {
     }
 
     @Test
+    fun `previous key configuration requires a bounded UTC deadline`() {
+        val current = key("deadline-current.key", 0x12)
+        val previous = key("deadline-previous.key", 0x23)
+        listOf(
+            CursorProperties("current", current.toString(), previousKeyNotAfter = NOW.plusSeconds(1)),
+            CursorProperties("current", current.toString(), "old", previous.toString()),
+            CursorProperties(
+                "current", current.toString(), "old", previous.toString(), NOW.plus(Duration.ofHours(24)).plusNanos(1),
+            ),
+            CursorProperties("current", current.toString(), "old", previous.toString(), NOW.minusNanos(1)),
+        ).forEach { properties ->
+            assertThatThrownBy { CursorKeyRing.load(properties, Clock.fixed(NOW, ZoneOffset.UTC)) }
+                .isInstanceOf(CursorKeyConfigurationException::class.java)
+        }
+    }
+
+    @Test
+    fun `previous key stops verifying at its deadline while current key remains valid`() {
+        val oldPath = key("expiring-old.key", 0x34)
+        val newPath = key("unbounded-current.key", 0x45)
+        val deadline = NOW.plusSeconds(60)
+        val ring = CursorKeyRing.load(
+            CursorProperties("new", newPath.toString(), "old", oldPath.toString(), deadline),
+            Clock.fixed(NOW, ZoneOffset.UTC),
+        )
+        val atDeadline = codec(oldPath, "old", clock = Clock.fixed(deadline, ZoneOffset.UTC))
+            .encode(payload(keyId = "old", issuedAt = deadline))
+        assertThat(HmacCursorCodec(ring, ObjectMapper().findAndRegisterModules(), Clock.fixed(deadline, ZoneOffset.UTC))
+            .decode(atDeadline, binding()).keyId).isEqualTo("old")
+
+        val afterDeadline = deadline.plusSeconds(1)
+        val forgedOld = codec(oldPath, "old", clock = Clock.fixed(afterDeadline, ZoneOffset.UTC))
+            .encode(payload(keyId = "old", issuedAt = afterDeadline))
+        val current = codec(newPath, "new", clock = Clock.fixed(afterDeadline, ZoneOffset.UTC))
+            .encode(payload(keyId = "new", issuedAt = afterDeadline))
+        val rotated = HmacCursorCodec(
+            ring,
+            ObjectMapper().findAndRegisterModules(),
+            Clock.fixed(afterDeadline, ZoneOffset.UTC),
+        )
+
+        assertThatThrownBy { rotated.decode(forgedOld, binding()) }
+            .isInstanceOf(InvalidCursorException::class.java)
+        assertThat(rotated.decode(current, binding()).keyId).isEqualTo("new")
+    }
+
+    @Test
     fun `cursor expires at 24 hours and rejects future issuance`() {
         val key = key("expiry.key", 0x25)
         val issued = NOW.minus(Duration.ofHours(24))
@@ -119,7 +166,7 @@ class CursorCodecTest {
             CursorProperties("current", lowEntropy.toString()),
             CursorProperties("current", key("valid.key", 0x77).toString(), previousKeyId = "old"),
         ).forEach { properties ->
-            assertThatThrownBy { CursorKeyRing.load(properties) }
+            assertThatThrownBy { CursorKeyRing.load(properties, Clock.fixed(NOW, ZoneOffset.UTC)) }
                 .isInstanceOf(CursorKeyConfigurationException::class.java)
                 .hasMessageNotContaining("119")
         }
@@ -129,6 +176,7 @@ class CursorCodecTest {
     fun `blank optional previous configuration is treated as absent`() {
         val ring = CursorKeyRing.load(
             CursorProperties("current", key("current-only.key", 0x37).toString(), "", ""),
+            Clock.fixed(NOW, ZoneOffset.UTC),
         )
 
         assertThat(ring.currentKeyId).isEqualTo("current")
@@ -153,6 +201,19 @@ class CursorCodecTest {
             assertThat(it).hasFailed()
             assertThat(it.startupFailure).hasStackTraceContaining("Cursor key configuration is unavailable or invalid")
         }
+        val current = key("context-current.key", 0x59)
+        val previous = key("context-previous.key", 0x6a)
+        context.withPropertyValues(
+            "occ.cursor.current-key-file=$current",
+            "occ.cursor.previous-key-id=old",
+            "occ.cursor.previous-key-file=$previous",
+        ).run { assertThat(it).hasFailed() }
+        context.withPropertyValues(
+            "occ.cursor.current-key-file=$current",
+            "occ.cursor.previous-key-id=old",
+            "occ.cursor.previous-key-file=$previous",
+            "occ.cursor.previous-key-not-after=${NOW.plus(Duration.ofHours(24))}",
+        ).run { assertThat(it).hasNotFailed().hasSingleBean(CursorCodec::class.java) }
     }
 
     @Test
@@ -163,6 +224,8 @@ class CursorCodecTest {
         assertThat(source.getProperty("occ.cursor.current-key-file")).isEqualTo("${'$'}{OCC_CURSOR_CURRENT_KEY_FILE:}")
         assertThat(source.getProperty("occ.cursor.previous-key-id")).isEqualTo("${'$'}{OCC_CURSOR_PREVIOUS_KEY_ID:}")
         assertThat(source.getProperty("occ.cursor.previous-key-file")).isEqualTo("${'$'}{OCC_CURSOR_PREVIOUS_KEY_FILE:}")
+        assertThat(source.getProperty("occ.cursor.previous-key-not-after"))
+            .isEqualTo("${'$'}{OCC_CURSOR_PREVIOUS_KEY_NOT_AFTER:}")
     }
 
     @Test
@@ -183,7 +246,14 @@ class CursorCodecTest {
         clock: Clock = Clock.fixed(NOW, ZoneOffset.UTC),
     ): CursorCodec = HmacCursorCodec(
         CursorKeyRing.load(
-            CursorProperties(currentId, currentPath.toString(), previousId, previousPath?.toString()),
+            CursorProperties(
+                currentId,
+                currentPath.toString(),
+                previousId,
+                previousPath?.toString(),
+                previousId?.let { clock.instant().plus(Duration.ofHours(24)) },
+            ),
+            clock,
         ),
         ObjectMapper().findAndRegisterModules(),
         clock,

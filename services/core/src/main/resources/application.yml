@@ -63,6 +63,7 @@ occ:
     current-key-file: ${OCC_CURSOR_CURRENT_KEY_FILE:}
     previous-key-id: ${OCC_CURSOR_PREVIOUS_KEY_ID:}
     previous-key-file: ${OCC_CURSOR_PREVIOUS_KEY_FILE:}
+    previous-key-not-after: ${OCC_CURSOR_PREVIOUS_KEY_NOT_AFTER:}
   outbox:
     enabled: ${OCC_OUTBOX_ENABLED:true}
     topic: occ.events.v1

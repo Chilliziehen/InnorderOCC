@@ -3,6 +3,9 @@ package com.innorder.occ.api.cursor
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -13,16 +16,20 @@ class CursorKeyRing private constructor(
     private val current: SecretKeySpec,
     private val previousKeyId: String?,
     private val previous: SecretKeySpec?,
+    private val previousKeyNotAfter: Instant?,
 ) {
     fun sign(payload: ByteArray): ByteArray = mac(current, payload)
 
-    fun verify(keyId: String, payload: ByteArray, signature: ByteArray): Boolean {
+    fun verify(keyId: String, payload: ByteArray, signature: ByteArray, now: Instant, issuedAt: Instant): Boolean {
         val key = when (keyId) {
             currentKeyId -> current
             previousKeyId -> previous
             else -> null
         } ?: return false
-        return MessageDigest.isEqual(mac(key, payload), signature)
+        if (!MessageDigest.isEqual(mac(key, payload), signature)) return false
+        return keyId == currentKeyId || previousKeyNotAfter?.let { deadline ->
+            !now.isAfter(deadline) && !issuedAt.isAfter(deadline)
+        } == true
     }
 
     companion object {
@@ -31,21 +38,28 @@ class CursorKeyRing private constructor(
         private const val MAXIMUM_KEY_BYTES = 4096L
         private val KEY_ID = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}${'$'}")
 
-        fun load(properties: CursorProperties): CursorKeyRing {
+        fun load(properties: CursorProperties, clock: Clock): CursorKeyRing {
             try {
                 require(KEY_ID.matches(properties.currentKeyId))
                 val previousKeyId = properties.previousKeyId?.trim()?.takeIf(String::isNotEmpty)
                 val previousKeyFile = properties.previousKeyFile?.trim()?.takeIf(String::isNotEmpty)
-                val previousConfigured = previousKeyId != null || previousKeyFile != null
+                val previousKeyNotAfter = properties.previousKeyNotAfter
+                val previousConfigured = previousKeyId != null || previousKeyFile != null || previousKeyNotAfter != null
                 require(!previousConfigured ||
-                    (previousKeyId != null && previousKeyFile != null))
+                    (previousKeyId != null && previousKeyFile != null && previousKeyNotAfter != null))
                 require(previousKeyId == null ||
                     (KEY_ID.matches(previousKeyId) && previousKeyId != properties.currentKeyId))
+                if (previousKeyNotAfter != null) {
+                    val now = clock.instant()
+                    require(!previousKeyNotAfter.isBefore(now))
+                    require(!previousKeyNotAfter.isAfter(now.plus(MAXIMUM_OVERLAP)))
+                }
                 return CursorKeyRing(
                     properties.currentKeyId,
                     loadKey(properties.currentKeyFile),
                     previousKeyId,
                     previousKeyFile?.let(::loadKey),
+                    previousKeyNotAfter,
                 )
             } catch (_: Exception) {
                 throw CursorKeyConfigurationException()
@@ -68,6 +82,7 @@ class CursorKeyRing private constructor(
         }
 
         private const val MINIMUM_DISTINCT_BYTES = 8
+        private val MAXIMUM_OVERLAP = Duration.ofHours(24)
 
         private fun mac(key: SecretKeySpec, payload: ByteArray): ByteArray =
             Mac.getInstance(ALGORITHM).run {

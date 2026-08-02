@@ -107,6 +107,11 @@ class EmbeddedWorkflowCatalogInstallerIntegrationTest {
                 EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
             )).isEqualTo("PUBLISHED")
             assertThat(jdbc.queryForObject(
+                "SELECT content_hash FROM catalog.package_version WHERE id = ?",
+                String::class.java,
+                EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+            )).isEqualTo(EmbeddedWorkflowCatalogContentHash.contentHash())
+            assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM catalog.workflow_definition WHERE package_version_id = ?",
                 Long::class.java,
                 EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,

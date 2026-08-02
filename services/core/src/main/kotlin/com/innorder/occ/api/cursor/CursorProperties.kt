@@ -12,6 +12,7 @@ import org.springframework.context.annotation.Configuration
 import org.springframework.core.type.AnnotatedTypeMetadata
 import org.springframework.util.StringUtils
 import java.time.Clock
+import java.time.Instant
 
 @ConfigurationProperties(prefix = "occ.cursor", ignoreUnknownFields = false)
 data class CursorProperties(
@@ -19,6 +20,7 @@ data class CursorProperties(
     val currentKeyFile: String = "",
     val previousKeyId: String? = null,
     val previousKeyFile: String? = null,
+    val previousKeyNotAfter: Instant? = null,
 )
 
 @Configuration(proxyBeanMethods = false)
@@ -26,7 +28,7 @@ data class CursorProperties(
 @Conditional(CursorConfiguredCondition::class)
 class CursorConfiguration {
     @Bean
-    fun cursorKeyRing(properties: CursorProperties): CursorKeyRing = CursorKeyRing.load(properties)
+    fun cursorKeyRing(properties: CursorProperties, clock: Clock): CursorKeyRing = CursorKeyRing.load(properties, clock)
 
     @Bean
     fun cursorCodec(keyRing: CursorKeyRing, objectMapper: ObjectMapper, clock: Clock): CursorCodec =

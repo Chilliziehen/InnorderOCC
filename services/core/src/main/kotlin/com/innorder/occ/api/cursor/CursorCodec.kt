@@ -61,13 +61,14 @@ class HmacCursorCodec(
         val payloadBytes = decoded.copyOfRange(0, decoded.size - SIGNATURE_BYTES)
         val signature = decoded.copyOfRange(decoded.size - SIGNATURE_BYTES, decoded.size)
         val payload = parse(payloadBytes)
-        require(keys.verify(payload.keyId, payloadBytes, signature))
+        val now = clock.instant()
+        require(keys.verify(payload.keyId, payloadBytes, signature, now, payload.issuedAt))
         require(MessageDigest.isEqual(payloadBytes, canonicalBytes(payload)))
         validatePayload(payload)
         require(payload.subjectId == binding.subjectId)
         require(payload.endpoint == normalizeEndpoint(binding.endpoint))
         require(payload.filterDigest == normalizeDigest(binding.filterDigest))
-        val age = Duration.between(payload.issuedAt, clock.instant())
+        val age = Duration.between(payload.issuedAt, now)
         require(!age.isNegative && age < MAX_AGE)
         payload
     }
