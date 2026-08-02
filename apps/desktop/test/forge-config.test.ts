@@ -1,10 +1,12 @@
 // @vitest-environment node
 
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 import { describe, expect, it, vi } from "vitest";
@@ -18,6 +20,7 @@ const desktopRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "../..");
 const packageJson = JSON.parse(readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
 const rootPackageJson = JSON.parse(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
+const execFileAsync = promisify(execFile);
 
 type RuntimeForgeComponent = {
   name?: string;
@@ -64,6 +67,8 @@ describe("Windows package configuration", () => {
       name: "Innorder OCC",
       executableName: "InnorderOCC",
       appBundleId: "com.innorder.occ",
+      appVersion: packageJson.version,
+      buildVersion: packageJson.version,
       icon: path.join("assets", "occ.ico"),
       win32metadata: {
         CompanyName: "Innorder",
@@ -74,7 +79,9 @@ describe("Windows package configuration", () => {
       },
     });
     const mainSource = readFileSync(path.join(desktopRoot, "src", "main.ts"), "utf8");
-    expect(mainSource).toContain('app.setAppUserModelId("com.innorder.occ")');
+    expect(mainSource).toContain("app.setAppUserModelId(SQUIRREL_APP_USER_MODEL_ID)");
+    const forgeSource = readFileSync(path.join(desktopRoot, "forge.config.ts"), "utf8");
+    expect(forgeSource).not.toContain('"0.1.0"');
   });
 
   it("configures exactly one unsigned-development x64 Squirrel maker with local branding", async () => {
@@ -90,7 +97,8 @@ describe("Windows package configuration", () => {
       authors: "Innorder",
       title: "Innorder OCC",
       exe: "InnorderOCC.exe",
-      setupExe: "InnorderOCC-0.1.0-x64-unsigned-dev-Setup.exe",
+      version: packageJson.version,
+      setupExe: `InnorderOCC-${packageJson.version}-x64-unsigned-dev-Setup.exe`,
       setupIcon: path.resolve(desktopRoot, "assets", "occ.ico"),
       nuspecTemplate: path.resolve(desktopRoot, "assets", "squirrel.nuspectemplate"),
       noMsi: true,
@@ -229,7 +237,7 @@ describe("Windows package configuration", () => {
   });
 
   it("removes only the product-owned obsolete package directory", async () => {
-    const helperPath = path.join(desktopRoot, "scripts", "package-output.mts");
+    const helperPath = path.join(desktopRoot, "scripts", "package-output.mjs");
     expect(existsSync(helperPath)).toBe(true);
     if (!existsSync(helperPath)) return;
 
@@ -243,8 +251,13 @@ describe("Windows package configuration", () => {
         await writeFile(file, file);
       }
 
-      const { removeObsoletePackageOutput } = await import(pathToFileURL(helperPath).href);
-      await removeObsoletePackageOutput(root);
+      const sourceUrl = pathToFileURL(helperPath).href;
+      await execFileAsync(process.execPath, [
+        "--input-type=module",
+        "--eval",
+        `const { removeObsoletePackageOutput } = await import(${JSON.stringify(sourceUrl)}); await removeObsoletePackageOutput(process.argv[1]);`,
+        root,
+      ]);
 
       await expect(access(staleFile)).rejects.toThrow();
       await expect(access(currentFile)).resolves.toBeUndefined();
@@ -295,5 +308,22 @@ describe("Windows package configuration", () => {
       openInspector,
     })).toBe(true);
     expect(openInspector).toHaveBeenCalledWith(0, "127.0.0.1", false);
+  });
+
+  it("uses the exact Squirrel shortcut identity in the main process", async () => {
+    const identityPath = path.join(desktopRoot, "src", "product-identity.ts");
+    expect(existsSync(identityPath)).toBe(true);
+    if (!existsSync(identityPath)) return;
+
+    const maker = (config.makers ?? [])[0] as RuntimeForgeComponent;
+    await maker.prepareConfig?.("x64");
+    const squirrelPackageId = String(maker.config?.name);
+    const executableName = path.parse(String(maker.config?.exe)).name;
+    const expectedAppUserModelId = `com.squirrel.${squirrelPackageId}.${executableName}`;
+    const identity = await import(pathToFileURL(identityPath).href);
+
+    expect(squirrelPackageId).toBe("com.innorder.occ");
+    expect(identity.SQUIRREL_APP_USER_MODEL_ID).toBe(expectedAppUserModelId);
+    expect(identity.SQUIRREL_APP_USER_MODEL_ID).toBe("com.squirrel.com.innorder.occ.InnorderOCC");
   });
 });

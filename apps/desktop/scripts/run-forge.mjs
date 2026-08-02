@@ -5,7 +5,7 @@ import {
   assertElectronProvenance,
   assertInstalledElectronVersion,
 } from "../../../scripts/electron-provenance.mjs";
-import { removeObsoletePackageOutput } from "./package-output.mts";
+import { removeObsoletePackageOutput } from "./package-output.mjs";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 await assertElectronProvenance({ root, environment: process.env });

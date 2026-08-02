@@ -30,6 +30,7 @@ import { createProfileStore } from "./profile-store";
 import { createReadCache, READ_CACHE_MAX_BYTES } from "./read-cache";
 import { createNotificationStream } from "./notification-stream";
 import { enablePackagedSmokeInspector } from "./packaged-smoke-inspector";
+import { SQUIRREL_APP_USER_MODEL_ID } from "./product-identity";
 import { createSessionManager, customerInstanceIdFromAccessToken } from "./session-manager";
 import { createMainReliabilityApi } from "./main-reliability-composition";
 import { fetchSystemStatuses } from "./system-status-ipc";
@@ -80,7 +81,7 @@ enablePackagedSmokeInspector({
   environmentToken: process.env.OCC_PACKAGED_SMOKE_TOKEN,
   openInspector,
 });
-app.setAppUserModelId("com.innorder.occ");
+app.setAppUserModelId(SQUIRREL_APP_USER_MODEL_ID);
 const ownsInstance = registerSingleInstanceLifecycle(app, () => mainWindow);
 
 if (ownsInstance) void app.whenReady().then(async () => {

@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
@@ -6,39 +7,44 @@ import type { ForgeConfig } from "@electron-forge/shared-types";
 import { VitePlugin } from "@electron-forge/plugin-vite";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
 
+import { SQUIRREL_PACKAGE_ID, WINDOWS_EXECUTABLE_NAME } from "./src/product-identity";
+
 const iconPath = path.join("assets", "occ.ico");
 const description = "Innorder OCC 运营控制中心 / Operations Control Center";
+const require = createRequire(import.meta.url);
+const desktopPackage = require("./package.json") as { version: string };
+const appVersion = desktopPackage.version;
 
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     name: "Innorder OCC",
-    executableName: "InnorderOCC",
+    executableName: WINDOWS_EXECUTABLE_NAME,
     icon: iconPath,
-    appBundleId: "com.innorder.occ",
+    appBundleId: SQUIRREL_PACKAGE_ID,
     appCopyright: "Copyright (c) 2026 Innorder",
-    appVersion: "0.1.0",
-    buildVersion: "0.1.0",
+    appVersion,
+    buildVersion: appVersion,
     win32metadata: {
       CompanyName: "Innorder",
       FileDescription: description,
-      InternalName: "InnorderOCC",
-      OriginalFilename: "InnorderOCC.exe",
+      InternalName: WINDOWS_EXECUTABLE_NAME,
+      OriginalFilename: `${WINDOWS_EXECUTABLE_NAME}.exe`,
       ProductName: "Innorder OCC",
     },
   },
   rebuildConfig: {},
   makers: [
     new MakerSquirrel({
-      name: "com.innorder.occ",
+      name: SQUIRREL_PACKAGE_ID,
       authors: "Innorder",
       owners: "Innorder",
       title: "Innorder OCC",
       description,
-      version: "0.1.0",
+      version: appVersion,
       copyright: "Copyright (c) 2026 Innorder",
-      exe: "InnorderOCC.exe",
-      setupExe: "InnorderOCC-0.1.0-x64-unsigned-dev-Setup.exe",
+      exe: `${WINDOWS_EXECUTABLE_NAME}.exe`,
+      setupExe: `${WINDOWS_EXECUTABLE_NAME}-${appVersion}-x64-unsigned-dev-Setup.exe`,
       setupIcon: path.resolve(__dirname, iconPath),
       nuspecTemplate: path.resolve(__dirname, "assets", "squirrel.nuspectemplate"),
       noMsi: true,
