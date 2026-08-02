@@ -13,3 +13,4 @@
 \ir migrations/V011__account_failed_attempt_window.sql
 \ir migrations/V012__outbox_publisher_lifecycle.sql
 \ir migrations/V013__process_task_workflow.sql
+\ir migrations/V014__cohort_api_lifecycle.sql

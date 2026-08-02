@@ -33,6 +33,9 @@ class CursorConfiguration {
     @Bean
     fun cursorCodec(keyRing: CursorKeyRing, objectMapper: ObjectMapper, clock: Clock): CursorCodec =
         HmacCursorCodec(keyRing, objectMapper, clock)
+
+    @Bean
+    fun cursorFilterDigest(objectMapper: ObjectMapper): CursorFilterDigest = CursorFilterDigest(objectMapper)
 }
 
 internal class CursorConfiguredCondition : SpringBootCondition() {

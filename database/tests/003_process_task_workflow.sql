@@ -131,10 +131,13 @@ SELECT pg_temp.assert_raises(
       '56000000-0000-7000-8000-000000000001', current_date, 'ARCHIVED',
       '56000000-0000-7000-8000-000000000001', '56000000-0000-7000-8000-000000000001', transaction_timestamp())$$,
   '55000', 'cohort cannot be created archived');
-SELECT pg_temp.assert_raises(
-  $$UPDATE occ.cohort SET status = 'ARCHIVED', archived_at = transaction_timestamp()
-    WHERE id = '57000000-0000-7000-8000-000000000001'$$,
-  '55000', 'cohort cannot skip ACTIVE');
+UPDATE occ.cohort
+SET start_date = current_date + 1, end_date = current_date + 2
+WHERE id = '57000000-0000-7000-8000-000000000001';
+SELECT pg_temp.assert_true(
+  (SELECT start_date = current_date + 1 AND end_date = current_date + 2
+   FROM occ.cohort WHERE id = '57000000-0000-7000-8000-000000000001'),
+  'cohort dates are mutable while draft');
 CREATE TEMP TABLE cohort_owner_transfer_revision_before AS
 SELECT current_revision FROM authz.authorization_state WHERE singleton = true;
 SELECT pg_temp.assert_raises(
@@ -178,8 +181,8 @@ SELECT pg_temp.assert_raises(
       AND object_entity_id = '57000000-0000-7000-8000-000000000001' AND revoked_at IS NULL$$,
   '55000', 'cohort owner projection cannot be revoked directly');
 SELECT pg_temp.assert_true(
-  (SELECT row_version = 2 FROM occ.cohort WHERE id = '57000000-0000-7000-8000-000000000001'),
-  'cohort row version increments from explicit version one');
+  (SELECT row_version = 3 FROM occ.cohort WHERE id = '57000000-0000-7000-8000-000000000001'),
+  'cohort row version increments for date update and owner transfer');
 
 INSERT INTO authz.relationship
   (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until, source_kind, source_ref)

@@ -11,6 +11,8 @@ import com.innorder.occ.command.InvalidCommandRequestException
 import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.IdempotencyExpiredException
 import com.innorder.occ.command.CommandIntegrityException
+import com.innorder.occ.cohort.CohortConflictException
+import com.innorder.occ.cohort.CohortNotFoundException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -142,6 +144,18 @@ class ApiExceptionHandler(
         exception: com.innorder.occ.command.OptimisticConflictException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.optimisticConflict(request, exception.currentVersion)
+
+    @ExceptionHandler(CohortConflictException::class)
+    fun cohortConflict(
+        exception: CohortConflictException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.conflict(request)
+
+    @ExceptionHandler(CohortNotFoundException::class)
+    fun cohortNotFound(
+        exception: CohortNotFoundException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.requestError(request, HttpStatus.NOT_FOUND)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(
