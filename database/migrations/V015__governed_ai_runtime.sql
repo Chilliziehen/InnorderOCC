@@ -234,14 +234,14 @@ CREATE TABLE ai.event_consumption (
 );
 
 CREATE TABLE ai.retention_policy (
-    object_kind text PRIMARY KEY CHECK (object_kind IN ('TRACE', 'RETRIEVAL_HIT', 'INVOCATION', 'GATE_RESULT', 'GATE_EVIDENCE', 'ARTIFACT')),
+    object_kind text PRIMARY KEY CHECK (object_kind IN ('TRACE', 'RETRIEVAL_HIT', 'INVOCATION', 'RECOMMENDATION_SUBMISSION', 'GATE_RESULT', 'GATE_EVIDENCE', 'ARTIFACT')),
     retention_interval interval NOT NULL DEFAULT interval '1 year'
         CHECK (retention_interval >= interval '1 year'),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp()
 );
 
 INSERT INTO ai.retention_policy (object_kind)
-VALUES ('TRACE'), ('RETRIEVAL_HIT'), ('INVOCATION'), ('GATE_RESULT'), ('GATE_EVIDENCE'), ('ARTIFACT');
+VALUES ('TRACE'), ('RETRIEVAL_HIT'), ('INVOCATION'), ('RECOMMENDATION_SUBMISSION'), ('GATE_RESULT'), ('GATE_EVIDENCE'), ('ARTIFACT');
 
 CREATE TABLE ai.model_invocation (
     id uuid PRIMARY KEY,
@@ -265,6 +265,35 @@ CREATE TABLE ai.model_invocation (
     CHECK (status <> 'FAILED' OR sanitized_error IS NOT NULL),
     CHECK (completed_at IS NULL OR completed_at >= started_at),
     CHECK (retention_until >= started_at + interval '1 year')
+);
+
+CREATE TABLE ai.recommendation_submission (
+    run_id uuid PRIMARY KEY REFERENCES ai.ai_run(id),
+    operation_id uuid NOT NULL,
+    invocation_id uuid NOT NULL UNIQUE REFERENCES ai.model_invocation(id),
+    idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
+    payload_hash text NOT NULL CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
+    payload jsonb NOT NULL CHECK (platform.is_json_object(payload) AND octet_length(payload::text) BETWEEN 2 AND 262144),
+    status text NOT NULL CHECK (status IN ('PREPARED', 'ACKNOWLEDGED', 'FAILED')),
+    core_recommendation_id uuid,
+    core_receipt_hash text CHECK (core_receipt_hash IS NULL OR core_receipt_hash ~ '^[0-9a-f]{64}$'),
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 100),
+    prepared_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    last_attempt_at timestamptz,
+    acknowledged_at timestamptz,
+    failed_at timestamptz,
+    sanitized_error text CHECK (sanitized_error IS NULL OR (
+        octet_length(sanitized_error) BETWEEN 1 AND 2048 AND sanitized_error !~ '[[:cntrl:]]'
+    )),
+    data_classification text NOT NULL CHECK (data_classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    UNIQUE (run_id, operation_id, idempotency_key, payload_hash),
+    CHECK (operation_id = run_id),
+    CHECK ((status = 'ACKNOWLEDGED') = (core_recommendation_id IS NOT NULL AND core_receipt_hash IS NOT NULL AND acknowledged_at IS NOT NULL)),
+    CHECK ((status = 'FAILED') = (failed_at IS NOT NULL AND sanitized_error IS NOT NULL)),
+    CHECK (status = 'PREPARED' OR last_attempt_at IS NOT NULL),
+    CHECK (retention_until >= prepared_at + interval '1 year')
 );
 
 CREATE TABLE ai.retrieval_trace (
@@ -403,7 +432,7 @@ CREATE TABLE ai.legal_hold (
 
 CREATE TABLE ai.legal_hold_object (
     hold_id uuid NOT NULL REFERENCES ai.legal_hold(id),
-    object_kind text NOT NULL CHECK (object_kind IN ('RUN', 'TRACE', 'INVOCATION', 'ARTIFACT', 'GATE_RESULT', 'AUTHORIZATION_GRANT')),
+    object_kind text NOT NULL CHECK (object_kind IN ('RUN', 'TRACE', 'INVOCATION', 'RECOMMENDATION_SUBMISSION', 'ARTIFACT', 'GATE_RESULT', 'AUTHORIZATION_GRANT')),
     object_id uuid NOT NULL,
     fact_key text NOT NULL DEFAULT '',
     held_at timestamptz NOT NULL DEFAULT statement_timestamp(),
@@ -435,6 +464,8 @@ BEGIN
         PERFORM 1 FROM ai.retrieval_trace WHERE id = NEW.object_id FOR UPDATE;
     ELSIF NEW.object_kind = 'INVOCATION' THEN
         PERFORM 1 FROM ai.model_invocation WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'RECOMMENDATION_SUBMISSION' THEN
+        PERFORM 1 FROM ai.recommendation_submission WHERE run_id = NEW.object_id FOR UPDATE;
     ELSIF NEW.object_kind = 'GATE_RESULT' THEN
         PERFORM 1 FROM ai.embedding_space_gate_result WHERE id = NEW.object_id FOR UPDATE;
     ELSIF NEW.object_kind = 'AUTHORIZATION_GRANT' THEN
@@ -532,6 +563,8 @@ FOR EACH ROW EXECUTE FUNCTION ai.enforce_legal_hold_lifecycle();
 
 ALTER TABLE ai.model_invocation
     ADD CONSTRAINT fk_model_invocation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.recommendation_submission
+    ADD CONSTRAINT fk_recommendation_submission_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
 ALTER TABLE ai.retrieval_trace
     ADD CONSTRAINT fk_retrieval_trace_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
 ALTER TABLE ai.retrieval_hit
@@ -962,6 +995,39 @@ $$;
 CREATE TRIGGER trg_model_invocation_lifecycle
 BEFORE UPDATE OR DELETE ON ai.model_invocation
 FOR EACH ROW EXECUTE FUNCTION ai.enforce_model_invocation_lifecycle();
+
+CREATE FUNCTION ai.enforce_recommendation_submission_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission cannot be deleted';
+    END IF;
+    IF NEW.run_id IS DISTINCT FROM OLD.run_id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+       OR NEW.invocation_id IS DISTINCT FROM OLD.invocation_id OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+       OR NEW.payload_hash IS DISTINCT FROM OLD.payload_hash OR NEW.payload IS DISTINCT FROM OLD.payload
+       OR NEW.prepared_at IS DISTINCT FROM OLD.prepared_at OR NEW.data_classification IS DISTINCT FROM OLD.data_classification
+       OR NEW.retention_until IS DISTINCT FROM OLD.retention_until OR NEW.legal_hold_id IS DISTINCT FROM OLD.legal_hold_id THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission identity is immutable';
+    END IF;
+    IF OLD.status IN ('ACKNOWLEDGED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal recommendation submission is immutable';
+    END IF;
+    IF current_setting('innorder.recommendation_submission_transition', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission transition requires bounded function';
+    END IF;
+    IF NEW.attempts < OLD.attempts OR NEW.attempts > OLD.attempts + 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission attempts are invalid';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_recommendation_submission_lifecycle
+BEFORE UPDATE OR DELETE ON ai.recommendation_submission
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_recommendation_submission_lifecycle();
 
 CREATE FUNCTION ai.validate_retrieval_hit_authorized()
 RETURNS trigger
@@ -1799,7 +1865,7 @@ BEGIN
     JOIN authz.ai_authorization_grant grant_row
       ON grant_row.id = run.authorization_grant_id AND grant_row.run_id = run.id
     WHERE run.id = p_run_id AND grant_row.consumed_at IS NOT NULL
-      AND run.status IN ('COMPLETED', 'FAILED', 'CANCELLED');
+      AND run.status IN ('RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
 END;
 $$;
 
@@ -1881,6 +1947,8 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    invocation_row ai.model_invocation%ROWTYPE;
 BEGIN
     IF p_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid terminal invocation status';
@@ -1888,15 +1956,267 @@ BEGIN
     IF p_provider_request_id_hash IS NOT NULL AND p_provider_request_id_hash !~ '^[0-9a-f]{64}$' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'provider request id hash must be lowercase SHA-256';
     END IF;
+    SELECT * INTO STRICT invocation_row FROM ai.model_invocation WHERE id = p_id FOR UPDATE;
+    IF invocation_row.status <> 'STARTED' THEN
+        IF invocation_row.status = p_status
+           AND invocation_row.response_hash IS NOT DISTINCT FROM p_response_hash
+           AND invocation_row.provider_request_id_hash IS NOT DISTINCT FROM p_provider_request_id_hash
+           AND invocation_row.input_tokens = p_input_tokens AND invocation_row.output_tokens = p_output_tokens
+           AND invocation_row.cost = p_cost AND invocation_row.latency_ms = p_latency_ms
+           AND invocation_row.sanitized_error IS NOT DISTINCT FROM p_sanitized_error THEN
+            RETURN;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'model invocation terminal replay conflicts with retained accounting';
+    END IF;
     UPDATE ai.model_invocation
     SET status = p_status, response_hash = p_response_hash, provider_request_id_hash = p_provider_request_id_hash,
         input_tokens = p_input_tokens, output_tokens = p_output_tokens, cost = p_cost,
         latency_ms = p_latency_ms, sanitized_error = p_sanitized_error,
         completed_at = statement_timestamp()
     WHERE id = p_id AND status = 'STARTED';
-    IF NOT FOUND THEN
-        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'model invocation is not active';
+END;
+$$;
+
+CREATE FUNCTION ai.prepare_guidance_recommendation_submission(
+    p_run_id uuid, p_operation_id uuid, p_invocation_id uuid,
+    p_payload jsonb,
+    p_response_hash text, p_provider_request_id_hash text,
+    p_input_tokens bigint, p_output_tokens bigint, p_cost numeric,
+    p_latency_ms integer, p_data_classification text
+)
+RETURNS TABLE (
+    run_id uuid, operation_id uuid, invocation_id uuid, status text,
+    idempotency_key text, payload_hash text, payload jsonb, attempts integer
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    submission_row ai.recommendation_submission%ROWTYPE;
+    calculated_payload_hash text;
+    calculated_idempotency_key text;
+    run_target_entity_id uuid;
+    output_payload jsonb;
+    item jsonb;
+BEGIN
+    IF p_run_id IS NULL OR p_operation_id <> p_run_id OR p_invocation_id IS NULL
+       OR jsonb_typeof(p_payload) <> 'object' OR octet_length(p_payload::text) NOT BETWEEN 2 AND 262144
+       OR p_response_hash !~ '^[0-9a-f]{64}$'
+       OR (p_provider_request_id_hash IS NOT NULL AND p_provider_request_id_hash !~ '^[0-9a-f]{64}$')
+       OR p_input_tokens < 0 OR p_output_tokens < 0 OR p_cost < 0 OR p_latency_ms < 0
+       OR p_data_classification NOT IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED') THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation submission preparation';
     END IF;
+    SELECT run.target_entity_id INTO run_target_entity_id FROM ai.ai_run run
+    WHERE run.id = p_run_id AND run.status = 'RUNNING' AND run.authorization_grant_id IS NOT NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission requires a running governed run';
+    END IF;
+    output_payload := p_payload->'output';
+    IF p_payload - ARRAY['operationId','runId','targetEntityId','expectedTargetVersion','output'] <> '{}'::jsonb
+       OR NOT (p_payload ?& ARRAY['operationId','runId','targetEntityId','expectedTargetVersion','output'])
+       OR jsonb_typeof(p_payload->'operationId') <> 'string' OR p_payload->>'operationId' <> p_operation_id::text
+       OR jsonb_typeof(p_payload->'runId') <> 'string' OR p_payload->>'runId' <> p_run_id::text
+       OR jsonb_typeof(p_payload->'targetEntityId') <> 'string' OR p_payload->>'targetEntityId' <> run_target_entity_id::text
+       OR jsonb_typeof(p_payload->'expectedTargetVersion') <> 'number'
+       OR p_payload->>'expectedTargetVersion' !~ '^(0|[1-9][0-9]{0,15})$'
+       OR (p_payload->>'expectedTargetVersion')::numeric > 9007199254740991
+       OR jsonb_typeof(output_payload) <> 'object'
+       OR output_payload - ARRAY['generatedContent','summary','steps','confidence','citations'] <> '{}'::jsonb
+       OR NOT (output_payload ?& ARRAY['generatedContent','summary','steps','confidence','citations'])
+       OR output_payload->'generatedContent' <> 'true'::jsonb
+       OR jsonb_typeof(output_payload->'summary') <> 'string'
+       OR length(output_payload->>'summary') NOT BETWEEN 1 AND 2000
+       OR jsonb_typeof(output_payload->'confidence') <> 'number'
+       OR (output_payload->>'confidence')::numeric NOT BETWEEN 0 AND 1
+       OR jsonb_typeof(output_payload->'steps') <> 'array'
+       OR jsonb_array_length(output_payload->'steps') NOT BETWEEN 1 AND 20
+       OR jsonb_typeof(output_payload->'citations') <> 'array'
+       OR jsonb_array_length(output_payload->'citations') NOT BETWEEN 1 AND 50
+       OR (SELECT count(*) FROM jsonb_array_elements(output_payload->'citations')) <>
+          (SELECT count(DISTINCT value) FROM jsonb_array_elements(output_payload->'citations')) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'strict recommendation submission payload is invalid';
+    END IF;
+    FOR item IN SELECT value FROM jsonb_array_elements(output_payload->'steps') LOOP
+        IF jsonb_typeof(item) <> 'object' OR item - ARRAY['text','citationRanks'] <> '{}'::jsonb
+           OR NOT (item ?& ARRAY['text','citationRanks']) OR jsonb_typeof(item->'text') <> 'string'
+           OR length(item->>'text') NOT BETWEEN 1 AND 2000 OR jsonb_typeof(item->'citationRanks') <> 'array'
+           OR jsonb_array_length(item->'citationRanks') NOT BETWEEN 1 AND 10
+           OR (SELECT count(*) FROM jsonb_array_elements(item->'citationRanks')) <>
+              (SELECT count(DISTINCT value) FROM jsonb_array_elements(item->'citationRanks'))
+           OR EXISTS (SELECT 1 FROM jsonb_array_elements(item->'citationRanks') AS ranks(rank_json)
+                      WHERE jsonb_typeof(rank_json) <> 'number' OR rank_json::text !~ '^[1-9][0-9]*$'
+                        OR rank_json::text::numeric NOT BETWEEN 1 AND 50) THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'strict recommendation submission payload is invalid';
+        END IF;
+    END LOOP;
+    FOR item IN SELECT value FROM jsonb_array_elements(output_payload->'citations') LOOP
+        IF jsonb_typeof(item) <> 'object' OR item - ARRAY['rank','retrievalHitId','excerptHash'] <> '{}'::jsonb
+           OR NOT (item ?& ARRAY['rank','retrievalHitId','excerptHash']) OR jsonb_typeof(item->'rank') <> 'number'
+           OR item->>'rank' !~ '^[1-9][0-9]*$' OR (item->>'rank')::numeric NOT BETWEEN 1 AND 50
+           OR jsonb_typeof(item->'retrievalHitId') <> 'string'
+           OR item->>'retrievalHitId' !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+           OR jsonb_typeof(item->'excerptHash') <> 'string' OR item->>'excerptHash' !~ '^[0-9a-f]{64}$' THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'strict recommendation submission payload is invalid';
+        END IF;
+    END LOOP;
+    calculated_payload_hash := encode(pg_catalog.sha256(convert_to(p_payload::text, 'UTF8')), 'hex');
+    calculated_idempotency_key := encode(pg_catalog.sha256(convert_to(
+        p_run_id::text || ':' || p_operation_id::text || ':' || calculated_payload_hash, 'UTF8')), 'hex');
+    PERFORM ai.finalize_model_invocation(p_invocation_id, 'COMPLETED', p_response_hash,
+        p_provider_request_id_hash, p_input_tokens, p_output_tokens, p_cost, p_latency_ms, NULL);
+    IF NOT EXISTS (SELECT 1 FROM ai.model_invocation invocation
+                   WHERE invocation.id = p_invocation_id AND invocation.run_id = p_run_id) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'recommendation submission invocation does not match run';
+    END IF;
+    INSERT INTO ai.recommendation_submission
+        (run_id, operation_id, invocation_id, idempotency_key, payload_hash, payload, status, data_classification)
+    VALUES (p_run_id, p_operation_id, p_invocation_id, calculated_idempotency_key, calculated_payload_hash,
+            p_payload, 'PREPARED', p_data_classification)
+    ON CONFLICT ON CONSTRAINT recommendation_submission_pkey DO NOTHING;
+    SELECT * INTO STRICT submission_row FROM ai.recommendation_submission
+    WHERE recommendation_submission.run_id = p_run_id FOR UPDATE;
+    IF submission_row.operation_id <> p_operation_id OR submission_row.invocation_id <> p_invocation_id
+       OR submission_row.idempotency_key <> calculated_idempotency_key OR submission_row.payload_hash <> calculated_payload_hash
+       OR submission_row.payload <> p_payload OR submission_row.data_classification <> p_data_classification THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'recommendation submission replay conflicts with prepared identity';
+    END IF;
+    RETURN QUERY SELECT submission_row.run_id, submission_row.operation_id, submission_row.invocation_id,
+        submission_row.status, submission_row.idempotency_key, submission_row.payload_hash,
+        submission_row.payload, submission_row.attempts;
+END;
+$$;
+
+CREATE FUNCTION ai.get_guidance_recommendation_submission(p_run_id uuid)
+RETURNS TABLE (
+    run_id uuid, operation_id uuid, invocation_id uuid, status text,
+    idempotency_key text, payload_hash text, payload jsonb, attempts integer,
+    core_recommendation_id uuid, core_receipt_hash text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN QUERY SELECT submission.run_id, submission.operation_id, submission.invocation_id,
+        submission.status, submission.idempotency_key, submission.payload_hash, submission.payload,
+        submission.attempts, submission.core_recommendation_id, submission.core_receipt_hash
+    FROM ai.recommendation_submission submission
+    JOIN ai.ai_run run ON run.id = submission.run_id
+    JOIN authz.ai_authorization_grant grant_row ON grant_row.id = run.authorization_grant_id
+    WHERE submission.run_id = p_run_id AND grant_row.consumed_at IS NOT NULL;
+END;
+$$;
+
+CREATE FUNCTION ai.mark_guidance_recommendation_dispatched(
+    p_run_id uuid, p_idempotency_key text, p_payload_hash text
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    next_attempt integer;
+BEGIN
+    PERFORM 1 FROM ai.ai_run run WHERE run.id = p_run_id AND run.status = 'RUNNING' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation dispatch requires a running run';
+    END IF;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'on', true);
+    UPDATE ai.recommendation_submission submission
+    SET attempts = attempts + 1, last_attempt_at = statement_timestamp()
+    WHERE submission.run_id = p_run_id AND submission.status = 'PREPARED'
+      AND submission.idempotency_key = p_idempotency_key AND submission.payload_hash = p_payload_hash
+      AND submission.attempts < 100
+    RETURNING attempts INTO next_attempt;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'off', true);
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission is not dispatchable';
+    END IF;
+    RETURN next_attempt;
+END;
+$$;
+
+CREATE FUNCTION ai.acknowledge_guidance_recommendation(
+    p_run_id uuid, p_idempotency_key text, p_payload_hash text,
+    p_recommendation_id uuid, p_receipt_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    run_status text;
+    submission_row ai.recommendation_submission%ROWTYPE;
+BEGIN
+    IF p_recommendation_id IS NULL OR p_receipt_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation acknowledgement';
+    END IF;
+    SELECT status INTO STRICT run_status FROM ai.ai_run WHERE id = p_run_id FOR UPDATE;
+    SELECT * INTO STRICT submission_row FROM ai.recommendation_submission submission
+    WHERE submission.run_id = p_run_id AND submission.idempotency_key = p_idempotency_key
+      AND submission.payload_hash = p_payload_hash FOR UPDATE;
+    IF submission_row.status = 'ACKNOWLEDGED' THEN
+        IF run_status = 'COMPLETED' AND submission_row.core_recommendation_id = p_recommendation_id
+           AND submission_row.core_receipt_hash = p_receipt_hash THEN
+            RETURN p_recommendation_id;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation acknowledgement replay conflicts';
+    END IF;
+    IF run_status <> 'RUNNING' OR submission_row.status <> 'PREPARED' OR submission_row.attempts < 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission is not acknowledgeable';
+    END IF;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'on', true);
+    UPDATE ai.recommendation_submission
+    SET status = 'ACKNOWLEDGED', core_recommendation_id = p_recommendation_id,
+        core_receipt_hash = p_receipt_hash, acknowledged_at = statement_timestamp()
+    WHERE recommendation_submission.run_id = p_run_id;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'off', true);
+    UPDATE ai.ai_run
+    SET status = 'COMPLETED', recommendation_id = p_recommendation_id,
+        error_code = NULL, completed_at = statement_timestamp()
+    WHERE id = p_run_id AND status = 'RUNNING';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation acknowledgement lost run ownership';
+    END IF;
+    RETURN p_recommendation_id;
+END;
+$$;
+
+CREATE FUNCTION ai.fail_guidance_recommendation_submission(
+    p_run_id uuid, p_idempotency_key text, p_payload_hash text, p_error_code text
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_error_code !~ '^OCC-AI-[A-Z0-9-]{1,112}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation submission failure';
+    END IF;
+    PERFORM 1 FROM ai.ai_run run WHERE run.id = p_run_id AND run.status = 'RUNNING' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation failure requires a running run';
+    END IF;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'on', true);
+    UPDATE ai.recommendation_submission submission
+    SET status = 'FAILED', failed_at = statement_timestamp(), last_attempt_at = statement_timestamp(),
+        sanitized_error = p_error_code
+    WHERE submission.run_id = p_run_id AND submission.status = 'PREPARED'
+      AND submission.idempotency_key = p_idempotency_key AND submission.payload_hash = p_payload_hash
+      AND submission.attempts = 0;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'off', true);
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'possibly dispatched recommendation cannot be failed';
+    END IF;
+    UPDATE ai.ai_run SET status = 'FAILED', error_code = p_error_code,
+        recommendation_id = NULL, completed_at = statement_timestamp()
+    WHERE id = p_run_id AND status = 'RUNNING';
+    RETURN 'FAILED';
 END;
 $$;
 
@@ -2521,6 +2841,11 @@ REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUB
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.get_guidance_recommendation_submission(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.mark_guidance_recommendation_dispatched(uuid, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.acknowledge_guidance_recommendation(uuid, text, text, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.fail_guidance_recommendation_submission(uuid, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.record_retrieval_trace(uuid, uuid, uuid, text, integer, integer, integer, jsonb) FROM PUBLIC, innorder_ai_runtime;
 REVOKE ALL ON FUNCTION ai.record_retrieval_hit(uuid, uuid, uuid, double precision, double precision, double precision, integer, text, boolean) FROM PUBLIC, innorder_ai_runtime;
 REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FROM PUBLIC, innorder_runtime;
@@ -2535,6 +2860,11 @@ GRANT EXECUTE ON FUNCTION ai.heartbeat_ingestion_job(uuid, text, interval) TO in
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_guidance_recommendation_submission(uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.mark_guidance_recommendation_dispatched(uuid, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.acknowledge_guidance_recommendation(uuid, text, text, uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.fail_guidance_recommendation_submission(uuid, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.release_legal_hold(uuid, uuid) TO innorder_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;

@@ -7,7 +7,7 @@ import type { CoreClient } from "../core/core-client.js";
 import type { OpenAiCompatibleProvider } from "../provider/openai-compatible.js";
 import type { HybridRetriever } from "../retrieval/hybrid-retriever.js";
 import { buildGuidancePrompt } from "./prompt-builder.js";
-import type { GuidanceConfiguration, PostgresGuidanceRepository, TerminalGuidanceResult } from "./guidance-repository.js";
+import type { GuidanceConfiguration, PostgresGuidanceRepository, PreparedRecommendationSubmission, TerminalGuidanceResult } from "./guidance-repository.js";
 import { validateGuidanceOutput } from "./output-validator.js";
 
 const HASH = /^[a-f0-9]{64}$/u;
@@ -27,7 +27,9 @@ export type ConsumedGuidanceGrant = Readonly<{
   authorizedDocumentVersionIds: readonly string[]; boundedContext: Readonly<Record<string, unknown>>; replayed: boolean;
 }>;
 
-type Repository = Pick<PostgresGuidanceRepository, "loadConfiguration" | "terminalResult" | "transition" | "startInvocation" | "finalizeInvocation" | "persistArtifact">;
+type Repository = Pick<PostgresGuidanceRepository, "loadConfiguration" | "terminalResult" | "transition" | "startInvocation" |
+  "finalizeInvocation" | "persistArtifact" | "loadPreparedSubmission" | "completeProviderAndPrepare" |
+  "markSubmissionDispatched" | "acknowledgeSubmission">;
 type ArtifactStore = { upload(objectKey: string, bytes: Uint8Array, expectedHash: string, signal: AbortSignal): Promise<void> };
 type Dependencies = Readonly<{
   repository: Repository;
@@ -47,13 +49,18 @@ export class GuidanceRunner {
   async run(input: Readonly<{ operationId: string; grant: string | ConsumedGuidanceGrant }>, signal: AbortSignal): Promise<GuidanceRunResult> {
     const grant = typeof input.grant === "string" ? await this.consume(input.grant, signal) : input.grant;
     let invocationId: string | undefined;
+    let providerResult: Awaited<ReturnType<OpenAiCompatibleProvider["chat"]>> | undefined;
+    let validatedProviderResult: ReturnType<typeof validateGuidanceOutput> | undefined;
     const started = (this.dependencies.now?.() ?? new Date()).getTime();
     try {
       if (grant.replayed) {
         if (grant.operationId !== input.operationId || grant.runId !== input.operationId || grant.operation !== "PARTICIPANT_GUIDANCE") throw new Error("OCC-AI-GRANT-MISMATCH");
-        const terminal = await this.dependencies.repository.terminalResult(grant.runId, new AbortController().signal);
-        if (terminal === undefined) throw new Error("OCC-AI-GRANT-REPLAY");
-        return terminal;
+        const status = await this.dependencies.repository.terminalResult(grant.runId, new AbortController().signal);
+        if (status === undefined) throw new Error("OCC-AI-GRANT-REPLAY");
+        if (status.status !== "RECONCILIATION_PENDING") return status;
+        const retained = await this.dependencies.repository.loadPreparedSubmission(grant.runId, new AbortController().signal);
+        if (retained === undefined) throw new Error("OCC-AI-RECONCILIATION-PENDING");
+        return await this.reconcile(retained, signal);
       }
       if (signal.aborted) throw new Error("OCC-AI-CANCELLED");
       if (grant.operationId !== input.operationId || grant.runId !== input.operationId || grant.operation !== "PARTICIPANT_GUIDANCE") throw new Error("OCC-AI-GRANT-MISMATCH");
@@ -81,41 +88,69 @@ export class GuidanceRunner {
         taskContext: context.data, hits: retrieval.hits, outputSchema: configuration.agent.outputSchema, maxInputBytes: configuration.profile.maxInputBytes });
       invocationId = this.dependencies.invocationId?.() ?? randomUUID();
       await this.dependencies.repository.startInvocation({ id: invocationId, runId: grant.runId, profileId: grant.modelProfileId,
-        operation: grant.operationId, requestHash: prompt.promptHash, capabilityHash: configuration.profile.capabilityHash }, signal);
-      const response = await this.dependencies.provider.chat({ messages: prompt.messages, schema: prompt.schema }, signal);
-      const responseHash = digest(canonical(response.output));
-      await this.dependencies.repository.finalizeInvocation({ id: invocationId, status: "COMPLETED", responseHash,
-        inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens,
-        cost: response.accounting.costMicros.toString(), latencyMs: Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started), errorCode: null }, signal);
-      invocationId = undefined;
-      const validated = validateGuidanceOutput(response.output, { runId: grant.runId, traceId: retrieval.traceId, hits: retrieval.hits });
+        operation: grant.operation, requestHash: prompt.promptHash, capabilityHash: configuration.profile.capabilityHash }, signal);
+      providerResult = await this.dependencies.provider.chat({ messages: prompt.messages, schema: prompt.schema }, signal);
+      const responseHash = digest(canonical(providerResult.output));
+      validatedProviderResult = validateGuidanceOutput(providerResult.output, { runId: grant.runId, traceId: retrieval.traceId, hits: retrieval.hits });
       const artifactId = this.dependencies.artifactId?.() ?? randomUUID();
       const artifact = {
         generatedContent: true, runId: grant.runId, traceId: retrieval.traceId, queryHash: retrieval.queryHash,
         configuration: { agentVersionId: grant.agentVersionId, modelProfileId: grant.modelProfileId, promptVersionId: grant.promptVersionId,
           packageVersionId: grant.packageVersionId, policyReleaseDigest: grant.policyReleaseDigest, embeddingSpaceId: grant.embeddingSpaceId,
           promptHash: prompt.promptHash, schemaHash: prompt.schemaHash, capabilityHash: configuration.profile.capabilityHash },
-        validation: { status: "PASSED", citationCount: validated.citations.length }, output: validated,
+        validation: { status: "PASSED", citationCount: validatedProviderResult.citations.length }, output: validatedProviderResult,
       };
       const bytes = Buffer.from(canonical(artifact), "utf8");
       const artifactHash = digest(bytes);
       const objectKey = `trace/${grant.runId}/${artifactId}.json`;
       await this.dependencies.artifactStore.upload(objectKey, bytes, artifactHash, signal);
       await this.dependencies.repository.persistArtifact({ id: artifactId, runId: grant.runId, artifactKind: "TRACE", objectKey, hash: artifactHash, classification: grant.classificationCeiling }, signal);
-      const idempotencyKey = digest(`${grant.operationId}:${grant.runId}:recommendation`);
-      const coreResult = await this.dependencies.core.submitRecommendation({ operationId: grant.operationId, runId: grant.runId,
-        targetEntityId: grant.targetEntityId, expectedTargetVersion: context.data.expectedTargetVersion, output: validated }, idempotencyKey, signal);
-      const recommendationId = this.recommendationId(coreResult);
-      await this.dependencies.repository.transition({ runId: grant.runId, status: "COMPLETED", recommendationId }, signal);
-      return { operationId: grant.operationId, runId: grant.runId, status: "SUCCEEDED", recommendationId };
+      const payload = { operationId: grant.operationId, runId: grant.runId, targetEntityId: grant.targetEntityId,
+        expectedTargetVersion: context.data.expectedTargetVersion, output: validatedProviderResult };
+      const prepared = await this.dependencies.repository.completeProviderAndPrepare({
+        runId: grant.runId, operationId: grant.operationId, invocationId, payload, responseHash,
+        ...(providerResult.providerRequestIdHash === undefined ? {} : { providerRequestIdHash: providerResult.providerRequestIdHash }),
+        inputTokens: providerResult.usage.inputTokens, outputTokens: providerResult.usage.outputTokens,
+        cost: providerResult.accounting.costMicros.toString(),
+        latencyMs: Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started), classification: grant.classificationCeiling,
+      }, new AbortController().signal);
+      invocationId = undefined;
+      return await this.reconcile(prepared, signal);
     } catch (error) {
       const code = this.errorCode(error, signal);
+      if (code === "OCC-AI-RECONCILIATION-PENDING" || validatedProviderResult !== undefined) throw new Error("OCC-AI-RECONCILIATION-PENDING");
+      if (providerResult !== undefined && invocationId !== undefined) {
+        const responseHash = digest(canonical(providerResult.output));
+        await this.dependencies.repository.finalizeInvocation({ id: invocationId, status: "COMPLETED", responseHash,
+          inputTokens: providerResult.usage.inputTokens, outputTokens: providerResult.usage.outputTokens,
+          cost: providerResult.accounting.costMicros.toString(), latencyMs: Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started), errorCode: null }, new AbortController().signal)
+          .catch(() => { throw new Error("OCC-AI-RECONCILIATION-PENDING"); });
+        invocationId = undefined;
+      }
       if (invocationId !== undefined) {
         await this.dependencies.repository.finalizeInvocation({ id: invocationId, status: code === "OCC-AI-CANCELLED" ? "CANCELLED" : "FAILED",
           responseHash: null, inputTokens: 0, outputTokens: 0, cost: "0", latencyMs: Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started), errorCode: code }, new AbortController().signal).catch(() => undefined);
       }
       await this.dependencies.repository.transition({ runId: grant.runId, status: code === "OCC-AI-CANCELLED" ? "CANCELLED" : "FAILED", errorCode: code }, new AbortController().signal).catch(() => undefined);
       throw new Error(code);
+    }
+  }
+
+  private async reconcile(submission: PreparedRecommendationSubmission, signal: AbortSignal): Promise<GuidanceRunResult> {
+    if (signal.aborted) throw new Error("OCC-AI-RECONCILIATION-PENDING");
+    const durableSignal = new AbortController().signal;
+    try {
+      await this.dependencies.repository.markSubmissionDispatched({ runId: submission.runId,
+        idempotencyKey: submission.idempotencyKey, payloadHash: submission.payloadHash }, durableSignal);
+      const coreResult = await this.dependencies.core.submitRecommendation(submission.payload, submission.idempotencyKey, durableSignal);
+      const recommendationId = this.recommendationId(coreResult);
+      const receiptHash = digest(canonical(coreResult));
+      await this.dependencies.repository.acknowledgeSubmission({ runId: submission.runId,
+        idempotencyKey: submission.idempotencyKey, payloadHash: submission.payloadHash,
+        recommendationId, receiptHash }, durableSignal);
+      return { operationId: submission.operationId, runId: submission.runId, status: "SUCCEEDED", recommendationId };
+    } catch {
+      throw new Error("OCC-AI-RECONCILIATION-PENDING");
     }
   }
 

@@ -18,7 +18,7 @@ const outputSchemaInputSchema = z.record(z.string().min(1).max(128), z.unknown()
 export const chatRequestSchema = z.object({ messages: z.array(chatMessageSchema).min(1).max(100), schema: outputSchemaInputSchema }).strict();
 export const embeddingRequestSchema = z.object({ inputs: z.array(z.string().min(1).max(1_000_000)).min(1).max(1024), dimensions: z.number().int().min(1).max(1_000_000) }).strict();
 export type ChatRequest = Readonly<z.infer<typeof chatRequestSchema>>;
-export type ChatResult = Readonly<{ output: unknown; usage: Readonly<{ inputTokens: number; outputTokens: number }>; accounting: AccountingResult }>;
+export type ChatResult = Readonly<{ output: unknown; usage: Readonly<{ inputTokens: number; outputTokens: number }>; accounting: AccountingResult; providerRequestIdHash?: string }>;
 export type EmbeddingRequest = Readonly<z.infer<typeof embeddingRequestSchema>>;
 export type EmbeddingResult = Readonly<{ embeddings: readonly (readonly number[])[]; usage: Readonly<{ inputTokens: number; outputTokens: number }>; accounting: AccountingResult }>;
 export interface OpenAiCompatibleProvider {
@@ -305,7 +305,7 @@ export class OpenAiCompatibleAdapter implements OpenAiCompatibleProvider {
     const accounting = calculateAccounting({ requestBytes: body.byteLength, responseBytes: response.body.byteLength, ...(providerUsage === undefined ? {} : { usage: providerUsage }), cost: this.profile.cost });
     const usage = { inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens };
     await this.emitAccounting(operation, accounting, startedAt);
-    return { output, usage, accounting };
+    return { output, usage, accounting, providerRequestIdHash: createHash("sha256").update(parsed.data.id, "utf8").digest("hex") };
   }
 
   async embed(input: EmbeddingRequest, signal: AbortSignal): Promise<EmbeddingResult> {

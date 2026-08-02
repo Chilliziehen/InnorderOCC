@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GUIDANCE_INPUT_JSON_SCHEMA, GUIDANCE_OUTPUT_JSON_SCHEMA } from "@innorder/contracts";
 
 import { GuidanceRunner } from "../src/guidance/guidance-runner.js";
+import { PostgresGuidanceRepository } from "../src/guidance/guidance-repository.js";
 import { buildGuidancePrompt, PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE } from "../src/guidance/prompt-builder.js";
 import { validateGuidanceOutput } from "../src/guidance/output-validator.js";
 import { validateRecommendationResponse, validateRecommendationSubmission } from "../src/core/core-client.js";
@@ -130,19 +131,25 @@ describe("GuidanceRunner", () => {
   };
 
   function harness(overrides: Record<string, unknown> = {}) {
+    const prepared = { runId: ids.run, operationId: ids.run, invocationId: "00000000-0000-4000-8000-000000000011",
+      status: "PREPARED" as const, idempotencyKey: hash("recommendation-key"), payloadHash: hash(canonical({ operationId: ids.run })),
+      payload: { operationId: ids.run, runId: ids.run, targetEntityId: ids.document, expectedTargetVersion: 4, output }, attempts: 0 };
     const repository = {
       loadConfiguration: vi.fn().mockResolvedValue(configuration), terminalResult: vi.fn().mockResolvedValue(undefined),
       transition: vi.fn().mockResolvedValue(undefined), startInvocation: vi.fn().mockResolvedValue("00000000-0000-4000-8000-000000000011"),
       finalizeInvocation: vi.fn().mockResolvedValue(undefined), persistArtifact: vi.fn().mockResolvedValue("00000000-0000-4000-8000-000000000012"),
+      loadPreparedSubmission: vi.fn().mockResolvedValue(undefined), completeProviderAndPrepare: vi.fn().mockResolvedValue(prepared),
+      markSubmissionDispatched: vi.fn().mockResolvedValue({ ...prepared, attempts: 1 }), acknowledgeSubmission: vi.fn().mockResolvedValue("00000000-0000-4000-8000-000000000013"),
     };
     const retriever = { retrieve: vi.fn().mockResolvedValue({ traceId: ids.trace, queryHash: hash("approved checklist"), hits: [hit] }) };
-    const provider = { chat: vi.fn().mockResolvedValue({ output, usage: { inputTokens: 10, outputTokens: 5 }, accounting: { costMicros: 3n, currency: "USD", estimated: false } }) };
+    const provider = { chat: vi.fn().mockResolvedValue({ output, usage: { inputTokens: 10, outputTokens: 5 },
+      accounting: { costMicros: 3n, currency: "USD", estimated: false }, providerRequestIdHash: hash("provider-request") }) };
     const artifactStore = { upload: vi.fn().mockResolvedValue(undefined) };
     const core = { submitRecommendation: vi.fn().mockResolvedValue({ recommendationId: "00000000-0000-4000-8000-000000000013" }) };
     const runner = new GuidanceRunner({ repository, retriever, provider, artifactStore, core,
       invocationId: () => "00000000-0000-4000-8000-000000000011", artifactId: () => "00000000-0000-4000-8000-000000000012",
       now: () => new Date("2026-08-02T00:00:00.000Z"), ...overrides } as never);
-    return { runner, repository, retriever, provider, artifactStore, core };
+    return { runner, repository, retriever, provider, artifactStore, core, prepared };
   }
 
   it("persists every required boundary before completing and submits only a generated recommendation", async () => {
@@ -154,13 +161,122 @@ describe("GuidanceRunner", () => {
       packageVersionId: consumed.packageVersionId, modelProfileId: consumed.modelProfileId,
       embeddingSpaceId: consumed.embeddingSpaceId, policyReleaseDigest: consumed.policyReleaseDigest,
     }), expect.any(AbortSignal));
-    expect(h.repository.startInvocation).toHaveBeenCalledWith(expect.objectContaining({ capabilityHash: configuration.profile.capabilityHash }), expect.any(AbortSignal));
+    expect(h.repository.startInvocation).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "PARTICIPANT_GUIDANCE", capabilityHash: configuration.profile.capabilityHash,
+    }), expect.any(AbortSignal));
     expect(h.provider.chat.mock.calls[0]?.[0].schema).toBe(configuration.agent.outputSchema);
-    expect(h.repository.finalizeInvocation).toHaveBeenCalledWith(expect.objectContaining({ status: "COMPLETED", inputTokens: 10, outputTokens: 5 }), expect.any(AbortSignal));
+    expect(h.repository.completeProviderAndPrepare).toHaveBeenCalledWith(expect.objectContaining({
+      responseHash: hash(canonical(output)), inputTokens: 10, outputTokens: 5, cost: "3", providerRequestIdHash: hash("provider-request"),
+      payload: expect.objectContaining({ operationId: ids.run, output }), classification: "INTERNAL",
+    }), expect.any(AbortSignal));
     expect(h.artifactStore.upload).toHaveBeenCalledWith(expect.stringMatching(/^trace\//u), expect.any(Uint8Array), expect.stringMatching(/^[a-f0-9]{64}$/u), expect.any(AbortSignal));
     expect(h.repository.persistArtifact).toHaveBeenCalledWith(expect.objectContaining({ artifactKind: "TRACE", classification: "INTERNAL" }), expect.any(AbortSignal));
     expect(h.core.submitRecommendation).toHaveBeenCalledWith(expect.objectContaining({ operationId: ids.run, runId: ids.run, output }), expect.stringMatching(/^[a-f0-9]{64}$/u), expect.any(AbortSignal));
-    expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING", "COMPLETED"]);
+    expect(h.repository.markSubmissionDispatched).toHaveBeenCalledBefore(h.core.submitRecommendation);
+    expect(h.repository.acknowledgeSubmission).toHaveBeenCalledWith(expect.objectContaining({
+      runId: ids.run, recommendationId: "00000000-0000-4000-8000-000000000013", receiptHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    }), expect.any(AbortSignal));
+    expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING"]);
+  });
+
+  it("resumes a prepared replay without retrieval or a second provider call", async () => {
+    const h = harness();
+    h.repository.terminalResult.mockResolvedValue({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
+    h.repository.loadPreparedSubmission.mockResolvedValue(h.prepared);
+    await expect(h.runner.run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
+      .resolves.toEqual({ operationId: ids.run, runId: ids.run, status: "SUCCEEDED", recommendationId: "00000000-0000-4000-8000-000000000013" });
+    expect(h.provider.chat).not.toHaveBeenCalled();
+    expect(h.retriever.retrieve).not.toHaveBeenCalled();
+    expect(h.core.submitRecommendation).toHaveBeenCalledWith(h.prepared.payload, h.prepared.idempotencyKey, expect.any(AbortSignal));
+  });
+
+  it("leaves exact provider accounting reconciliation-pending when durable prepare fails", async () => {
+    const h = harness();
+    h.repository.completeProviderAndPrepare.mockRejectedValue(new Error("OCC-AI-GUIDANCE-DATABASE"));
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(h.provider.chat).toHaveBeenCalledOnce();
+    expect(h.repository.finalizeInvocation).not.toHaveBeenCalled();
+    expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING"]);
+  });
+
+  it("does not replace provider accounting when cancellation races durable preparation", async () => {
+    const controller = new AbortController();
+    const h = harness();
+    h.repository.completeProviderAndPrepare.mockImplementation(async () => {
+      controller.abort();
+      throw new Error("OCC-AI-GUIDANCE-DATABASE");
+    });
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, controller.signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(h.repository.completeProviderAndPrepare).toHaveBeenCalledWith(expect.objectContaining({
+      responseHash: hash(canonical(output)), inputTokens: 10, outputTokens: 5, cost: "3",
+      providerRequestIdHash: hash("provider-request"),
+    }), expect.any(AbortSignal));
+    expect(h.repository.finalizeInvocation).not.toHaveBeenCalled();
+    expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING"]);
+  });
+
+  it("does not dispatch when recording the attempt fails", async () => {
+    const h = harness();
+    h.repository.markSubmissionDispatched.mockRejectedValue(new Error("OCC-AI-GUIDANCE-DATABASE"));
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(h.core.submitRecommendation).not.toHaveBeenCalled();
+    expect(h.repository.acknowledgeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("retries an ambiguous Core outcome with the same payload and key and no duplicate provider call", async () => {
+    const h = harness();
+    let authoritativeCreations = 0;
+    let accepted: { recommendationId: string } | undefined;
+    h.core.submitRecommendation.mockImplementation(async () => {
+      if (accepted === undefined) {
+        authoritativeCreations += 1;
+        accepted = { recommendationId: "00000000-0000-4000-8000-000000000013" };
+        throw new Error("response lost after Core accepted");
+      }
+      return accepted;
+    });
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    h.repository.terminalResult.mockResolvedValue({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
+    h.repository.loadPreparedSubmission.mockResolvedValue(h.prepared);
+    await expect(h.runner.run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
+      .resolves.toMatchObject({ status: "SUCCEEDED" });
+    expect(h.provider.chat).toHaveBeenCalledOnce();
+    expect(h.core.submitRecommendation).toHaveBeenCalledTimes(2);
+    expect(h.core.submitRecommendation.mock.calls[0]?.slice(0, 2)).toEqual(h.core.submitRecommendation.mock.calls[1]?.slice(0, 2));
+    expect(authoritativeCreations).toBe(1);
+  });
+
+  it("waits for acknowledgement when cancellation occurs after dispatch", async () => {
+    const controller = new AbortController();
+    const h = harness();
+    h.core.submitRecommendation.mockImplementation(async (_payload, _key, durableSignal) => {
+      controller.abort();
+      expect(durableSignal.aborted).toBe(false);
+      return { recommendationId: "00000000-0000-4000-8000-000000000013" };
+    });
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, controller.signal))
+      .resolves.toMatchObject({ status: "SUCCEEDED", recommendationId: "00000000-0000-4000-8000-000000000013" });
+    expect(h.repository.acknowledgeSubmission).toHaveBeenCalledOnce();
+    expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING"]);
+  });
+
+  it("retries after the Core response when atomic acknowledgement fails", async () => {
+    const h = harness();
+    h.repository.acknowledgeSubmission.mockRejectedValueOnce(new Error("OCC-AI-GUIDANCE-DATABASE"))
+      .mockResolvedValueOnce("00000000-0000-4000-8000-000000000013");
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    h.repository.terminalResult.mockResolvedValue({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
+    h.repository.loadPreparedSubmission.mockResolvedValue(h.prepared);
+    await expect(h.runner.run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
+      .resolves.toMatchObject({ status: "SUCCEEDED" });
+    expect(h.provider.chat).toHaveBeenCalledOnce();
+    expect(h.core.submitRecommendation).toHaveBeenCalledTimes(2);
+    expect(h.repository.acknowledgeSubmission).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -218,21 +334,29 @@ describe("GuidanceRunner", () => {
   it.each([
     ["configuration", "database unavailable"], ["retrieval", "retrieval unavailable"],
     ["invocation start", "invocation unavailable"], ["provider", "OCC-AI-PROVIDER-STATUS"],
-    ["invocation finalization", "invocation persistence unavailable"], ["artifact", "object unavailable"],
-    ["artifact persistence", "artifact persistence unavailable"], ["core", "Core service request failed"],
   ])("fails and sanitizes %s boundary errors without completing", async (boundary, message) => {
     const h = harness();
     if (boundary === "configuration") h.repository.loadConfiguration.mockRejectedValue(new Error(message));
     if (boundary === "retrieval") h.retriever.retrieve.mockRejectedValue(new Error(message));
     if (boundary === "invocation start") h.repository.startInvocation.mockRejectedValue(new Error(message));
     if (boundary === "provider") h.provider.chat.mockRejectedValue(new Error(message));
-    if (boundary === "invocation finalization") h.repository.finalizeInvocation.mockRejectedValue(new Error(message));
-    if (boundary === "core") h.core.submitRecommendation.mockRejectedValue(new Error(message));
-    if (boundary === "artifact") h.artifactStore.upload.mockRejectedValue(new Error(message));
-    if (boundary === "artifact persistence") h.repository.persistArtifact.mockRejectedValue(new Error(message));
     await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal)).rejects.toThrow(/^OCC-AI-/u);
     expect(h.repository.transition.mock.calls.some(([call]) => call.status === "COMPLETED")).toBe(false);
     expect(h.repository.transition.mock.calls.at(-1)?.[0]).toMatchObject({ status: "FAILED", errorCode: expect.stringMatching(/^OCC-AI-/u) });
+  });
+
+  it.each([
+    ["invocation finalization", "invocation persistence unavailable"], ["artifact", "object unavailable"],
+    ["artifact persistence", "artifact persistence unavailable"], ["core", "Core service request failed"],
+  ])("keeps %s boundary errors reconciliation-pending after provider completion", async (boundary, message) => {
+    const h = harness();
+    if (boundary === "invocation finalization") h.repository.completeProviderAndPrepare.mockRejectedValue(new Error(message));
+    if (boundary === "core") h.core.submitRecommendation.mockRejectedValue(new Error(message));
+    if (boundary === "artifact") h.artifactStore.upload.mockRejectedValue(new Error(message));
+    if (boundary === "artifact persistence") h.repository.persistArtifact.mockRejectedValue(new Error(message));
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING"]);
   });
 
   it("terminalizes a consumed queued run when already cancelled", async () => {
@@ -252,6 +376,29 @@ describe("GuidanceRunner", () => {
     expect(h.retriever.retrieve).not.toHaveBeenCalled();
     expect(h.provider.chat).not.toHaveBeenCalled();
     expect(h.repository.transition).toHaveBeenLastCalledWith({ runId: ids.run, status: "FAILED", errorCode: "OCC-AI-CONTEXT-INVALID" }, expect.any(AbortSignal));
+  });
+});
+
+describe("PostgresGuidanceRepository reconciliation", () => {
+  it("lets PostgreSQL compute the JSONB payload hash and deterministic idempotency key", async () => {
+    const payload = { operationId: ids.run, confidence: 1e-7 };
+    const row = { run_id: ids.run, operation_id: ids.run, invocation_id: ids.hit, status: "PREPARED",
+      idempotency_key: hash("database-key"), payload_hash: hash("database-jsonb"), payload, attempts: 0 };
+    const query = vi.fn().mockResolvedValue({ rows: [row] });
+    const repository = new PostgresGuidanceRepository({ query } as never);
+    await expect(repository.completeProviderAndPrepare({ runId: ids.run, operationId: ids.run, invocationId: ids.hit,
+      payload, responseHash: hash("response"), providerRequestIdHash: hash("request"), inputTokens: 4,
+      outputTokens: 2, cost: "3", latencyMs: 8, classification: "INTERNAL" }, new AbortController().signal))
+      .resolves.toMatchObject({ idempotencyKey: row.idempotency_key, payloadHash: row.payload_hash });
+    expect(query.mock.calls[0]?.[1]).toEqual([ids.run, ids.run, ids.hit, JSON.stringify(payload), hash("response"),
+      hash("request"), 4, 2, "3", 8, "INTERNAL"]);
+  });
+
+  it("maps a running governed status to reconciliation pending", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ operation_id: ids.run, run_status: "RUNNING", error_code: null, recommendation_id: null }] });
+    const repository = new PostgresGuidanceRepository({ query } as never);
+    await expect(repository.terminalResult(ids.run, new AbortController().signal))
+      .resolves.toEqual({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
   });
 });
 

@@ -16,7 +16,12 @@ export type GuidanceConfiguration = Readonly<{
 export type TerminalGuidanceResult =
   | Readonly<{ operationId: string; runId: string; status: "SUCCEEDED"; recommendationId: string }>
   | Readonly<{ operationId: string; runId: string; status: "FAILED"; errorCode: string }>
-  | Readonly<{ operationId: string; runId: string; status: "CANCELLED" }>;
+  | Readonly<{ operationId: string; runId: string; status: "CANCELLED" }>
+  | Readonly<{ operationId: string; runId: string; status: "RECONCILIATION_PENDING" }>;
+export type PreparedRecommendationSubmission = Readonly<{
+  runId: string; operationId: string; invocationId: string; status: "PREPARED";
+  idempotencyKey: string; payloadHash: string; payload: Readonly<Record<string, unknown>>; attempts: number;
+}>;
 type Queryable = { query(text: string, values?: unknown[]): Promise<QueryResult> };
 
 function abort(signal: AbortSignal): void {
@@ -26,6 +31,13 @@ function abort(signal: AbortSignal): void {
 function databaseError(error: unknown): never {
   if (error instanceof Error && error.message === "OCC-AI-CANCELLED") throw error;
   throw new Error("OCC-AI-GUIDANCE-DATABASE");
+}
+
+function prepared(row: Record<string, unknown>): PreparedRecommendationSubmission {
+  if (row.status !== "PREPARED" || row.payload === null || typeof row.payload !== "object" || Array.isArray(row.payload)) throw new Error();
+  return { runId: String(row.run_id), operationId: String(row.operation_id), invocationId: String(row.invocation_id),
+    status: "PREPARED", idempotencyKey: String(row.idempotency_key), payloadHash: String(row.payload_hash),
+    payload: row.payload as Record<string, unknown>, attempts: Number(row.attempts) };
 }
 
 export class PostgresGuidanceRepository {
@@ -66,6 +78,9 @@ export class PostgresGuidanceRepository {
       const operationId = String(row.operation_id);
       const status = String(row.run_status);
       if (operationId !== runId) throw new Error();
+      if (status === "RUNNING" && row.recommendation_id === null && row.error_code === null) {
+        return { operationId, runId, status: "RECONCILIATION_PENDING" };
+      }
       if (status === "COMPLETED" && row.recommendation_id !== null && row.error_code === null) {
         return { operationId, runId, status: "SUCCEEDED", recommendationId: String(row.recommendation_id) };
       }
@@ -101,6 +116,57 @@ export class PostgresGuidanceRepository {
     try {
       await this.database.query("SELECT ai.finalize_model_invocation($1,$2,$3,NULL,$4,$5,$6,$7,$8)", [input.id, input.status, input.responseHash, input.inputTokens, input.outputTokens, input.cost, input.latencyMs, input.errorCode]);
     } catch (error) { databaseError(error); }
+  }
+
+  async loadPreparedSubmission(runId: string, signal: AbortSignal): Promise<PreparedRecommendationSubmission | undefined> {
+    abort(signal);
+    try {
+      const result = await this.database.query("SELECT * FROM ai.get_guidance_recommendation_submission($1)", [runId]);
+      abort(signal);
+      if (result.rows.length === 0) return undefined;
+      if (result.rows.length !== 1) throw new Error();
+      const row = result.rows[0]!;
+      if (row.status !== "PREPARED") return undefined;
+      return prepared(row);
+    } catch (error) { return databaseError(error); }
+  }
+
+  async completeProviderAndPrepare(input: Readonly<{
+    runId: string; operationId: string; invocationId: string; payload: Readonly<Record<string, unknown>>;
+    responseHash: string; providerRequestIdHash?: string; inputTokens: number; outputTokens: number;
+    cost: string; latencyMs: number; classification: DataClassification;
+  }>, signal: AbortSignal): Promise<PreparedRecommendationSubmission> {
+    abort(signal);
+    try {
+      const result = await this.database.query("SELECT * FROM ai.prepare_guidance_recommendation_submission($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [
+        input.runId, input.operationId, input.invocationId, JSON.stringify(input.payload),
+        input.responseHash, input.providerRequestIdHash ?? null, input.inputTokens, input.outputTokens,
+        input.cost, input.latencyMs, input.classification,
+      ]);
+      abort(signal);
+      if (result.rows.length !== 1) throw new Error();
+      return prepared(result.rows[0]!);
+    } catch (error) { return databaseError(error); }
+  }
+
+  async markSubmissionDispatched(input: Readonly<{ runId: string; idempotencyKey: string; payloadHash: string }>, signal: AbortSignal): Promise<number> {
+    abort(signal);
+    try {
+      const result = await this.database.query("SELECT ai.mark_guidance_recommendation_dispatched($1,$2,$3) AS attempts", [input.runId, input.idempotencyKey, input.payloadHash]);
+      if (result.rows.length !== 1 || !Number.isSafeInteger(Number(result.rows[0]?.attempts))) throw new Error();
+      return Number(result.rows[0]!.attempts);
+    } catch (error) { return databaseError(error); }
+  }
+
+  async acknowledgeSubmission(input: Readonly<{ runId: string; idempotencyKey: string; payloadHash: string; recommendationId: string; receiptHash: string }>, signal: AbortSignal): Promise<string> {
+    abort(signal);
+    try {
+      const result = await this.database.query("SELECT ai.acknowledge_guidance_recommendation($1,$2,$3,$4,$5) AS id", [
+        input.runId, input.idempotencyKey, input.payloadHash, input.recommendationId, input.receiptHash,
+      ]);
+      if (result.rows.length !== 1 || String(result.rows[0]?.id) !== input.recommendationId) throw new Error();
+      return input.recommendationId;
+    } catch (error) { return databaseError(error); }
   }
 
   async persistArtifact(input: Readonly<{ id: string; runId: string; artifactKind: "TRACE"; objectKey: string; hash: string; classification: DataClassification }>, signal: AbortSignal): Promise<string> {

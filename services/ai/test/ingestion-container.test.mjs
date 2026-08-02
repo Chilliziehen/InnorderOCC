@@ -61,6 +61,10 @@ async function eventually(action, timeoutMs = 60_000) {
   throw lastError;
 }
 
+async function stage(name, action) {
+  try { return await action(); } catch (error) { throw new Error(`${name}: ${error instanceof Error ? error.message : "failed"}`, { cause: error }); }
+}
+
 test("pinned MinIO quarantine and official clamd fail closed end to end", { timeout: 300_000 }, async () => {
   const suffix = randomUUID(); const minio = `innorder-minio-${suffix}`; const clamav = `innorder-clamav-${suffix}`;
   const credentials = await mkdtemp(join(tmpdir(), "innorder-ingestion-container-"));
@@ -84,7 +88,7 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
     await waitHttp(`${endpoint}/minio/health/ready`, minio);
     const rootClient = new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", credentials: { accessKeyId: rootAccess, secretAccessKey: rootSecret }, maxAttempts: 1 });
     await eventually(() => rootClient.send(new CreateBucketCommand({ Bucket: bucket, ObjectLockEnabledForBucket: true })));
-    await rootClient.send(new CreateBucketCommand({ Bucket: "other-quarantine" }));
+    await eventually(() => rootClient.send(new CreateBucketCommand({ Bucket: "other-quarantine" })));
     const mc = (args) => docker(["exec", minio, "mc", ...args]);
     assert.equal(mc(["alias", "set", "local", "http://127.0.0.1:9000", rootAccess, rootSecret]).status, 0);
     assert.equal(mc(["admin", "user", "add", "local", appAccess, appSecret]).status, 0);
@@ -93,11 +97,11 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
     const appClient = new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", credentials: { accessKeyId: appAccess, secretAccessKey: appSecret }, maxAttempts: 1 });
     const store = await MinioQuarantineObjectStore.create({ endpoint, bucket, prefix, accessKeyFile: join(credentials, "access"), secretKeyFile: join(credentials, "secret"), forcePathStyle: true, allowInsecureLocalhost: true });
     const body = Buffer.from("private governed upload");
-    await store.upload("golden", body, sha256(body), new AbortController().signal);
-    assert.deepEqual(await store.readObject("golden", sha256(body), new AbortController().signal), body);
+    await stage("golden upload", () => store.upload("golden", body, sha256(body), new AbortController().signal));
+    assert.deepEqual(await stage("golden read", () => store.readObject("golden", sha256(body), new AbortController().signal)), body);
     await assert.rejects(store.upload("golden", body, sha256(body), new AbortController().signal), /OCC-AI-OBJECT-STORE-CONFLICT/u);
     const key = "quarantine/integration/golden";
-    const head = await appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: key, ChecksumMode: "ENABLED" }));
+    const head = await stage("golden head", () => appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: key, ChecksumMode: "ENABLED" })));
     assert.equal(head.ContentLength, body.length); assert.equal(head.ServerSideEncryption, "AES256");
     assert.equal(head.ChecksumSHA256, createHash("sha256").update(body).digest("base64"));
     await assert.rejects(appClient.send(new PutObjectCommand({ Bucket: bucket, Key: "quarantine/other/denied", Body: body })));
@@ -114,18 +118,18 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
     const artifactStore = await MinioArtifactObjectStore.create({ endpoint, bucket, prefix: "trace/integration",
       accessKeyFile: join(credentials, "access"), secretKeyFile: join(credentials, "secret"), forcePathStyle: true, allowInsecureLocalhost: true });
     const artifactBody = Buffer.from('{"generatedContent":true}');
-    await artifactStore.upload("run/artifact.json", artifactBody, sha256(artifactBody), new AbortController().signal);
+    await stage("artifact upload", () => artifactStore.upload("run/artifact.json", artifactBody, sha256(artifactBody), new AbortController().signal));
     const artifactKey = "trace/integration/run/artifact.json";
-    const artifactHead = await appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey, ChecksumMode: "ENABLED" }));
+    const artifactHead = await stage("artifact head", () => appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey, ChecksumMode: "ENABLED" })));
     assert.equal(artifactHead.ObjectLockMode, "GOVERNANCE");
     assert.equal(typeof artifactHead.VersionId, "string");
     assert.ok(artifactHead.ObjectLockRetainUntilDate instanceof Date);
     assert.ok(artifactHead.ObjectLockRetainUntilDate.getTime() > Date.now() + 364 * 24 * 60 * 60 * 1000);
-    const retention = await appClient.send(new GetObjectRetentionCommand({ Bucket: bucket, Key: artifactKey }));
+    const retention = await stage("artifact retention", () => appClient.send(new GetObjectRetentionCommand({ Bucket: bucket, Key: artifactKey })));
     assert.equal(retention.Retention?.Mode, "GOVERNANCE");
     assert.ok(retention.Retention?.RetainUntilDate instanceof Date);
     await assert.rejects(appClient.send(new DeleteObjectCommand({ Bucket: bucket, Key: artifactKey, VersionId: artifactHead.VersionId })));
-    assert.equal((await appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey }))).VersionId, artifactHead.VersionId);
+    assert.equal((await stage("artifact retained head", () => appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey })))).VersionId, artifactHead.VersionId);
 
     const clamRun = docker(["run", "--detach", "--name", clamav, "--publish", "127.0.0.1::3310",
       "--mount", `type=bind,src=${join(credentials, "local.ndb")},dst=/var/lib/clamav/local.ndb,readonly`,

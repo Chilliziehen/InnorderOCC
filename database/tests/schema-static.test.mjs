@@ -499,8 +499,19 @@ test('fails embedding gates closed with fixed manifest-bound evidence', () => {
 test('routes AI mutations through bounded functions and retains governed evidence', () => {
   const sql = readMigration('V015__governed_ai_runtime.sql');
   assert.match(sql, /CREATE TABLE ai\.retention_policy\b/iu);
+  const submission = sql.match(/CREATE TABLE ai\.recommendation_submission\s*\([\s\S]*?\n\);/iu)?.[0] ?? '';
+  assert.match(submission, /status text NOT NULL[^\n]*PREPARED[^\n]*ACKNOWLEDGED[^\n]*FAILED/iu);
+  assert.match(submission, /payload jsonb NOT NULL/iu);
+  assert.match(submission, /payload_hash text NOT NULL/iu);
+  assert.match(submission, /idempotency_key text NOT NULL/iu);
+  assert.match(submission, /core_recommendation_id uuid/iu);
+  assert.match(submission, /core_receipt_hash text/iu);
+  assert.match(submission, /attempts integer NOT NULL DEFAULT 0/iu);
+  assert.match(submission, /data_classification text NOT NULL/iu);
+  assert.match(submission, /retention_until timestamptz NOT NULL DEFAULT \(statement_timestamp\(\) \+ interval '1 year'\)/iu);
+  assert.match(submission, /legal_hold_id uuid/iu);
   assert.match(sql, /retention_interval interval NOT NULL DEFAULT interval '1 year'/iu);
-  for (const table of ['model_invocation', 'retrieval_trace', 'retrieval_hit', 'embedding_space_gate_result']) {
+  for (const table of ['model_invocation', 'recommendation_submission', 'retrieval_trace', 'retrieval_hit', 'embedding_space_gate_result']) {
     const definition = sql.match(new RegExp(`CREATE TABLE ai\\.${table}\\s*\\([\\s\\S]*?\\n\\);`, 'iu'))?.[0] ?? '';
     assert.match(definition, /retention_until timestamptz NOT NULL DEFAULT \(statement_timestamp\(\) \+ interval '1 year'\)/iu, table);
     assert.match(definition, /legal_hold_id uuid/iu, table);
@@ -515,8 +526,12 @@ test('routes AI mutations through bounded functions and retains governed evidenc
     'finalize_ingestion_job', 'fail_ingestion_job', 'register_event_consumption',
     'finalize_event_consumption', 'fail_event_consumption', 'transition_ai_run',
     'start_model_invocation', 'finalize_model_invocation', 'persist_run_artifact',
-    'persist_retrieval_bundle',
+    'persist_retrieval_bundle', 'prepare_guidance_recommendation_submission',
+    'mark_guidance_recommendation_dispatched', 'acknowledge_guidance_recommendation',
+    'fail_guidance_recommendation_submission',
   ]) assert.match(sql, new RegExp(`CREATE FUNCTION ai\\.${fn}\\(`, 'iu'), fn);
+  assert.match(sql, /CREATE TRIGGER trg_recommendation_submission_lifecycle/iu);
+  assert.match(sql, /UPDATE ai\.recommendation_submission[\s\S]*UPDATE ai\.ai_run[\s\S]*status = 'COMPLETED'/iu);
   assert.match(sql, /GRANT SELECT ON ai\.model_provider/iu);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION ai\.(?:record_retrieval_trace|record_retrieval_hit)\([^;]*TO innorder_ai_runtime/iu);
   assert.doesNotMatch(sql, /GRANT SELECT, INSERT(?:, UPDATE)? ON ai\.(?:knowledge_document_version|knowledge_chunk|chunk_embedding|ingestion_job|ingestion_attempt|event_consumption|model_invocation|retrieval_trace|retrieval_hit)/iu);

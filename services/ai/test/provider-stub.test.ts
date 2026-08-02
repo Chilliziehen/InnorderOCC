@@ -418,6 +418,7 @@ describe("OpenAI-compatible adapter", () => {
     const adapter = new OpenAiCompatibleAdapter({ provider, profile, transport, capabilityRepository: { save: async () => undefined }, operationId: () => "operation" });
     const chat = await adapter.chat({ messages: [{ role: "user", content: "question" }], schema: { type: "object" } }, new AbortController().signal);
     expect(chat).toMatchObject({ output: { answer: "yes" }, accounting: { estimated: true } });
+    expect(chat.providerRequestIdHash).toBe(hash("chatcmpl-fixture"));
     expect(chat.usage.inputTokens).toBeGreaterThan(3);
     expect(chat.usage.outputTokens).toBeGreaterThan(2);
     await expect(adapter.embed({ inputs: ["one", "two"], dimensions: 3 }, new AbortController().signal))

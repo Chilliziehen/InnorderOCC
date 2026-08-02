@@ -289,7 +289,8 @@ function fixtureSql(prefix) {
       ('${id('000000000040')}'::uuid, repeat('b',64), 'jti-mismatch-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000035')}'::uuid, '${id('000000000031')}'::uuid),
       ('${id('000000000041')}'::uuid, repeat('c',64), 'jti-expired-${prefix}', 0, interval '-10 minutes', interval '-6 minutes', '${id('000000000039')}'::uuid, '${id('000000000032')}'::uuid),
       ('${id('000000000042')}'::uuid, repeat('e',64), 'jti-stale-${prefix}', 1, interval '0', interval '5 minutes', '${id('00000000003d')}'::uuid, '${id('000000000033')}'::uuid),
-      ('${id('000000000050')}'::uuid, repeat('f',64), 'jti-cancel-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000034')}'::uuid, '${id('000000000034')}'::uuid)
+      ('${id('000000000050')}'::uuid, repeat('f',64), 'jti-cancel-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000034')}'::uuid, '${id('000000000034')}'::uuid),
+      ('${id('000000000053')}'::uuid, repeat('9',64), 'jti-rejected-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000054')}'::uuid, '${id('000000000055')}'::uuid)
     ) AS grant_input(id, token_hash, jti, revision_offset, issued_offset, expires_offset, event_id, run_id)
     WHERE singleton;
     INSERT INTO authz.ai_authorized_document (grant_id, document_version_id)
@@ -298,7 +299,8 @@ function fixtureSql(prefix) {
       ('${id('000000000040')}', '${id('000000000017')}'),
       ('${id('000000000041')}', '${id('000000000017')}'),
       ('${id('000000000042')}', '${id('000000000017')}'),
-      ('${id('000000000050')}', '${id('000000000017')}');
+      ('${id('000000000050')}', '${id('000000000017')}'),
+      ('${id('000000000053')}', '${id('000000000017')}');
     INSERT INTO ai.ingestion_job
       (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
        parser_version, chunker_version, candidate_embedding_space_id,
@@ -886,9 +888,61 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     FROM ai.get_guidance_terminal_result('${id('000000000030')}');`), `${id('000000000030')}|FAILED|OCC-AI-PROVIDER-STATUS|none`);
   execAiSql(consume({ token: 'b', event: id('000000000035'), run: id('000000000031') }));
   assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000031')}', 'RUNNING', NULL, NULL);`), 'RUNNING');
-  assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000031')}', 'COMPLETED', NULL, '${id('000000000051')}');`), 'COMPLETED');
+  const validSubmissionOutput = { generatedContent: true, summary: 'approved',
+    steps: [{ text: 'follow approved procedure', citationRanks: [1] }], confidence: 1e-7,
+    citations: [{ rank: 1, retrievalHitId: '123e4567-e89b-42d3-a456-426614174000', excerptHash: '4'.repeat(64) }] };
+  const submissionPayload = JSON.stringify({ operationId: id('000000000031'), runId: id('000000000031'),
+    targetEntityId: id('000000000015'), expectedTargetVersion: 4, output: validSubmissionOutput });
+  const submissionPayloadHash = execSql(`SELECT encode(pg_catalog.sha256(convert_to(('${submissionPayload}'::jsonb)::text, 'UTF8')), 'hex');`);
+  const submissionInvocationId = id('000000000052');
+  assert.equal(execAiSql(`SELECT ai.start_model_invocation('${submissionInvocationId}', '${id('000000000031')}',
+    '${id('000000000008')}', 'RETRIEVE', repeat('1',64), repeat('2',64));`), submissionInvocationId);
+  expectAiFailure(`SELECT * FROM ai.prepare_guidance_recommendation_submission('${id('000000000031')}', '${id('000000000031')}',
+    '${submissionInvocationId}', '{}'::jsonb, repeat('3',64), repeat('4',64), 10, 5, 3, 12, 'PUBLIC');`, /strict recommendation submission payload/iu);
+  const prepareSubmission = `SELECT run_id || '|' || status || '|' || attempts FROM ai.prepare_guidance_recommendation_submission(
+    '${id('000000000031')}', '${id('000000000031')}', '${submissionInvocationId}',
+    '${submissionPayload}'::jsonb, repeat('3',64), repeat('4',64), 10, 5, 3, 12, 'PUBLIC');`;
+  assert.equal(execAiSql(prepareSubmission), `${id('000000000031')}|PREPARED|0`);
+  assert.equal(execAiSql(prepareSubmission), `${id('000000000031')}|PREPARED|0`);
+  expectAiFailure(prepareSubmission.replace(', 10, 5, 3, 12,', ', 11, 5, 3, 12,'), /retained accounting/iu);
+  expectAiFailure(prepareSubmission.replace('"generatedContent":true', '"generatedContent":false'), /strict recommendation submission payload|prepared identity/iu);
+  const submissionIdempotencyKey = execSql(`SELECT idempotency_key FROM ai.recommendation_submission WHERE run_id = '${id('000000000031')}';`);
+  assert.equal(execSql(`SELECT payload_hash FROM ai.recommendation_submission WHERE run_id = '${id('000000000031')}';`), submissionPayloadHash);
+  assert.equal(execSql(`SELECT response_hash || '|' || provider_request_id_hash || '|' || input_tokens || '|' || output_tokens || '|' || cost
+    FROM ai.model_invocation WHERE id = '${submissionInvocationId}';`), `${'3'.repeat(64)}|${'4'.repeat(64)}|10|5|3`);
+  assert.equal(execAiSql(`SELECT run_status FROM ai.get_guidance_terminal_result('${id('000000000031')}');`), 'RUNNING');
+  assert.equal(execAiSql(`SELECT ai.mark_guidance_recommendation_dispatched('${id('000000000031')}', '${submissionIdempotencyKey}', '${submissionPayloadHash}');`), '1');
+  execAiSql(`BEGIN; SELECT ai.acknowledge_guidance_recommendation('${id('000000000031')}', '${submissionIdempotencyKey}',
+    '${submissionPayloadHash}', '${id('000000000051')}', repeat('a',64)); ROLLBACK;`);
+  assert.equal(execSql(`SELECT status || '|' || attempts FROM ai.recommendation_submission WHERE run_id = '${id('000000000031')}';`), 'PREPARED|1');
+  assert.equal(execSql(`SELECT status || '|' || coalesce(recommendation_id::text, 'none') FROM ai.ai_run WHERE id = '${id('000000000031')}';`), 'RUNNING|none');
+  assert.equal(execAiSql(`SELECT ai.acknowledge_guidance_recommendation('${id('000000000031')}', '${submissionIdempotencyKey}',
+    '${submissionPayloadHash}', '${id('000000000051')}', repeat('a',64));`), id('000000000051'));
+  assert.equal(execAiSql(`SELECT ai.acknowledge_guidance_recommendation('${id('000000000031')}', '${submissionIdempotencyKey}',
+    '${submissionPayloadHash}', '${id('000000000051')}', repeat('a',64));`), id('000000000051'));
+  assert.equal(execSql(`SELECT submission.status || '|' || run.status || '|' || run.recommendation_id
+    FROM ai.recommendation_submission submission JOIN ai.ai_run run ON run.id = submission.run_id
+    WHERE submission.run_id = '${id('000000000031')}';`), `ACKNOWLEDGED|COMPLETED|${id('000000000051')}`);
+  expectAiFailure(`SELECT ai.finalize_model_invocation('${submissionInvocationId}', 'COMPLETED', repeat('3',64),
+    repeat('4',64), 10, 5, 4, 12, NULL);`, /retained accounting/iu);
+  expectAiFailure(`UPDATE ai.recommendation_submission SET attempts = 2 WHERE run_id = '${id('000000000031')}';`, /permission denied/iu);
   assert.equal(execAiSql(`SELECT run_status || '|' || recommendation_id FROM ai.get_guidance_terminal_result('${id('000000000031')}');`),
     `COMPLETED|${id('000000000051')}`);
+  execAiSql(consume({ token: '9', event: id('000000000054'), run: id('000000000055') }));
+  assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000055')}', 'RUNNING', NULL, NULL);`), 'RUNNING');
+  assert.equal(execAiSql(`SELECT ai.start_model_invocation('${id('000000000056')}', '${id('000000000055')}',
+    '${id('000000000008')}', 'RETRIEVE', repeat('1',64), repeat('2',64));`), id('000000000056'));
+  const rejectedPayload = JSON.stringify({ operationId: id('000000000055'), runId: id('000000000055'),
+    targetEntityId: id('000000000015'), expectedTargetVersion: 4, output: validSubmissionOutput });
+  execAiSql(`SELECT * FROM ai.prepare_guidance_recommendation_submission('${id('000000000055')}', '${id('000000000055')}',
+    '${id('000000000056')}', '${rejectedPayload}'::jsonb, repeat('3',64), NULL, 7, 2, 1, 9, 'PUBLIC');`);
+  const rejectedKey = execSql(`SELECT idempotency_key FROM ai.recommendation_submission WHERE run_id = '${id('000000000055')}';`);
+  const rejectedHash = execSql(`SELECT payload_hash FROM ai.recommendation_submission WHERE run_id = '${id('000000000055')}';`);
+  assert.equal(execAiSql(`SELECT ai.fail_guidance_recommendation_submission('${id('000000000055')}', '${rejectedKey}',
+    '${rejectedHash}', 'OCC-AI-CORE-PAYLOAD');`), 'FAILED');
+  assert.equal(execSql(`SELECT submission.status || '|' || run.status || '|' || run.error_code
+    FROM ai.recommendation_submission submission JOIN ai.ai_run run ON run.id = submission.run_id
+    WHERE submission.run_id = '${id('000000000055')}';`), 'FAILED|FAILED|OCC-AI-CORE-PAYLOAD');
   execAiSql(consume({ token: 'f', event: id('000000000034'), run: id('000000000034') }));
   assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000034')}', 'CANCELLED', 'OCC-AI-CANCELLED', NULL);`), 'CANCELLED');
   assert.equal(execAiSql(`SELECT run_status || '|' || error_code FROM ai.get_guidance_terminal_result('${id('000000000034')}');`),
