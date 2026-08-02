@@ -277,8 +277,11 @@ class ResourceService(
         val inclusive = tuple?.get(3)?.booleanValue() ?: false
         val rowBudget = MAX_QUERY_AUTHORIZATION_CALLS - 1
         val scan = transactions.execute {
-            val snapshotAt = requestedSnapshot ?: repository.currentTimestamp()
             authorizeRequired(principalId, correlationId, resourceId, resourceId, READ_ACTION)
+            val snapshotAt = requestedSnapshot ?: run {
+                if (!repository.lockResourceForShare(resourceId)) throw InvalidCommandRequestException()
+                repository.currentTimestamp()
+            }
             val rows = repository.schedule(
                 resourceId, normalizedStart, normalizedEnd, snapshotAt, afterStart, afterId, inclusive,
                 minOf(limit + 1, rowBudget),

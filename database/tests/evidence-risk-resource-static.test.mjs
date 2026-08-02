@@ -150,6 +150,10 @@ test('serializes resource availability and reservation capacity on the parent ro
   ]) assert.match(historyTable, new RegExp(`\\b${field}\\b`, 'i'), `history snapshots ${field}`);
   assert.match(sql, /CREATE TRIGGER trg_resource_reservation_snapshot[\s\S]*AFTER INSERT OR UPDATE ON occ\.resource_reservation/i);
   assert.match(sql, /CREATE TRIGGER trg_resource_reservation_history_immutable[\s\S]*platform\.reject_immutable_row/i);
+  assert.match(sql, /CREATE FUNCTION occ\.snapshot_resource_reservation\(\)[\s\S]*SECURITY DEFINER[\s\S]*SET search_path = pg_catalog, occ\s/i);
+  assert.match(sql, /snapshot_resource_reservation[\s\S]*clock_timestamp\(\)/i);
+  assert.match(sql, /REVOKE INSERT, UPDATE, DELETE ON TABLE occ\.resource_reservation_history FROM innorder_runtime/i);
+  assert.doesNotMatch(sql, /GRANT[^;]*INSERT[^;]*ON TABLE occ\.resource_reservation_history TO innorder_runtime/i);
   assert.match(historyTable, /row_version bigint NOT NULL/i);
   assert.match(historyTable, /recorded_at timestamptz NOT NULL/i);
 });
@@ -170,8 +174,13 @@ test('keeps bounded trigger functions invoker-rights and unavailable for direct 
   for (const [, name] of functions) {
     const definition = functions.find((match) => match[1] === name)?.[0] ?? '';
     assert.match(definition, /RETURNS trigger/i, `${name} remains trigger-only`);
-    assert.match(definition, /SET search_path = pg_catalog, occ, pg_temp/i, `${name} fixes search_path`);
-    assert.doesNotMatch(definition, /SECURITY DEFINER/i, `${name} remains invoker-rights`);
+    if (name === 'snapshot_resource_reservation') {
+      assert.match(definition, /SECURITY DEFINER/i, `${name} appends as migration owner`);
+      assert.match(definition, /SET search_path = pg_catalog, occ\s/i, `${name} fixes owner search_path`);
+    } else {
+      assert.match(definition, /SET search_path = pg_catalog, occ, pg_temp/i, `${name} fixes search_path`);
+      assert.doesNotMatch(definition, /SECURITY DEFINER/i, `${name} remains invoker-rights`);
+    }
     assert.match(sql, new RegExp(`REVOKE (?:ALL|EXECUTE) ON FUNCTION occ\\.${name}\\([^;]* FROM PUBLIC`, 'i'));
     assert.doesNotMatch(sql, new RegExp(`GRANT EXECUTE ON FUNCTION occ\\.${name}\\([^;]* TO innorder_runtime`, 'i'));
   }

@@ -199,6 +199,7 @@ await applyMigration('V014__evidence_risk_resource.sql');
 
 const v14FunctionSecurity = await db.query(`
   SELECT p.proname, p.prosecdef, p.proconfig,
+         pg_get_userbyid(p.proowner) AS owner_name, current_user AS migration_owner,
          has_function_privilege('innorder_runtime', p.oid, 'EXECUTE') AS runtime_execute,
          p.prorettype = 'pg_catalog.trigger'::regtype AS trigger_only
   FROM pg_catalog.pg_proc p
@@ -215,11 +216,29 @@ const v14FunctionSecurity = await db.query(`
       'validate_managed_resource_change', 'snapshot_resource_reservation'
     )
 `);
+const reservationSnapshotFunction = v14FunctionSecurity.rows.find((row) => row.proname === 'snapshot_resource_reservation');
 if (v14FunctionSecurity.rows.length !== 15
-    || v14FunctionSecurity.rows.some((row) => row.prosecdef
-      || row.runtime_execute || !row.trigger_only
-      || row.proconfig?.[0] !== 'search_path=pg_catalog, occ, pg_temp')) {
+    || !reservationSnapshotFunction?.prosecdef
+    || reservationSnapshotFunction.owner_name !== reservationSnapshotFunction.migration_owner
+    || reservationSnapshotFunction.runtime_execute
+    || !reservationSnapshotFunction.trigger_only
+    || reservationSnapshotFunction.proconfig?.[0] !== 'search_path=pg_catalog, occ'
+    || v14FunctionSecurity.rows.some((row) => row.proname !== 'snapshot_resource_reservation'
+      && (row.prosecdef || row.runtime_execute || !row.trigger_only
+        || row.proconfig?.[0] !== 'search_path=pg_catalog, occ, pg_temp'))) {
   throw new Error('V014 trigger functions expose an elevated or directly callable runtime API');
+}
+const reservationHistoryPrivileges = await db.query(`
+  SELECT has_table_privilege('innorder_runtime', 'occ.resource_reservation_history', 'SELECT') AS can_select,
+         has_table_privilege('innorder_runtime', 'occ.resource_reservation_history', 'INSERT') AS can_insert,
+         has_table_privilege('innorder_runtime', 'occ.resource_reservation_history', 'UPDATE') AS can_update,
+         has_table_privilege('innorder_runtime', 'occ.resource_reservation_history', 'DELETE') AS can_delete
+`);
+if (!reservationHistoryPrivileges.rows[0]?.can_select
+    || reservationHistoryPrivileges.rows[0]?.can_insert
+    || reservationHistoryPrivileges.rows[0]?.can_update
+    || reservationHistoryPrivileges.rows[0]?.can_delete) {
+  throw new Error('runtime reservation history privileges are not append-trigger-only');
 }
 console.log('passed V014 trigger-only function security boundary');
 
@@ -534,11 +553,13 @@ await db.exec(`
           tstzrange('2025-01-01 00:00Z', '2027-01-01 00:00Z', '[)'), 'AVAILABLE',
           '90000000-0000-7000-8000-000000000005');
   RESET ROLE;
+  SET ROLE innorder_runtime;
   INSERT INTO occ.resource_reservation
     (id, resource_id, requester_entity_id, time_range, capacity, exclusive, state)
   VALUES ('92000000-0000-7000-8000-000000000070', '92000000-0000-7000-8000-000000000007',
-          '90000000-0000-7000-8000-000000000005',
-          tstzrange('2026-01-01 10:00Z', '2026-01-01 12:00Z', '[)'), 6, false, 'PENDING');
+           '90000000-0000-7000-8000-000000000005',
+           tstzrange('2026-01-01 10:00Z', '2026-01-01 12:00Z', '[)'), 6, false, 'PENDING');
+  RESET ROLE;
 `);
 await expectSqlState(`
   INSERT INTO occ.resource_reservation
@@ -575,6 +596,15 @@ const reservationHistory = await db.query(`
   WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
 `);
 if (reservationHistory.rows[0]?.versions !== 1) throw new Error('reservation insert history snapshot is missing');
+await expectSqlState(`
+  SET ROLE innorder_runtime;
+  INSERT INTO occ.resource_reservation_history
+  SELECT gen_random_uuid(), reservation_id, resource_id, requester_entity_id,
+         process_instance_id, task_id, time_range, capacity, exclusive, state,
+         row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at, clock_timestamp()
+  FROM occ.resource_reservation_history
+  WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
+`, '42501', 'runtime reservation history forgery');
 await expectSqlState(`
   UPDATE occ.resource_reservation_history SET capacity = 9
   WHERE reservation_id = '92000000-0000-7000-8000-000000000070'

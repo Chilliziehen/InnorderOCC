@@ -11,10 +11,16 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.http.MediaType
+import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.test.web.servlet.post
 import org.springframework.test.web.servlet.patch
 import org.springframework.test.web.servlet.get
+import org.springframework.transaction.support.TransactionTemplate
+import java.time.OffsetDateTime
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
     @Test
@@ -83,7 +89,7 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         val second = reserve(resource.id, requester, instant(10), instant(11), 4)
 
         assertThat(updated.version).isEqualTo(1)
-        assertThat(resources.inventory(administratorId, UUID.randomUUID(), 10, null).items.map { it.id })
+        assertThat(resources.inventory(administratorId, UUID.randomUUID(), 100, null).items.map { it.id })
             .contains(resource.id)
         assertThat(resources.availability(administratorId, UUID.randomUUID(), resource.id, instant(8), instant(12)))
             .extracting("mode").containsExactly(AvailabilityMode.AVAILABLE)
@@ -252,6 +258,113 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         assertThatThrownBy {
             jdbc.update("UPDATE occ.resource_reservation_history SET capacity = 9 WHERE reservation_id = ?", ids[0])
         }.hasRootCauseInstanceOf(org.postgresql.util.PSQLException::class.java)
+    }
+
+    @Test
+    fun `first schedule page locks snapshot boundary against a transaction started writer`() {
+        val resource = createResource()
+        val requester = entity("snapshot-race-requester")
+        val reservations = listOf(
+            reserve(resource.id, requester, instant(9), instant(10), 1),
+            reserve(resource.id, requester, instant(10), instant(11), 1),
+            reserve(resource.id, requester, instant(11), instant(12), 1),
+        )
+        val writerStarted = CountDownLatch(1)
+        val allowWriter = CountDownLatch(1)
+        val writerFinished = CountDownLatch(1)
+        val pageReady = CountDownLatch(1)
+        val allowPageCommit = CountDownLatch(1)
+        val transactions = TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!))
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val writer = executor.submit {
+                transactions.executeWithoutResult {
+                    jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)
+                    writerStarted.countDown()
+                    check(allowWriter.await(10, TimeUnit.SECONDS))
+                    jdbc.update(
+                        """UPDATE occ.resource_reservation
+                           SET time_range = tstzrange(?::timestamptz, ?::timestamptz, '[)'),
+                               row_version = row_version + 1
+                           WHERE id = ?""",
+                        instant(12), instant(13), reservations[0].id,
+                    )
+                    writerFinished.countDown()
+                }
+            }
+            check(writerStarted.await(10, TimeUnit.SECONDS))
+            val firstPage = executor.submit<CursorPage<Reservation>> {
+                transactions.execute {
+                    resources.schedule(
+                        administratorId, UUID.randomUUID(), resource.id, instant(8), instant(14), 1, null,
+                    ).also {
+                        pageReady.countDown()
+                        check(allowPageCommit.await(10, TimeUnit.SECONDS))
+                    }
+                }!!
+            }
+            check(pageReady.await(10, TimeUnit.SECONDS))
+            allowWriter.countDown()
+            assertThat(writerFinished.await(1, TimeUnit.SECONDS)).isFalse()
+            allowPageCommit.countDown()
+            val first = firstPage.get(10, TimeUnit.SECONDS)
+            writer.get(10, TimeUnit.SECONDS)
+
+            val second = resources.schedule(
+                administratorId, UUID.randomUUID(), resource.id, instant(8), instant(14), 1, first.nextCursor,
+            )
+            val third = resources.schedule(
+                administratorId, UUID.randomUUID(), resource.id, instant(8), instant(14), 1, second.nextCursor,
+            )
+            val snapshot = first.items + second.items + third.items
+            assertThat(snapshot.map { it.id }).containsExactlyElementsOf(reservations.map { it.id })
+            assertThat(snapshot.map { it.start }).containsExactly(instant(9), instant(10), instant(11))
+            assertThat(third.nextCursor).isNull()
+        } finally {
+            allowWriter.countDown()
+            allowPageCommit.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `runtime reservation commands append history but direct history forgery is denied`() {
+        val resource = createResource()
+        val requester = entity("history-privilege-requester")
+        val reservation = reserve(resource.id, requester, instant(9), instant(10), 1)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.resource_reservation_history WHERE reservation_id = ?",
+            Long::class.java,
+            reservation.id,
+        )).isEqualTo(1)
+
+        var forgery: Throwable? = null
+        TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!)).executeWithoutResult { status ->
+            forgery = runCatching {
+                jdbc.update(
+                    """INSERT INTO occ.resource_reservation_history
+                       SELECT ?, reservation_id, resource_id, requester_entity_id,
+                              process_instance_id, task_id, time_range, capacity, exclusive, state,
+                              row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at, clock_timestamp()
+                       FROM occ.resource_reservation_history WHERE reservation_id = ? LIMIT 1""",
+                    UUID.randomUUID(), reservation.id,
+                )
+            }.exceptionOrNull()
+            status.setRollbackOnly()
+        }
+        assertThat(forgery).hasRootCauseInstanceOf(org.postgresql.util.PSQLException::class.java)
+        val postgres = generateSequence(forgery) { it.cause }
+            .filterIsInstance<org.postgresql.util.PSQLException>()
+            .firstOrNull()
+        assertThat(postgres?.sqlState).isEqualTo("42501")
+
+        val change = ChangeReservationRequest(resource.id, instant(10), instant(11), 1.toBigDecimal(), false)
+        resources.change(reservation.id, metadata(expectedVersion = 0), mapper.writeValueAsBytes(change), change)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.resource_reservation_history WHERE reservation_id = ?",
+            Long::class.java,
+            reservation.id,
+        )).isEqualTo(2)
     }
 
     @Test
