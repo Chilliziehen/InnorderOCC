@@ -236,26 +236,32 @@ class AuthorizationSnapshotRepository(
         request: AuthorizationRequest,
         snapshotAt: OffsetDateTime,
     ): List<AuthorizationRelationshipFact> {
+        validateWorkflowRelationDefinitions()
+        val definitions = WorkflowAuthorizationRelationDefinitions.all
         val rows = jdbc.query(
-            """SELECT lower(definition.relation_key) AS relation_key,
-                      relationship.subject_entity_id, relationship.object_entity_id
-               FROM authz.active_relationships_at(?) relationship
-               JOIN catalog.relation_definition definition
-                 ON definition.id = relationship.relation_definition_id
-               WHERE lower(definition.relation_key) IN (${RELATION_KEYS.keys.joinToString(",") { "?" }})
-                 AND relationship.subject_entity_id = ?
-                 AND relationship.object_entity_id IN (?, ?)
-               ORDER BY lower(definition.relation_key), relationship.subject_entity_id, relationship.object_entity_id
-               LIMIT 257""",
+            """SELECT definition.id AS relation_definition_id,
+                       relationship.subject_entity_id, relationship.object_entity_id
+                FROM authz.active_relationships_at(?) relationship
+                JOIN catalog.relation_definition definition
+                  ON definition.id = relationship.relation_definition_id
+                JOIN (VALUES ${definitions.joinToString(",") { "(?::uuid, ?)" }}) canonical(id, relation_key)
+                  ON canonical.id = definition.id
+                 AND canonical.relation_key = definition.relation_key
+                WHERE definition.auth_relevant
+                  AND relationship.subject_entity_id = ?
+                  AND relationship.object_entity_id IN (?, ?)
+                ORDER BY definition.id, relationship.subject_entity_id, relationship.object_entity_id
+                LIMIT 257""",
             { rs, _ ->
                 AuthorizationRelationshipFact(
-                    RELATION_KEYS.getValue(rs.getString("relation_key")),
+                    WorkflowAuthorizationRelationDefinitions.byId
+                        .getValue(rs.getObject("relation_definition_id", UUID::class.java)).relation,
                     rs.getObject("subject_entity_id", UUID::class.java),
                     rs.getObject("object_entity_id", UUID::class.java),
                 )
             },
             snapshotAt,
-            *RELATION_KEYS.keys.toTypedArray(),
+            *definitions.flatMap { listOf(it.id, it.key) }.toTypedArray(),
             request.principalId,
             request.entityId,
             request.resourceId,
@@ -269,10 +275,33 @@ class AuthorizationSnapshotRepository(
         return Collections.unmodifiableList(sorted)
     }
 
+    private fun validateWorkflowRelationDefinitions() {
+        val expected = WorkflowAuthorizationRelationDefinitions.byId
+        val rows = jdbc.query(
+            """SELECT id, relation_key, auth_relevant
+               FROM catalog.relation_definition
+               WHERE id IN (${expected.keys.joinToString(",") { "?" }})""",
+            { rs, _ ->
+                CanonicalRelationMetadata(
+                    rs.getObject("id", UUID::class.java),
+                    rs.getString("relation_key"),
+                    rs.getBoolean("auth_relevant"),
+                )
+            },
+            *expected.keys.toTypedArray(),
+        )
+        if (rows.size != expected.size || rows.any { row ->
+                val definition = expected[row.id]
+                definition == null || row.key != definition.key || !row.authRelevant
+            }
+        ) throw AuthorizationSnapshotException()
+    }
+
     private fun authoritativeContext(request: AuthorizationRequest): Map<String, Any?> {
         if (request.action != TASK_COMPLETE_ACTION) return request.context
         val facts = jdbc.query(
-            """SELECT process.state AS process_state,
+            """SELECT task.state AS task_state,
+                      process.state AS process_state,
                       NOT EXISTS (
                           SELECT 1 FROM occ.task_blocker blocker
                           WHERE blocker.task_id = task.id
@@ -297,10 +326,17 @@ class AuthorizationSnapshotRepository(
                FROM occ.task_projection task
                JOIN occ.process_instance process ON process.id = task.process_instance_id
                WHERE task.id = ?""",
-            { rs, _ -> TaskCompletionFacts(rs.getString("process_state"), rs.getBoolean("hard_blockers_absent")) },
+            { rs, _ ->
+                TaskCompletionFacts(
+                    rs.getString("task_state"),
+                    rs.getString("process_state"),
+                    rs.getBoolean("hard_blockers_absent"),
+                )
+            },
             request.resourceId,
         ).singleOrNull() ?: throw AuthorizationSnapshotException()
         return LinkedHashMap(request.context).apply {
+            put(TASK_STATE_CONTEXT_KEY, facts.taskState)
             put(PROCESS_STATE_CONTEXT_KEY, facts.processState)
             put(HARD_BLOCKERS_ABSENT_CONTEXT_KEY, facts.hardBlockersAbsent)
         }
@@ -442,7 +478,12 @@ class AuthorizationSnapshotRepository(
         val subjectRoleEntityKey: String,
     )
 
-    private data class TaskCompletionFacts(val processState: String, val hardBlockersAbsent: Boolean)
+    private data class TaskCompletionFacts(
+        val taskState: String,
+        val processState: String,
+        val hardBlockersAbsent: Boolean,
+    )
+    private data class CanonicalRelationMetadata(val id: UUID, val key: String, val authRelevant: Boolean)
 
     companion object {
         private val PINNED_BUNDLE_STATUSES = setOf("ACTIVE", "DEPRECATED")
@@ -456,18 +497,12 @@ class AuthorizationSnapshotRepository(
         private const val MAX_RELATIONSHIPS = 256
         private const val MAX_MANIFEST_BYTES = 64 * 1024
         private const val TASK_COMPLETE_ACTION = "task.complete"
+        private const val TASK_STATE_CONTEXT_KEY = "taskState"
         private const val PROCESS_STATE_CONTEXT_KEY = "processState"
         private const val HARD_BLOCKERS_ABSENT_CONTEXT_KEY = "hardBlockersAbsent"
         private val NIL_UUID = UUID(0, 0)
         private val ROLE_ASSIGNMENT_RELATION_ID = UUID.fromString("00000000-0000-7000-8000-000000000002")
         private val ACTION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private val UUID_PATTERN = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}${'$'}")
-        private val RELATION_KEYS = mapOf(
-            "cohort_owner" to AuthorizationRelation.COHORT_OWNER,
-            "cohort_teacher" to AuthorizationRelation.COHORT_TEACHER,
-            "cohort_participant" to AuthorizationRelation.COHORT_PARTICIPANT,
-            "task_candidate" to AuthorizationRelation.TASK_CANDIDATE,
-            "task_assignee" to AuthorizationRelation.TASK_ASSIGNEE,
-        )
     }
 }

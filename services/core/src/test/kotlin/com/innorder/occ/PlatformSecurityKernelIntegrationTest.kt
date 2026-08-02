@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.api.CorrelationIdFilter
 import com.innorder.occ.auth.AccessTokenPrincipal
 import com.innorder.occ.authz.AuthorizationRevisionLockRepository
+import com.innorder.occ.authz.WorkflowAuthorizationRelationDefinitions
 import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.AggregateLockPlan
 import com.innorder.occ.command.AggregateLockResolver
@@ -95,6 +96,34 @@ class PlatformSecurityKernelIntegrationTest(
             UUID::class.java,
         )!!
         val flyway = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
+        if (flyway.queryForObject(
+                "SELECT count(*) FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
+                Long::class.java,
+                *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
+            ) == 0L
+        ) {
+            flyway.update(
+                "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'kernel-authz-relations', 'Kernel authz relations', 'ACTIVE')",
+                KERNEL_RELATION_PACKAGE_ID,
+            )
+            flyway.update(
+                "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
+                KERNEL_RELATION_PACKAGE_VERSION_ID, KERNEL_RELATION_PACKAGE_ID,
+            )
+            WorkflowAuthorizationRelationDefinitions.all.forEach { definition ->
+                flyway.update(
+                    """INSERT INTO catalog.relation_definition
+                       (id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
+                       VALUES (?, ?, ?, ?, ?, 'MANY_TO_MANY', true)""",
+                    definition.id, KERNEL_RELATION_PACKAGE_VERSION_ID, definition.key,
+                    BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE,
+                )
+            }
+            flyway.update(
+                "UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('e', 64), published_at = transaction_timestamp() WHERE id = ?",
+                KERNEL_RELATION_PACKAGE_VERSION_ID,
+            )
+        }
         flyway.execute("CREATE TABLE IF NOT EXISTS occ.platform_kernel_test(id uuid PRIMARY KEY, value text NOT NULL, row_version bigint NOT NULL)")
         flyway.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON occ.platform_kernel_test TO innorder_runtime")
         jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", administratorId)
@@ -390,6 +419,8 @@ class PlatformSecurityKernelIntegrationTest(
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val PASSWORD = "platform-kernel-bootstrap-test-only"
+        private val KERNEL_RELATION_PACKAGE_ID = UUID.fromString("00000000-0000-7000-8000-000000000150")
+        private val KERNEL_RELATION_PACKAGE_VERSION_ID = UUID.fromString("00000000-0000-7000-8000-000000000151")
         private val opa = OpaProcess()
 
         @Container
