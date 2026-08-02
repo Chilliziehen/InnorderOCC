@@ -88,7 +88,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             )
         }
 
-        val snapshot = repository(jdbc).load(request())
+        val snapshot = repository(jdbc).load(request().copy(action = "cohort.read"))
 
         assertThat(snapshot.contractVersion).isEqualTo(2)
         assertThat(snapshot.relationships).containsExactly(
@@ -137,7 +137,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             )
         }
 
-        assertThat(repository(jdbc).load(request()).relationships).isEmpty()
+        assertThat(repository(jdbc).load(request().copy(action = "cohort.read")).relationships).isEmpty()
     }
 
     @Test
@@ -154,10 +154,23 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
                     UUID.fromString(WorkflowAuthorizationRelationDefinitions.COHORT_OWNER_ID),
                 )
 
-                assertThatThrownBy { repository(jdbc).load(request()) }
+                assertThatThrownBy { repository(jdbc).load(request().copy(action = "cohort.read")) }
                     .isInstanceOf(AuthorizationSnapshotException::class.java)
             }
         }
+    }
+
+    @Test
+    fun `workflow action fails closed when canonical definitions are absent`() = adminScenario { jdbc ->
+        seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to EMPTY_MANIFEST))
+        jdbc.execute("SET LOCAL session_replication_role = replica")
+        jdbc.update(
+            "DELETE FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
+            *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
+        )
+
+        assertThatThrownBy { repository(jdbc).load(request().copy(action = "cohort.create")) }
+            .isInstanceOf(AuthorizationSnapshotException::class.java)
     }
 
     @Test
@@ -197,7 +210,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             )
         }
 
-        assertThat(repository(jdbc).load(request()).relationships).isEmpty()
+        assertThat(repository(jdbc).load(request().copy(action = "cohort.read")).relationships).isEmpty()
     }
 
     @Test
