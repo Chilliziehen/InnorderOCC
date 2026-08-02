@@ -2,6 +2,12 @@ import { z } from "zod";
 
 import { problemDetailsSchema } from "./problem-details.js";
 
+export {
+  OCC_PROBLEM_CODES,
+  occProblemCodeSchema,
+} from "./problem-details.js";
+export type { OccProblemCode } from "./problem-details.js";
+
 export const MAX_EVIDENCE_BYTES = 100 * 1024 * 1024;
 export const MAX_EXPANDED_ARCHIVE_BYTES = MAX_EVIDENCE_BYTES * 2;
 export const MAX_SAFE_VERSION = Number.MAX_SAFE_INTEGER;
@@ -16,28 +22,7 @@ export const EVIDENCE_CONTENT_RANGE_PATTERN =
 export const EVIDENCE_UNSATISFIED_CONTENT_RANGE_PATTERN =
   "^bytes \\*/[0-9]{1,16}$";
 
-export const OCC_PROBLEM_CODES = [
-  "OCC-INVALID-REQUEST",
-  "OCC-AUTHENTICATION-REQUIRED",
-  "OCC-FORBIDDEN",
-  "OCC-NOT-FOUND",
-  "OCC-IDEMPOTENCY-CONFLICT",
-  "OCC-VERSION-CONFLICT",
-  "OCC-EVIDENCE-TOO-LARGE",
-  "OCC-EVIDENCE-DIGEST-MISMATCH",
-  "OCC-EVIDENCE-INVALID-CONTENT",
-  "OCC-EVIDENCE-UPLOAD-CONFLICT",
-  "OCC-EVIDENCE-REVIEW-CONFLICT",
-  "OCC-RISK-INVALID-TRANSITION",
-  "OCC-RESOURCE-UNAVAILABLE",
-  "OCC-RESERVATION-CONFLICT",
-  "OCC-INTERNAL-ERROR",
-] as const;
-
-export const occProblemCodeSchema = z.enum(OCC_PROBLEM_CODES);
-export const domainProblemDetailsSchema = problemDetailsSchema
-  .extend({ code: occProblemCodeSchema })
-  .strict();
+export const domainProblemDetailsSchema = problemDetailsSchema;
 
 const boundedText = (maximum: number, minimum = 1) =>
   z.string().trim().min(minimum).max(maximum);
@@ -812,7 +797,6 @@ export type OpaqueCursor = z.infer<typeof opaqueCursorSchema>;
 export type EvidenceRangeHeader = z.infer<typeof evidenceRangeHeaderSchema>;
 export type EvidenceContentRangeHeader = z.infer<typeof evidenceContentRangeHeaderSchema>;
 export type EvidenceUnsatisfiedContentRangeHeader = z.infer<typeof evidenceUnsatisfiedContentRangeHeaderSchema>;
-export type OccProblemCode = z.infer<typeof occProblemCodeSchema>;
 export type DomainProblemDetails = z.infer<typeof domainProblemDetailsSchema>;
 export type EvidenceState = z.infer<typeof evidenceStateSchema>;
 export type EvidenceUploadStatus = z.infer<typeof evidenceUploadStatusSchema>;

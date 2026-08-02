@@ -54,6 +54,7 @@ import {
   createAvailabilityWindowRequestSchema,
   createEvidenceUploadSessionRequestSchema,
   createRiskAdjudicationRequestSchema,
+  domainProblemDetailsSchema,
   evidenceContentResultSchema,
   evidenceDownloadMetadataSchema,
   evidenceEventPayloadSchema,
@@ -94,6 +95,7 @@ import {
   updateResourceRequestSchema,
 } from "../src/evidence-risk-resource.js";
 import {
+  OCC_PROBLEM_CODES,
   PROBLEM_DETAIL_MIN_LENGTH,
   PROBLEM_DETAIL_MAX_LENGTH,
   PROBLEM_STATUS_MAX,
@@ -438,14 +440,7 @@ describe("OCC Core OpenAPI system status", () => {
       expect(schemas[name]?.properties?.nextCursor).toEqual({ $ref: "#/components/schemas/OpaqueCursor" });
       expect(schemas[name]?.properties?.previousCursor).toEqual({ $ref: "#/components/schemas/OpaqueCursor" });
     }
-    expect(schemas.OccProblemCode?.enum).toEqual(expect.arrayContaining([
-      "OCC-EVIDENCE-TOO-LARGE",
-      "OCC-EVIDENCE-DIGEST-MISMATCH",
-      "OCC-RISK-INVALID-TRANSITION",
-      "OCC-RESOURCE-UNAVAILABLE",
-      "OCC-RESERVATION-CONFLICT",
-      "OCC-VERSION-CONFLICT",
-    ]));
+    expect(schemas.OccProblemCode?.enum).toEqual(OCC_PROBLEM_CODES);
     expect(schemas.ProblemDetails?.properties?.code).toEqual({
       $ref: "#/components/schemas/OccProblemCode",
     });
@@ -454,6 +449,42 @@ describe("OCC Core OpenAPI system status", () => {
       expect(variant.type).toBe("object");
       expect(variant.additionalProperties).toBe(false);
     }
+  });
+
+  it("accepts every Core runtime problem code and rejects unknown codes", async () => {
+    const [openApiSource, runtimeSource] = await Promise.all([
+      readFile(new URL("../openapi/occ-core.yaml", import.meta.url), "utf8"),
+      readFile(
+        new URL(
+          "../../../services/core/src/main/kotlin/com/innorder/occ/api/OccProblem.kt",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ]);
+    const schemas = (parse(openApiSource) as OpenApiDocument).components.schemas;
+    const validateProblem = createOpenApiSchemaValidator(schemas, "ProblemDetails");
+    const runtimeCodes = [...new Set(
+      [...runtimeSource.matchAll(/"(OCC-[A-Z0-9-]+)"/g)].map((match) => match[1]),
+    )].sort();
+    const base = {
+      type: "https://innorder.local/problems/validation",
+      title: "Runtime problem",
+      status: 400,
+      correlationId: "11111111-1111-4111-8111-111111111111",
+    };
+
+    expect(runtimeCodes.length).toBeGreaterThan(0);
+    for (const code of runtimeCodes) {
+      const problem = { ...base, code };
+      expect(problemDetailsSchema.safeParse(problem).success, code).toBe(true);
+      expect(domainProblemDetailsSchema.safeParse(problem).success, code).toBe(true);
+      expect(validateProblem(problem), `${code}: ${JSON.stringify(validateProblem.errors)}`).toBe(true);
+    }
+    const unknown = { ...base, code: "OCC-UNKNOWN-CODE" };
+    expect(problemDetailsSchema.safeParse(unknown).success).toBe(false);
+    expect(domainProblemDetailsSchema.safeParse(unknown).success).toBe(false);
+    expect(validateProblem(unknown)).toBe(false);
   });
 
   it("defines a discriminated strict domain event envelope union", async () => {

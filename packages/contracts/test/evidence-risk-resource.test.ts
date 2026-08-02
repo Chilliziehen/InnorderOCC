@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -419,5 +421,39 @@ describe("domain problem details", () => {
     expect(domainProblemDetailsSchema.safeParse(problem).success).toBe(true);
     expect(domainProblemDetailsSchema.safeParse({ ...problem, code: "AD_HOC_CODE" }).success).toBe(false);
     expectUnknownFieldRejected(domainProblemDetailsSchema, problem);
+  });
+});
+
+describe("contract validator dependency provenance", () => {
+  it("pins Ajv validators to official registry artifacts", async () => {
+    const packageJson = JSON.parse(await readFile(
+      new URL("../package.json", import.meta.url),
+      "utf8",
+    )) as { devDependencies?: Record<string, string> };
+    const lock = JSON.parse(await readFile(
+      new URL("../../../package-lock.json", import.meta.url),
+      "utf8",
+    )) as {
+      packages: Record<string, {
+        devDependencies?: Record<string, string>;
+        integrity?: string;
+        resolved?: string;
+        version?: string;
+      }>;
+    };
+    const expected = { ajv: "8.20.0", "ajv-formats": "3.0.1" };
+
+    expect(packageJson.devDependencies).toEqual(expect.objectContaining(expected));
+    expect(lock.packages["packages/contracts"]?.devDependencies).toEqual(
+      expect.objectContaining(expected),
+    );
+    for (const [name, version] of Object.entries(expected)) {
+      const dependency = lock.packages[`node_modules/${name}`];
+      expect(dependency?.version).toBe(version);
+      expect(dependency?.resolved).toBe(
+        `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`,
+      );
+      expect(dependency?.integrity).toMatch(/^sha512-/);
+    }
   });
 });

@@ -11,6 +11,41 @@ export const PROBLEM_CODE_MAX_LENGTH = 128;
 export const PROBLEM_DETAIL_MIN_LENGTH = 0;
 export const PROBLEM_DETAIL_MAX_LENGTH = 4096;
 
+export const OCC_PROBLEM_CODES = [
+  "OCC-API-VALIDATION",
+  "OCC-API-AUTHENTICATION",
+  "OCC-AUTH-INVALID-CREDENTIALS",
+  "OCC-API-FORBIDDEN",
+  "OCC-API-CONFLICT",
+  "OCC-COMMAND-IDEMPOTENCY-KEY",
+  "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
+  "OCC-COMMAND-METADATA",
+  "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
+  "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
+  "OCC-COMMAND-INTEGRITY",
+  "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+  "OCC-AUTHZ-UNAVAILABLE",
+  "OCC-API-INTERNAL",
+  "OCC-API-REQUEST",
+  "OCC-INVALID-REQUEST",
+  "OCC-AUTHENTICATION-REQUIRED",
+  "OCC-FORBIDDEN",
+  "OCC-NOT-FOUND",
+  "OCC-IDEMPOTENCY-CONFLICT",
+  "OCC-VERSION-CONFLICT",
+  "OCC-EVIDENCE-TOO-LARGE",
+  "OCC-EVIDENCE-DIGEST-MISMATCH",
+  "OCC-EVIDENCE-INVALID-CONTENT",
+  "OCC-EVIDENCE-UPLOAD-CONFLICT",
+  "OCC-EVIDENCE-REVIEW-CONFLICT",
+  "OCC-RISK-INVALID-TRANSITION",
+  "OCC-RESOURCE-UNAVAILABLE",
+  "OCC-RESERVATION-CONFLICT",
+  "OCC-INTERNAL-ERROR",
+] as const;
+
+export const occProblemCodeSchema = z.enum(OCC_PROBLEM_CODES);
+
 export const problemDetailsSchema = z
   .object({
     type: z.url(),
@@ -24,10 +59,7 @@ export const problemDetailsSchema = z
         ),
       ),
     status: z.number().int().min(PROBLEM_STATUS_MIN).max(PROBLEM_STATUS_MAX),
-    code: z
-      .string()
-      .min(PROBLEM_CODE_MIN_LENGTH)
-      .max(PROBLEM_CODE_MAX_LENGTH),
+    code: occProblemCodeSchema,
     correlationId: z.uuid(),
     detail: z
       .string()
@@ -44,3 +76,4 @@ export const problemDetailsSchema = z
   .strict();
 
 export type ProblemDetails = z.infer<typeof problemDetailsSchema>;
+export type OccProblemCode = z.infer<typeof occProblemCodeSchema>;
