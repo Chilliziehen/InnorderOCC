@@ -12,6 +12,10 @@ import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.IdempotencyExpiredException
 import com.innorder.occ.command.CommandIntegrityException
 import com.innorder.occ.risk.EscalationLevelConflictException
+import com.innorder.occ.risk.InvalidRiskActionException
+import com.innorder.occ.risk.InvalidRiskRequestException
+import com.innorder.occ.risk.RiskNotFoundException
+import com.innorder.occ.risk.TerminalRiskException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -149,6 +153,22 @@ class ApiExceptionHandler(
         exception: EscalationLevelConflictException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.escalationLevelConflict(request)
+
+    @ExceptionHandler(RiskNotFoundException::class)
+    fun riskNotFound(exception: RiskNotFoundException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.riskNotFound(request)
+
+    @ExceptionHandler(TerminalRiskException::class)
+    fun terminalRisk(exception: TerminalRiskException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.terminalRisk(request)
+
+    @ExceptionHandler(InvalidRiskActionException::class)
+    fun invalidRiskAction(exception: InvalidRiskActionException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.invalidRiskAction(request)
+
+    @ExceptionHandler(InvalidRiskRequestException::class)
+    fun invalidRiskRequest(exception: InvalidRiskRequestException, request: HttpServletRequest): ResponseEntity<OccProblem> =
+        responses.invalidRiskRequest(request)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(

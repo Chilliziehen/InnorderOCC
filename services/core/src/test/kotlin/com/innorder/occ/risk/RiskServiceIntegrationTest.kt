@@ -295,6 +295,33 @@ class RiskServiceIntegrationTest {
     }
 
     @Test
+    fun `due escalation isolates malformed level and advances later candidate`() {
+        val malformedRisk = requireNotNull(service.create(
+            metadata("malformed-escalation"), fixture.decision(
+                occurrence = "yellow", sla = Duration.ofHours(4),
+            ),
+        ).resourceId)
+        val validRisk = requireNotNull(service.create(
+            metadata("valid-escalation"), fixture.decision(
+                occurrence = "red", sla = Duration.ofHours(4),
+                escalationSteps = listOf(EscalationStep(Duration.ofHours(2), severity = RiskSeverity.RED)),
+            ),
+        ).resourceId)
+        runtimeJdbc.update(
+            """INSERT INTO occ.risk_intervention
+               (id, risk_id, intervention_type, due_at, intervention_data)
+               VALUES (?, ?, 'ESCALATION', ?, '{"level":"bad","severity":"RED"}'::jsonb)""",
+            UUID.randomUUID(), malformedRisk, java.sql.Timestamp.from(NOW.plus(Duration.ofHours(1))),
+        )
+
+        val results = service.escalateDue(fixture.systemPrincipal, NOW.plus(Duration.ofHours(3)), 1, UUID.randomUUID())
+
+        assertThat(results.map(CommandResult::resourceId)).containsExactly(validRisk)
+        assertThat(repository.actions(malformedRisk)).isEmpty()
+        assertThat(repository.actions(validRisk).map(RiskActionRecord::escalationLevel)).containsExactly(0)
+    }
+
+    @Test
     fun `authorized cursor queue orders and filters risks while omitting denied rows and redacting reason`() {
         val lateYellow = requireNotNull(service.create(metadata("queue-yellow"), fixture.decision(
             occurrence = "yellow", severity = RiskSeverity.YELLOW, sla = Duration.ofHours(2),
@@ -403,6 +430,31 @@ class RiskServiceIntegrationTest {
     }
 
     @Test
+    fun `database enforces exact adjudication outcome risk linkage partition`() {
+        val riskId = requireNotNull(service.create(
+            metadata("adjudication-constraint-risk"), fixture.decision(occurrence = "metric"),
+        ).resourceId)
+
+        insertDirectAdjudication("valid-tp", RiskAdjudicationOutcome.TRUE_POSITIVE, riskId)
+        insertDirectAdjudication("valid-fp", RiskAdjudicationOutcome.FALSE_POSITIVE, riskId)
+        insertDirectAdjudication("valid-missed", RiskAdjudicationOutcome.MISSED, null)
+        insertDirectAdjudication("valid-na", RiskAdjudicationOutcome.NOT_APPLICABLE, null)
+
+        listOf(
+            Triple("invalid-tp", RiskAdjudicationOutcome.TRUE_POSITIVE, null),
+            Triple("invalid-fp", RiskAdjudicationOutcome.FALSE_POSITIVE, null),
+            Triple("invalid-missed", RiskAdjudicationOutcome.MISSED, riskId),
+            Triple("invalid-na", RiskAdjudicationOutcome.NOT_APPLICABLE, riskId),
+        ).forEach { (key, outcome, linkedRisk) ->
+            assertPostgresState("23514") { insertDirectAdjudication(key, outcome, linkedRisk) }
+        }
+        assertThat(runtimeJdbc.queryForObject(
+            "SELECT count(*) FROM occ.risk_adjudication WHERE known_event_key LIKE 'valid-%'",
+            Long::class.java,
+        )).isEqualTo(4)
+    }
+
+    @Test
     fun `linked adjudication locks matching risk target authorizes the risk and database rejects cross target facts`() {
         val linkedRisk = requireNotNull(service.create(
             metadata("linked-risk"), fixture.decision(targetEntityId = fixture.otherTarget),
@@ -437,6 +489,22 @@ class RiskServiceIntegrationTest {
                 UUID.randomUUID(), fixture.principal, fixture.target, linkedRisk,
             )
         }
+    }
+
+    @Test
+    fun `denied linked adjudication does not reveal whether the risk exists`() {
+        val nonexistentRisk = UUID.randomUUID()
+        authorization.deniedResources += nonexistentRisk
+        val request = RiskAdjudicationRequest(
+            LocalDate.parse("2024-07-01"), LocalDate.parse("2024-08-01"), "opaque-denied", fixture.target,
+            severeEvent = false, riskId = nonexistentRisk, outcome = RiskAdjudicationOutcome.FALSE_POSITIVE,
+            reason = "authorization must precede lookup",
+        )
+
+        assertThatThrownBy { service.adjudicate(metadata("opaque-denied", 0), request) }
+            .isInstanceOf(AuthorizationDeniedException::class.java)
+        assertThat(authorization.requests.last().resourceId).isEqualTo(nonexistentRisk)
+        assertThat(repository.adjudications("opaque-denied", fixture.target)).isEmpty()
     }
 
     @Test
@@ -498,6 +566,35 @@ class RiskServiceIntegrationTest {
             it.action == "risk.sla_breach" && it.principalId == fixture.systemPrincipal && it.resourceId == riskId
         }).isTrue()
         assertThat(RiskRepository.DUE_SLA_BREACH_SQL).contains("FOR UPDATE", "SKIP LOCKED")
+    }
+
+    @Test
+    fun `due evaluator isolates denied item and advances later risk with batch size one`() {
+        val deniedRisk = requireNotNull(service.create(
+            metadata("due-denied"), fixture.decision(occurrence = "yellow", sla = Duration.ofHours(1)),
+        ).resourceId)
+        val validRisk = requireNotNull(service.create(
+            metadata("due-valid"), fixture.decision(occurrence = "red", sla = Duration.ofHours(2)),
+        ).resourceId)
+        authorization.deniedResources += deniedRisk
+        val evaluator = RiskDueEvaluator(
+            service,
+            RiskDueProperties(enabled = true, systemPrincipalId = fixture.systemPrincipal.toString(), batchSize = 1),
+            Clock.fixed(NOW.plus(Duration.ofHours(3)), ZoneOffset.UTC),
+        )
+
+        assertThat(evaluator.runOnce()).isEqualTo(RiskDueEvaluationResult(1, 0))
+        assertThat(runtimeJdbc.queryForObject(
+            "SELECT count(*) FROM occ.risk_action WHERE risk_id = ? AND action_type = 'SLA_BREACHED'",
+            Long::class.java,
+            deniedRisk,
+        )).isZero()
+        assertThat(runtimeJdbc.queryForObject(
+            "SELECT count(*) FROM occ.risk_action WHERE risk_id = ? AND action_type = 'SLA_BREACHED'",
+            Long::class.java,
+            validRisk,
+        )).isEqualTo(1)
+        assertThat(evaluator.runOnce()).isEqualTo(RiskDueEvaluationResult(0, 0))
     }
 
     @Test
@@ -641,6 +738,16 @@ class RiskServiceIntegrationTest {
         Long::class.java,
         riskId,
     )!!
+
+    private fun insertDirectAdjudication(key: String, outcome: RiskAdjudicationOutcome, riskId: UUID?) {
+        runtimeJdbc.update(
+            """INSERT INTO occ.risk_adjudication
+               (id, reporting_period_start, reporting_period_end, evaluator_id, known_event_key,
+                target_entity_id, severe_event, risk_id, outcome, reason, adjudication_version)
+               VALUES (?, '2026-07-01', '2026-08-01', ?, ?, ?, false, ?, ?, 'direct constraint test', 1)""",
+            UUID.randomUUID(), fixture.principal, key, fixture.target, riskId, outcome.name,
+        )
+    }
 
     private fun outboxTypes(riskId: UUID): List<String> = runtimeJdbc.queryForList(
         "SELECT event_type FROM audit.outbox_event WHERE aggregate_id = ? ORDER BY aggregate_version",

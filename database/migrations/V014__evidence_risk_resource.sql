@@ -624,7 +624,10 @@ CREATE TABLE occ.risk_adjudication (
     supersedes_adjudication_id uuid REFERENCES occ.risk_adjudication(id),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     CHECK (reporting_period_end > reporting_period_start),
-    CHECK ((outcome = 'MISSED' AND risk_id IS NULL) OR outcome <> 'MISSED'),
+    CHECK (
+        (outcome IN ('TRUE_POSITIVE', 'FALSE_POSITIVE') AND risk_id IS NOT NULL)
+        OR (outcome IN ('MISSED', 'NOT_APPLICABLE') AND risk_id IS NULL)
+    ),
     FOREIGN KEY (risk_id, target_entity_id) REFERENCES occ.risk(id, target_entity_id),
     UNIQUE (known_event_key, target_entity_id, adjudication_version),
     UNIQUE (supersedes_adjudication_id)

@@ -90,6 +90,18 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
             "OCC-RISK-ESCALATION-LEVEL-CONFLICT",
         )
 
+    fun riskNotFound(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 404, "risk-not-found", "Risk not found", "OCC-RISK-NOT-FOUND")
+
+    fun terminalRisk(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "risk-terminal", "Risk is terminal", "OCC-RISK-TERMINAL")
+
+    fun invalidRiskAction(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "invalid-risk-action", "Invalid risk action", "OCC-RISK-ACTION")
+
+    fun invalidRiskRequest(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "invalid-risk-request", "Invalid risk request", "OCC-RISK-REQUEST")
+
     fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
 

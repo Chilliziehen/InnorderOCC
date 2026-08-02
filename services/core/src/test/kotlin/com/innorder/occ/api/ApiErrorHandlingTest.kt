@@ -16,6 +16,11 @@ import com.innorder.occ.command.CommandIntegrityException
 import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.OptimisticConflictException
 import com.innorder.occ.risk.EscalationLevelConflictException
+import com.innorder.occ.risk.InvalidRiskActionException
+import com.innorder.occ.risk.InvalidRiskRequestException
+import com.innorder.occ.risk.RiskNotFoundException
+import com.innorder.occ.risk.RiskAdjudicationRequest
+import com.innorder.occ.risk.TerminalRiskException
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
@@ -297,6 +302,52 @@ class ApiErrorHandlingTest {
                 assertThat(problem.has("currentVersion")).isFalse()
             }
             assertSafe(result.response.contentAsString, "request-secret")
+        }
+    }
+
+    @Test
+    fun `risk failures have stable bounded problem mappings`() {
+        val expectations = listOf(
+            RiskProblemExpectation("/test/risk-not-found", 404, "risk-not-found", "OCC-RISK-NOT-FOUND"),
+            RiskProblemExpectation("/test/risk-terminal", 409, "risk-terminal", "OCC-RISK-TERMINAL"),
+            RiskProblemExpectation("/test/invalid-risk-action", 400, "invalid-risk-action", "OCC-RISK-ACTION"),
+            RiskProblemExpectation("/test/invalid-risk-request", 400, "invalid-risk-request", "OCC-RISK-REQUEST"),
+        )
+
+        expectations.forEach { expectation ->
+            val result = mockMvc.get(expectation.path).andExpect {
+                status { isEqualTo(expectation.status) }
+                content { contentType(MediaType.APPLICATION_PROBLEM_JSON) }
+                jsonPath("$.type") { value("${OccProblem.PROBLEM_TYPE_ROOT}${expectation.slug}") }
+                jsonPath("$.code") { value(expectation.code) }
+            }.andReturn()
+            assertStrictProblem(result.response.contentAsString)
+            assertSafe(result.response.contentAsString, "RiskNotFoundException", "request-secret")
+        }
+    }
+
+    @Test
+    fun `invalid adjudication dates and linkage return bounded validation problems`() {
+        val invalidBodies = listOf(
+            """{"reportingPeriodStart":"2026-08-01","reportingPeriodEnd":"2026-08-01",
+                "knownEventKey":"invalid-date","targetEntityId":"00000000-0000-7000-8000-000000000040",
+                "severeEvent":false,"riskId":null,"outcome":"MISSED","reason":"invalid dates"}""",
+            """{"reportingPeriodStart":"2026-07-01","reportingPeriodEnd":"2026-08-01",
+                "knownEventKey":"invalid-link","targetEntityId":"00000000-0000-7000-8000-000000000040",
+                "severeEvent":false,"riskId":"00000000-0000-7000-8000-000000000041",
+                "outcome":"NOT_APPLICABLE","reason":"must be unlinked"}""",
+        )
+        invalidBodies.forEach { body ->
+            val result = mockMvc.post("/test/risk-request-body") {
+                contentType = MediaType.APPLICATION_JSON
+                content = body
+            }.andExpect {
+                status { isBadRequest() }
+                content { contentType(MediaType.APPLICATION_PROBLEM_JSON) }
+                jsonPath("$.code") { value("OCC-API-VALIDATION") }
+            }.andReturn()
+            assertStrictProblem(result.response.contentAsString)
+            assertSafe(result.response.contentAsString, "InvalidRiskRequestException", "invalid dates")
         }
     }
 
@@ -584,6 +635,21 @@ class ApiErrorHandlingTest {
         @GetMapping("/escalation-level-conflict")
         fun escalationLevelConflict(): Nothing = throw EscalationLevelConflictException(UUID.randomUUID(), 2)
 
+        @GetMapping("/risk-not-found")
+        fun riskNotFound(): Nothing = throw RiskNotFoundException()
+
+        @GetMapping("/risk-terminal")
+        fun riskTerminal(): Nothing = throw TerminalRiskException()
+
+        @GetMapping("/invalid-risk-action")
+        fun invalidRiskAction(): Nothing = throw InvalidRiskActionException()
+
+        @GetMapping("/invalid-risk-request")
+        fun invalidRiskRequest(): Nothing = throw InvalidRiskRequestException()
+
+        @PostMapping("/risk-request-body")
+        fun riskRequestBody(@RequestBody request: RiskAdjudicationRequest) = request.outcome.name
+
         @GetMapping("/command-integrity")
         fun commandIntegrity(): Nothing = throw CommandIntegrityException()
 
@@ -687,4 +753,11 @@ class ApiErrorHandlingTest {
             org.junit.jupiter.params.provider.Arguments.of("non-RFC variant seven", listOf(NON_STANDARD_UUIDS[3])),
         )
     }
+
+    private data class RiskProblemExpectation(
+        val path: String,
+        val status: Int,
+        val slug: String,
+        val code: String,
+    )
 }

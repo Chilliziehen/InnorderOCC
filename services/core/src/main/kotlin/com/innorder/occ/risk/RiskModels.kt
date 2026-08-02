@@ -39,10 +39,10 @@ data class RiskActionRecord(
 data class DueRiskEscalation(
     val riskId: UUID,
     val targetEntityId: UUID,
-    val level: Int,
+    val level: Int?,
     val dueAt: Instant,
     val ownerRelationshipId: UUID?,
-    val severity: RiskSeverity?,
+    val severityKey: String?,
 )
 
 data class RiskQueueFilters(
@@ -53,7 +53,7 @@ data class RiskQueueFilters(
     val ownerRelationshipId: UUID? = null,
 ) {
     init {
-        require(severities.isNotEmpty() && states.isNotEmpty())
+        if (severities.isEmpty() || states.isEmpty()) throw InvalidRiskRequestException()
     }
 }
 
@@ -82,10 +82,15 @@ data class RiskAdjudicationRequest(
     val reason: String,
 ) {
     init {
-        require(reportingPeriodEnd > reportingPeriodStart)
-        require(knownEventKey.length in 1..256 && reason.length in 1..1024)
-        require(outcome != RiskAdjudicationOutcome.MISSED || riskId == null)
-        require(outcome !in setOf(RiskAdjudicationOutcome.TRUE_POSITIVE, RiskAdjudicationOutcome.FALSE_POSITIVE) || riskId != null)
+        if (reportingPeriodEnd <= reportingPeriodStart || knownEventKey.length !in 1..256 ||
+            reason.length !in 1..1024
+        ) throw InvalidRiskRequestException()
+        if (outcome in setOf(RiskAdjudicationOutcome.MISSED, RiskAdjudicationOutcome.NOT_APPLICABLE) && riskId != null) {
+            throw InvalidRiskRequestException()
+        }
+        if (outcome in setOf(RiskAdjudicationOutcome.TRUE_POSITIVE, RiskAdjudicationOutcome.FALSE_POSITIVE) && riskId == null) {
+            throw InvalidRiskRequestException()
+        }
     }
 }
 
@@ -126,5 +131,6 @@ fun interface RiskNotificationPort {
 class RiskNotFoundException : RuntimeException("Risk was not found")
 class TerminalRiskException : RuntimeException("Terminal risk rejects actions")
 class InvalidRiskActionException : RuntimeException("Risk action is invalid")
+class InvalidRiskRequestException : RuntimeException("Risk request is invalid")
 class EscalationLevelConflictException(val riskId: UUID, val level: Int) :
     RuntimeException("Risk escalation level already exists")
