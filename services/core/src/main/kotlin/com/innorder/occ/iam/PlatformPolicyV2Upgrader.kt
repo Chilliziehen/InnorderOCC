@@ -177,6 +177,7 @@ class PlatformPolicyV2Upgrader(
             ) != 0L
         ) fail()
 
+        jdbc.queryForObject("SELECT authz.begin_authorization_revision_batch()", Long::class.java) ?: fail()
         val now = OffsetDateTime.now()
         jdbc.update(
             """INSERT INTO authz.policy_bundle_version
@@ -211,6 +212,7 @@ class PlatformPolicyV2Upgrader(
                WHERE id = ? AND status = 'STAGED'""",
             BootstrapPolicyBaseline.OPA_REVISION, now, BootstrapIds.POLICY_RELEASE_V2,
         )
+        jdbc.queryForObject("SELECT authz.finish_authorization_revision_batch()", Long::class.java) ?: fail()
         return PlatformPolicyUpgradeResult.UPGRADED
     }
 

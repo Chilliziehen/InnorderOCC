@@ -1309,3 +1309,107 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+CREATE TABLE authz.authorization_revision_batch (
+    transaction_id xid8 PRIMARY KEY,
+    changed boolean NOT NULL DEFAULT false
+);
+
+REVOKE ALL ON authz.authorization_revision_batch FROM PUBLIC, innorder_runtime;
+
+CREATE OR REPLACE FUNCTION authz.bump_authorization_revision()
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, authz
+AS $$
+DECLARE
+    next_revision bigint;
+BEGIN
+    UPDATE authz.authorization_revision_batch
+    SET changed = true
+    WHERE transaction_id = pg_current_xact_id();
+    IF FOUND THEN
+        SELECT current_revision INTO STRICT next_revision
+        FROM authz.authorization_state
+        WHERE singleton;
+        RETURN next_revision;
+    END IF;
+
+    UPDATE authz.authorization_state
+    SET current_revision = current_revision + 1,
+        updated_at = statement_timestamp()
+    WHERE singleton
+    RETURNING current_revision INTO STRICT next_revision;
+    RETURN next_revision;
+END;
+$$;
+
+CREATE FUNCTION authz.begin_authorization_revision_batch()
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, authz
+AS $$
+DECLARE
+    current_revision bigint;
+BEGIN
+    SELECT authz.lock_authorization_state_for_change() INTO STRICT current_revision;
+    INSERT INTO authz.authorization_revision_batch(transaction_id)
+    VALUES (pg_current_xact_id());
+    RETURN current_revision;
+END;
+$$;
+
+CREATE FUNCTION authz.finish_authorization_revision_batch()
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, authz
+AS $$
+DECLARE
+    facts_changed boolean;
+    current_revision bigint;
+BEGIN
+    DELETE FROM authz.authorization_revision_batch
+    WHERE transaction_id = pg_current_xact_id()
+    RETURNING changed INTO facts_changed;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'authorization revision batch is not open';
+    END IF;
+    IF facts_changed THEN
+        RETURN authz.bump_authorization_revision();
+    END IF;
+    SELECT state.current_revision INTO STRICT current_revision
+    FROM authz.authorization_state state
+    WHERE state.singleton;
+    RETURN current_revision;
+END;
+$$;
+
+CREATE FUNCTION authz.enforce_authorization_revision_batch_closed()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, authz
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM authz.authorization_revision_batch
+        WHERE transaction_id = NEW.transaction_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'authorization revision batch must be closed';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER trg_authorization_revision_batch_closed
+AFTER INSERT ON authz.authorization_revision_batch
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION authz.enforce_authorization_revision_batch_closed();
+
+REVOKE EXECUTE ON FUNCTION authz.begin_authorization_revision_batch() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION authz.finish_authorization_revision_batch() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION authz.begin_authorization_revision_batch() TO innorder_runtime;
+GRANT EXECUTE ON FUNCTION authz.finish_authorization_revision_batch() TO innorder_runtime;
