@@ -11,12 +11,12 @@ class ReservationConcurrencyIntegrationTest : ResourceIntegrationSupport() {
     fun `simultaneous exclusive and capacity contenders cannot both commit`() {
         val resource = createResource(capacity = 10)
         val requester = entity("requester")
-        val outcomes = race(
+        val outcomes = race(resource.id,
             { reserve(resource.id, requester, instant(9), instant(10), 10) },
             { reserve(resource.id, requester, instant(9), instant(10), 1, exclusive = true) },
         )
 
-        assertThat(outcomes.count { it }).isEqualTo(1)
+        assertOutcomes(outcomes)
         assertThat(activeCount(resource.id)).isEqualTo(1)
     }
 
@@ -25,12 +25,12 @@ class ReservationConcurrencyIntegrationTest : ResourceIntegrationSupport() {
         val resource = createResource(capacity = 10)
         val requester = entity("requester")
         reserve(resource.id, requester, instant(9), instant(10), 4)
-        val outcomes = race(
+        val outcomes = race(resource.id,
             { reserve(resource.id, requester, instant(9), instant(10), 6) },
             { reserve(resource.id, requester, instant(9), instant(10), 6) },
         )
 
-        assertThat(outcomes.count { it }).isEqualTo(1)
+        assertOutcomes(outcomes)
         assertThat(activeCapacity(resource.id)).isEqualByComparingTo("10")
     }
 
@@ -41,7 +41,7 @@ class ReservationConcurrencyIntegrationTest : ResourceIntegrationSupport() {
         val availability = AddAvailabilityRequest(
             java.util.UUID.randomUUID(), instant(9), instant(10), AvailabilityMode.UNAVAILABLE, "maintenance",
         )
-        val outcomes = race(
+        val outcomes = race(resource.id,
             {
                 resources.addAvailability(
                     resource.id, metadata(expectedVersion = 0), mapper.writeValueAsBytes(availability), availability,
@@ -50,7 +50,7 @@ class ReservationConcurrencyIntegrationTest : ResourceIntegrationSupport() {
             { reserve(resource.id, requester, instant(9), instant(10), 1) },
         )
 
-        assertThat(outcomes.count { it }).isEqualTo(1)
+        assertOutcomes(outcomes)
         val invalid = jdbc.queryForObject(
             """SELECT count(*) FROM occ.resource_reservation r JOIN occ.resource_availability a
                ON a.resource_id = r.resource_id AND a.mode = 'UNAVAILABLE' AND a.time_range && r.time_range
@@ -61,25 +61,33 @@ class ReservationConcurrencyIntegrationTest : ResourceIntegrationSupport() {
         assertThat(invalid).isZero()
     }
 
-    private fun race(first: () -> Any, second: () -> Any): List<Boolean> {
+    private fun race(resourceId: java.util.UUID, first: () -> Any, second: () -> Any): List<Result<Any>> {
         val ready = CountDownLatch(2)
         val start = CountDownLatch(1)
         val pool = Executors.newFixedThreadPool(2)
+        lockObserver.arm(resourceId, 2)
         return try {
             listOf(first, second).map { contender ->
-                pool.submit<Boolean> {
+                pool.submit<Result<Any>> {
                     ready.countDown()
                     check(start.await(10, TimeUnit.SECONDS))
-                    runCatching { contender() }.isSuccess
+                    runCatching { contender() }
                 }
             }.also {
                 check(ready.await(10, TimeUnit.SECONDS))
                 start.countDown()
+                lockObserver.releaseWhenContending()
             }.map { it.get(30, TimeUnit.SECONDS) }
         } finally {
             pool.shutdownNow()
             check(pool.awaitTermination(10, TimeUnit.SECONDS))
         }
+    }
+
+    private fun assertOutcomes(outcomes: List<Result<Any>>) {
+        assertThat(outcomes.count { it.isSuccess }).isEqualTo(1)
+        assertThat(outcomes.single { it.isFailure }.exceptionOrNull())
+            .isInstanceOf(ReservationConflictException::class.java)
     }
 
     private fun activeCount(resourceId: java.util.UUID): Long = jdbc.queryForObject(

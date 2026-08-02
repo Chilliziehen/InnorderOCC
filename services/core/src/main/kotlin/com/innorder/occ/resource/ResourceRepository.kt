@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.stereotype.Repository
+import org.springframework.stereotype.Component
 import java.math.BigDecimal
 import java.sql.ResultSet
 import java.time.OffsetDateTime
@@ -14,12 +15,16 @@ import java.util.UUID
 class ResourceRepository(
     private val jdbc: JdbcTemplate,
     private val mapper: ObjectMapper,
+    private val lockObserver: ResourceLockObserver,
 ) {
-    fun lockResource(id: UUID): Long? = jdbc.query(
-        "SELECT row_version FROM occ.managed_resource WHERE id = ? FOR UPDATE",
-        { rs, _ -> rs.getLong(1) },
-        id,
-    ).singleOrNull()
+    fun lockResource(id: UUID): Long? {
+        lockObserver.beforeLock(id)
+        return jdbc.query(
+            "SELECT row_version FROM occ.managed_resource WHERE id = ? FOR UPDATE",
+            { rs, _ -> rs.getLong(1) },
+            id,
+        ).singleOrNull().also { lockObserver.afterLock(id) }
+    }
 
     fun lockResourceEntity(id: UUID) {
         check(jdbc.query(
@@ -99,22 +104,39 @@ class ResourceRepository(
         )
     }
 
-    fun reservationParent(id: UUID): ReservationIdentity? = jdbc.query(
-        "SELECT resource_id, requester_entity_id FROM occ.resource_reservation WHERE id = ?",
-        { rs, _ -> ReservationIdentity(rs.getObject(1, UUID::class.java), rs.getObject(2, UUID::class.java)) },
-        id,
+    fun lockReservation(id: UUID, resourceId: UUID): Reservation? = jdbc.query(
+        """SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
+                  lower(time_range) AS starts_at, upper(time_range) AS ends_at,
+                  capacity, exclusive, state, row_version, created_at
+           FROM occ.resource_reservation WHERE id = ? AND resource_id = ? FOR UPDATE""",
+        ::mapReservation,
+        id, resourceId,
     ).singleOrNull()
 
-    fun lockReservation(id: UUID): Long? = jdbc.query(
-        "SELECT row_version FROM occ.resource_reservation WHERE id = ? FOR UPDATE",
-        { rs, _ -> rs.getLong(1) },
-        id,
-    ).singleOrNull()
+    fun lockReservationProvenance(request: ReserveResourceRequest): Boolean {
+        val requester = jdbc.query(
+            "SELECT id FROM authz.entity WHERE id = ? AND state = 'ACTIVE' FOR KEY SHARE",
+            { rs, _ -> rs.getObject(1, UUID::class.java) }, request.requesterEntityId,
+        ).singleOrNull() ?: return false
+        if (requester != request.requesterEntityId) return false
+        if (request.processInstanceId != null && jdbc.query(
+                "SELECT id FROM occ.process_instance WHERE id = ? FOR KEY SHARE",
+                { rs, _ -> rs.getObject(1, UUID::class.java) }, request.processInstanceId,
+            ).singleOrNull() == null) return false
+        if (request.taskId != null) {
+            val process = request.processInstanceId ?: return false
+            if (jdbc.query(
+                    "SELECT process_instance_id FROM occ.task_projection WHERE id = ? FOR KEY SHARE",
+                    { rs, _ -> rs.getObject(1, UUID::class.java) }, request.taskId,
+                ).singleOrNull() != process) return false
+        }
+        return true
+    }
 
     fun reservation(id: UUID): Reservation? = jdbc.query(
         """SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
                   lower(time_range) AS starts_at, upper(time_range) AS ends_at,
-                  capacity, exclusive, state, row_version
+                  capacity, exclusive, state, row_version, created_at
            FROM occ.resource_reservation WHERE id = ?""",
         ::mapReservation,
         id,
@@ -155,28 +177,28 @@ class ResourceRepository(
         resourceId: UUID,
         start: OffsetDateTime,
         end: OffsetDateTime,
-        afterStart: OffsetDateTime?,
+        afterCreatedAt: OffsetDateTime?,
         afterId: UUID?,
         inclusive: Boolean,
         limit: Int,
     ): List<Reservation> {
-        val cursorClause = if (afterStart == null) "" else
-            "AND (lower(time_range), id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
+        val cursorClause = if (afterCreatedAt == null) "" else
+            "AND (created_at, id) ${if (inclusive) ">=" else ">"} (?::timestamptz, ?)"
         val arguments = mutableListOf<Any>(resourceId, start, end)
-        if (afterStart != null) {
-            arguments += afterStart
+        if (afterCreatedAt != null) {
+            arguments += afterCreatedAt
             arguments += requireNotNull(afterId)
         }
         arguments += limit
         return jdbc.query(
             """SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
                       lower(time_range) AS starts_at, upper(time_range) AS ends_at,
-                      capacity, exclusive, state, row_version
+                      capacity, exclusive, state, row_version, created_at
                FROM occ.resource_reservation
                WHERE resource_id = ? AND state IN ('PENDING','CONFIRMED')
                  AND time_range && tstzrange(?::timestamptz, ?::timestamptz, '[)')
                  $cursorClause
-               ORDER BY lower(time_range), id LIMIT ?""",
+               ORDER BY created_at, id LIMIT ?""",
             ::mapReservation,
             *arguments.toTypedArray(),
         )
@@ -222,16 +244,26 @@ class ResourceRepository(
         rs.getObject("process_instance_id", UUID::class.java), rs.getObject("task_id", UUID::class.java),
         utc(rs.getObject("starts_at", OffsetDateTime::class.java)), utc(rs.getObject("ends_at", OffsetDateTime::class.java)),
         rs.getBigDecimal("capacity"), rs.getBoolean("exclusive"), ReservationState.valueOf(rs.getString("state")),
-        rs.getLong("row_version"),
+        rs.getLong("row_version"), utc(rs.getObject("created_at", OffsetDateTime::class.java)),
     )
 
     private fun utc(value: OffsetDateTime): OffsetDateTime = value.withOffsetSameInstant(ZoneOffset.UTC)
 }
 
-data class ReservationIdentity(val resourceId: UUID, val requesterEntityId: UUID)
 data class ReservationIdentityDetail(
     val reservationId: UUID,
     val requesterEntityId: UUID,
     val start: OffsetDateTime,
     val end: OffsetDateTime,
 )
+
+interface ResourceLockObserver {
+    fun beforeLock(resourceId: UUID)
+    fun afterLock(resourceId: UUID)
+}
+
+@Component
+class NoopResourceLockObserver : ResourceLockObserver {
+    override fun beforeLock(resourceId: UUID) = Unit
+    override fun afterLock(resourceId: UUID) = Unit
+}

@@ -14,6 +14,9 @@ import com.innorder.occ.command.CommandIntegrityException
 import com.innorder.occ.resource.ReservationConflictException
 import com.innorder.occ.resource.ReservationStateConflictException
 import com.innorder.occ.resource.ResourceQueryValidationException
+import com.innorder.occ.resource.ResourceReferenceValidationException
+import com.innorder.occ.resource.ResourceIdConflictException
+import com.innorder.occ.resource.ReservationNotFoundException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -166,6 +169,24 @@ class ApiExceptionHandler(
         exception: ResourceQueryValidationException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.resourceQueryValidation(request)
+
+    @ExceptionHandler(ResourceReferenceValidationException::class)
+    fun resourceReferenceValidation(
+        exception: ResourceReferenceValidationException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.resourceReferenceValidation(request)
+
+    @ExceptionHandler(ResourceIdConflictException::class)
+    fun resourceIdConflict(
+        exception: ResourceIdConflictException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.resourceIdConflict(request)
+
+    @ExceptionHandler(ReservationNotFoundException::class)
+    fun reservationNotFound(
+        exception: ReservationNotFoundException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.reservationNotFound(request)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(

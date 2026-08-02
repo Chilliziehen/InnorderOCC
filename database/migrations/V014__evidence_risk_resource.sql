@@ -6,12 +6,14 @@ LOCK TABLE occ.evidence_review IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE occ.risk IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE occ.managed_resource IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE occ.resource_reservation IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE occ.task_projection IN SHARE ROW EXCLUSIVE MODE;
 
 DO $$
 DECLARE
     legacy_review_ids text;
     legacy_exclusive_ids text;
     legacy_capacity_ids text;
+    legacy_task_process_ids text;
 BEGIN
     SELECT pg_catalog.string_agg(review_group, '; ' ORDER BY review_group)
     INTO legacy_review_ids
@@ -80,6 +82,20 @@ BEGIN
         RAISE EXCEPTION USING
             ERRCODE = '23P01',
             MESSAGE = 'V014 preflight found legacy capacity violations: ' || legacy_capacity_ids;
+    END IF;
+
+    SELECT pg_catalog.string_agg(r.id::text, ',' ORDER BY r.id)
+    INTO legacy_task_process_ids
+    FROM occ.resource_reservation r
+    LEFT JOIN occ.task_projection task ON task.id = r.task_id
+    WHERE r.task_id IS NOT NULL
+      AND (r.process_instance_id IS NULL OR task.id IS NULL
+           OR task.process_instance_id IS DISTINCT FROM r.process_instance_id);
+
+    IF legacy_task_process_ids IS NOT NULL THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'V014 preflight found reservation task/process mismatches: ' || legacy_task_process_ids;
     END IF;
 END;
 $$;
@@ -843,6 +859,9 @@ CREATE TRIGGER trg_risk_intervention_immutable
 BEFORE UPDATE OR DELETE ON occ.risk_intervention
 FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 
+ALTER TABLE occ.task_projection
+    ADD CONSTRAINT uq_task_projection_id_process UNIQUE (id, process_instance_id);
+
 ALTER TABLE occ.resource_reservation
     DROP CONSTRAINT resource_reservation_resource_id_time_range_excl,
     ADD COLUMN confirmed_at timestamptz,
@@ -857,7 +876,17 @@ ALTER TABLE occ.resource_reservation
         OR (state = 'CONFIRMED' AND confirmed_at IS NOT NULL AND cancelled_at IS NULL AND completed_at IS NULL)
         OR (state = 'CANCELLED' AND cancelled_at IS NOT NULL AND completed_at IS NULL)
         OR (state = 'COMPLETED' AND confirmed_at IS NOT NULL AND cancelled_at IS NULL AND completed_at IS NOT NULL)
-    ) NOT VALID;
+    ) NOT VALID,
+    ADD CONSTRAINT ck_resource_reservation_task_process_present CHECK (
+        task_id IS NULL OR process_instance_id IS NOT NULL
+    ) NOT VALID,
+    ADD CONSTRAINT fk_resource_reservation_task_process
+        FOREIGN KEY (task_id, process_instance_id)
+        REFERENCES occ.task_projection(id, process_instance_id) NOT VALID;
+
+ALTER TABLE occ.resource_reservation
+    VALIDATE CONSTRAINT ck_resource_reservation_task_process_present,
+    VALIDATE CONSTRAINT fk_resource_reservation_task_process;
 
 CREATE TABLE occ.resource_availability (
     id uuid PRIMARY KEY,
@@ -882,7 +911,7 @@ ON occ.resource_reservation USING gist (resource_id, time_range)
 WHERE state IN ('PENDING', 'CONFIRMED');
 
 CREATE INDEX ix_resource_reservation_cursor
-ON occ.resource_reservation (resource_id, lower(time_range), id)
+ON occ.resource_reservation (resource_id, created_at, id)
 WHERE state IN ('PENDING', 'CONFIRMED');
 
 CREATE FUNCTION occ.validate_resource_availability()
@@ -945,6 +974,18 @@ BEGIN
     FROM occ.managed_resource
     WHERE id = NEW.resource_id
     FOR UPDATE;
+
+    IF NEW.task_id IS NOT NULL THEN
+        IF NEW.process_instance_id IS NULL OR NOT EXISTS (
+            SELECT 1
+            FROM occ.task_projection task
+            WHERE task.id = NEW.task_id
+              AND task.process_instance_id = NEW.process_instance_id
+            FOR KEY SHARE
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'reservation task must belong to process';
+        END IF;
+    END IF;
 
     IF TG_OP = 'UPDATE' THEN
         IF OLD.state IN ('CANCELLED', 'COMPLETED') AND NEW IS DISTINCT FROM OLD THEN
