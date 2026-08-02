@@ -13,14 +13,18 @@ import java.util.UUID
 @ConfigurationProperties(prefix = "occ.risk-due", ignoreUnknownFields = false)
 data class RiskDueProperties(
     val enabled: Boolean = false,
-    val systemPrincipalId: UUID? = null,
+    val systemPrincipalId: String = "",
     val batchSize: Int = 50,
     val pollInterval: Duration = Duration.ofMinutes(1),
 ) {
+    val systemPrincipalUuid: UUID? = configuredUuid(systemPrincipalId)
+
     init {
         require(batchSize in 1..100)
         require(pollInterval in Duration.ofSeconds(1)..Duration.ofHours(1))
-        require(!enabled || systemPrincipalId != null)
+        require(!enabled || systemPrincipalUuid != null) {
+            "Enabled risk due evaluation requires a system principal ID"
+        }
     }
 }
 
@@ -33,7 +37,7 @@ class RiskDueEvaluator(
 ) {
     fun runOnce(): RiskDueEvaluationResult {
         if (!properties.enabled) return RiskDueEvaluationResult(0, 0)
-        val principalId = requireNotNull(properties.systemPrincipalId)
+        val principalId = requireNotNull(properties.systemPrincipalUuid)
         val at = clock.instant()
         val correlationId = UUID.randomUUID()
         val breaches = risks.recordDueSlaBreaches(principalId, at, properties.batchSize, correlationId)

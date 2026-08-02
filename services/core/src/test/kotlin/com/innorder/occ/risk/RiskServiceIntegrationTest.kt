@@ -27,6 +27,7 @@ import com.innorder.occ.authz.OpaClientException
 import com.innorder.occ.command.AuditRepository
 import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.CommandMetadata
+import com.innorder.occ.command.CommandResult
 import com.innorder.occ.command.IdempotencyRepository
 import com.innorder.occ.command.IdempotencyConflictException
 import com.innorder.occ.command.OptimisticConflictException
@@ -34,6 +35,7 @@ import com.innorder.occ.events.OutboxRepository
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.flywaydb.core.Flyway
+import org.springframework.boot.DefaultApplicationArguments
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -73,7 +75,7 @@ class RiskServiceIntegrationTest {
     @BeforeEach
     fun setUp() {
         fixture = Fixture.seed()
-        authorization = TestAuthorizationSnapshots(fixture.principal)
+        authorization = TestAuthorizationSnapshots()
         notifications = RecordingRiskNotifications(RiskNotificationOutboxPort(runtimeJdbc))
         policyDecisions = TestPolicyDecisions(
             OpaClient(MAPPER, OpaProperties("http://${opa.host}:${opa.getMappedPort(8181)}")),
@@ -101,7 +103,7 @@ class RiskServiceIntegrationTest {
             CursorCodec(CURSOR_SECRET, Clock.fixed(NOW, ZoneOffset.UTC)),
             transactionManager,
             notifications,
-            RiskMetricsProperties(reportResourceId = fixture.target),
+            RiskMetricsProperties(enabled = true, reportResourceId = fixture.target.toString()),
         )
     }
 
@@ -109,13 +111,15 @@ class RiskServiceIntegrationTest {
     fun `creation from a decision deduplicates the occurrence and preserves owner SLA and facts`() {
         val decision = fixture.decision(severity = RiskSeverity.YELLOW, sla = Duration.ofHours(4))
 
-        val first = service.create(metadata("create-1"), decision)
-        val exactReplay = service.create(metadata("create-1"), decision)
-        val duplicate = service.create(metadata("create-2"), decision)
+        val firstMetadata = metadata("create-1", commandKey = "risk.create")
+        val first = service.create(firstMetadata, decision)
+        val exactReplay = service.create(firstMetadata, decision)
+        val duplicate = service.create(metadata("create-2", commandKey = "risk.create"), decision)
 
         assertThat(exactReplay).isEqualTo(first.copy(replayed = true))
         assertThat(duplicate.resourceId).isEqualTo(first.resourceId)
-        assertThat(duplicate.replayed).isTrue()
+        assertThat(duplicate.status).isEqualTo(200)
+        assertThat(duplicate.replayed).isFalse()
         val risk = repository.get(requireNotNull(first.resourceId))
         assertThat(risk.state).isEqualTo(RiskState.OPEN)
         assertThat(risk.severity).isEqualTo(RiskSeverity.YELLOW)
@@ -125,8 +129,20 @@ class RiskServiceIntegrationTest {
             .isEqualTo(1)
         assertThat(runtimeJdbc.queryForObject("SELECT triggering_fact_ids::text FROM occ.risk_occurrence WHERE risk_id = ?", String::class.java, risk.id))
             .contains(fixture.fact.toString())
-        assertThat(auditCount(fixture.target)).isEqualTo(1)
-        assertThat(outboxTypes(risk.id)).containsExactly("risk.opened")
+        assertThat(auditCount(fixture.target)).isEqualTo(2)
+        assertThat(runtimeJdbc.queryForList(
+            """SELECT event_type FROM audit.outbox_event
+               WHERE aggregate_type = 'risk-occurrence-command' AND payload->>'riskId' = ?
+               ORDER BY created_at, event_type""",
+            String::class.java,
+            risk.id.toString(),
+        )).containsExactly("risk.opened", "risk.occurrence_observed")
+        assertThat(runtimeJdbc.queryForObject(
+            """SELECT count(*) FROM audit.idempotency_record
+               WHERE principal_id = ? AND command_key = 'risk.create' AND state = 'COMPLETED'""",
+            Long::class.java,
+            fixture.principal,
+        )).isEqualTo(2)
         val intent = notifications.intents.single()
         assertThat(intent.type).isEqualTo("RISK_OPENED")
         assertThat(intent.templateData.keys).containsExactlyInAnyOrder("riskId", "severity", "dueAt")
@@ -141,6 +157,59 @@ class RiskServiceIntegrationTest {
         authorization.deniedResources += fixture.target
         assertThatThrownBy { service.create(metadata("create-denied"), decision) }
             .isInstanceOf(AuthorizationDeniedException::class.java)
+    }
+
+    @Test
+    fun `concurrent semantic occurrence duplicates complete two kernel commands and create one risk`() {
+        val decision = fixture.decision(occurrence = "yellow", severity = RiskSeverity.YELLOW)
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val outcomes = listOf("semantic-a", "semantic-b").map { key ->
+                pool.submit<CommandResult> {
+                    start.await(10, TimeUnit.SECONDS)
+                    service.create(metadata(key, commandKey = "risk.create.concurrent"), decision)
+                }
+            }
+            start.countDown()
+            val results = outcomes.map { it.get(30, TimeUnit.SECONDS) }
+            assertThat(results.map(CommandResult::status)).containsExactlyInAnyOrder(200, 201)
+            assertThat(results.map(CommandResult::resourceId).distinct()).hasSize(1)
+            val riskId = requireNotNull(results.first().resourceId)
+            assertThat(runtimeJdbc.queryForObject(
+                "SELECT count(*) FROM occ.risk_occurrence WHERE risk_id = ?",
+                Long::class.java,
+                riskId,
+            )).isEqualTo(1)
+            assertThat(runtimeJdbc.queryForObject(
+                """SELECT count(*) FROM audit.idempotency_record
+                   WHERE principal_id = ? AND command_key = 'risk.create.concurrent' AND state = 'COMPLETED'""",
+                Long::class.java,
+                fixture.principal,
+            )).isEqualTo(2)
+            assertThat(runtimeJdbc.queryForObject(
+                "SELECT count(*) FROM audit.audit_record WHERE action_key = 'risk.create' AND target_entity_id = ?",
+                Long::class.java,
+                fixture.target,
+            )).isEqualTo(2)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `semantic occurrence command aggregates distinguish delimiter-bearing keys`() {
+        val decision = fixture.decision()
+
+        val first = service.create(metadata("first", commandKey = "risk.a", idempotencyKey = "b:c"), decision)
+        service.create(metadata("second", commandKey = "risk.a:b", idempotencyKey = "c"), decision)
+
+        assertThat(runtimeJdbc.queryForObject(
+            """SELECT count(DISTINCT aggregate_id) FROM audit.outbox_event
+               WHERE aggregate_type = 'risk-occurrence-command' AND payload->>'riskId' = ?""",
+            Long::class.java,
+            requireNotNull(first.resourceId).toString(),
+        )).isEqualTo(2)
     }
 
     @Test
@@ -181,7 +250,7 @@ class RiskServiceIntegrationTest {
         assertThat(auditCount(fixture.target)).isEqualTo(1)
         assertThat(auditCount(riskId)).isEqualTo(4)
         assertThat(outboxTypes(riskId)).containsExactly(
-            "risk.opened", "risk.acknowledged", "risk.assigned", "risk.mitigated", "risk.resolved",
+            "risk.acknowledged", "risk.assigned", "risk.mitigated", "risk.resolved",
         )
     }
 
@@ -414,7 +483,7 @@ class RiskServiceIntegrationTest {
 
         val evaluator = RiskDueEvaluator(
             service,
-            RiskDueProperties(enabled = true, systemPrincipalId = fixture.principal, batchSize = 100),
+            RiskDueProperties(enabled = true, systemPrincipalId = fixture.systemPrincipal.toString(), batchSize = 100),
             evaluationClock,
         )
         assertThat(evaluator.runOnce().slaBreaches).isPositive()
@@ -427,7 +496,7 @@ class RiskServiceIntegrationTest {
         )).isEqualTo(1)
         assertThat(notifications.intents.count { it.type == "RISK_SLA_BREACHED" && it.resourceId == riskId }).isEqualTo(1)
         assertThat(authorization.requests.any {
-            it.action == "risk.sla_breach" && it.principalId == fixture.principal && it.resourceId == riskId
+            it.action == "risk.sla_breach" && it.principalId == fixture.systemPrincipal && it.resourceId == riskId
         }).isTrue()
         assertThat(RiskRepository.DUE_SLA_BREACH_SQL).contains("FOR UPDATE", "SKIP LOCKED")
     }
@@ -513,10 +582,70 @@ class RiskServiceIntegrationTest {
         }
     }
 
-    private fun metadata(key: String, expectedVersion: Long? = null) = CommandMetadata(
+    @Test
+    fun `concurrent initial unlinked adjudication serializes to success and optimistic conflict`() {
+        val request = RiskAdjudicationRequest(
+            LocalDate.parse("2023-07-01"), LocalDate.parse("2023-08-01"),
+            "concurrent-adjudication-${fixture.key}", fixture.target, severeEvent = true, riskId = null,
+            outcome = RiskAdjudicationOutcome.MISSED, reason = "concurrent known event",
+        )
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val outcomes = listOf("adjudication-a", "adjudication-b").map { key ->
+                pool.submit<Throwable?> {
+                    start.await(10, TimeUnit.SECONDS)
+                    runCatching { service.adjudicate(metadata(key, 0), request) }.exceptionOrNull()
+                }
+            }
+            start.countDown()
+            val errors = outcomes.map { it.get(30, TimeUnit.SECONDS) }
+            assertThat(errors.count { it == null }).isEqualTo(1)
+            assertThat(errors.filterNotNull()).singleElement().isInstanceOf(OptimisticConflictException::class.java)
+            assertThat(repository.adjudications(request.knownEventKey, fixture.target)).hasSize(1)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `production risk configuration validates existing service principal and report resource`() {
+        assertThatThrownBy { RiskDueProperties(enabled = true) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("Enabled risk due evaluation requires a system principal ID")
+        assertThatThrownBy { RiskMetricsProperties(enabled = true) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("Enabled risk metrics requires a report resource ID")
+        val due = RiskDueProperties(enabled = true, systemPrincipalId = fixture.systemPrincipal.toString())
+        val metrics = RiskMetricsProperties(enabled = true, reportResourceId = fixture.target.toString())
+
+        RiskRuntimeIdentityValidator(runtimeJdbc, due, metrics).run(DefaultApplicationArguments())
+
+        assertThatThrownBy {
+            RiskRuntimeIdentityValidator(
+                runtimeJdbc,
+                due.copy(systemPrincipalId = fixture.principal.toString()),
+                metrics,
+            ).run(DefaultApplicationArguments())
+        }.isInstanceOf(RiskRuntimeConfigurationException::class.java)
+        assertThatThrownBy {
+            RiskRuntimeIdentityValidator(
+                runtimeJdbc,
+                due,
+                metrics.copy(reportResourceId = fixture.systemPrincipal.toString()),
+            ).run(DefaultApplicationArguments())
+        }.isInstanceOf(RiskRuntimeConfigurationException::class.java)
+    }
+
+    private fun metadata(
+        key: String,
+        expectedVersion: Long? = null,
+        commandKey: String = "risk.$key",
+        idempotencyKey: String = "${fixture.key}-$key",
+    ) = CommandMetadata(
         fixture.principal,
-        "risk.$key",
-        "${fixture.key}-$key",
+        commandKey,
+        idempotencyKey,
         expectedVersion,
         UUID.randomUUID(),
     )
@@ -556,6 +685,7 @@ class RiskServiceIntegrationTest {
         val target: UUID,
         val otherTarget: UUID,
         val principal: UUID,
+        val systemPrincipal: UUID,
         val ownerRelationship: UUID,
         val escalatedOwnerRelationship: UUID,
         val rules: Map<String, UUID>,
@@ -600,6 +730,7 @@ class RiskServiceIntegrationTest {
                 val riskType = UUID.randomUUID()
                 val riskTypeVersion = UUID.randomUUID()
                 val principal = UUID.randomUUID()
+                val systemPrincipal = UUID.randomUUID()
                 val owner = UUID.randomUUID()
                 val escalatedOwner = UUID.randomUUID()
                 val target = UUID.randomUUID()
@@ -651,6 +782,7 @@ class RiskServiceIntegrationTest {
                     id, type, version, "$entityKey-$key",
                 )
                 entity(principal, userType, userTypeVersion, "actor")
+                entity(systemPrincipal, userType, userTypeVersion, "risk-system")
                 entity(owner, userType, userTypeVersion, "owner")
                 entity(escalatedOwner, userType, userTypeVersion, "escalated")
                 entity(target, targetType, targetTypeVersion, "target")
@@ -661,6 +793,10 @@ class RiskServiceIntegrationTest {
                         id, name,
                     )
                 }
+                adminJdbc.update(
+                    "INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, 'SERVICE', 'Risk system', 'ACTIVE')",
+                    systemPrincipal,
+                )
                 val relationFixtures = listOf(
                     arrayOf(ownerDefinition, "owner", ownerRelationship, owner),
                     arrayOf(escalatedDefinition, "escalated-owner", escalatedOwnerRelationship, escalatedOwner),
@@ -707,14 +843,14 @@ class RiskServiceIntegrationTest {
                     otherOwnerRelationship, ownerDefinition, owner, otherTarget, "risk-test-other-$key",
                 )
                 return Fixture(
-                    key, packageVersion, target, otherTarget, principal, ownerRelationship,
+                    key, packageVersion, target, otherTarget, principal, systemPrincipal, ownerRelationship,
                     escalatedOwnerRelationship, rules, UUID.randomUUID(),
                 )
             }
         }
     }
 
-    private class TestAuthorizationSnapshots(private val principalId: UUID) : AuthorizationSnapshotSource {
+    private class TestAuthorizationSnapshots : AuthorizationSnapshotSource {
         val deniedResources = mutableSetOf<UUID>()
         val redactedResources = mutableSetOf<UUID>()
         val requests: MutableList<AuthorizationRequest> = Collections.synchronizedList(mutableListOf())
@@ -728,7 +864,7 @@ class RiskServiceIntegrationTest {
                 request.requestId,
                 1,
                 mapOf(PolicyLayer.PLATFORM to POLICY_RELEASE),
-                AuthorizationPrincipal(principalId, true),
+                AuthorizationPrincipal(request.principalId, true),
                 AuthorizationEntity(request.entityId),
                 request.action,
                 AuthorizationResource(request.resourceId, true),
@@ -736,7 +872,7 @@ class RiskServiceIntegrationTest {
                 emptyList(),
                 if (allowed) listOf(AuthorizationGrant(
                     "risk-test-grant", PolicyLayer.PLATFORM, POLICY_RELEASE, GrantEffect.ALLOW,
-                    request.action, principalId.toString(), request.entityId.toString(), request.resourceId.toString(),
+                    request.action, request.principalId.toString(), request.entityId.toString(), request.resourceId.toString(),
                 )) else emptyList(),
                 POLICY_RELEASE,
                 "platform-authz-v1",

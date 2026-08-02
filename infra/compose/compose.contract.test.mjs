@@ -264,6 +264,10 @@ test("Compose wiring follows application config and completion gates", () => {
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
     "OBJECT_STORAGE_ENDPOINT",
+    "OCC_RISK_DUE_ENABLED",
+    "OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID",
+    "OCC_RISK_METRICS_ENABLED",
+    "OCC_RISK_METRICS_REPORT_RESOURCE_ID",
     "OPA_BASE_URL",
     "REDIS_HOST",
     "REDIS_PORT",
@@ -289,6 +293,18 @@ test("Compose wiring follows application config and completion gates", () => {
     postgres: { condition: "service_healthy" },
   });
   assert.equal(core.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "false");
+  assert.equal(core.environment.OCC_RISK_DUE_ENABLED, "true");
+  assert.equal(core.environment.OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID,
+    "${OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:?Set OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID}");
+  assert.equal(core.environment.OCC_RISK_METRICS_ENABLED, "true");
+  assert.equal(core.environment.OCC_RISK_METRICS_REPORT_RESOURCE_ID,
+    "${OCC_RISK_METRICS_REPORT_RESOURCE_ID:?Set OCC_RISK_METRICS_REPORT_RESOURCE_ID}");
+  const application = read("services/core/src/main/resources/application.yml");
+  assert.match(application, /system-principal-id: \$\{OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:\}/u);
+  assert.match(application, /report-resource-id: \$\{OCC_RISK_METRICS_REPORT_RESOURCE_ID:\}/u);
+  const envExample = read("infra/compose/.env.example");
+  assert.match(envExample, /^OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID=$/mu);
+  assert.match(envExample, /^OCC_RISK_METRICS_REPORT_RESOURCE_ID=$/mu);
   const flowableInit = compose.services["flowable-init"];
   assert.equal(flowableInit.environment.SPRING_PROFILES_ACTIVE, "flowable-init");
   assert.equal(flowableInit.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "true");

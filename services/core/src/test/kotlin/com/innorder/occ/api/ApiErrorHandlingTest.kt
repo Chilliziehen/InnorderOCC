@@ -15,6 +15,7 @@ import com.innorder.occ.command.IdempotencyInProgressException
 import com.innorder.occ.command.CommandIntegrityException
 import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.OptimisticConflictException
+import com.innorder.occ.risk.EscalationLevelConflictException
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
@@ -278,6 +279,7 @@ class ApiErrorHandlingTest {
             Triple("/test/idempotency-in-progress", 409, "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS"),
             Triple("/test/idempotency-expired", 409, "OCC-COMMAND-IDEMPOTENCY-EXPIRED"),
             Triple("/test/optimistic-conflict", 409, "OCC-COMMAND-OPTIMISTIC-CONFLICT"),
+            Triple("/test/escalation-level-conflict", 409, "OCC-RISK-ESCALATION-LEVEL-CONFLICT"),
             Triple("/test/command-integrity", 503, "OCC-COMMAND-INTEGRITY"),
             Triple("/test/authorization-denied", 403, "OCC-API-FORBIDDEN"),
             Triple("/test/authorization-unavailable", 503, "OCC-AUTHZ-UNAVAILABLE"),
@@ -578,6 +580,9 @@ class ApiErrorHandlingTest {
 
         @GetMapping("/optimistic-max")
         fun optimisticMax(): Nothing = throw OptimisticConflictException(CommandExecutor.MAX_SAFE_INTEGER)
+
+        @GetMapping("/escalation-level-conflict")
+        fun escalationLevelConflict(): Nothing = throw EscalationLevelConflictException(UUID.randomUUID(), 2)
 
         @GetMapping("/command-integrity")
         fun commandIntegrity(): Nothing = throw CommandIntegrityException()

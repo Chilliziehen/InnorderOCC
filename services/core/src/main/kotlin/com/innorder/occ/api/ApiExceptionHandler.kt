@@ -11,6 +11,7 @@ import com.innorder.occ.command.InvalidCommandRequestException
 import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.IdempotencyExpiredException
 import com.innorder.occ.command.CommandIntegrityException
+import com.innorder.occ.risk.EscalationLevelConflictException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -142,6 +143,12 @@ class ApiExceptionHandler(
         exception: com.innorder.occ.command.OptimisticConflictException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.optimisticConflict(request, exception.currentVersion)
+
+    @ExceptionHandler(EscalationLevelConflictException::class)
+    fun escalationLevelConflict(
+        exception: EscalationLevelConflictException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.escalationLevelConflict(request)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(

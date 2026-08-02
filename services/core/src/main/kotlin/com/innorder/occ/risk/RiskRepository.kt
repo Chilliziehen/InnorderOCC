@@ -21,6 +21,17 @@ class RiskRepository(private val jdbc: JdbcOperations) {
                        WHERE rule_definition_id = ? AND target_entity_id = ? AND occurrence_key = ?""",
             ::risk, ruleDefinitionId, targetEntityId, occurrenceKey).singleOrNull()
 
+    fun lockByOccurrence(ruleDefinitionId: UUID, targetEntityId: UUID, occurrenceKey: String): RiskRecord? =
+        jdbc.query(
+            """SELECT * FROM occ.risk
+               WHERE rule_definition_id = ? AND target_entity_id = ? AND occurrence_key = ? FOR UPDATE""",
+            ::risk, ruleDefinitionId, targetEntityId, occurrenceKey,
+        ).singleOrNull()
+
+    fun lockOccurrenceIdentity(ruleDefinitionId: UUID, targetEntityId: UUID, occurrenceKey: String) {
+        advisoryLock("${ruleDefinitionId}:$targetEntityId:${occurrenceKey.length}:$occurrenceKey", 1380537172)
+    }
+
     fun get(id: UUID): RiskRecord = jdbc.query("SELECT * FROM occ.risk WHERE id = ?", ::risk, id)
         .singleOrNull() ?: throw RiskNotFoundException()
 
@@ -228,6 +239,18 @@ class RiskRepository(private val jdbc: JdbcOperations) {
                WHERE known_event_key = ? AND target_entity_id = ? ORDER BY adjudication_version DESC LIMIT 1${if (lock) " FOR UPDATE" else ""}""",
             ::adjudication, knownEventKey, targetEntityId,
         ).singleOrNull()
+
+    fun lockAdjudicationIdentity(knownEventKey: String, targetEntityId: UUID) {
+        advisoryLock("${knownEventKey.length}:$knownEventKey:$targetEntityId", 1380537171)
+    }
+
+    private fun advisoryLock(identity: String, seed: Int) {
+        jdbc.queryForObject(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, ?)) IS NULL",
+            Boolean::class.java,
+            identity, seed,
+        )
+    }
 
     fun adjudications(knownEventKey: String, targetEntityId: UUID): List<RiskAdjudicationRecord> = jdbc.query(
         """SELECT * FROM occ.risk_adjudication WHERE known_event_key = ? AND target_entity_id = ?
