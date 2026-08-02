@@ -4,6 +4,7 @@ import com.innorder.occ.auth.PasswordService
 import com.innorder.occ.authz.PolicyLayer
 import com.innorder.occ.authz.PolicyReleaseIntegrity
 import com.innorder.occ.authz.PolicyReleaseItemIntegrity
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import org.springframework.boot.ApplicationArguments
 import org.springframework.boot.ApplicationRunner
 import org.springframework.boot.autoconfigure.condition.ConditionOutcome
@@ -120,25 +121,18 @@ internal object BootstrapPolicyV1Baseline {
 
 internal object BootstrapPolicyBaseline {
     const val OPA_REVISION = "platform-authz-v2"
-    private val workflowActions = listOf(
-        "cohort.create", "cohort.read", "cohort.update", "cohort.owner.transfer", "cohort.members.manage",
-        "cohort.archive", "cohort.process.start", "process.read", "process.suspend", "process.resume",
-        "process.cancel", "process.fail", "process.transfer", "process.reconcile", "process.wait.release",
-        "task.read", "task.claim", "task.complete", "task.fail", "task.assignment.manage",
-    )
     private val baselineGrants = listOf(
-        grant("viewer", "occ.read", "platform-viewer-read"),
-        grant("operator", "occ.execute", "platform-operator-execute"),
-        grant("operator", "occ.read", "platform-operator-read"),
-        grant("administrator", "occ.admin", "platform-administrator-admin"),
-        grant("administrator", "occ.execute", "platform-administrator-execute"),
-        grant("administrator", "occ.read", "platform-administrator-read"),
+        grant("role:viewer", "occ.read", "platform-viewer-read"),
+        grant("role:operator", "occ.execute", "platform-operator-execute"),
+        grant("role:operator", "occ.read", "platform-operator-read"),
+        grant("role:administrator", "occ.admin", "platform-administrator-admin"),
+        grant("role:administrator", "occ.execute", "platform-administrator-execute"),
+        grant("role:administrator", "occ.read", "platform-administrator-read"),
     )
     private val workflowGrants = listOf(
-        "viewer" to setOf("cohort.read", "process.read", "task.read", "task.claim", "task.complete"),
-        "operator" to workflowActions.toSet(),
-        "administrator" to workflowActions.toSet(),
-    ).flatMap { (role, actions) -> actions.sorted().map { action -> grant(role, action) } }
+        WorkflowAuthorizationRoles.processOwner.key to WorkflowAuthorizationRoles.processOwnerActions,
+        WorkflowAuthorizationRoles.participant.key to WorkflowAuthorizationRoles.participantActions,
+    ).flatMap { (roleKey, actions) -> actions.sorted().map { action -> grant(roleKey, action) } }
     val manifest = """{"forbiddenActions":[],"roleGrants":[${(baselineGrants + workflowGrants).joinToString(",")}],"version":1}"""
     val contentHash: String = PolicyReleaseIntegrity.manifestContentHash(manifest)
     val releaseHash: String = PolicyReleaseIntegrity.contentHash(
@@ -153,9 +147,10 @@ internal object BootstrapPolicyBaseline {
         ),
     )
 
-    private fun grant(role: String, action: String, grantId: String? = null): String {
-        val id = grantId ?: "platform-$role-${action.replace('.', '-')}"
-        return """{"action":"$action","effect":"ALLOW","entityId":"*","id":"$id","resourceId":"*","subjectRoleEntityKey":"role:$role"}"""
+    private fun grant(roleKey: String, action: String, grantId: String? = null): String {
+        val roleName = roleKey.removePrefix("role:")
+        val id = grantId ?: "platform-$roleName-${action.replace('.', '-')}"
+        return """{"action":"$action","effect":"ALLOW","entityId":"*","id":"$id","resourceId":"*","subjectRoleEntityKey":"$roleKey"}"""
     }
 }
 
@@ -452,11 +447,11 @@ class BootstrapAdministrator internal constructor(
     }
 
     private fun seedRoles(now: OffsetDateTime) {
-        listOf(
+        (listOf(
             Triple(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
             Triple(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
             Triple(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
-        ).forEach { (id, key, name) ->
+        ) + WorkflowAuthorizationRoles.all.map { Triple(it.id, it.key, it.displayName) }).forEach { (id, key, name) ->
             ensure(
                 "authz.entity", "id = ? OR (entity_type_id = ? AND entity_key = ?)",
                 arrayOf(id, BootstrapIds.ROLE_TYPE, key),

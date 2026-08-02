@@ -1,13 +1,15 @@
 package com.innorder.occ.iam
 
+import com.innorder.occ.authz.WorkflowAuthorizationRole
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
-import org.springframework.boot.DefaultApplicationArguments
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.postgresql.ds.PGSimpleDataSource
+import org.springframework.boot.DefaultApplicationArguments
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.transaction.support.TransactionTemplate
@@ -24,6 +26,14 @@ class PlatformPolicyV2UpgraderIntegrationTest {
     fun resetPolicies() {
         admin.update(
             "TRUNCATE authz.policy_release_item, authz.policy_release, authz.policy_bundle_version, authz.policy_bundle CASCADE",
+        )
+        admin.update(
+            "DELETE FROM iam.principal WHERE id IN (?, ?, ?)",
+            *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
+        )
+        admin.update(
+            "DELETE FROM authz.entity WHERE id IN (?, ?, ?)",
+            *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
         )
     }
 
@@ -66,6 +76,21 @@ class PlatformPolicyV2UpgraderIntegrationTest {
             BootstrapIds.POLICY_RELEASE_V1, BootstrapIds.POLICY_BUNDLE, BootstrapIds.POLICY_BUNDLE_VERSION_V1,
         )).isEqualTo(1)
         assertV2Active()
+        assertThat(runtime.queryForList(
+            """SELECT e.id, e.entity_key, p.display_name, p.principal_kind, p.status
+               FROM authz.entity e JOIN iam.principal p ON p.id = e.id
+               WHERE e.id IN (?, ?, ?) ORDER BY e.entity_key""",
+            *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
+        )).containsExactly(
+            workflowRoleRow(WorkflowAuthorizationRoles.domainModeler),
+            workflowRoleRow(WorkflowAuthorizationRoles.participant),
+            workflowRoleRow(WorkflowAuthorizationRoles.processOwner),
+        )
+        assertThat(runtime.queryForObject(
+            "SELECT count(*) FROM authz.relationship WHERE object_entity_id IN (?, ?, ?) AND revoked_at IS NULL",
+            Long::class.java,
+            *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
+        )).isZero()
 
         val state = policyState()
         assertThat(upgrader().upgrade()).isEqualTo(PlatformPolicyUpgradeResult.NO_ACTION)
@@ -87,6 +112,16 @@ class PlatformPolicyV2UpgraderIntegrationTest {
         )).isZero()
         assertThat(runtime.queryForObject(
             "SELECT count(*) FROM authz.policy_release WHERE release_number = 2", Long::class.java,
+        )).isZero()
+        assertThat(runtime.queryForObject(
+            "SELECT count(*) FROM authz.entity WHERE id IN (?, ?, ?)",
+            Long::class.java,
+            *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
+        )).isZero()
+        assertThat(runtime.queryForObject(
+            "SELECT count(*) FROM iam.principal WHERE id IN (?, ?, ?)",
+            Long::class.java,
+            *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
         )).isZero()
     }
 
@@ -159,6 +194,14 @@ class PlatformPolicyV2UpgraderIntegrationTest {
            ORDER BY kind, number""",
     )
 
+    private fun workflowRoleRow(role: WorkflowAuthorizationRole) = mapOf(
+        "id" to role.id,
+        "entity_key" to role.key,
+        "display_name" to role.displayName,
+        "principal_kind" to "ROLE",
+        "status" to "ACTIVE",
+    )
+
     private fun upgrader() = PlatformPolicyV2Upgrader(
         runtime,
         TransactionTemplate(DataSourceTransactionManager(runtime.dataSource!!)),
@@ -188,6 +231,30 @@ class PlatformPolicyV2UpgraderIntegrationTest {
                 .locations("classpath:db/migration").load().migrate()
             admin = JdbcTemplate(dataSource("innorder_flyway", "flyway-test-only"))
             runtime = JdbcTemplate(dataSource("innorder_runtime", "runtime-test-only"))
+            runtime.update(
+                "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'platform-iam', 'Platform IAM', 'ACTIVE')",
+                BootstrapIds.PACKAGE,
+            )
+            runtime.update(
+                "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
+                BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE,
+            )
+            runtime.update(
+                """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)
+                   VALUES (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true)""",
+                BootstrapIds.ROLE_TYPE, BootstrapIds.PACKAGE,
+            )
+            runtime.update(
+                """INSERT INTO catalog.entity_type_version
+                   (id, entity_type_id, package_version_id, schema_version, json_schema)
+                   VALUES (?, ?, ?, 1, '{}'::jsonb)""",
+                BootstrapIds.ROLE_TYPE_VERSION, BootstrapIds.ROLE_TYPE, BootstrapIds.PACKAGE_VERSION,
+            )
+            runtime.update(
+                """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('a', 64),
+                       published_at = transaction_timestamp() WHERE id = ?""",
+                BootstrapIds.PACKAGE_VERSION,
+            )
         }
 
         private fun dataSource(username: String, password: String) = PGSimpleDataSource().apply {

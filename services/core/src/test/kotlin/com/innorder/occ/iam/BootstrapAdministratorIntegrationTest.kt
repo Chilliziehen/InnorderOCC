@@ -8,6 +8,7 @@ import com.innorder.occ.auth.AuthService
 import com.innorder.occ.auth.InvalidCredentialsException
 import com.innorder.occ.auth.PasswordService
 import com.innorder.occ.auth.SessionRepository
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
@@ -218,13 +219,17 @@ class BootstrapAdministratorIntegrationTest {
                 """SELECT e.id, e.entity_key, e.entity_type_id, e.entity_type_version_id, e.state,
                           p.display_name, p.status, p.principal_kind
                    FROM authz.entity e JOIN iam.principal p ON p.id = e.id
-                   WHERE e.id IN (?, ?, ?) ORDER BY e.entity_key""",
+                   WHERE e.id IN (?, ?, ?, ?, ?, ?) ORDER BY e.entity_key""",
                 BootstrapIds.VIEWER_ROLE,
                 BootstrapIds.OPERATOR_ROLE,
                 BootstrapIds.ADMINISTRATOR_ROLE,
+                *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
             )).containsExactly(
                 roleRow(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
+                roleRow(WorkflowAuthorizationRoles.domainModeler.id, "role:domain-modeler", "Domain Modeler"),
                 roleRow(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
+                roleRow(WorkflowAuthorizationRoles.participant.id, "role:participant", "Participant"),
+                roleRow(WorkflowAuthorizationRoles.processOwner.id, "role:process-owner", "Process Owner"),
                 roleRow(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
             )
             assertThat(jdbc.queryForMap(
@@ -250,6 +255,13 @@ class BootstrapAdministratorIntegrationTest {
                 "actors_match" to true,
                 "row_version" to 0L,
             ))
+            assertThat(jdbc.queryForObject(
+                """SELECT count(*) FROM authz.relationship
+                   WHERE relation_definition_id = ? AND object_entity_id IN (?, ?, ?) AND revoked_at IS NULL""",
+                Long::class.java,
+                BootstrapIds.ROLE_ASSIGNMENT_RELATION,
+                *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
+            )).isZero()
             assertThat(Files.exists(path)).isTrue()
 
             val principals = PrincipalRepository(jdbc)

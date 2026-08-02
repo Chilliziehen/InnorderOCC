@@ -16,6 +16,8 @@ import com.innorder.occ.command.CommandMutation
 import com.innorder.occ.command.IdempotencyRepository
 import com.innorder.occ.command.PendingEventSpec
 import com.innorder.occ.events.OutboxRepository
+import com.innorder.occ.iam.BootstrapIds
+import com.innorder.occ.iam.BootstrapPolicyBaseline
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
@@ -281,6 +283,40 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
     }
 
     @Test
+    fun `real PostgreSQL assignments and OPA enforce the exact workflow role matrix`() {
+        WORKFLOW_ROLE_MATRIX.forEach { (role, allowedActions) ->
+            scenario { jdbc ->
+                seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to BootstrapPolicyBaseline.manifest))
+                seedTask(jdbc)
+                seedWorkflowRoleMatrix(jdbc)
+                jdbc.update(
+                    """UPDATE authz.relationship SET revoked_at = transaction_timestamp()
+                       WHERE relation_definition_id = ? AND subject_entity_id = ?""",
+                    BootstrapIds.ROLE_ASSIGNMENT_RELATION, PRINCIPAL_ID,
+                )
+                jdbc.update(
+                    """INSERT INTO authz.relationship
+                       (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                       VALUES (?, ?, ?, ?, 'SYSTEM', 'workflow-role-matrix')""",
+                    UUID.randomUUID(), BootstrapIds.ROLE_ASSIGNMENT_RELATION, PRINCIPAL_ID, role.id,
+                )
+                val authorization = realAuthorization(jdbc)
+
+                WORKFLOW_ACTIONS.forEach { action ->
+                    val allowed = try {
+                        authorization.authorize(workflowRequest(action))
+                        true
+                    } catch (_: AuthorizationDeniedException) {
+                        false
+                    }
+                    assertThat(allowed).describedAs("${role.key} -> $action")
+                        .isEqualTo(action in allowedActions)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `real command executor and OPA bind task completion to target process and blockers`() = scenario { jdbc ->
         seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to TASK_COMPLETE_MANIFEST))
         seedTask(jdbc)
@@ -345,6 +381,46 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             repository(jdbc),
             OpaClient(mapper, OpaProperties("http://${opa.host}:${opa.getMappedPort(8181)}")),
             RecordingDecisionLog(),
+        )
+    }
+
+    private fun seedWorkflowRoleMatrix(jdbc: org.springframework.jdbc.core.JdbcTemplate) {
+        WORKFLOW_ROLE_MATRIX.keys.filter { it.id != MATRIX_ADMINISTRATOR_ROLE_ID }.forEach { role ->
+            jdbc.update(
+                """INSERT INTO authz.entity
+                   (id, entity_type_id, entity_type_version_id, entity_key, state)
+                   VALUES (?, ?, ?, ?, 'ACTIVE')""",
+                role.id, MATRIX_ROLE_TYPE_ID, MATRIX_ROLE_TYPE_VERSION_ID, role.key,
+            )
+            jdbc.update(
+                """INSERT INTO iam.principal(id, principal_kind, display_name, status)
+                   VALUES (?, 'ROLE', ?, 'ACTIVE')""",
+                role.id, role.displayName,
+            )
+        }
+        listOf(
+            WorkflowAuthorizationRelationDefinitions.COHORT_PARTICIPANT_ID to COHORT_ID,
+            WorkflowAuthorizationRelationDefinitions.TASK_CANDIDATE_ID to TASK_ID,
+        ).forEach { (definitionId, objectId) ->
+            jdbc.update(
+                """INSERT INTO authz.relationship
+                   (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                   VALUES (?, ?::uuid, ?, ?, 'SYSTEM', 'workflow-role-matrix')""",
+                UUID.randomUUID(), definitionId, PRINCIPAL_ID, objectId,
+            )
+        }
+    }
+
+    private fun workflowRequest(action: String): AuthorizationRequest {
+        val entityId = if (action == "cohort.create") MATRIX_ENTITY_ID else COHORT_ID
+        val resourceId = when {
+            action.startsWith("task.") -> TASK_ID
+            action.startsWith("process.") -> PROCESS_ID
+            else -> entityId
+        }
+        return AuthorizationRequest(
+            UUID.randomUUID(), PRINCIPAL_ID, action, entityId, resourceId,
+            mapOf("commandKey" to action),
         )
     }
 
@@ -477,10 +553,24 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
         private val WORKFLOW_ID = UUID.fromString("75000000-0000-7000-8000-000000000001")
         private val BINDING_ID = UUID.fromString("75000000-0000-7000-8000-000000000002")
         private val PROCESS_ID = UUID.fromString("75000000-0000-7000-8000-000000000003")
+        private val MATRIX_ENTITY_ID = UUID.fromString("73000000-0000-7000-8000-000000000008")
+        private val MATRIX_ADMINISTRATOR_ROLE_ID = UUID.fromString("73000000-0000-7000-8000-000000000010")
+        private val MATRIX_ROLE_TYPE_ID = UUID.fromString("73000000-0000-7000-8000-000000000005")
+        private val MATRIX_ROLE_TYPE_VERSION_ID = UUID.fromString("73000000-0000-7000-8000-000000000006")
         private val SPOOF_PACKAGE_ID = UUID.fromString("76000000-0000-7000-8000-000000000001")
         private val SPOOF_PACKAGE_VERSION_ID = UUID.fromString("76000000-0000-7000-8000-000000000002")
         private val SPOOF_TEACHER_RELATION_ID = UUID.fromString("76000000-0000-7000-8000-000000000003")
         private val SPOOF_ASSIGNEE_RELATION_ID = UUID.fromString("76000000-0000-7000-8000-000000000004")
+        private val WORKFLOW_ACTIONS = WorkflowAuthorizationRoles.processOwnerActions +
+            WorkflowAuthorizationRoles.participantActions
+        private val WORKFLOW_ROLE_MATRIX = linkedMapOf(
+            WorkflowAuthorizationRole(MATRIX_ADMINISTRATOR_ROLE_ID, "role:administrator", "Administrator") to emptySet(),
+            WorkflowAuthorizationRole(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator") to emptySet(),
+            WorkflowAuthorizationRole(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer") to emptySet(),
+            WorkflowAuthorizationRoles.domainModeler to emptySet(),
+            WorkflowAuthorizationRoles.processOwner to WorkflowAuthorizationRoles.processOwnerActions,
+            WorkflowAuthorizationRoles.participant to WorkflowAuthorizationRoles.participantActions,
+        )
 
         @Container
         @JvmStatic
