@@ -18,6 +18,7 @@ import com.innorder.occ.risk.RiskNotFoundException
 import com.innorder.occ.risk.TerminalRiskException
 import com.innorder.occ.resource.ReservationConflictException
 import com.innorder.occ.resource.ReservationStateConflictException
+import com.innorder.occ.resource.ResourceQueryValidationException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -186,6 +187,12 @@ class ApiExceptionHandler(
         exception: ReservationStateConflictException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.reservationStateConflict(request)
+
+    @ExceptionHandler(ResourceQueryValidationException::class)
+    fun resourceQueryValidation(
+        exception: ResourceQueryValidationException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.resourceQueryValidation(request)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(
