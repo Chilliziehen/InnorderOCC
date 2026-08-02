@@ -199,6 +199,155 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
     }
 
     @Test
+    fun `schedule cursor uses immutable creation order when consumed and unconsumed ranges move`() {
+        val resource = createResource(capacity = 10)
+        val requester = entity("moving-schedule-requester")
+        val ids = List(3) { UUID.randomUUID() }
+        ids.forEachIndexed { index, id ->
+            jdbc.update(
+                """INSERT INTO occ.resource_reservation
+                   (id, resource_id, requester_entity_id, time_range, capacity, exclusive, state, created_at)
+                   VALUES (?, ?, ?, tstzrange(?::timestamptz, ?::timestamptz, '[)'), 1, false, 'PENDING', ?::timestamptz)""",
+                id, resource.id, requester, instant(9 + index), instant(10 + index), instant(6).plusSeconds(index.toLong()),
+            )
+        }
+
+        val first = resources.schedule(administratorId, UUID.randomUUID(), resource.id, instant(8), instant(13), 1, null)
+        jdbc.update(
+            "UPDATE occ.resource_reservation SET time_range = tstzrange(?::timestamptz, ?::timestamptz, '[)') WHERE id = ?",
+            instant(12), instant(13), ids[0],
+        )
+        jdbc.update(
+            "UPDATE occ.resource_reservation SET time_range = tstzrange(?::timestamptz, ?::timestamptz, '[)') WHERE id = ?",
+            instant(8, 30), instant(9, 30), ids[1],
+        )
+        val second = resources.schedule(
+            administratorId, UUID.randomUUID(), resource.id, instant(8), instant(13), 1, first.nextCursor,
+        )
+        val third = resources.schedule(
+            administratorId, UUID.randomUUID(), resource.id, instant(8), instant(13), 1, second.nextCursor,
+        )
+
+        assertThat(first.items.map { it.id }).containsExactly(ids[0])
+        assertThat(second.items.map { it.id }).containsExactly(ids[1])
+        assertThat(third.items.map { it.id }).containsExactly(ids[2])
+        assertThat((first.items + second.items + third.items).map { it.id }).doesNotHaveDuplicates()
+    }
+
+    @Test
+    fun `reservation validates and authorizes requester process and task provenance transactionally`() {
+        val resource = createResource()
+        val requester = entity("workflow-requester")
+        val workflow = workflowFixture()
+        val valid = ReserveResourceRequest(
+            UUID.randomUUID(), requester, workflow.processA, workflow.taskA,
+            instant(9), instant(10), 1.toBigDecimal(), false,
+        )
+        val allowsBefore = decisionCount("occ.execute")
+
+        resources.reserve(resource.id, metadata(), mapper.writeValueAsBytes(valid), valid)
+
+        assertThat(decisionCount("occ.execute") - allowsBefore).isEqualTo(4)
+        assertThatThrownBy {
+            jdbc.update("UPDATE occ.task_projection SET process_instance_id = ? WHERE id = ?", workflow.processB, workflow.taskA)
+        }.hasRootCauseInstanceOf(org.postgresql.util.PSQLException::class.java)
+        val crossWorkflow = valid.copy(id = UUID.randomUUID(), processInstanceId = workflow.processB)
+        assertThatThrownBy {
+            resources.reserve(resource.id, metadata(), mapper.writeValueAsBytes(crossWorkflow), crossWorkflow)
+        }.isInstanceOf(ResourceReferenceValidationException::class.java)
+        assertThatThrownBy {
+            jdbc.update(
+                """INSERT INTO occ.resource_reservation
+                   (id, resource_id, requester_entity_id, process_instance_id, task_id,
+                    time_range, capacity, exclusive, state)
+                   VALUES (?, ?, ?, ?, ?, tstzrange(?::timestamptz, ?::timestamptz, '[)'), 1, false, 'PENDING')""",
+                UUID.randomUUID(), resource.id, requester, workflow.processB, workflow.taskA, instant(10), instant(11),
+            )
+        }.hasRootCauseInstanceOf(org.postgresql.util.PSQLException::class.java)
+    }
+
+    @Test
+    fun `named reservation reference and duplicate constraints return bounded HTTP errors`() {
+        val resource = createResource()
+        val requester = entity("reference-requester")
+        val phantomProcess = entity("phantom-process")
+        val token = loginToken()
+        val reservationId = UUID.randomUUID()
+
+        fun postReservation(request: ReserveResourceRequest, key: String, expectedStatus: Int): String =
+            mockMvc.post("/api/v1/resources/${resource.id}/reservations") {
+                header("Authorization", "Bearer $token")
+                header("X-Correlation-Id", UUID.randomUUID())
+                header("Idempotency-Key", key)
+                contentType = MediaType.APPLICATION_JSON
+                content = mapper.writeValueAsBytes(request)
+            }.andExpect { status { isEqualTo(expectedStatus) } }.andReturn().response.contentAsString
+
+        val missingRequester = ReserveResourceRequest(
+            UUID.randomUUID(), UUID.randomUUID(), null, null, instant(9), instant(10), 1.toBigDecimal(), false,
+        )
+        assertThat(postReservation(missingRequester, "missing-requester-${UUID.randomUUID()}", 400))
+            .contains("OCC-RESOURCE-REFERENCE").doesNotContain("23503", "PSQLException")
+        val missingProcess = missingRequester.copy(id = reservationId, requesterEntityId = requester, processInstanceId = phantomProcess)
+        assertThat(postReservation(missingProcess, "missing-process-${UUID.randomUUID()}", 400))
+            .contains("OCC-RESOURCE-REFERENCE")
+
+        val valid = missingProcess.copy(processInstanceId = null)
+        postReservation(valid, "reservation-first-${UUID.randomUUID()}", 201)
+        assertThat(postReservation(valid, "reservation-duplicate-${UUID.randomUUID()}", 409))
+            .contains("OCC-RESOURCE-ID-CONFLICT").doesNotContain("23505", "PSQLException")
+
+        val availability = AddAvailabilityRequest(UUID.randomUUID(), instant(8), instant(18), AvailabilityMode.AVAILABLE, null)
+        fun postAvailability(version: Long, key: String, expectedStatus: Int): String =
+            mockMvc.post("/api/v1/resources/${resource.id}/availability") {
+                header("Authorization", "Bearer $token")
+                header("X-Correlation-Id", UUID.randomUUID())
+                header("Idempotency-Key", key)
+                header("Expected-Version", version)
+                contentType = MediaType.APPLICATION_JSON
+                content = mapper.writeValueAsBytes(availability)
+            }.andExpect { status { isEqualTo(expectedStatus) } }.andReturn().response.contentAsString
+        postAvailability(0, "availability-first-${UUID.randomUUID()}", 201)
+        assertThat(postAvailability(1, "availability-duplicate-${UUID.randomUUID()}", 409))
+            .contains("OCC-RESOURCE-ID-CONFLICT")
+    }
+
+    @Test
+    fun `change and cancel authorize supplied resource before revealing reservation existence`() {
+        val resource = createResource()
+        val otherResource = createResource()
+        val requester = entity("oracle-requester")
+        val reservation = reserve(resource.id, requester, instant(9), instant(10), 1)
+        val token = loginToken()
+        val missing = UUID.randomUUID()
+        val change = ChangeReservationRequest(resource.id, instant(10), instant(11), 1.toBigDecimal(), false)
+
+        fun change(id: UUID, request: ChangeReservationRequest): String = mockMvc.patch("/api/v1/reservations/$id") {
+            header("Authorization", "Bearer $token")
+            header("X-Correlation-Id", UUID.randomUUID())
+            header("Idempotency-Key", "oracle-change-${UUID.randomUUID()}")
+            header("Expected-Version", 0)
+            contentType = MediaType.APPLICATION_JSON
+            content = mapper.writeValueAsBytes(request)
+        }.andExpect { status { isNotFound() } }.andReturn().response.contentAsString
+
+        val absent = change(missing, change)
+        val wrongParent = change(reservation.id, change.copy(resourceId = otherResource.id))
+        assertThat(absent).contains("OCC-RESERVATION-NOT-FOUND")
+        assertThat(wrongParent).contains("OCC-RESERVATION-NOT-FOUND")
+
+        val cancelled = mockMvc.post("/api/v1/reservations/$missing/cancel") {
+            header("Authorization", "Bearer $token")
+            header("X-Correlation-Id", UUID.randomUUID())
+            header("Idempotency-Key", "oracle-cancel-${UUID.randomUUID()}")
+            header("Expected-Version", 0)
+            contentType = MediaType.APPLICATION_JSON
+            content = mapper.writeValueAsBytes(CancelReservationRequest(resource.id))
+        }.andExpect { status { isNotFound() } }.andReturn().response.contentAsString
+        assertThat(cancelled).contains("OCC-RESERVATION-NOT-FOUND")
+    }
+
+    @Test
     fun `HTTP query boundaries return bounded validation problems before database access`() {
         val resource = createResource()
         val token = loginToken()
@@ -283,7 +432,7 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         val resource = createResource()
         val requester = entity("requester")
         val reservation = reserve(resource.id, requester, instant(9), instant(10), 2, key = "reserve-replay-${UUID.randomUUID()}")
-        val change = ChangeReservationRequest(instant(10), instant(11), 3.toBigDecimal(), false)
+        val change = ChangeReservationRequest(resource.id, instant(10), instant(11), 3.toBigDecimal(), false)
         val key = "change-${UUID.randomUUID()}"
         val metadata = metadata(key, expectedVersion = 0)
 
@@ -295,7 +444,8 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         assertThat(replay.replayed).isTrue()
         assertThat(changed.body.version).isEqualTo(1)
         assertThatThrownBy {
-            resources.cancel(reservation.id, metadata(expectedVersion = 0), byteArrayOf('{'.code.toByte(), '}'.code.toByte()))
+            val cancel = CancelReservationRequest(resource.id)
+            resources.cancel(reservation.id, metadata(expectedVersion = 0), mapper.writeValueAsBytes(cancel), cancel)
         }.isInstanceOf(OptimisticConflictException::class.java)
         assertThatThrownBy {
             resources.change(
@@ -346,6 +496,8 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
             header("X-Correlation-Id", UUID.randomUUID())
             header("Idempotency-Key", "cancel-${UUID.randomUUID()}")
             header("Expected-Version", 0)
+            contentType = MediaType.APPLICATION_JSON
+            content = mapper.writeValueAsBytes(CancelReservationRequest(resource.id))
         }.andExpect { status { isOk() } }
 
         val terminal = mockMvc.post("/api/v1/reservations/${reservation.id}/cancel") {
@@ -353,11 +505,13 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
             header("X-Correlation-Id", UUID.randomUUID())
             header("Idempotency-Key", "cancel-terminal-${UUID.randomUUID()}")
             header("Expected-Version", 1)
+            contentType = MediaType.APPLICATION_JSON
+            content = mapper.writeValueAsBytes(CancelReservationRequest(resource.id))
         }.andExpect { status { isConflict() } }.andReturn().response.contentAsString
         assertThat(terminal).contains("OCC-RESERVATION-STATE-CONFLICT").doesNotContain("PSQLException", "55000")
 
         val constrainedReservation = reserve(resource.id, requester, instant(10), instant(11), 1)
-        val invalid = ChangeReservationRequest(instant(10), instant(11), 3.toBigDecimal(), false)
+        val invalid = ChangeReservationRequest(resource.id, instant(10), instant(11), 3.toBigDecimal(), false)
         val constrained = mockMvc.patch("/api/v1/reservations/${constrainedReservation.id}") {
             header("Authorization", "Bearer $token")
             header("X-Correlation-Id", UUID.randomUUID())
@@ -396,4 +550,52 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
         administratorId,
         action,
     )!!
+
+    private fun workflowFixture(): WorkflowFixture {
+        val packageId = UUID.randomUUID()
+        val packageVersion = UUID.randomUUID()
+        flywayJdbc.update(
+            "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, ?, 'Resource fixture', 'ACTIVE')",
+            packageId, "resource.${UUID.randomUUID()}",
+        )
+        flywayJdbc.update(
+            "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
+            packageVersion, packageId,
+        )
+        val workflow = UUID.randomUUID()
+        val binding = UUID.randomUUID()
+        flywayJdbc.update(
+            """INSERT INTO catalog.workflow_definition
+               (id, package_version_id, workflow_key, bpmn_object_key, content_hash)
+               VALUES (?, ?, ?, 'workflow.bpmn', ?)""",
+            workflow, packageVersion, "resource-${UUID.randomUUID()}", "a".repeat(64),
+        )
+        jdbc.update(
+            """INSERT INTO occ.process_definition_binding
+               (id, workflow_definition_id, package_version_id, bpmn_key,
+                flowable_deployment_id, flowable_definition_id, content_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            binding, workflow, packageVersion, "resource-${UUID.randomUUID()}",
+            "deployment-${UUID.randomUUID()}", "definition-${UUID.randomUUID()}", "b".repeat(64),
+        )
+        fun process(label: String): UUID = entity(label).also { id ->
+            jdbc.update(
+                """INSERT INTO occ.process_instance
+                   (id, definition_binding_id, package_version_id, flowable_instance_id, business_key, state)
+                   VALUES (?, ?, ?, ?, ?, 'RUNNING')""",
+                id, binding, packageVersion, "flowable-${UUID.randomUUID()}", "business-${UUID.randomUUID()}",
+            )
+        }
+        val processA = process("process-a")
+        val processB = process("process-b")
+        val taskA = entity("task-a")
+        jdbc.update(
+            """INSERT INTO occ.task_projection(id, process_instance_id, activity_key, flowable_task_id, state)
+               VALUES (?, ?, 'reserve', ?, 'CREATED')""",
+            taskA, processA, "task-${UUID.randomUUID()}",
+        )
+        return WorkflowFixture(processA, processB, taskA)
+    }
+
+    private data class WorkflowFixture(val processA: UUID, val processB: UUID, val taskA: UUID)
 }

@@ -65,6 +65,7 @@ data class Reservation(
     val exclusive: Boolean,
     val state: ReservationState,
     val version: Long,
+    val createdAt: OffsetDateTime,
 )
 
 data class CreateResourceRequest(
@@ -107,6 +108,7 @@ data class ReserveResourceRequest(
 }
 
 data class ChangeReservationRequest(
+    val resourceId: UUID,
     val start: OffsetDateTime,
     val end: OffsetDateTime,
     val capacity: BigDecimal,
@@ -114,6 +116,8 @@ data class ChangeReservationRequest(
 ) {
     init { validateRange(start, end); require(capacity > BigDecimal.ZERO) }
 }
+
+data class CancelReservationRequest(val resourceId: UUID)
 
 data class CursorPage<T>(val items: List<T>, val nextCursor: String?)
 data class ResourceCommandResult<T>(val status: Int, val replayed: Boolean, val body: T)
@@ -128,6 +132,9 @@ class ReservationConflictException(
 
 class ReservationStateConflictException : RuntimeException("Reservation state does not permit this command")
 class ResourceQueryValidationException : RuntimeException("Resource query is invalid")
+class ResourceReferenceValidationException : RuntimeException("Resource reference is invalid")
+class ResourceIdConflictException : RuntimeException("Resource command ID already exists")
+class ReservationNotFoundException : RuntimeException("Reservation is unavailable")
 
 @Service
 class ResourceService(
@@ -172,17 +179,19 @@ class ResourceService(
         bytes: ByteArray,
         request: ChangeReservationRequest,
     ): ResourceCommandResult<Reservation> {
-        val parent = repository.reservationParent(reservationId) ?: throw InvalidCommandRequestException()
-        return domainFailure(parent.resourceId, utc(request.start) to utc(request.end), metadata) {
-            decodeReservation(commands.execute(metadata, bytes, changeCommand(reservationId, parent, request.normalized())))
+        return domainFailure(request.resourceId, utc(request.start) to utc(request.end), metadata) {
+            decodeReservation(commands.execute(metadata, bytes, changeCommand(reservationId, request.normalized())))
         }
     }
 
-    fun cancel(reservationId: UUID, metadata: CommandMetadata, bytes: ByteArray): ResourceCommandResult<Reservation> {
-        val parent = repository.reservationParent(reservationId) ?: throw InvalidCommandRequestException()
-        val current = repository.reservation(reservationId) ?: throw InvalidCommandRequestException()
-        return domainFailure(parent.resourceId, current.start to current.end, metadata) {
-            decodeReservation(commands.execute(metadata, bytes, cancelCommand(reservationId, parent)))
+    fun cancel(
+        reservationId: UUID,
+        metadata: CommandMetadata,
+        bytes: ByteArray,
+        request: CancelReservationRequest,
+    ): ResourceCommandResult<Reservation> {
+        return domainFailure(request.resourceId, null, metadata) {
+            decodeReservation(commands.execute(metadata, bytes, cancelCommand(reservationId, request.resourceId)))
         }
     }
 
@@ -258,27 +267,28 @@ class ResourceService(
             put("start", normalizedStart.toString())
             put("end", normalizedEnd.toString())
         })
-        val context = cursorContext("resource.schedule", filters, "reservation-start-id")
+        val context = cursorContext("resource.schedule", filters, "reservation-created-id", sortVersion = 2)
         val tuple = cursor?.let { cursorCodec.decode(it, context) }
-        val afterStart = tuple?.get(0)?.textValue()?.let(OffsetDateTime::parse)
+        val afterCreatedAt = tuple?.get(0)?.textValue()?.let(OffsetDateTime::parse)
         val afterId = tuple?.get(1)?.textValue()?.let(UUID::fromString)
         val inclusive = tuple?.get(2)?.booleanValue() ?: false
         val rowBudget = MAX_QUERY_AUTHORIZATION_CALLS - 1
         val authorized = transactions.execute {
             authorizeRequired(principalId, correlationId, resourceId, resourceId, READ_ACTION)
-            repository.schedule(resourceId, normalizedStart, normalizedEnd, afterStart, afterId, inclusive, minOf(limit + 1, rowBudget))
+            // Each page is a READ COMMITTED view; immutable creation order prevents range changes from shifting cursor position.
+            repository.schedule(resourceId, normalizedStart, normalizedEnd, afterCreatedAt, afterId, inclusive, minOf(limit + 1, rowBudget))
                 .map { revealOrRedactIdentity(principalId, correlationId, it) }
         }!!
         val page = authorized.take(limit)
         val next = if (authorized.size > limit) authorized[limit].let { reservation ->
             cursorCodec.encode(
                 context,
-                mapper.createArrayNode().add(reservation.start.toString()).add(reservation.id.toString()).add(true),
+                mapper.createArrayNode().add(reservation.createdAt.toString()).add(reservation.id.toString()).add(true),
             )
         } else if (authorized.size == rowBudget && limit + 1 > rowBudget) authorized.last().let { reservation ->
             cursorCodec.encode(
                 context,
-                mapper.createArrayNode().add(reservation.start.toString()).add(reservation.id.toString()).add(false),
+                mapper.createArrayNode().add(reservation.createdAt.toString()).add(reservation.id.toString()).add(false),
             )
         } else null
         return CursorPage(page, next)
@@ -315,9 +325,17 @@ class ResourceService(
         }
 
     private fun reserveCommand(resourceId: UUID, request: ReserveResourceRequest) =
-        object : ResourceCommand(request.requesterEntityId, resourceId, request.id, false, "resource-reservation") {
+        object : ResourceCommand(resourceId, resourceId, request.id, false, "resource-reservation") {
             override fun lockCurrentVersion(context: CommandContext): Long? {
                 if (repository.lockResource(resourceId) == null) throw InvalidCommandRequestException()
+                if (!repository.lockReservationProvenance(request)) throw ResourceReferenceValidationException()
+                authorizeRequired(context.metadata.principalId, context.metadata.correlationId, request.requesterEntityId, resourceId, WRITE_ACTION)
+                request.processInstanceId?.let {
+                    authorizeRequired(context.metadata.principalId, context.metadata.correlationId, it, resourceId, WRITE_ACTION)
+                }
+                request.taskId?.let {
+                    authorizeRequired(context.metadata.principalId, context.metadata.correlationId, it, resourceId, WRITE_ACTION)
+                }
                 return null
             }
 
@@ -326,11 +344,11 @@ class ResourceService(
             )
         }
 
-    private fun changeCommand(id: UUID, parent: ReservationIdentity, request: ChangeReservationRequest) =
-        object : ResourceCommand(parent.requesterEntityId, parent.resourceId, id, true, "resource-reservation") {
+    private fun changeCommand(id: UUID, request: ChangeReservationRequest) =
+        object : ResourceCommand(request.resourceId, request.resourceId, id, true, "resource-reservation") {
             override fun lockCurrentVersion(context: CommandContext): Long? {
-                if (repository.lockResource(parent.resourceId) == null) throw InvalidCommandRequestException()
-                return repository.lockReservation(id)
+                if (repository.lockResource(request.resourceId) == null) throw InvalidCommandRequestException()
+                return repository.lockReservation(id, request.resourceId)?.version ?: throw ReservationNotFoundException()
             }
 
             override fun execute(context: CommandContext): CommandMutation {
@@ -342,11 +360,11 @@ class ResourceService(
             }
         }
 
-    private fun cancelCommand(id: UUID, parent: ReservationIdentity) =
-        object : ResourceCommand(parent.requesterEntityId, parent.resourceId, id, true, "resource-reservation") {
+    private fun cancelCommand(id: UUID, resourceId: UUID) =
+        object : ResourceCommand(resourceId, resourceId, id, true, "resource-reservation") {
             override fun lockCurrentVersion(context: CommandContext): Long? {
-                if (repository.lockResource(parent.resourceId) == null) throw InvalidCommandRequestException()
-                return repository.lockReservation(id)
+                if (repository.lockResource(resourceId) == null) throw InvalidCommandRequestException()
+                return repository.lockReservation(id, resourceId)?.version ?: throw ReservationNotFoundException()
             }
 
             override fun execute(context: CommandContext): CommandMutation {
@@ -502,8 +520,8 @@ class ResourceService(
         taskId = null,
     )
 
-    private fun cursorContext(endpoint: String, filters: CanonicalJsonObject, sortName: String) = CursorContext(
-        endpoint, OutboxRepository.DEFAULT_CUSTOMER_INSTANCE_ID, filters, sortName, 1, CursorDirection.FORWARD,
+    private fun cursorContext(endpoint: String, filters: CanonicalJsonObject, sortName: String, sortVersion: Int = 1) = CursorContext(
+        endpoint, OutboxRepository.DEFAULT_CUSTOMER_INSTANCE_ID, filters, sortName, sortVersion, CursorDirection.FORWARD,
     )
 
     private inline fun <T> domainFailure(
@@ -514,9 +532,16 @@ class ResourceService(
     ): T = try {
         action()
     } catch (exception: DataAccessException) {
-        when (sqlState(exception)) {
+        val postgres = postgresException(exception)
+        when (postgres?.sqlState) {
             STATE_SQLSTATE -> throw ReservationStateConflictException()
             CONSTRAINT_SQLSTATE -> throw InvalidCommandRequestException()
+            FOREIGN_KEY_SQLSTATE -> if (postgres.serverErrorMessage?.constraint in REFERENCE_CONSTRAINTS) {
+                throw ResourceReferenceValidationException()
+            } else throw exception
+            UNIQUE_SQLSTATE -> if (postgres.serverErrorMessage?.constraint in ID_CONSTRAINTS) {
+                throw ResourceIdConflictException()
+            } else throw exception
             EXCLUSION_SQLSTATE -> Unit
             else -> throw exception
         }
@@ -547,10 +572,10 @@ class ResourceService(
         }
     }
 
-    private fun sqlState(exception: Throwable): String? {
+    private fun postgresException(exception: Throwable): PSQLException? {
         var current: Throwable? = exception
         while (current != null) {
-            if (current is PSQLException) return current.sqlState
+            if (current is PSQLException) return current
             current = current.cause
         }
         return null
@@ -571,11 +596,20 @@ class ResourceService(
         private const val EXCLUSION_SQLSTATE = "23P01"
         private const val STATE_SQLSTATE = "55000"
         private const val CONSTRAINT_SQLSTATE = "23514"
+        private const val FOREIGN_KEY_SQLSTATE = "23503"
+        private const val UNIQUE_SQLSTATE = "23505"
         private const val DATABASE_PAGE_SIZE = 32
         private const val MAX_QUERY_LIMIT = 100
 
         /** Bounds rows examined and OPA decisions made by one inventory or schedule request. */
         const val MAX_QUERY_AUTHORIZATION_CALLS = 32
+        private val REFERENCE_CONSTRAINTS = setOf(
+            "resource_reservation_requester_entity_id_fkey",
+            "resource_reservation_process_instance_id_fkey",
+            "resource_reservation_task_id_fkey",
+            "fk_resource_reservation_task_process",
+        )
+        private val ID_CONSTRAINTS = setOf("resource_reservation_pkey", "resource_availability_pkey")
     }
 }
 

@@ -19,6 +19,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.springframework.jdbc.core.JdbcTemplate
+import org.springframework.jdbc.datasource.DriverManagerDataSource
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.context.DynamicPropertyRegistry
@@ -39,6 +40,7 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CountDownLatch
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -51,6 +53,11 @@ abstract class ResourceIntegrationSupport {
     @Autowired protected lateinit var mapper: ObjectMapper
     @Autowired protected lateinit var mockMvc: MockMvc
     @Autowired protected lateinit var cursorCodec: CursorCodec
+    @Autowired protected lateinit var lockObserver: ContendedResourceLockObserver
+
+    protected val flywayJdbc: JdbcTemplate by lazy {
+        JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
+    }
 
     protected val administratorId: UUID
         get() = jdbc.queryForObject(
@@ -106,6 +113,36 @@ abstract class ResourceIntegrationSupport {
         @Bean
         @Primary
         internal fun resourceBootstrapSecretReader(): BootstrapSecretReader = InjectedSecretReader()
+
+        @Bean
+        @Primary
+        fun resourceLockObserver(): ContendedResourceLockObserver = ContendedResourceLockObserver()
+    }
+
+    class ContendedResourceLockObserver : ResourceLockObserver {
+        @Volatile private var target: UUID? = null
+        @Volatile private var arrivals = CountDownLatch(0)
+        @Volatile private var release = CountDownLatch(0)
+
+        @Synchronized
+        fun arm(resourceId: UUID, contenders: Int) {
+            target = resourceId
+            arrivals = CountDownLatch(contenders)
+            release = CountDownLatch(1)
+        }
+
+        override fun beforeLock(resourceId: UUID) {
+            if (resourceId != target) return
+            arrivals.countDown()
+            check(release.await(10, TimeUnit.SECONDS))
+        }
+
+        override fun afterLock(resourceId: UUID) = Unit
+
+        fun releaseWhenContending() {
+            check(arrivals.await(10, TimeUnit.SECONDS))
+            release.countDown()
+        }
     }
 
     companion object {

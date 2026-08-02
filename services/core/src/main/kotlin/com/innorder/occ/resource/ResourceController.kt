@@ -83,8 +83,9 @@ class ResourceController(private val resources: ResourceService, private val map
         @PathVariable id: UUID,
         @RequestHeader("Idempotency-Key") key: String,
         @RequestHeader("Expected-Version") expectedVersion: Long,
+        @Valid @RequestBody request: CancelReservationRequest,
     ) = response(
-        resources.cancel(id, metadata(authentication, servletRequest, key, expectedVersion), "{}".toByteArray()),
+        resources.cancel(id, metadata(authentication, servletRequest, key, expectedVersion), bytes(request), request),
     )
 
     @GetMapping("/resources")

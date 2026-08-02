@@ -131,6 +131,15 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun resourceQueryValidation(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 400, "resource-query-validation", "Invalid resource query", "OCC-RESOURCE-QUERY-VALIDATION")
 
+    fun resourceReferenceValidation(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "resource-reference-validation", "Invalid resource reference", "OCC-RESOURCE-REFERENCE")
+
+    fun resourceIdConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 409, "resource-id-conflict", "Resource ID conflict", "OCC-RESOURCE-ID-CONFLICT")
+
+    fun reservationNotFound(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 404, "reservation-not-found", "Reservation not found", "OCC-RESERVATION-NOT-FOUND")
+
     fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
 
