@@ -51,15 +51,16 @@ import {
   availabilityWindowSchema,
   cancelReservationRequestSchema,
   changeReservationRequestSchema,
+  confirmedEvidenceContentResultSchema,
   createAvailabilityWindowRequestSchema,
   createEvidenceUploadSessionRequestSchema,
   createRiskAdjudicationRequestSchema,
   domainProblemDetailsSchema,
-  evidenceContentResultSchema,
   evidenceDownloadMetadataSchema,
   evidenceEventPayloadSchema,
   evidenceMetadataSchema,
   evidencePreviewMetadataSchema,
+  evidenceRangeHeaderSchema,
   evidenceRequirementPageSchema,
   evidenceRequirementSchema,
   evidenceReviewConditionSchema,
@@ -68,6 +69,7 @@ import {
   evidenceUploadSessionSchema,
   evidenceVersionPageSchema,
   evidenceVersionSchema,
+  failedEvidenceContentResultSchema,
   halfOpenIntervalSchema,
   interventionItemSchema,
   interventionPageSchema,
@@ -78,6 +80,7 @@ import {
   reservationConflictSchema,
   reservationEventPayloadSchema,
   reservationSchedulePageSchema,
+  reservationScheduleFiltersSchema,
   reservationSchema,
   reserveResourceRequestSchema,
   reviewEvidenceRequestSchema,
@@ -113,6 +116,7 @@ interface OpenApiSchema extends OpenApiSchemaProperty {
 interface OpenApiSchemaProperty {
   $ref?: string;
   additionalProperties?: boolean;
+  allOf?: OpenApiSchemaProperty[];
   const?: string;
   discriminator?: { mapping?: Record<string, string>; propertyName?: string };
   enum?: string[];
@@ -125,6 +129,10 @@ interface OpenApiSchemaProperty {
   oneOf?: OpenApiSchemaProperty[];
   pattern?: string;
   type?: string;
+  "x-occ-semantic-validation"?: {
+    rules: string[];
+    validator: string;
+  };
 }
 
 interface OpenApiParameter {
@@ -132,6 +140,7 @@ interface OpenApiParameter {
   in?: string;
   name?: string;
   required?: boolean;
+  schema?: OpenApiSchemaProperty;
 }
 
 interface OpenApiDocument {
@@ -158,6 +167,10 @@ interface OpenApiOperation {
   };
   security?: Array<Record<string, string[]>>;
   responses?: Record<string, OpenApiResponse>;
+  "x-occ-semantic-validation"?: {
+    rules: string[];
+    validator: string;
+  };
 }
 
 interface OpenApiResponse {
@@ -202,6 +215,37 @@ const createOpenApiSchemaValidator = (
   });
 };
 
+const expectSharedFixtureValidation = (
+  structuralValidator: ReturnType<typeof createOpenApiSchemaValidator>,
+  runtimeSchema: { safeParse: (value: unknown) => { success: boolean } },
+  fixtures: Array<{ structural: boolean; valid: boolean; value: unknown }>,
+): void => {
+  for (const fixture of fixtures) {
+    const structurallyValid = structuralValidator(fixture.value);
+    expect(structurallyValid, JSON.stringify(structuralValidator.errors)).toBe(
+      fixture.structural,
+    );
+    expect(structurallyValid && runtimeSchema.safeParse(fixture.value).success).toBe(
+      fixture.valid,
+    );
+  }
+};
+
+const createInlineOpenApiSchemaValidator = (
+  schemas: Record<string, OpenApiSchema>,
+  schema: OpenApiSchemaProperty,
+) => {
+  const rewritten = JSON.parse(
+    JSON.stringify({ schema, schemas }).replaceAll(
+      "#/components/schemas/",
+      "#/$defs/",
+    ),
+  ) as { schema: object; schemas: Record<string, unknown> };
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  return ajv.compile({ ...rewritten.schema, $defs: rewritten.schemas });
+};
+
 const expectStrictObjectParity = (
   openApiSchema: OpenApiSchema | undefined,
   zodShape: Record<string, { isOptional: () => boolean }>,
@@ -213,6 +257,23 @@ const expectStrictObjectParity = (
   expect(Object.keys(openApiSchema?.properties ?? {}), label).toEqual(
     Object.keys(zodShape),
   );
+};
+
+const derivesFromProblemDetails = (
+  schema: OpenApiSchemaProperty | undefined,
+  schemas: Record<string, OpenApiSchema>,
+  seen = new Set<string>(),
+): boolean => {
+  if (schema?.$ref === "#/components/schemas/ProblemDetails") return true;
+  if (schema?.$ref) {
+    const name = schema.$ref.replace("#/components/schemas/", "");
+    if (seen.has(name)) return false;
+    return derivesFromProblemDetails(schemas[name], schemas, new Set(seen).add(name));
+  }
+  if (schema?.allOf?.some((member) => derivesFromProblemDetails(member, schemas, seen))) {
+    return true;
+  }
+  return schema?.oneOf?.every((member) => derivesFromProblemDetails(member, schemas, seen)) ?? false;
 };
 
 describe("OCC Core OpenAPI system status", () => {
@@ -328,6 +389,121 @@ describe("OCC Core OpenAPI system status", () => {
     }));
   });
 
+  it("aligns structural and semantic validation for byte ranges", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const rangeSchema = document.components.parameters?.Range?.schema;
+
+    expect(rangeSchema?.["x-occ-semantic-validation"]).toEqual({
+      validator: "evidenceRangeHeaderSchema",
+      rules: [
+        "suffix-length-positive",
+        "offsets-js-safe-integers",
+        "end-not-before-start",
+      ],
+    });
+    const validateRange = createInlineOpenApiSchemaValidator(
+      document.components.schemas,
+      rangeSchema ?? {},
+    );
+    expectSharedFixtureValidation(validateRange, evidenceRangeHeaderSchema, [
+      { value: "bytes=0-499", structural: true, valid: true },
+      { value: "bytes=500-", structural: true, valid: true },
+      { value: "bytes=-500", structural: true, valid: true },
+      { value: "bytes=-0", structural: false, valid: false },
+      { value: "bytes=500-499", structural: true, valid: false },
+      { value: `bytes=0-${Number.MAX_SAFE_INTEGER + 1}`, structural: true, valid: false },
+    ]);
+  });
+
+  it("documents and validates positive intervals across resources and events", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const start = "2026-08-01T10:30:00+02:00";
+    const end = "2026-08-01T11:30:00+02:00";
+    const interval = { start, end };
+    const reversed = { start: end, end: start };
+    const id = "11111111-1111-4111-8111-111111111111";
+    const contracts = [
+      ["HalfOpenInterval", halfOpenIntervalSchema, interval],
+      ["AvailabilityWindow", availabilityWindowSchema, { id, resourceId: id, interval, mode: "AVAILABLE", createdAt: start }],
+      ["CreateAvailabilityWindowRequest", createAvailabilityWindowRequestSchema, { interval, mode: "UNAVAILABLE" }],
+      ["ReservationConflict", reservationConflictSchema, { resourceId: id, interval, kind: "CAPACITY", redacted: true }],
+      ["ReservationAvailabilityRequest", reservationAvailabilityRequestSchema, { interval, capacity: 1, exclusive: false }],
+      ["ReservationAvailability", reservationAvailabilitySchema, { resourceId: id, interval, requestedCapacity: 1, available: true, remainingCapacity: 1, conflicts: [] }],
+      ["Reservation", reservationSchema, { id, resourceId: id, interval, capacity: 1, exclusive: false, state: "CONFIRMED", version: 1, createdAt: start, updatedAt: start }],
+      ["ReserveResourceRequest", reserveResourceRequestSchema, { resourceId: id, requesterEntityId: id, interval, capacity: 1, exclusive: false }],
+      ["ChangeReservationRequest", changeReservationRequestSchema, { interval, capacity: 1, exclusive: false }],
+      ["ResourceEventPayload", resourceEventPayloadSchema, { resourceId: id, state: "AVAILABLE", version: 1, interval }],
+      ["ReservationEventPayload", reservationEventPayloadSchema, { reservationId: id, resourceId: id, state: "CONFIRMED", version: 1, interval, capacity: 1, exclusive: false }],
+    ] as const;
+
+    expect(schemas.HalfOpenInterval?.["x-occ-semantic-validation"]).toEqual({
+      validator: "halfOpenIntervalSchema",
+      rules: ["start-before-end"],
+    });
+    for (const [name, runtimeSchema, valid] of contracts) {
+      const invalid = name === "HalfOpenInterval"
+        ? reversed
+        : { ...valid, interval: reversed };
+      expectSharedFixtureValidation(
+        createOpenApiSchemaValidator(schemas, name),
+        runtimeSchema,
+        [
+          { value: valid, structural: true, valid: true },
+          { value: invalid, structural: true, valid: false },
+        ],
+      );
+    }
+  });
+
+  it("documents and validates reporting and schedule period ordering", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const schemas = document.components.schemas;
+    const id = "11111111-1111-4111-8111-111111111111";
+    const createdAt = "2026-08-01T10:30:00+02:00";
+    const contracts = [
+      ["CreateRiskAdjudicationRequest", createRiskAdjudicationRequestSchema, { reportingPeriodStart: "2026-07-01", reportingPeriodEnd: "2026-08-01", knownEventKey: "event:1", targetEntityId: id, severeEvent: true, outcome: "MISSED", reason: "No risk." }],
+      ["RiskAdjudication", riskAdjudicationSchema, { id, reportingPeriodStart: "2026-07-01", reportingPeriodEnd: "2026-08-01", knownEventKey: "event:1", targetEntityId: id, severeEvent: true, outcome: "MISSED", reason: "No risk.", adjudicationVersion: 1, createdAt }],
+      ["RiskMetrics", riskMetricsSchema, { reportingPeriodStart: "2026-07-01", reportingPeriodEnd: "2026-08-01", evaluatedCount: 1, severeEventCount: 1, truePositiveCount: 0, falsePositiveCount: 0, missedCount: 1, acknowledgedWithinSlaCount: 0, resolvedCount: 0, generatedAt: createdAt }],
+      ["ReservationScheduleFilters", reservationScheduleFiltersSchema, { from: createdAt, until: "2026-08-01T11:30:00+02:00" }],
+    ] as const;
+
+    expect(
+      document.paths["/api/v1/resources/{resourceId}/schedule"]?.get?.[
+        "x-occ-semantic-validation"
+      ],
+    ).toEqual({
+      validator: "reservationScheduleFiltersSchema",
+      rules: ["from-before-until"],
+    });
+
+    for (const [name, runtimeSchema, valid] of contracts) {
+      expect(schemas[name]?.["x-occ-semantic-validation"]).toBeDefined();
+      const reversed = name === "ReservationScheduleFilters"
+        ? { ...valid, from: valid.until, until: valid.from }
+        : { ...valid, reportingPeriodStart: valid.reportingPeriodEnd, reportingPeriodEnd: valid.reportingPeriodStart };
+      expectSharedFixtureValidation(
+        createOpenApiSchemaValidator(schemas, name),
+        runtimeSchema,
+        [
+          { value: valid, structural: true, valid: true },
+          { value: reversed, structural: true, valid: false },
+        ],
+      );
+    }
+  });
+
   it("wires domain filters to cursor queries", async () => {
     const source = await readFile(
       new URL("../openapi/occ-core.yaml", import.meta.url),
@@ -412,7 +588,8 @@ describe("OCC Core OpenAPI system status", () => {
       "EvidenceRequirement",
       "CreateEvidenceUploadSessionRequest",
       "EvidenceUploadSession",
-      "EvidenceContentResult",
+      "ConfirmedEvidenceContentResult",
+      "FailedEvidenceContentResult",
       "EvidenceMetadata",
       "ReviewEvidenceRequest",
       "Risk",
@@ -446,8 +623,58 @@ describe("OCC Core OpenAPI system status", () => {
     });
     expect(schemas.RiskActionCommandRequest?.oneOf).toHaveLength(6);
     for (const variant of schemas.RiskActionCommandRequest?.oneOf ?? []) {
-      expect(variant.type).toBe("object");
-      expect(variant.additionalProperties).toBe(false);
+      const name = variant.$ref?.replace("#/components/schemas/", "") ?? "";
+      expect(schemas[name]?.type).toBe("object");
+      expect(schemas[name]?.additionalProperties).toBe(false);
+    }
+  });
+
+  it("names and discriminates terminal evidence content results", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const result = schemas.EvidenceContentResult;
+
+    expect(result?.oneOf).toEqual([
+      { $ref: "#/components/schemas/ConfirmedEvidenceContentResult" },
+      { $ref: "#/components/schemas/FailedEvidenceContentResult" },
+    ]);
+    expect(result?.discriminator).toEqual({
+      propertyName: "status",
+      mapping: {
+        CONFIRMED: "#/components/schemas/ConfirmedEvidenceContentResult",
+        FAILED: "#/components/schemas/FailedEvidenceContentResult",
+      },
+    });
+    for (const name of ["ConfirmedEvidenceContentResult", "FailedEvidenceContentResult"]) {
+      expect(schemas[name]?.additionalProperties).toBe(false);
+    }
+  });
+
+  it("uses named risk action command schemas with complete discriminator mapping", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const command = schemas.RiskActionCommandRequest;
+    const mapping = {
+      ACKNOWLEDGE: "#/components/schemas/AcknowledgeRiskActionCommand",
+      ASSIGN: "#/components/schemas/AssignRiskActionCommand",
+      ESCALATE: "#/components/schemas/EscalateRiskActionCommand",
+      MITIGATE: "#/components/schemas/MitigateRiskActionCommand",
+      RESOLVE: "#/components/schemas/ResolveRiskActionCommand",
+      DISMISS: "#/components/schemas/DismissRiskActionCommand",
+    };
+
+    expect(command?.oneOf).toEqual(
+      Object.values(mapping).map(($ref) => ({ $ref })),
+    );
+    expect(command?.discriminator).toEqual({ propertyName: "action", mapping });
+    for (const name of Object.values(mapping).map((ref) => ref.split("/").at(-1) ?? "")) {
+      expect(schemas[name]?.additionalProperties).toBe(false);
     }
   });
 
@@ -587,7 +814,8 @@ describe("OCC Core OpenAPI system status", () => {
       EvidenceRequirementPage: evidenceRequirementPageSchema,
       CreateEvidenceUploadSessionRequest: createEvidenceUploadSessionRequestSchema,
       EvidenceUploadSession: evidenceUploadSessionSchema,
-      EvidenceContentResult: evidenceContentResultSchema,
+      ConfirmedEvidenceContentResult: confirmedEvidenceContentResultSchema,
+      FailedEvidenceContentResult: failedEvidenceContentResultSchema,
       EvidenceMetadata: evidenceMetadataSchema,
       SubmitEvidenceRequest: submitEvidenceRequestSchema,
       EvidenceReviewCondition: evidenceReviewConditionSchema,
@@ -685,9 +913,10 @@ describe("OCC Core OpenAPI system status", () => {
     });
 
     for (const response of Object.values(document.components.responses ?? {})) {
-      expect(response.content?.["application/problem+json"]?.schema?.$ref).toBe(
-        "#/components/schemas/ProblemDetails",
-      );
+      expect(derivesFromProblemDetails(
+        response.content?.["application/problem+json"]?.schema,
+        document.components.schemas,
+      )).toBe(true);
     }
   });
 
@@ -725,12 +954,80 @@ describe("OCC Core OpenAPI system status", () => {
           const resolvedResponse = componentName
             ? document.components.responses?.[componentName]
             : response;
-          expect(
-            resolvedResponse?.content?.["application/problem+json"]?.schema?.$ref,
-          ).toBe("#/components/schemas/ProblemDetails");
+          expect(derivesFromProblemDetails(
+            resolvedResponse?.content?.["application/problem+json"]?.schema,
+            document.components.schemas,
+          )).toBe(true);
         }
       }
     }
+  });
+
+  it("wires operation-specific domain error responses", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const document = parse(source) as OpenApiDocument;
+    const expected = [
+      ["/api/v1/evidence/upload-sessions", "post", "409", "EvidenceUploadConflict"],
+      ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "409", "EvidenceUploadConflict"],
+      ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "413", "PayloadTooLarge"],
+      ["/api/v1/evidence/upload-sessions/{uploadSessionId}/content", "put", "422", "UnprocessableContent"],
+      ["/api/v1/evidence/{evidenceId}/submit", "post", "409", "VersionConflict"],
+      ["/api/v1/evidence/{evidenceId}/reviews", "post", "409", "EvidenceReviewConflict"],
+      ["/api/v1/risks/{riskId}/actions", "post", "409", "RiskInvalidTransition"],
+      ["/api/v1/risks/adjudications", "post", "409", "VersionConflict"],
+      ["/api/v1/resources/{resourceId}", "patch", "409", "ResourceUnavailable"],
+      ["/api/v1/resources/{resourceId}/availability", "post", "409", "ResourceUnavailable"],
+      ["/api/v1/reservations", "post", "409", "ReservationConflict"],
+      ["/api/v1/reservations/{reservationId}/change", "post", "409", "ReservationConflict"],
+      ["/api/v1/reservations/{reservationId}/cancel", "post", "409", "VersionConflict"],
+      ["/api/v1/evidence/{evidenceId}/download", "get", "416", "InvalidRange"],
+    ] as const;
+
+    for (const [path, method, status, responseName] of expected) {
+      const operation = document.paths[path]?.[method as keyof OpenApiPathItem] as OpenApiOperation | undefined;
+      expect(operation?.responses?.[status]?.$ref, `${method.toUpperCase()} ${path} ${status}`).toBe(
+        `#/components/responses/${responseName}`,
+      );
+    }
+  });
+
+  it("fixes status and code for every domain Problem Details variant", async () => {
+    const source = await readFile(
+      new URL("../openapi/occ-core.yaml", import.meta.url),
+      "utf8",
+    );
+    const schemas = (parse(source) as OpenApiDocument).components.schemas;
+    const variants = {
+      EvidenceUploadConflictProblem: [409, "OCC-EVIDENCE-UPLOAD-CONFLICT"],
+      EvidenceReviewConflictProblem: [409, "OCC-EVIDENCE-REVIEW-CONFLICT"],
+      RiskInvalidTransitionProblem: [409, "OCC-RISK-INVALID-TRANSITION"],
+      ResourceUnavailableProblem: [409, "OCC-RESOURCE-UNAVAILABLE"],
+      ReservationConflictProblem: [409, "OCC-RESERVATION-CONFLICT"],
+      VersionConflictProblem: [409, "OCC-VERSION-CONFLICT"],
+      EvidenceTooLargeProblem: [413, "OCC-EVIDENCE-TOO-LARGE"],
+      EvidenceDigestMismatchProblem: [422, "OCC-EVIDENCE-DIGEST-MISMATCH"],
+      EvidenceInvalidContentProblem: [422, "OCC-EVIDENCE-INVALID-CONTENT"],
+      InvalidRangeProblem: [416, "OCC-INVALID-REQUEST"],
+    } as const;
+    const base = {
+      type: "https://innorder.local/problems/domain-error",
+      title: "Domain error",
+      correlationId: "11111111-1111-4111-8111-111111111111",
+    };
+
+    for (const [name, [status, code]] of Object.entries(variants)) {
+      const validate = createOpenApiSchemaValidator(schemas, name);
+      expect(validate({ ...base, status, code }), JSON.stringify(validate.errors)).toBe(true);
+      expect(validate({ ...base, status: status + 1, code })).toBe(false);
+      expect(validate({ ...base, status, code: "OCC-API-INTERNAL" })).toBe(false);
+    }
+    expect(schemas.UnprocessableContentProblem?.oneOf).toEqual([
+      { $ref: "#/components/schemas/EvidenceDigestMismatchProblem" },
+      { $ref: "#/components/schemas/EvidenceInvalidContentProblem" },
+    ]);
   });
 
   it("matches all strict platform Zod contracts", async () => {

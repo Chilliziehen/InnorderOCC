@@ -179,7 +179,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/EvidenceUploadConflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/upload-sessions/{uploadSessionId}:
@@ -231,7 +231,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/EvidenceUploadConflict"
         "413":
           $ref: "#/components/responses/PayloadTooLarge"
         "422":
@@ -285,7 +285,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/VersionConflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/reviews:
@@ -337,7 +337,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/EvidenceReviewConflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/evidence/{evidenceId}/versions:
@@ -569,7 +569,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/RiskInvalidTransition"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/interventions:
@@ -643,7 +643,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/VersionConflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/risks/metrics:
@@ -750,7 +750,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/ResourceUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources/{resourceId}/availability:
@@ -802,7 +802,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/ResourceUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
   /api/v1/resources/{resourceId}/availability-checks:
@@ -838,6 +838,9 @@ paths:
       - $ref: "#/components/parameters/ResourceId"
     get:
       operationId: getResourceSchedule
+      x-occ-semantic-validation:
+        validator: reservationScheduleFiltersSchema
+        rules: [from-before-until]
       parameters:
         - $ref: "#/components/parameters/ScheduleFrom"
         - $ref: "#/components/parameters/ScheduleUntil"
@@ -966,7 +969,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          $ref: "#/components/responses/Conflict"
+          $ref: "#/components/responses/VersionConflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
 components:
@@ -1019,7 +1022,13 @@ components:
       schema:
         type: string
         maxLength: 39
-        pattern: "^bytes=(?:[0-9]{1,16}-[0-9]{0,16}|-[0-9]{1,16})$"
+        pattern: "^bytes=(?:[0-9]{1,16}-[0-9]{0,16}|-[1-9][0-9]{0,15})$"
+        x-occ-semantic-validation:
+          validator: evidenceRangeHeaderSchema
+          rules:
+            - suffix-length-positive
+            - offsets-js-safe-integers
+            - end-not-before-start
     Cursor:
       name: cursor
       in: query
@@ -1249,19 +1258,49 @@ components:
       content:
         application/problem+json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/ReservationConflictProblem"
+    EvidenceUploadConflict:
+      description: Evidence upload session or content lifecycle conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/EvidenceUploadConflictProblem"
+    EvidenceReviewConflict:
+      description: Evidence review lifecycle conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/EvidenceReviewConflictProblem"
+    RiskInvalidTransition:
+      description: Risk action is invalid for the current lifecycle state
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/RiskInvalidTransitionProblem"
+    ResourceUnavailable:
+      description: Managed resource state or availability rejects the command
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ResourceUnavailableProblem"
+    VersionConflict:
+      description: Expected-Version does not match the current aggregate version
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/VersionConflictProblem"
     PayloadTooLarge:
       description: Evidence content exceeds the declared or 100 MiB limit
       content:
         application/problem+json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/EvidenceTooLargeProblem"
     UnprocessableContent:
       description: Evidence digest, media, inspection, or scanner validation failed closed
       content:
         application/problem+json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/UnprocessableContentProblem"
     InvalidRange:
       description: Requested evidence byte range is invalid
       headers:
@@ -1272,7 +1311,7 @@ components:
       content:
         application/problem+json:
           schema:
-            $ref: "#/components/schemas/ProblemDetails"
+            $ref: "#/components/schemas/InvalidRangeProblem"
     TooManyRequests:
       description: Request rate limit exceeded
       content:
@@ -1321,6 +1360,80 @@ components:
           format: int64
           minimum: 0
           maximum: 9007199254740991
+    EvidenceUploadConflictProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-EVIDENCE-UPLOAD-CONFLICT }
+    EvidenceReviewConflictProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-EVIDENCE-REVIEW-CONFLICT }
+    RiskInvalidTransitionProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-RISK-INVALID-TRANSITION }
+    ResourceUnavailableProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-RESOURCE-UNAVAILABLE }
+    ReservationConflictProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-RESERVATION-CONFLICT }
+    VersionConflictProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 409 }
+            code: { const: OCC-VERSION-CONFLICT }
+    EvidenceTooLargeProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 413 }
+            code: { const: OCC-EVIDENCE-TOO-LARGE }
+    EvidenceDigestMismatchProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 422 }
+            code: { const: OCC-EVIDENCE-DIGEST-MISMATCH }
+    EvidenceInvalidContentProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 422 }
+            code: { const: OCC-EVIDENCE-INVALID-CONTENT }
+    UnprocessableContentProblem:
+      oneOf:
+        - $ref: "#/components/schemas/EvidenceDigestMismatchProblem"
+        - $ref: "#/components/schemas/EvidenceInvalidContentProblem"
+    InvalidRangeProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          properties:
+            status: { const: 416 }
+            code: { const: OCC-INVALID-REQUEST }
     LoginRequest:
       type: object
       additionalProperties: false
@@ -1578,6 +1691,9 @@ components:
       additionalProperties: false
       required: [start, end]
       description: Positive canonical half-open interval [start, end); end must be later than start
+      x-occ-semantic-validation:
+        validator: halfOpenIntervalSchema
+        rules: [start-before-end]
       properties:
         start:
           $ref: "#/components/schemas/OffsetInstant"
@@ -1671,17 +1787,35 @@ components:
         expiresAt: { $ref: "#/components/schemas/OffsetInstant" }
         version: { $ref: "#/components/schemas/SafeVersion" }
     EvidenceContentResult:
+      oneOf:
+        - $ref: "#/components/schemas/ConfirmedEvidenceContentResult"
+        - $ref: "#/components/schemas/FailedEvidenceContentResult"
+      discriminator:
+        propertyName: status
+        mapping:
+          CONFIRMED: "#/components/schemas/ConfirmedEvidenceContentResult"
+          FAILED: "#/components/schemas/FailedEvidenceContentResult"
+    ConfirmedEvidenceContentResult:
       type: object
       additionalProperties: false
-      required: [uploadSessionId, evidenceId, status, version]
+      required: [uploadSessionId, evidenceId, status, sha256, sizeBytes, detectedMediaType, evidenceVersion, version]
       properties:
         uploadSessionId: { type: string, format: uuid }
         evidenceId: { type: string, format: uuid }
-        status: { type: string, enum: [CONFIRMED, FAILED] }
+        status: { type: string, const: CONFIRMED }
         sha256: { $ref: "#/components/schemas/Sha256" }
         sizeBytes: { type: integer, format: int64, minimum: 1, maximum: 104857600 }
         detectedMediaType: { type: string, minLength: 1, maxLength: 128 }
         evidenceVersion: { $ref: "#/components/schemas/PositiveVersion" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+    FailedEvidenceContentResult:
+      type: object
+      additionalProperties: false
+      required: [uploadSessionId, evidenceId, status, failureCode, version]
+      properties:
+        uploadSessionId: { type: string, format: uuid }
+        evidenceId: { type: string, format: uuid }
+        status: { type: string, const: FAILED }
         failureCode: { type: string, minLength: 1, maxLength: 128 }
         version: { $ref: "#/components/schemas/SafeVersion" }
     EvidenceMetadata:
@@ -1857,47 +1991,68 @@ components:
         actedAt: { $ref: "#/components/schemas/OffsetInstant" }
     RiskActionCommandRequest:
       oneOf:
-        - type: object
-          additionalProperties: false
-          required: [action, reason]
-          properties:
-            action: { type: string, const: ACKNOWLEDGE }
-            reason: { type: string, minLength: 1, maxLength: 2048 }
-        - type: object
-          additionalProperties: false
-          required: [action, ownerRelationshipId, reason]
-          properties:
-            action: { type: string, const: ASSIGN }
-            ownerRelationshipId: { type: string, format: uuid }
-            reason: { type: string, minLength: 1, maxLength: 2048 }
-        - type: object
-          additionalProperties: false
-          required: [action, level, severity, reason]
-          properties:
-            action: { type: string, const: ESCALATE }
-            level: { type: integer, minimum: 0, maximum: 100 }
-            severity: { $ref: "#/components/schemas/RiskSeverity" }
-            ownerRelationshipId: { type: string, format: uuid }
-            reason: { type: string, minLength: 1, maxLength: 2048 }
-        - type: object
-          additionalProperties: false
-          required: [action, interventionType, reason]
-          properties:
-            action: { type: string, const: MITIGATE }
-            interventionType: { type: string, minLength: 1, maxLength: 128 }
-            reason: { type: string, minLength: 1, maxLength: 2048 }
-        - type: object
-          additionalProperties: false
-          required: [action, reason]
-          properties:
-            action: { type: string, const: RESOLVE }
-            reason: { type: string, minLength: 1, maxLength: 2048 }
-        - type: object
-          additionalProperties: false
-          required: [action, reason]
-          properties:
-            action: { type: string, const: DISMISS }
-            reason: { type: string, minLength: 1, maxLength: 2048 }
+        - $ref: "#/components/schemas/AcknowledgeRiskActionCommand"
+        - $ref: "#/components/schemas/AssignRiskActionCommand"
+        - $ref: "#/components/schemas/EscalateRiskActionCommand"
+        - $ref: "#/components/schemas/MitigateRiskActionCommand"
+        - $ref: "#/components/schemas/ResolveRiskActionCommand"
+        - $ref: "#/components/schemas/DismissRiskActionCommand"
+      discriminator:
+        propertyName: action
+        mapping:
+          ACKNOWLEDGE: "#/components/schemas/AcknowledgeRiskActionCommand"
+          ASSIGN: "#/components/schemas/AssignRiskActionCommand"
+          ESCALATE: "#/components/schemas/EscalateRiskActionCommand"
+          MITIGATE: "#/components/schemas/MitigateRiskActionCommand"
+          RESOLVE: "#/components/schemas/ResolveRiskActionCommand"
+          DISMISS: "#/components/schemas/DismissRiskActionCommand"
+    AcknowledgeRiskActionCommand:
+      type: object
+      additionalProperties: false
+      required: [reason, action]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        action: { type: string, const: ACKNOWLEDGE }
+    AssignRiskActionCommand:
+      type: object
+      additionalProperties: false
+      required: [ownerRelationshipId, reason, action]
+      properties:
+        ownerRelationshipId: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        action: { type: string, const: ASSIGN }
+    EscalateRiskActionCommand:
+      type: object
+      additionalProperties: false
+      required: [level, severity, reason, action]
+      properties:
+        level: { type: integer, minimum: 0, maximum: 100 }
+        severity: { $ref: "#/components/schemas/RiskSeverity" }
+        ownerRelationshipId: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        action: { type: string, const: ESCALATE }
+    MitigateRiskActionCommand:
+      type: object
+      additionalProperties: false
+      required: [interventionType, reason, action]
+      properties:
+        interventionType: { type: string, minLength: 1, maxLength: 128 }
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        action: { type: string, const: MITIGATE }
+    ResolveRiskActionCommand:
+      type: object
+      additionalProperties: false
+      required: [reason, action]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        action: { type: string, const: RESOLVE }
+    DismissRiskActionCommand:
+      type: object
+      additionalProperties: false
+      required: [reason, action]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 2048 }
+        action: { type: string, const: DISMISS }
     RiskActionPage:
       type: object
       additionalProperties: false
@@ -1940,6 +2095,9 @@ components:
       then:
         not:
           required: [riskId]
+      x-occ-semantic-validation:
+        validator: createRiskAdjudicationRequestSchema
+        rules: [reporting-period-start-before-end]
       properties:
         reportingPeriodStart: { type: string, format: date }
         reportingPeriodEnd: { type: string, format: date }
@@ -1954,6 +2112,9 @@ components:
       type: object
       additionalProperties: false
       required: [id, reportingPeriodStart, reportingPeriodEnd, knownEventKey, targetEntityId, severeEvent, outcome, reason, adjudicationVersion, createdAt]
+      x-occ-semantic-validation:
+        validator: riskAdjudicationSchema
+        rules: [reporting-period-start-before-end]
       properties:
         id: { type: string, format: uuid }
         reportingPeriodStart: { type: string, format: date }
@@ -1979,6 +2140,9 @@ components:
       type: object
       additionalProperties: false
       required: [reportingPeriodStart, reportingPeriodEnd, evaluatedCount, severeEventCount, truePositiveCount, falsePositiveCount, missedCount, acknowledgedWithinSlaCount, resolvedCount, generatedAt]
+      x-occ-semantic-validation:
+        validator: riskMetricsSchema
+        rules: [reporting-period-start-before-end]
       properties:
         reportingPeriodStart: { type: string, format: date }
         reportingPeriodEnd: { type: string, format: date }
@@ -2135,6 +2299,23 @@ components:
         items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/Reservation" } }
         nextCursor: { $ref: "#/components/schemas/OpaqueCursor" }
         previousCursor: { $ref: "#/components/schemas/OpaqueCursor" }
+    ReservationScheduleFilters:
+      type: object
+      additionalProperties: false
+      required: [from, until]
+      x-occ-semantic-validation:
+        validator: reservationScheduleFiltersSchema
+        rules: [from-before-until]
+      properties:
+        from: { $ref: "#/components/schemas/OffsetInstant" }
+        until: { $ref: "#/components/schemas/OffsetInstant" }
+        state:
+          type: array
+          minItems: 1
+          maxItems: 4
+          items: { $ref: "#/components/schemas/ReservationState" }
+        cursor: { $ref: "#/components/schemas/OpaqueCursor" }
+        limit: { type: integer, minimum: 1, maximum: 100 }
     ReserveResourceRequest:
       type: object
       additionalProperties: false
