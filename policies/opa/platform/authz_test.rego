@@ -288,6 +288,108 @@ test_candidate_claim_and_assignee_complete_require_exact_task_facts if {
     not blocked_result.allow
 }
 
+workflow_case(action) := {"relationships": [], "context": base_input.context} if {
+    action == "cohort.create"
+}
+
+workflow_case(action) := {
+    "relationships": [relationship("COHORT_OWNER", principal_id, entity_id)],
+    "context": base_input.context,
+} if {
+    action in {
+        "cohort.read", "cohort.update", "cohort.owner.transfer", "cohort.members.manage", "cohort.archive",
+        "cohort.process.start", "process.read", "process.suspend", "process.resume", "process.cancel",
+        "process.fail", "process.transfer", "process.reconcile", "process.wait.release",
+        "task.fail", "task.assignment.manage",
+    }
+}
+
+workflow_case(action) := {
+    "relationships": [relationship("TASK_CANDIDATE", principal_id, resource_id)],
+    "context": base_input.context,
+} if {
+    action in {"task.read", "task.claim"}
+}
+
+workflow_case(action) := {
+    "relationships": [relationship("TASK_ASSIGNEE", principal_id, resource_id)],
+    "context": {"processState": "RUNNING", "hardBlockersAbsent": true},
+} if {
+    action == "task.complete"
+}
+
+test_every_workflow_action_has_explicit_allow_and_deny_paths if {
+    every action in workflow_actions {
+        grant_value := workflow_grant(action)
+        authz_case := workflow_case(action)
+        allowed_request := object.union(base_input, {
+            "action": action,
+            "context": authz_case.context,
+            "relationships": authz_case.relationships,
+            "grants": [grant_value],
+        })
+        allowed_result := decision with input as allowed_request
+        allowed_result.allow
+        allowed_result.reasonCodes == ["ALLOW_GRANT_MATCH"]
+        allowed_result.matchedPolicyIds == [grant_ref(grant_value.id)]
+
+        denied_grant := object.union(grant_value, {"action": "*"})
+        denied_request := object.union(allowed_request, {
+            "relationships": [],
+            "grants": [denied_grant],
+        })
+        denied_result := decision with input as denied_request
+        not denied_result.allow
+        denied_result.reasonCodes == ["NO_MATCHING_ALLOW"]
+    }
+}
+
+test_task_read_accepts_candidate_or_assignee_only if {
+    every relation in ["TASK_CANDIDATE", "TASK_ASSIGNEE"] {
+        grant_value := workflow_grant("task.read")
+        request := object.union(base_input, {
+            "action": "task.read",
+            "relationships": [relationship(relation, principal_id, resource_id)],
+            "grants": [grant_value],
+        })
+        result := decision with input as request
+        result.allow
+    }
+}
+
+test_task_fail_and_assignment_manage_require_cohort_authority if {
+    every action in ["task.fail", "task.assignment.manage"] {
+        grant_value := workflow_grant(action)
+        every relation in ["COHORT_OWNER", "COHORT_TEACHER"] {
+            request := object.union(base_input, {
+                "action": action,
+                "relationships": [relationship(relation, principal_id, entity_id)],
+                "grants": [grant_value],
+            })
+            result := decision with input as request
+            result.allow
+        }
+        participant_request := object.union(base_input, {
+            "action": action,
+            "relationships": [relationship("COHORT_PARTICIPANT", principal_id, entity_id)],
+            "grants": [grant_value],
+        })
+        participant_result := decision with input as participant_request
+        not participant_result.allow
+        every role in ["administrator", "modeler"] {
+            role_grant := object.union(grant_value, {"id": sprintf("%s-%s", [action, role])})
+            request := object.union(base_input, {
+                "action": action,
+                "relationships": [],
+                "grants": [role_grant],
+            })
+            result := decision with input as request
+            not result.allow
+            result.reasonCodes == ["NO_MATCHING_ALLOW"]
+        }
+    }
+}
+
 test_relationships_are_constraints_not_allow_sources if {
     fact := relationship("TASK_CANDIDATE", principal_id, resource_id)
     relationship_only := object.union(base_input, {

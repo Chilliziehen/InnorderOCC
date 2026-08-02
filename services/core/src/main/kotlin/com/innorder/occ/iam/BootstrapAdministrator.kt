@@ -15,6 +15,8 @@ import org.springframework.context.annotation.ConditionContext
 import org.springframework.context.annotation.Conditional
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.type.AnnotatedTypeMetadata
+import org.springframework.core.Ordered
+import org.springframework.core.annotation.Order
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import org.springframework.util.StringUtils
@@ -41,6 +43,7 @@ class BootstrapAdministratorConfiguration {
 
     @Bean
     @Conditional(BootstrapAdministratorConfiguredCondition::class)
+    @Order(Ordered.HIGHEST_PRECEDENCE + 1)
     internal fun bootstrapAdministrator(
         jdbc: JdbcTemplate,
         authTransactions: TransactionTemplate,
@@ -83,8 +86,12 @@ object BootstrapIds {
     val OPERATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000021")
     val ADMINISTRATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000022")
     val POLICY_BUNDLE: UUID = uuid("00000000-0000-7000-8000-000000000030")
-    val POLICY_BUNDLE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000031")
-    val POLICY_RELEASE: UUID = uuid("00000000-0000-7000-8000-000000000032")
+    val POLICY_BUNDLE_VERSION_V1: UUID = uuid("00000000-0000-7000-8000-000000000031")
+    val POLICY_RELEASE_V1: UUID = uuid("00000000-0000-7000-8000-000000000032")
+    val POLICY_BUNDLE_VERSION_V2: UUID = uuid("00000000-0000-7000-8000-000000000033")
+    val POLICY_RELEASE_V2: UUID = uuid("00000000-0000-7000-8000-000000000034")
+    val POLICY_BUNDLE_VERSION: UUID = POLICY_BUNDLE_VERSION_V2
+    val POLICY_RELEASE: UUID = POLICY_RELEASE_V2
 
     private fun uuid(value: String): UUID = UUID.fromString(value)
 }
@@ -103,6 +110,12 @@ internal object BootstrapBaseline {
     val contentHash: String = MessageDigest.getInstance("SHA-256")
         .digest(canonicalAssets.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
+}
+
+internal object BootstrapPolicyV1Baseline {
+    const val OPA_REVISION = "platform-authz-v1"
+    const val manifest = """{"forbiddenActions":[],"roleGrants":[{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-viewer-read","resourceId":"*","subjectRoleEntityKey":"role:viewer"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-operator-execute","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-operator-read","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.admin","effect":"ALLOW","entityId":"*","id":"platform-administrator-admin","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-administrator-execute","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-administrator-read","resourceId":"*","subjectRoleEntityKey":"role:administrator"}],"version":1}"""
+    val contentHash = PolicyReleaseIntegrity.manifestContentHash(manifest)
 }
 
 internal object BootstrapPolicyBaseline {
@@ -127,7 +140,7 @@ internal object BootstrapPolicyBaseline {
         "administrator" to workflowActions.toSet(),
     ).flatMap { (role, actions) -> actions.sorted().map { action -> grant(role, action) } }
     val manifest = """{"forbiddenActions":[],"roleGrants":[${(baselineGrants + workflowGrants).joinToString(",")}],"version":1}"""
-    val contentHash: String = sha256(manifest)
+    val contentHash: String = PolicyReleaseIntegrity.manifestContentHash(manifest)
     val releaseHash: String = PolicyReleaseIntegrity.contentHash(
         OPA_REVISION,
         listOf(
@@ -139,10 +152,6 @@ internal object BootstrapPolicyBaseline {
             ),
         ),
     )
-
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
 
     private fun grant(role: String, action: String, grantId: String? = null): String {
         val id = grantId ?: "platform-$role-${action.replace('.', '-')}"
@@ -497,9 +506,9 @@ class BootstrapAdministrator internal constructor(
         }
         ensure(
             "authz.policy_bundle_version",
-            "id = ? OR (bundle_id = ? AND version = 1)",
+            "id = ? OR (bundle_id = ? AND version = 2)",
             arrayOf(BootstrapIds.POLICY_BUNDLE_VERSION, BootstrapIds.POLICY_BUNDLE),
-            """id = ? AND bundle_id = ? AND version = 1 AND status IN ('DRAFT', 'PUBLISHED')
+            """id = ? AND bundle_id = ? AND version = 2 AND status IN ('DRAFT', 'PUBLISHED')
                AND manifest = ?::jsonb AND created_by IS NULL AND published_by IS NULL
                AND ((status = 'DRAFT' AND content_hash IS NULL AND published_at IS NULL)
                     OR (status = 'PUBLISHED' AND content_hash = ? AND published_at IS NOT NULL))""",
@@ -513,7 +522,7 @@ class BootstrapAdministrator internal constructor(
             jdbc.update(
                 """INSERT INTO authz.policy_bundle_version
                    (id, bundle_id, version, status, manifest, created_at)
-                   VALUES (?, ?, 1, 'DRAFT', ?::jsonb, ?)""",
+                    VALUES (?, ?, 2, 'DRAFT', ?::jsonb, ?)""",
                 BootstrapIds.POLICY_BUNDLE_VERSION,
                 BootstrapIds.POLICY_BUNDLE,
                 BootstrapPolicyBaseline.manifest,
@@ -537,7 +546,7 @@ class BootstrapAdministrator internal constructor(
         }
         if (count(
                 """SELECT count(*) FROM authz.policy_bundle_version
-                   WHERE id = ? AND bundle_id = ? AND version = 1 AND status = 'PUBLISHED'
+                   WHERE id = ? AND bundle_id = ? AND version = 2 AND status = 'PUBLISHED'
                      AND manifest = ?::jsonb AND content_hash = ? AND published_at IS NOT NULL
                      AND created_by IS NULL AND published_by IS NULL""",
                 BootstrapIds.POLICY_BUNDLE_VERSION,
@@ -549,9 +558,9 @@ class BootstrapAdministrator internal constructor(
 
         ensure(
             "authz.policy_release",
-            "id = ? OR release_number = 1",
+            "id = ? OR release_number = 2",
             arrayOf(BootstrapIds.POLICY_RELEASE),
-            """id = ? AND release_number = 1 AND status IN ('STAGED', 'ACTIVE') AND content_hash = ?
+            """id = ? AND release_number = 2 AND status IN ('STAGED', 'ACTIVE') AND content_hash = ?
                AND published_by IS NULL
                AND ((status = 'STAGED' AND opa_revision IS NULL AND published_at IS NULL)
                     OR (status = 'ACTIVE' AND opa_revision = ? AND published_at IS NOT NULL))""",
@@ -563,7 +572,7 @@ class BootstrapAdministrator internal constructor(
         ) {
             jdbc.update(
                 """INSERT INTO authz.policy_release(id, release_number, status, content_hash, created_at)
-                   VALUES (?, 1, 'STAGED', ?, ?)""",
+                   VALUES (?, 2, 'STAGED', ?, ?)""",
                 BootstrapIds.POLICY_RELEASE,
                 BootstrapPolicyBaseline.releaseHash,
                 now,
@@ -606,7 +615,7 @@ class BootstrapAdministrator internal constructor(
             count(
                 """SELECT count(*) FROM authz.policy_release pr
                    JOIN authz.policy_release_item pri ON pri.release_id = pr.id
-                   WHERE pr.id = ? AND pr.release_number = 1 AND pr.status = 'ACTIVE'
+                    WHERE pr.id = ? AND pr.release_number = 2 AND pr.status = 'ACTIVE'
                      AND pr.content_hash = ? AND pr.opa_revision = ? AND pr.published_at IS NOT NULL
                      AND pr.published_by IS NULL AND pri.bundle_id = ? AND pri.bundle_version_id = ?""",
                 BootstrapIds.POLICY_RELEASE,

@@ -3,6 +3,10 @@ package com.innorder.occ.iam
 import com.innorder.occ.OccCoreApplication
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import com.innorder.occ.authz.PolicyLayer
+import com.innorder.occ.authz.PolicyReleaseIntegrity
+import com.innorder.occ.authz.PolicyReleaseItemIntegrity
+import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.Test
 import org.postgresql.ds.PGSimpleDataSource
 import org.springframework.boot.builder.SpringApplicationBuilder
@@ -18,6 +22,7 @@ import org.testcontainers.utility.MountableFile
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.concurrent.atomic.AtomicBoolean
 
 class BootstrapAdministratorStartupIntegrationTest {
@@ -57,6 +62,91 @@ class BootstrapAdministratorStartupIntegrationTest {
                 .isEqualTo(13)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isZero()
         }
+    }
+
+    @Test
+    fun `disabled bootstrap still installs upgrader and safely starts without policy data`() {
+        database { postgres, jdbc ->
+            val disabledArguments = arguments(postgres).filterNot {
+                it.startsWith("--occ.bootstrap-administrator.")
+            }.toTypedArray()
+
+            SpringApplicationBuilder(OccCoreApplication::class.java)
+                .run(*disabledArguments).use { context ->
+                    assertThat(context.getBean(PlatformPolicyV2Upgrader::class.java)).isNotNull()
+                    assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release", Long::class.java)).isZero()
+                    assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_bundle_version", Long::class.java)).isZero()
+                }
+        }
+    }
+
+    @Test
+    fun `disabled bootstrap upgrades an existing active v1 policy during startup`() {
+        database { postgres, jdbc ->
+            Flyway.configure().dataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only")
+                .locations("classpath:db/migration").load().migrate()
+            seedV1Policy(jdbc)
+            val disabledArguments = arguments(postgres).filterNot {
+                it.startsWith("--occ.bootstrap-administrator.")
+            }.toTypedArray()
+
+            SpringApplicationBuilder(OccCoreApplication::class.java)
+                .run(*disabledArguments).use {
+                    assertThat(jdbc.queryForObject(
+                        "SELECT status FROM authz.policy_release WHERE id = ?",
+                        String::class.java,
+                        BootstrapIds.POLICY_RELEASE_V1,
+                    )).isEqualTo("RETIRED")
+                    assertThat(jdbc.queryForObject(
+                        """SELECT count(*) FROM authz.policy_release pr
+                           JOIN authz.policy_release_item pri ON pri.release_id = pr.id
+                           WHERE pr.id = ? AND pr.release_number = 2 AND pr.status = 'ACTIVE'
+                             AND pr.opa_revision = ? AND pri.bundle_version_id = ?""",
+                        Long::class.java,
+                        BootstrapIds.POLICY_RELEASE_V2,
+                        BootstrapPolicyBaseline.OPA_REVISION,
+                        BootstrapIds.POLICY_BUNDLE_VERSION_V2,
+                    )).isEqualTo(1)
+                }
+        }
+    }
+
+    private fun seedV1Policy(jdbc: JdbcTemplate) {
+        val now = OffsetDateTime.now()
+        val releaseHash = PolicyReleaseIntegrity.contentHash(
+            BootstrapPolicyV1Baseline.OPA_REVISION,
+            listOf(PolicyReleaseItemIntegrity(
+                PolicyLayer.PLATFORM,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapIds.POLICY_BUNDLE_VERSION_V1,
+                BootstrapPolicyV1Baseline.contentHash,
+            )),
+        )
+        jdbc.update(
+            """INSERT INTO authz.policy_bundle(id, bundle_key, layer, status, created_at)
+               VALUES (?, 'platform-core-authorization', 'PLATFORM', 'ACTIVE', ?)""",
+            BootstrapIds.POLICY_BUNDLE, now,
+        )
+        jdbc.update(
+            """INSERT INTO authz.policy_bundle_version
+               (id, bundle_id, version, status, manifest, content_hash, created_at, published_at)
+               VALUES (?, ?, 1, 'PUBLISHED', ?::jsonb, ?, ?, ?)""",
+            BootstrapIds.POLICY_BUNDLE_VERSION_V1, BootstrapIds.POLICY_BUNDLE,
+            BootstrapPolicyV1Baseline.manifest, BootstrapPolicyV1Baseline.contentHash, now, now,
+        )
+        jdbc.update(
+            """INSERT INTO authz.policy_release(id, release_number, status, content_hash, created_at)
+               VALUES (?, 1, 'STAGED', ?, ?)""",
+            BootstrapIds.POLICY_RELEASE_V1, releaseHash, now,
+        )
+        jdbc.update(
+            "INSERT INTO authz.policy_release_item(release_id, bundle_id, bundle_version_id) VALUES (?, ?, ?)",
+            BootstrapIds.POLICY_RELEASE_V1, BootstrapIds.POLICY_BUNDLE, BootstrapIds.POLICY_BUNDLE_VERSION_V1,
+        )
+        jdbc.update(
+            """UPDATE authz.policy_release SET status = 'ACTIVE', opa_revision = ?, published_at = ? WHERE id = ?""",
+            BootstrapPolicyV1Baseline.OPA_REVISION, now, BootstrapIds.POLICY_RELEASE_V1,
+        )
     }
 
     private fun successfulReader(): BootstrapSecretReader = BootstrapSecretReader(
