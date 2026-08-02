@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service
 import java.util.UUID
 
 data class KnowledgeActivationRequest(
+    val sourceId: UUID,
     val documentId: UUID,
     val candidateVersion: Int,
     val candidateSpaceId: UUID,
@@ -23,13 +24,13 @@ data class KnowledgeActivationRequest(
     val expectedActiveSpaceId: UUID,
 ) {
     init {
-        requireValid(documentId, candidateSpaceId, gateEvaluationId, expectedActiveSpaceId)
+        requireValid(sourceId, documentId, candidateSpaceId, gateEvaluationId, expectedActiveSpaceId)
         if (candidateVersion < 1) throw InvalidCommandRequestException()
     }
 }
 
-data class KnowledgeRollbackRequest(val documentId: UUID, val gateEvaluationId: UUID) {
-    init { requireValid(documentId, gateEvaluationId) }
+data class KnowledgeRollbackRequest(val sourceId: UUID, val gateEvaluationId: UUID) {
+    init { requireValid(sourceId, gateEvaluationId) }
 }
 
 private fun requireValid(vararg ids: UUID) {
@@ -61,41 +62,47 @@ private data class CorpusMember(
     var rowVersion: Long,
 )
 
-private abstract class KnowledgeCommand(protected val documentId: UUID, protected val mapper: ObjectMapper) : AuthorizedCommand {
-    override val entityId = documentId
-    override val resourceId = documentId
-    override val aggregateType = "knowledge-document"
-    override val aggregateId = documentId
+private abstract class KnowledgeCommand(protected val sourceId: UUID, protected val mapper: ObjectMapper) : AuthorizedCommand {
+    override val entityId = sourceId
+    override val resourceId = sourceId
+    override val aggregateType = "knowledge-source"
+    override val aggregateId = sourceId
     override val expectedVersionRequired = true
     override val changesAuthorizationFacts = false
     protected var rowVersion = -1L
-    protected var currentVersion = -1
-
-    protected fun setPrimary(members: List<CorpusMember>) {
-        val primary = members.singleOrNull { it.documentId == documentId } ?: throw KnowledgeGateException()
-        rowVersion = primary.rowVersion
-        currentVersion = primary.previousVersion
+    protected fun lockSource(context: CommandContext): Long {
+        rowVersion = context.jdbc.queryForObject(
+            "SELECT row_version FROM ai.knowledge_source WHERE id = ? AND state = 'ACTIVE' FOR UPDATE",
+            Long::class.java, sourceId,
+        ) ?: throw KnowledgeGateException()
+        return rowVersion
     }
 
     protected fun json(block: ObjectNode.() -> Unit): CanonicalJsonObject =
         CanonicalJsonObject.from(mapper.createObjectNode().apply(block))
 
     protected fun lockSpaces(context: CommandContext, first: UUID, second: UUID): Map<UUID, Space> {
+        val ids = listOf(first, second).distinct().sorted()
+        if (ids.size != 2) throw KnowledgeGateException()
         val rows = context.jdbc.query(
-            "SELECT id, status, corpus_version FROM ai.embedding_space WHERE id IN (?, ?) ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id FOR UPDATE",
+            "SELECT id, status, corpus_version FROM ai.embedding_space WHERE id IN (?, ?) ORDER BY id FOR UPDATE",
             { result, _ -> Space(result.getObject("id", UUID::class.java), result.getString("status"), result.getString("corpus_version")) },
-            first, second, first,
+            ids[0], ids[1],
         )
         if (rows.size != 2) throw KnowledgeGateException()
         return rows.associateBy { it.id }
     }
 
     protected fun lockMembers(context: CommandContext, candidateSpaceId: UUID, manifest: String): List<CorpusMember> {
-        val ids = context.jdbc.queryForList(
-            """SELECT DISTINCT document_id FROM ai.ingestion_job
-               WHERE candidate_embedding_space_id = ? AND corpus_manifest_digest = ? AND status = 'COMPLETED'
-               ORDER BY document_id""", UUID::class.java, candidateSpaceId, manifest,
+        val manifestMembers = context.jdbc.query(
+            """SELECT DISTINCT job.document_id, document.source_id FROM ai.ingestion_job job
+               JOIN ai.knowledge_document document ON document.id = job.document_id
+               WHERE job.candidate_embedding_space_id = ? AND job.corpus_manifest_digest = ? AND job.status = 'COMPLETED'
+               ORDER BY job.document_id""",
+            { result, _ -> result.getObject("document_id", UUID::class.java) to result.getObject("source_id", UUID::class.java) }, candidateSpaceId, manifest,
         )
+        if (manifestMembers.any { it.second != sourceId }) throw KnowledgeGateException()
+        val ids = manifestMembers.map { it.first }
         if (ids.isEmpty()) throw KnowledgeGateException()
         ids.forEach { id ->
             context.jdbc.queryForObject(
@@ -149,15 +156,20 @@ private abstract class KnowledgeCommand(protected val documentId: UUID, protecte
         }
     }
 
+    protected fun advanceSource(context: CommandContext) {
+        context.jdbc.update("UPDATE ai.knowledge_source SET sync_cursor = sync_cursor WHERE id = ? AND row_version = ?", sourceId, rowVersion)
+            .takeIf { it == 1 } ?: throw KnowledgeGateException()
+    }
+
     protected fun mutation(eventType: String, body: CanonicalJsonObject, detail: CanonicalJsonObject, payload: CanonicalJsonObject) = CommandMutation(
-        status = 200, body = body, resourceId = documentId, aggregateId = documentId,
+        status = 200, body = body, resourceId = sourceId, aggregateId = sourceId,
         aggregateType = aggregateType, beforeVersion = rowVersion, afterVersion = rowVersion + 1,
         auditReason = eventType, auditDetail = detail,
         events = listOf(PendingEventSpec(eventType, 1, payload, rowVersion + 1)),
     )
 }
 
-private class ActivationCommand(private val request: KnowledgeActivationRequest, mapper: ObjectMapper) : KnowledgeCommand(request.documentId, mapper) {
+private class ActivationCommand(private val request: KnowledgeActivationRequest, mapper: ObjectMapper) : KnowledgeCommand(request.sourceId, mapper) {
     override val action = "knowledge.activate"
     private lateinit var candidate: Space
     private lateinit var active: Space
@@ -167,6 +179,7 @@ private class ActivationCommand(private val request: KnowledgeActivationRequest,
     private lateinit var previousManifest: String
 
     override fun lockCurrentVersion(context: CommandContext): Long {
+        lockSource(context)
         val spaces = lockSpaces(context, request.candidateSpaceId, request.expectedActiveSpaceId)
         candidate = spaces[request.candidateSpaceId] ?: throw KnowledgeGateException()
         active = spaces[request.expectedActiveSpaceId] ?: throw KnowledgeGateException()
@@ -180,8 +193,7 @@ private class ActivationCommand(private val request: KnowledgeActivationRequest,
             active.status != "ACTIVE" || candidate.corpusVersion != gate["corpus_manifest_digest"]
         ) throw KnowledgeGateException()
         members = lockMembers(context, request.candidateSpaceId, gate["corpus_manifest_digest"] as String)
-        setPrimary(members)
-        val primary = members.single { it.documentId == documentId }
+        val primary = members.singleOrNull { it.documentId == request.documentId } ?: throw KnowledgeGateException()
         if (primary.candidateVersion != request.candidateVersion || primary.previousVersion == request.candidateVersion) throw KnowledgeGateException()
         candidateManifest = canonicalManifest(context, members, true)
         previousManifest = canonicalManifest(context, members, false)
@@ -195,36 +207,38 @@ private class ActivationCommand(private val request: KnowledgeActivationRequest,
         context.jdbc.update("UPDATE ai.embedding_space SET status = 'ACTIVE', activated_at = statement_timestamp() WHERE id = ? AND status = 'BUILDING'", request.candidateSpaceId)
             .takeIf { it == 1 } ?: throw KnowledgeGateException()
         updateHeads(context, members, false)
+        advanceSource(context)
         val payload = json {
-            put("documentId", documentId.toString()); put("previousSpaceId", request.expectedActiveSpaceId.toString())
+            put("sourceId", sourceId.toString()); put("previousSpaceId", request.expectedActiveSpaceId.toString())
             put("candidateSpaceId", request.candidateSpaceId.toString()); put("gateEvaluationId", request.gateEvaluationId.toString())
             put("corpusManifestDigest", gate["corpus_manifest_digest"] as String); put("candidateManifest", candidateManifest); put("previousManifest", previousManifest)
             put("datasetVersionId", (gate["dataset_version_id"] as UUID).toString()); put("datasetContentHash", gate["dataset_content_hash"] as String); put("evidenceHash", gate["evidence_hash"] as String)
             set<JsonNode>("members", mapper.valueToTree(members))
         }
         return mutation(
-            "knowledge-document.activated",
-            json { put("documentId", documentId.toString()); put("currentVersion", request.candidateVersion); put("embeddingSpaceId", request.candidateSpaceId.toString()); put("documentCount", members.size) },
+            "knowledge-corpus.activated",
+            json { put("sourceId", sourceId.toString()); put("embeddingSpaceId", request.candidateSpaceId.toString()); put("documentCount", members.size); set<JsonNode>("members", mapper.valueToTree(members.map { mapOf("documentId" to it.documentId.toString(), "contentHash" to it.candidateHash) })) },
             json { put("gateEvaluationId", request.gateEvaluationId.toString()); put("corpusManifestDigest", gate["corpus_manifest_digest"] as String); put("documentManifest", candidateManifest) },
             payload,
         )
     }
 }
 
-private class RollbackCommand(private val request: KnowledgeRollbackRequest, mapper: ObjectMapper) : KnowledgeCommand(request.documentId, mapper) {
+private class RollbackCommand(private val request: KnowledgeRollbackRequest, mapper: ObjectMapper) : KnowledgeCommand(request.sourceId, mapper) {
     override val action = "knowledge.rollback"
     private lateinit var trace: ActivationTrace
     private lateinit var currentSpace: Space
     private lateinit var previousSpace: Space
 
     override fun lockCurrentVersion(context: CommandContext): Long {
+        lockSource(context)
         val payload = context.jdbc.queryForObject(
             """SELECT payload::text FROM audit.outbox_event WHERE aggregate_id = ?
-               AND event_type = 'knowledge-document.activated' ORDER BY aggregate_version DESC LIMIT 1 FOR SHARE""",
-            String::class.java, documentId,
+               AND event_type = 'knowledge-corpus.activated' ORDER BY aggregate_version DESC LIMIT 1 FOR SHARE""",
+            String::class.java, sourceId,
         ) ?: throw KnowledgeGateException()
         trace = parseTrace(payload)
-        if (trace.gateEvaluationId != request.gateEvaluationId || trace.documentId != documentId || trace.members.isEmpty()) throw KnowledgeGateException()
+        if (trace.gateEvaluationId != request.gateEvaluationId || trace.sourceId != sourceId || trace.members.isEmpty()) throw KnowledgeGateException()
         val spaces = lockSpaces(context, trace.candidateSpaceId, trace.previousSpaceId)
         currentSpace = spaces[trace.candidateSpaceId] ?: throw KnowledgeGateException()
         previousSpace = spaces[trace.previousSpaceId] ?: throw KnowledgeGateException()
@@ -233,7 +247,6 @@ private class RollbackCommand(private val request: KnowledgeRollbackRequest, map
             if ((row["current_version"] as Number).toInt() != member.candidateVersion || row["state"] != "READY") throw KnowledgeGateException()
             member.rowVersion = (row["row_version"] as Number).toLong()
         }
-        setPrimary(trace.members)
         val candidate = canonicalManifest(context, trace.members, true)
         val previous = canonicalManifest(context, trace.members, false)
         if (candidate != trace.candidateManifest || previous != trace.previousManifest || currentSpace.status != "ACTIVE" || previousSpace.status != "RETIRED") throw KnowledgeGateException()
@@ -252,7 +265,7 @@ private class RollbackCommand(private val request: KnowledgeRollbackRequest, map
             )
         }
         ActivationTrace(
-            uuid("documentId"), uuid("previousSpaceId"), uuid("candidateSpaceId"), uuid("gateEvaluationId"),
+            uuid("sourceId"), uuid("previousSpaceId"), uuid("candidateSpaceId"), uuid("gateEvaluationId"),
             node.path("corpusManifestDigest").textValue(), node.path("candidateManifest").textValue(),
             node.path("previousManifest").textValue(), members,
         )
@@ -264,18 +277,18 @@ private class RollbackCommand(private val request: KnowledgeRollbackRequest, map
         context.jdbc.update("UPDATE ai.embedding_space SET status = 'ACTIVE' WHERE id = ? AND status = 'RETIRED'", trace.previousSpaceId)
             .takeIf { it == 1 } ?: throw KnowledgeGateException()
         updateHeads(context, trace.members, true)
-        val primary = trace.members.single { it.documentId == documentId }
+        advanceSource(context)
         return mutation(
-            "knowledge-document.rolled-back",
-            json { put("documentId", documentId.toString()); put("currentVersion", primary.previousVersion); put("embeddingSpaceId", trace.previousSpaceId.toString()); put("documentCount", trace.members.size) },
+            "knowledge-corpus.rolled-back",
+            json { put("sourceId", sourceId.toString()); put("embeddingSpaceId", trace.previousSpaceId.toString()); put("documentCount", trace.members.size); set<JsonNode>("members", mapper.valueToTree(trace.members.map { mapOf("documentId" to it.documentId.toString(), "contentHash" to it.previousHash) })) },
             json { put("gateEvaluationId", request.gateEvaluationId.toString()); put("restoredManifest", trace.previousManifest) },
-            json { put("documentId", documentId.toString()); put("restoredSpaceId", trace.previousSpaceId.toString()); put("retiredSpaceId", trace.candidateSpaceId.toString()); put("gateEvaluationId", request.gateEvaluationId.toString()); set<JsonNode>("members", mapper.valueToTree(trace.members)) },
+            json { put("sourceId", sourceId.toString()); put("restoredSpaceId", trace.previousSpaceId.toString()); put("retiredSpaceId", trace.candidateSpaceId.toString()); put("gateEvaluationId", request.gateEvaluationId.toString()); set<JsonNode>("members", mapper.valueToTree(trace.members)) },
         )
     }
 }
 
 private data class ActivationTrace(
-    val documentId: UUID = UUID(0, 0),
+    val sourceId: UUID = UUID(0, 0),
     val previousSpaceId: UUID = UUID(0, 0),
     val candidateSpaceId: UUID = UUID(0, 0),
     val gateEvaluationId: UUID = UUID(0, 0),

@@ -39,7 +39,7 @@ describe("filesystem parser sidecar", () => {
       const parsed = await client.parse({ bytes: Buffer.from("sidecar text"), fileName: "source.txt", mimeType: "text/plain" }, new AbortController().signal);
       expect(parsed).toMatchObject({ text: "sidecar text", parserVersion: "governed-parser-v1" });
       expect(await readdir(paths.requests)).toEqual([]);
-      expect(await readdir(paths.output)).toEqual([]);
+      expect(await readdir(paths.output)).toEqual([".parser-heartbeat.json"]);
       expect(await readdir(paths.input)).toEqual([]);
       expect(child.exitCode).toBeNull();
     } finally { child.kill("SIGTERM"); await rm(paths.root, { recursive: true, force: true }); }
@@ -53,7 +53,7 @@ describe("filesystem parser sidecar", () => {
     const child = worker(paths.input, paths.requests, paths.output);
     try {
       await expect(parsing).resolves.toMatchObject({ text: "restart text" });
-      expect(await readdir(paths.output)).toEqual([]);
+      expect(await readdir(paths.output)).toEqual([".parser-heartbeat.json"]);
     } finally { child.kill("SIGTERM"); await rm(paths.root, { recursive: true, force: true }); }
   }, 70_000);
 

@@ -186,6 +186,7 @@ async function main() {
   await run("AI service build", npm, ["run", "build", "--workspace", "@innorder/ai-service"]);
   if (full) {
     await run("parser sandbox container integration", process.execPath, ["--test", "services/ai/test/parser-container.test.mjs"]);
+    await run("parser Compose runtime integration", process.execPath, ["--test", "services/ai/test/parser-compose-container.test.mjs"]);
     await run("MinIO and ClamAV ingestion integration", process.execPath, ["--test", "services/ai/test/ingestion-container.test.mjs"]);
   }
   await run("Electron package build", npm, ["run", "build", "--workspace", "@innorder/desktop"]);

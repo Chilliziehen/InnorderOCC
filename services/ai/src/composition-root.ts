@@ -7,19 +7,27 @@ import { buildApp } from "./app.js";
 import type { ServiceConfig } from "./config.js";
 import { CoreClient, readBoundedFile } from "./core/core-client.js";
 import { GrantConsumer } from "./core/grant-consumer.js";
+import { ParserSidecarClient } from "./ingestion/parser-sidecar.js";
 import { createPostgresPool, PostgresAiRepository } from "./persistence/postgres.js";
 import { parseRevokedSerials, verifyServiceIdentity } from "./security/service-identity.js";
 
 export interface CompositionRoot {
   app: FastifyInstance;
   grantConsumer?: GrantConsumer;
+  parserSidecar?: ParserSidecarClient;
   close(): Promise<void>;
 }
 
 export async function createCompositionRoot(config: ServiceConfig): Promise<CompositionRoot> {
+  const parserSidecar = config.ingestionEnabled ? new ParserSidecarClient({
+    inputRoot: config.parserInputRoot!, requestRoot: config.parserRequestRoot!, outputRoot: config.parserOutputRoot!,
+    timeoutMs: config.parserTimeoutMs, pollMs: config.parserPollMs, heartbeatMaxAgeMs: config.parserHeartbeatMaxAgeMs,
+  }) : undefined;
+  await parserSidecar?.assertReady();
   if (!config.businessEnabled) {
     const app = buildApp(config);
-    return { app, close: async () => app.close() };
+    app.addHook("onClose", async () => parserSidecar?.close());
+    return { app, ...(parserSidecar === undefined ? {} : { parserSidecar }), close: async () => app.close() };
   }
 
   const [key, certificates, cas, passwordBytes, revokedBytes, grantKeys] = await Promise.all([
@@ -53,8 +61,9 @@ export async function createCompositionRoot(config: ServiceConfig): Promise<Comp
   app.addHook("onClose", async () => {
     if (resourcesClosed) return;
     resourcesClosed = true;
+    parserSidecar?.close();
     core.close();
     await pool.end();
   });
-  return { app, grantConsumer, close: async () => app.close() };
+  return { app, grantConsumer, ...(parserSidecar === undefined ? {} : { parserSidecar }), close: async () => app.close() };
 }

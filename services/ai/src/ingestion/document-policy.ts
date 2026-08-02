@@ -1,4 +1,4 @@
-import { unzipSync } from "fflate";
+import { Unzip, UnzipInflate } from "fflate";
 
 export type DocumentFormat = "text" | "markdown" | "pdf" | "docx" | "xlsx";
 
@@ -79,12 +79,14 @@ function inspectZip(bytes: Uint8Array, maxEntries: number, maxExpandedBytes: num
   let offset = view.getUint32(eocd + 16, true);
   let expanded = 0;
   const names = new Set<string>();
+  const declared = new Map<string, { compressedSize: number; size: number; crc: number }>();
   for (let index = 0; index < entryCount; index += 1) {
     if (offset + 46 > eocd || readUInt32(bytes, offset) !== 0x02014b50) fail("ARCHIVE-MALFORMED");
     const flags = view.getUint16(offset + 8, true);
     const method = view.getUint16(offset + 10, true);
     const compressedSize = view.getUint32(offset + 20, true);
     const size = view.getUint32(offset + 24, true);
+    const crc = view.getUint32(offset + 16, true);
     const nameLength = view.getUint16(offset + 28, true);
     const extraLength = view.getUint16(offset + 30, true);
     const entryCommentLength = view.getUint16(offset + 32, true);
@@ -96,15 +98,62 @@ function inspectZip(bytes: Uint8Array, maxEntries: number, maxExpandedBytes: num
     if (!name || name.startsWith("/") || name.split("/").some((part) => part === ".." || part === ".") || names.has(name)) fail("ARCHIVE-PATH");
     if (((externalAttributes >>> 16) & 0xf000) === 0xa000) fail("ARCHIVE-PATH");
     names.add(name);
+    declared.set(name, { compressedSize, size, crc });
     expanded += size;
     if (!Number.isSafeInteger(expanded) || expanded > maxExpandedBytes) fail("ARCHIVE-BOUNDS");
     offset += 46 + nameLength + extraLength + entryCommentLength;
   }
   if (offset !== eocd) fail("ARCHIVE-MALFORMED");
-  let parts: Record<string, Uint8Array>;
-  try { parts = unzipSync(bytes); } catch { return fail("ARCHIVE-MALFORMED"); }
-  if (Object.keys(parts).length !== entryCount) fail("ARCHIVE-MALFORMED");
+  const parts: Record<string, Uint8Array> = {};
+  let actualExpanded = 0;
+  let completed = 0;
+  let failure: DocumentPolicyError | undefined;
+  const unzip = new Unzip((file) => {
+    const metadata = declared.get(file.name);
+    if (metadata === undefined || Object.hasOwn(parts, file.name) || (file.size !== undefined && file.size !== metadata.compressedSize) || (file.originalSize !== undefined && file.originalSize !== metadata.size)) {
+      failure = new DocumentPolicyError("OCC-AI-DOCUMENT-ARCHIVE-MALFORMED");
+      file.terminate();
+      return;
+    }
+    let actualSize = 0;
+    let crc = 0xffffffff;
+    const chunks: Uint8Array[] = [];
+    file.ondata = (error, chunk, final) => {
+      if (failure !== undefined) return;
+      if (error !== null) { failure = new DocumentPolicyError("OCC-AI-DOCUMENT-ARCHIVE-MALFORMED"); return; }
+      actualSize += chunk.length;
+      actualExpanded += chunk.length;
+      if (actualSize > metadata.size || actualExpanded > maxExpandedBytes || (metadata.compressedSize > 0 && actualSize / metadata.compressedSize > 100)) {
+        failure = new DocumentPolicyError("OCC-AI-DOCUMENT-ARCHIVE-BOUNDS");
+        file.terminate();
+        return;
+      }
+      crc = crc32(chunk, crc);
+      chunks.push(chunk);
+      if (final) {
+        if (actualSize !== metadata.size || (crc ^ 0xffffffff) >>> 0 !== metadata.crc) { failure = new DocumentPolicyError("OCC-AI-DOCUMENT-ARCHIVE-MALFORMED"); return; }
+        parts[file.name] = Buffer.concat(chunks.map((value) => Buffer.from(value)));
+        completed += 1;
+      }
+    };
+    file.start();
+  });
+  unzip.register(UnzipInflate);
+  try {
+    for (let cursor = 0; cursor < bytes.length && failure === undefined; cursor += 1_024) unzip.push(bytes.subarray(cursor, Math.min(bytes.length, cursor + 1_024)), cursor + 1_024 >= bytes.length);
+  } catch { if (failure === undefined) failure = new DocumentPolicyError("OCC-AI-DOCUMENT-ARCHIVE-MALFORMED"); }
+  if (failure !== undefined) throw failure;
+  if (completed !== entryCount) fail("ARCHIVE-MALFORMED");
   return parts;
+}
+
+function crc32(bytes: Uint8Array, initial: number): number {
+  let crc = initial;
+  for (const value of bytes) {
+    crc ^= value;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return crc >>> 0;
 }
 
 function inspectOpenXml(format: "docx" | "xlsx", parts: Record<string, Uint8Array>): void {

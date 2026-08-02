@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import type { ParsedDocument } from "./parser.js";
 import {
@@ -9,7 +10,7 @@ import {
   ParserResultSchema, sha256, type ParserRequest,
 } from "./parser-protocol.js";
 
-type Options = Readonly<{ inputRoot: string; requestRoot: string; outputRoot: string; timeoutMs?: number; pollMs?: number; requestId?: () => string }>;
+type Options = Readonly<{ inputRoot: string; requestRoot: string; outputRoot: string; timeoutMs?: number; pollMs?: number; heartbeatMaxAgeMs?: number; requestId?: () => string }>;
 
 async function atomicWrite(path: string, bytes: Uint8Array): Promise<void> {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -25,28 +26,42 @@ async function safeRoot(path: string): Promise<string> {
   return realpath(path);
 }
 
-function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolvePromise, reject) => {
-    if (signal.aborted) return reject(new Error("OCC-AI-PARSER-CANCELLED"));
-    const timer = setTimeout(resolvePromise, milliseconds); timer.unref();
-    signal.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("OCC-AI-PARSER-CANCELLED")); }, { once: true });
-  });
+async function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+  try { await delay(milliseconds, undefined, { signal, ref: false }); }
+  catch (error) { if (error instanceof Error && error.name === "AbortError") throw new Error("OCC-AI-PARSER-CANCELLED"); throw error; }
 }
 
 export class ParserSidecarClient {
   private readonly timeoutMs: number;
   private readonly pollMs: number;
   private readonly requestId: () => string;
+  private readonly heartbeatMaxAgeMs: number;
+  private readonly shutdown = new AbortController();
   constructor(private readonly options: Options) {
     const roots = [options.inputRoot, options.requestRoot, options.outputRoot].map((path) => resolve(path));
     if (new Set(roots).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
     this.timeoutMs = options.timeoutMs ?? 60_000;
     this.pollMs = options.pollMs ?? 25;
     this.requestId = options.requestId ?? randomUUID;
-    if (this.timeoutMs < 1 || this.timeoutMs > 60_000 || this.pollMs < 5 || this.pollMs > 1_000) throw new Error("OCC-AI-PARSER-CONFIG");
+    this.heartbeatMaxAgeMs = options.heartbeatMaxAgeMs ?? 10_000;
+    if (this.timeoutMs < 1 || this.timeoutMs > 60_000 || this.pollMs < 5 || this.pollMs > 1_000 || this.heartbeatMaxAgeMs < 1_000 || this.heartbeatMaxAgeMs > 60_000) throw new Error("OCC-AI-PARSER-CONFIG");
   }
 
+  async assertReady(): Promise<void> {
+    const [inputRoot, requestRoot, outputRoot] = await Promise.all([safeRoot(this.options.inputRoot), safeRoot(this.options.requestRoot), safeRoot(this.options.outputRoot)]);
+    if (new Set([inputRoot, requestRoot, outputRoot]).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
+    try {
+      const path = resolve(outputRoot, ".parser-heartbeat.json");
+      const metadata = await stat(path); const heartbeat = JSON.parse((await readFile(path)).toString("utf8")) as unknown;
+      if (!metadata.isFile() || metadata.size > 256 || typeof heartbeat !== "object" || heartbeat === null || !("version" in heartbeat) || heartbeat.version !== 1 || !("at" in heartbeat) || typeof heartbeat.at !== "number" || Math.abs(Date.now() - heartbeat.at) > this.heartbeatMaxAgeMs) throw new Error();
+    } catch { throw new Error("OCC-AI-PARSER-NOT-READY"); }
+  }
+
+  close(): void { this.shutdown.abort(); }
+
   async parse(input: Readonly<{ bytes: Uint8Array; fileName: string; mimeType: string }>, signal: AbortSignal): Promise<ParsedDocument> {
+    const activeSignal = AbortSignal.any([signal, this.shutdown.signal]);
+    if (activeSignal.aborted) throw new Error("OCC-AI-PARSER-CANCELLED");
     if (input.bytes.length < 1 || input.bytes.length > MAX_PARSER_INPUT_BYTES) throw new Error("OCC-AI-PARSER-INPUT");
     const [inputRoot, requestRoot, outputRoot] = await Promise.all([safeRoot(this.options.inputRoot), safeRoot(this.options.requestRoot), safeRoot(this.options.outputRoot)]);
     const requestId = this.requestId();
@@ -76,7 +91,7 @@ export class ParserSidecarClient {
       ownsRequest = true;
       const deadline = Date.now() + this.timeoutMs;
       while (true) {
-        if (signal.aborted) throw new Error("OCC-AI-PARSER-CANCELLED");
+        if (activeSignal.aborted) throw new Error("OCC-AI-PARSER-CANCELLED");
         if (Date.now() >= deadline) throw new Error("OCC-AI-PARSER-TIMEOUT");
         try {
           const metadata = await stat(outputPath);
@@ -89,7 +104,7 @@ export class ParserSidecarClient {
           return result.parsed;
         } catch (error) {
           if (error instanceof Error && (error.message.startsWith("OCC-AI-") || error.name === "ZodError")) throw error.name === "ZodError" ? new Error("OCC-AI-PARSER-RESULT-SCHEMA") : error;
-          await sleep(Math.min(this.pollMs, Math.max(1, deadline - Date.now())), signal);
+          await sleep(Math.min(this.pollMs, Math.max(1, deadline - Date.now())), activeSignal);
         }
       }
     } finally {

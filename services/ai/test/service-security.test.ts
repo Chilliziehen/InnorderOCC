@@ -10,7 +10,7 @@ import { verifyServiceIdentity } from "../src/security/service-identity.js";
 import { loadConfig } from "../src/config.js";
 import { readBoundedFile, validateInternalOrigin } from "../src/core/core-client.js";
 import { createCompositionRoot } from "../src/composition-root.js";
-import { writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -300,5 +300,18 @@ describe("bounded internal clients and composition", () => {
     const root = await createCompositionRoot(loadConfig({}));
     expect(root.app).toBeDefined();
     await root.close();
+  });
+
+  it("owns a ready parser sidecar when ingestion is enabled and cancels it on close", async () => {
+    const rootPath = join(tmpdir(), `innorder-parser-root-${randomUUID()}`);
+    const input = join(rootPath, "input"); const requests = join(rootPath, "requests"); const output = join(rootPath, "output");
+    await Promise.all([mkdir(input, { recursive: true }), mkdir(requests, { recursive: true }), mkdir(output, { recursive: true })]);
+    await writeFile(join(output, ".parser-heartbeat.json"), JSON.stringify({ version: 1, at: Date.now() }));
+    try {
+      const root = await createCompositionRoot(loadConfig({ AI_INGESTION_ENABLED: "true", AI_PARSER_INPUT_ROOT: input, AI_PARSER_REQUEST_ROOT: requests, AI_PARSER_OUTPUT_ROOT: output }));
+      expect(root.parserSidecar).toBeDefined();
+      await root.close();
+      await expect(root.parserSidecar!.parse({ bytes: Buffer.from("after close"), fileName: "closed.txt", mimeType: "text/plain" }, new AbortController().signal)).rejects.toThrow("OCC-AI-PARSER-CANCELLED");
+    } finally { await rm(rootPath, { recursive: true, force: true }); }
   });
 });

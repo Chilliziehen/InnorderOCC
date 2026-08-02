@@ -124,7 +124,7 @@ function deterministicUuid(value: string): string {
 export class IngestionWorker {
   private readonly leaseMs: number;
   constructor(private readonly dependencies: Dependencies) {
-    if (!dependencies.workerId.trim() || dependencies.embedder.maxBatchSize < 1 || dependencies.embedder.maxBatchSize > 1024 || dependencies.embedder.dimensions < 1) throw new Error("OCC-AI-INGESTION-CONFIG");
+    if (!dependencies.workerId.trim() || dependencies.embedder.maxBatchSize < 1 || dependencies.embedder.maxBatchSize > 100 || dependencies.embedder.dimensions < 1) throw new Error("OCC-AI-INGESTION-CONFIG");
     this.leaseMs = dependencies.leaseMs ?? 60_000;
   }
 

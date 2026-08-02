@@ -81,6 +81,7 @@ const expectedImages = {
   minio: "minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
   "minio-init": "minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3",
   "minio-volume-init": "alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+  "parser-volume-init": "alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
   postgres: "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9",
   redis: "redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952",
 };
@@ -191,6 +192,8 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
     "minio-init",
     "minio-volume-init",
     "opa",
+    "parser",
+    "parser-volume-init",
     "postgres",
     "redis",
   ]);
@@ -198,11 +201,14 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.equal(compose.networks["host-access"].internal, undefined);
 
   for (const [name, service] of Object.entries(compose.services)) {
-    if (!["flowable-init", "minio-init", "minio-volume-init"].includes(name)) {
+    if (!["flowable-init", "minio-init", "minio-volume-init", "parser-volume-init"].includes(name)) {
       assert.ok(service.healthcheck?.test, `${name} must have a healthcheck`);
     }
     if (name === "host-gateway") {
       assert.deepEqual(service.networks, ["backend", "host-access"]);
+    } else if (name === "parser") {
+      assert.equal(service.network_mode, "none");
+      assert.equal(service.networks, undefined);
     } else {
       assert.deepEqual(service.networks, ["backend"], `${name} must remain backend-only`);
       assert.equal(service.ports, undefined, `${name} must not publish ports directly`);
@@ -242,6 +248,9 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.deepEqual(Object.keys(compose.volumes).sort(), [
     "kafka-data",
     "minio-data",
+    "parser-input",
+    "parser-output",
+    "parser-requests",
     "postgres-data",
     "redis-data",
   ]);
@@ -276,6 +285,13 @@ test("Compose wiring follows application config and completion gates", () => {
     "SPRING_KAFKA_PRODUCER_RETRIES",
   ]);
   assert.deepEqual(Object.keys(ai.environment).sort(), [
+    "AI_INGESTION_ENABLED",
+    "AI_PARSER_HEARTBEAT_MAX_AGE_MS",
+    "AI_PARSER_INPUT_ROOT",
+    "AI_PARSER_OUTPUT_ROOT",
+    "AI_PARSER_POLL_MS",
+    "AI_PARSER_REQUEST_ROOT",
+    "AI_PARSER_TIMEOUT_MS",
     "HOST",
     "LOG_LEVEL",
     "NODE_ENV",
@@ -310,6 +326,33 @@ test("Compose wiring follows application config and completion gates", () => {
   assert.match(opaIgnore, /^!infra\/compose\/opa-entrypoint\.sh$/mu);
   assert.match(opaEntrypoint, /opa check --strict \/policies/u);
   assert.match(opaEntrypoint, /exec opa "\$@"/u);
+});
+
+test("Compose deploys the parser sidecar with shared queues and hard sandbox limits", () => {
+  const compose = parse(read(composePath));
+  const parser = compose.services.parser;
+  const ai = compose.services.ai;
+  assert.equal(parser.build.dockerfile, "services/ai/parser.Dockerfile");
+  assert.equal(parser.network_mode, "none");
+  assert.equal(parser.read_only, true);
+  assert.equal(parser.user, "node");
+  assert.deepEqual(parser.cap_drop, ["ALL"]);
+  assert.ok(parser.security_opt.includes("no-new-privileges:true"));
+  assert.ok(parser.security_opt.some((value) => String(value).includes("parser-seccomp.json")));
+  assert.equal(parser.cpus, 1);
+  assert.equal(parser.mem_limit, "512m");
+  assert.ok(parser.pids_limit <= 64);
+  assert.deepEqual(parser.tmpfs, ["/tmp:rw,noexec,nosuid,nodev,size=16m"]);
+  assert.ok(parser.volumes.includes("parser-input:/parser/input:ro"));
+  assert.ok(parser.volumes.includes("parser-requests:/parser/requests"));
+  assert.ok(parser.volumes.includes("parser-output:/parser/output"));
+  assert.ok(ai.volumes.includes("parser-input:/parser/input"));
+  assert.ok(ai.volumes.includes("parser-requests:/parser/requests"));
+  assert.ok(ai.volumes.includes("parser-output:/parser/output"));
+  assert.equal(ai.environment.AI_INGESTION_ENABLED, "true");
+  assert.equal(ai.environment.AI_PARSER_INPUT_ROOT, "/parser/input");
+  assert.equal(ai.depends_on.parser.condition, "service_healthy");
+  assert.deepEqual(Object.keys(compose.volumes).filter((name) => name.startsWith("parser-")).sort(), ["parser-input", "parser-output", "parser-requests"]);
 });
 
 test("Compose enforces least-privilege file-backed secret boundaries", () => {

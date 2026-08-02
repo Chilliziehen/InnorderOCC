@@ -38,6 +38,8 @@ import org.testcontainers.utility.DockerImageName
 import org.testcontainers.utility.MountableFile
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @Testcontainers(disabledWithoutDocker = true)
 class KnowledgeCommandIntegrationTest {
@@ -49,15 +51,18 @@ class KnowledgeCommandIntegrationTest {
     fun reset() {
         jdbc = JdbcTemplate(runtimeDataSource())
         JdbcTemplate(adminDataSource()).execute("TRUNCATE audit.audit_record")
-        jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id = ?", DOCUMENT_ID)
+        jdbc.update("DELETE FROM audit.outbox_event WHERE aggregate_id IN (?, ?)", SOURCE_ID, DOCUMENT_ID)
         jdbc.update("DELETE FROM audit.idempotency_record WHERE principal_id = ?", PRINCIPAL_ID)
         val admin = JdbcTemplate(adminDataSource())
         admin.execute("ALTER TABLE ai.knowledge_document DISABLE TRIGGER trg_knowledge_document_touch")
         try {
-            admin.update("UPDATE ai.knowledge_document SET current_version = 1, state = 'READY', row_version = 7 WHERE id IN (?, ?)", DOCUMENT_ID, SECOND_DOCUMENT_ID)
+            admin.update("UPDATE ai.knowledge_document SET source_id = ?, current_version = 1, state = 'READY', row_version = 7 WHERE id IN (?, ?)", SOURCE_ID, DOCUMENT_ID, SECOND_DOCUMENT_ID)
         } finally {
             admin.execute("ALTER TABLE ai.knowledge_document ENABLE TRIGGER trg_knowledge_document_touch")
         }
+        admin.execute("ALTER TABLE ai.knowledge_source DISABLE TRIGGER trg_knowledge_source_touch")
+        try { admin.update("UPDATE ai.knowledge_source SET state = 'ACTIVE', row_version = 7 WHERE id = ?", SOURCE_ID) }
+        finally { admin.execute("ALTER TABLE ai.knowledge_source ENABLE TRIGGER trg_knowledge_source_touch") }
         jdbc.update("UPDATE ai.embedding_space SET status = 'BUILDING', activated_at = NULL WHERE id = ?", CANDIDATE_SPACE_ID)
         jdbc.update("UPDATE ai.embedding_space SET status = 'ACTIVE' WHERE id = ?", ACTIVE_SPACE_ID)
         decisions = Decisions()
@@ -65,7 +70,7 @@ class KnowledgeCommandIntegrationTest {
             decisions,
             { snapshot ->
                 if (decisions.error) throw IllegalStateException("OPA unavailable with internal detail")
-                val outcome = decisions.outcome
+                val outcome = if (decisions.lastResource == decisions.allowedResource) decisions.outcome else AuthorizationDecisionValue.DENY
                 AuthorizationDecision(
                     1, "knowledge-v1", snapshot.requestId, 1, snapshot.releases, outcome,
                     outcome == AuthorizationDecisionValue.ALLOW,
@@ -88,7 +93,7 @@ class KnowledgeCommandIntegrationTest {
 
     @Test
     fun `activation and rollback are authorized idempotent audited commands with immutable trace`() {
-        val activation = KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)
+        val activation = KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)
         val metadata = metadata("activate", 7)
 
         val first = service.activate(metadata, activation)
@@ -99,53 +104,72 @@ class KnowledgeCommandIntegrationTest {
         assertThat(decisions.calls).isEqualTo(1)
         assertState(2, 8, CANDIDATE_SPACE_ID, "ACTIVE", ACTIVE_SPACE_ID, "RETIRED")
         assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, SECOND_DOCUMENT_ID)).isEqualTo(2)
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE target_entity_id = ?", Long::class.java, DOCUMENT_ID)).isEqualTo(1)
-        assertThat(jdbc.queryForObject("SELECT payload::text FROM audit.outbox_event WHERE aggregate_id = ?", String::class.java, DOCUMENT_ID))
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE target_entity_id = ?", Long::class.java, SOURCE_ID)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT payload::text FROM audit.outbox_event WHERE aggregate_id = ?", String::class.java, SOURCE_ID))
             .contains("previousVersion", "candidateVersion", ACTIVE_SPACE_ID.toString(), CANDIDATE_SPACE_ID.toString())
 
-        val rollback = service.rollback(metadata("rollback", 8), KnowledgeRollbackRequest(DOCUMENT_ID, GATE_ID))
+        val rollback = service.rollback(metadata("rollback", 8), KnowledgeRollbackRequest(SOURCE_ID, GATE_ID))
 
         assertThat(rollback.status).isEqualTo(200)
         assertState(1, 9, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "RETIRED")
         assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, SECOND_DOCUMENT_ID)).isEqualTo(1)
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE target_entity_id = ?", Long::class.java, DOCUMENT_ID)).isEqualTo(2)
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, DOCUMENT_ID)).isEqualTo(2)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.audit_record WHERE target_entity_id = ?", Long::class.java, SOURCE_ID)).isEqualTo(2)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, SOURCE_ID)).isEqualTo(2)
+        assertThat(decisions.resources).containsOnly(SOURCE_ID)
         assertThat(jdbc.queryForObject("SELECT count(*) FROM ai.knowledge_document_version WHERE document_id = ?", Long::class.java, DOCUMENT_ID)).isEqualTo(2)
     }
 
     @Test
     fun `OPA deny and error fail before locks or state changes`() {
         decisions.outcome = AuthorizationDecisionValue.DENY
-        assertThatThrownBy { service.activate(metadata("deny", 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+        assertThatThrownBy { service.activate(metadata("deny", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
             .isInstanceOf(AuthorizationDeniedException::class.java)
         decisions.outcome = AuthorizationDecisionValue.ALLOW
         decisions.error = true
-        assertThatThrownBy { service.activate(metadata("error", 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+        assertThatThrownBy { service.activate(metadata("error", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
             .isInstanceOf(AuthorizationAvailabilityException::class.java)
         assertState(1, 7, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "BUILDING")
     }
 
     @Test
+    fun `document-only authority cannot activate and mixed-source manifests fail atomically`() {
+        decisions.allowedResource = DOCUMENT_ID
+        assertThatThrownBy { service.activate(metadata("document-only", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+            .isInstanceOf(AuthorizationDeniedException::class.java)
+        assertState(1, 7, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "BUILDING")
+
+        decisions.allowedResource = SOURCE_ID
+        val admin = JdbcTemplate(adminDataSource())
+        admin.update("UPDATE ai.knowledge_document SET source_id = ? WHERE id = ?", OTHER_SOURCE_ID, SECOND_DOCUMENT_ID)
+        try {
+            assertThatThrownBy { service.activate(metadata("mixed-source", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+                .isInstanceOf(KnowledgeGateException::class.java)
+            assertState(1, 7, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "BUILDING")
+            assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, SECOND_DOCUMENT_ID)).isEqualTo(1)
+        } finally { admin.update("UPDATE ai.knowledge_document SET source_id = ? WHERE id = ?", SOURCE_ID, SECOND_DOCUMENT_ID) }
+    }
+
+    @Test
     fun `expected version and concurrent activation permit exactly one mutation`() {
-        assertThatThrownBy { service.activate(metadata("stale", 6), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+        assertThatThrownBy { service.activate(metadata("stale", 6), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
             .isInstanceOf(OptimisticConflictException::class.java)
 
         val pool = Executors.newFixedThreadPool(2)
         val results = try {
             listOf("race-a", "race-b").map { key -> pool.submit(runCatchingTask {
-                service.activate(metadata(key, 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID))
+                service.activate(metadata(key, 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID))
             }) }.map { it.get() }
         } finally { pool.shutdownNow() }
         assertThat(results.count { it.isSuccess }).isEqualTo(1)
         assertThat(results.count { it.isFailure }).isEqualTo(1)
-        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, DOCUMENT_ID)).isEqualTo(1)
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, SOURCE_ID)).isEqualTo(1)
     }
 
     @Test
     fun `missing member changed head chunk drift and stale active space fail atomically`() {
         val admin = JdbcTemplate(adminDataSource())
         fun rejected() {
-            assertThatThrownBy { service.activate(metadata("race-${UUID.randomUUID()}", 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+            assertThatThrownBy { service.activate(metadata("race-${UUID.randomUUID()}", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
                 .isInstanceOf(KnowledgeGateException::class.java)
             assertState(1, 7, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "BUILDING")
             assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, SECOND_DOCUMENT_ID)).isEqualTo(1)
@@ -163,7 +187,7 @@ class KnowledgeCommandIntegrationTest {
 
         admin.update("UPDATE ai.knowledge_document SET current_version = 2 WHERE id = ?", SECOND_DOCUMENT_ID)
         try {
-            assertThatThrownBy { service.activate(metadata("head-race", 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+            assertThatThrownBy { service.activate(metadata("head-race", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
                 .isInstanceOf(KnowledgeGateException::class.java)
             assertState(1, 7, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "BUILDING")
             assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, SECOND_DOCUMENT_ID)).isEqualTo(2)
@@ -178,7 +202,7 @@ class KnowledgeCommandIntegrationTest {
 
         admin.update("UPDATE ai.embedding_space SET status = 'RETIRED' WHERE id = ?", ACTIVE_SPACE_ID)
         try {
-            assertThatThrownBy { service.activate(metadata("stale-active", 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
+            assertThatThrownBy { service.activate(metadata("stale-active", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID)) }
                 .isInstanceOf(KnowledgeGateException::class.java)
             assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, DOCUMENT_ID)).isEqualTo(1)
         } finally { admin.update("UPDATE ai.embedding_space SET status = 'ACTIVE' WHERE id = ?", ACTIVE_SPACE_ID) }
@@ -187,14 +211,30 @@ class KnowledgeCommandIntegrationTest {
     @Test
     fun `rollback rejects previous corpus drift without partial transition`() {
         val admin = JdbcTemplate(adminDataSource())
-        service.activate(metadata("activate-drift", 7), KnowledgeActivationRequest(DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID))
+        service.activate(metadata("activate-drift", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID))
         admin.update("UPDATE ai.knowledge_chunk SET content_hash = ? WHERE id = ?", "f".repeat(64), FIRST_OLD_CHUNK_ID)
         try {
-            assertThatThrownBy { service.rollback(metadata("rollback-drift", 8), KnowledgeRollbackRequest(DOCUMENT_ID, GATE_ID)) }
+            assertThatThrownBy { service.rollback(metadata("rollback-drift", 8), KnowledgeRollbackRequest(SOURCE_ID, GATE_ID)) }
                 .isInstanceOf(KnowledgeGateException::class.java)
             assertState(2, 8, CANDIDATE_SPACE_ID, "ACTIVE", ACTIVE_SPACE_ID, "RETIRED")
             assertThat(jdbc.queryForObject("SELECT current_version FROM ai.knowledge_document WHERE id = ?", Int::class.java, SECOND_DOCUMENT_ID)).isEqualTo(2)
         } finally { admin.update("UPDATE ai.knowledge_chunk SET content_hash = ? WHERE id = ?", "0".repeat(64), FIRST_OLD_CHUNK_ID) }
+    }
+
+    @Test
+    fun `crossed activation and rollback sessions complete without a space lock deadlock`() {
+        service.activate(metadata("crossed-prime", 7), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 2, CANDIDATE_SPACE_ID, GATE_ID, ACTIVE_SPACE_ID))
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        val results = try {
+            val rollback = pool.submit(runCatchingTask { start.await(); service.rollback(metadata("crossed-rollback", 8), KnowledgeRollbackRequest(SOURCE_ID, GATE_ID)) })
+            val crossed = pool.submit(runCatchingTask { start.await(); service.activate(metadata("crossed-invalid", 8), KnowledgeActivationRequest(SOURCE_ID, DOCUMENT_ID, 1, ACTIVE_SPACE_ID, GATE_ID, CANDIDATE_SPACE_ID)) })
+            start.countDown()
+            listOf(rollback.get(5, TimeUnit.SECONDS), crossed.get(5, TimeUnit.SECONDS))
+        } finally { pool.shutdownNow() }
+        assertThat(results.count { it.isSuccess }).isEqualTo(1)
+        assertThat(results.count { it.isFailure }).isEqualTo(1)
+        assertState(1, 9, ACTIVE_SPACE_ID, "ACTIVE", CANDIDATE_SPACE_ID, "RETIRED")
     }
 
     private fun <T> runCatchingTask(action: () -> T) = java.util.concurrent.Callable { runCatching(action) }
@@ -212,8 +252,13 @@ class KnowledgeCommandIntegrationTest {
         var outcome = AuthorizationDecisionValue.ALLOW
         var error = false
         var calls = 0
+        var allowedResource = SOURCE_ID
+        var lastResource = SOURCE_ID
+        val resources = mutableListOf<UUID>()
         override fun load(request: AuthorizationRequest): AuthorizationSnapshot {
             calls += 1
+            resources += request.resourceId
+            lastResource = request.resourceId
             return AuthorizationSnapshot(
                 1, request.requestId, 1, mapOf(PolicyLayer.PLATFORM to RELEASE_ID),
                 AuthorizationPrincipal(request.principalId, true), AuthorizationEntity(request.entityId), request.action,
@@ -230,6 +275,7 @@ class KnowledgeCommandIntegrationTest {
         private val DOCUMENT_ID = UUID.fromString("82000000-0000-7000-8000-000000000002")
         private val SECOND_DOCUMENT_ID = UUID.fromString("82000000-0000-7000-8000-000000000014")
         private val SOURCE_ID = UUID.fromString("82000000-0000-7000-8000-000000000003")
+        private val OTHER_SOURCE_ID = UUID.fromString("82000000-0000-7000-8000-000000000023")
         private val PROVIDER_ID = UUID.fromString("82000000-0000-7000-8000-000000000004")
         private val PROFILE_ID = UUID.fromString("82000000-0000-7000-8000-000000000005")
         private val ACTIVE_SPACE_ID = UUID.fromString("82000000-0000-7000-8000-000000000006")
@@ -266,9 +312,9 @@ class KnowledgeCommandIntegrationTest {
             db.update("INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')", packageVersionId, packageId)
             db.update("INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable) VALUES (?, ?, 'knowledge.test', 'Knowledge Test', 'PRINCIPAL', true)", typeId, packageId)
             db.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, 1, '{}'::jsonb)", typeVersionId, typeId, packageVersionId)
-            listOf(PRINCIPAL_ID, DOCUMENT_ID, SOURCE_ID, PROVIDER_ID, SECOND_DOCUMENT_ID).forEachIndexed { index, id -> db.update("INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state) VALUES (?, ?, ?, ?, 'ACTIVE')", id, typeId, typeVersionId, "knowledge:$index") }
+            listOf(PRINCIPAL_ID, DOCUMENT_ID, SOURCE_ID, PROVIDER_ID, SECOND_DOCUMENT_ID, OTHER_SOURCE_ID).forEachIndexed { index, id -> db.update("INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state) VALUES (?, ?, ?, ?, 'ACTIVE')", id, typeId, typeVersionId, "knowledge:$index") }
             db.update("INSERT INTO iam.principal(id, principal_kind, display_name, status) VALUES (?, 'USER', 'Knowledge User', 'ACTIVE')", PRINCIPAL_ID)
-            db.update("INSERT INTO ai.knowledge_source(id, source_type, state) VALUES (?, 'UPLOAD', 'ACTIVE')", SOURCE_ID)
+            db.update("INSERT INTO ai.knowledge_source(id, source_type, state, row_version) VALUES (?, 'UPLOAD', 'ACTIVE', 7), (?, 'UPLOAD', 'ACTIVE', 7)", SOURCE_ID, OTHER_SOURCE_ID)
             db.update("INSERT INTO ai.knowledge_document(id, source_id, document_key, state, row_version) VALUES (?, ?, 'document', 'READY', 7), (?, ?, 'document-2', 'READY', 7)", DOCUMENT_ID, SOURCE_ID, SECOND_DOCUMENT_ID, SOURCE_ID)
             db.update("""INSERT INTO ai.knowledge_document_version(id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
                 VALUES (?, ?, 1, 'q/old', ?, 'text/plain', 'v1', 'INTERNAL'), (?, ?, 2, 'q/new', ?, 'text/plain', 'v1', 'INTERNAL'),

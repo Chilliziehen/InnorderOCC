@@ -1,6 +1,7 @@
 import { constants, existsSync } from "node:fs";
 import { open, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { Worker, type ResourceLimits } from "node:worker_threads";
 
 import {
@@ -35,7 +36,7 @@ async function root(path: string): Promise<string> {
 }
 
 function child(rootPath: string, name: string): string {
-  if (basename(name) !== name || name.includes("\0")) throw new Error("OCC-AI-PARSER-ENVELOPE");
+  if (basename(name) !== name || name.includes("\0") || (name !== ".parser-heartbeat.json" && name.startsWith("."))) throw new Error("OCC-AI-PARSER-ENVELOPE");
   const path = resolve(rootPath, name);
   if (dirname(path) !== rootPath) throw new Error("OCC-AI-PARSER-ENVELOPE");
   return path;
@@ -134,7 +135,12 @@ export async function runParserWorker(options: WorkerOptions, signal: AbortSigna
   if (new Set([input, requests, output]).size !== 3) throw new Error("OCC-AI-PARSER-CONFIG");
   const pollMs = options.pollMs ?? 25;
   if (pollMs < 5 || pollMs > 1_000) throw new Error("OCC-AI-PARSER-CONFIG");
+  let lastHeartbeat = 0;
   while (!signal.aborted) {
+    if (Date.now() - lastHeartbeat >= 1_000) {
+      await atomicWrite(child(output, ".parser-heartbeat.json"), Buffer.from(JSON.stringify({ version: 1, at: Date.now() })), 256);
+      lastHeartbeat = Date.now();
+    }
     const entries = (await readdir(requests, { withFileTypes: true })).filter((entry) => entry.isFile() && /^(?:[a-f0-9-]{36})\.(?:request|processing)\.json$/u.test(entry.name)).sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       if (signal.aborted) break;
@@ -145,8 +151,14 @@ export async function runParserWorker(options: WorkerOptions, signal: AbortSigna
       }
       await processClaim(claim, { input, requests, output }, options, signal);
     }
-    if (!signal.aborted) await new Promise((resolvePromise) => { const timer = setTimeout(resolvePromise, pollMs); signal.addEventListener("abort", () => { clearTimeout(timer); resolvePromise(undefined); }, { once: true }); });
+    if (!signal.aborted) await waitForParserPoll(pollMs, signal);
   }
+}
+
+type PollDelay = (milliseconds: number, value: undefined, options: { signal: AbortSignal }) => Promise<unknown>;
+export async function waitForParserPoll(pollMs: number, signal: AbortSignal, timer: PollDelay = delay): Promise<void> {
+  try { await timer(pollMs, undefined, { signal }); }
+  catch (error) { if (!(error instanceof Error) || error.name !== "AbortError") throw error; }
 }
 
 async function main(): Promise<void> {

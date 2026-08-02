@@ -4,11 +4,11 @@
 
 ## 部署拓扑
 
-Compose 项目名为 `innorder-occ`，包含十一个服务、四个命名卷和两个网络。除 `host-gateway` 外，所有服务只连接内部网络 `backend`，且不直接发布主机端口。`host-gateway` 同时连接 `backend` 与普通 bridge 网络 `host-access`，是唯一端口发布者。
+Compose 项目名为 `innorder-occ`，包含十三个服务、七个命名卷和两个网络。除使用 `network_mode: none` 的 `parser` 外，后端服务只连接内部网络 `backend`，且不直接发布主机端口。`host-gateway` 同时连接 `backend` 与普通 bridge 网络 `host-access`，是唯一端口发布者。
 
 **安全：** `backend` 设置为 `internal: true`，用于容器间通信。`host-access` 只给网关提供主机端口发布能力，不应被其他服务加入。
 
-### 十一个 Compose 服务
+### 十三个 Compose 服务
 
 | 服务 | 类型 | 当前职责 | 持久状态 | 启动门禁 |
 |---|---|---|---|---|
@@ -19,22 +19,25 @@ Compose 项目名为 `innorder-occ`，包含十一个服务、四个命名卷和
 | `minio` | 长运行 | S3 兼容对象存储与控制台 | `minio-data` | 等待卷初始化成功 |
 | `minio-init` | 一次性 | 建桶、创建桶级应用账号并附加策略 | MinIO 内部状态 | 等待 MinIO 健康 |
 | `opa` | 长运行 | 加载只读策略并提供无状态决策 | 无命名卷 | 自身 `/health` |
-| `ai` | 长运行 | AI 边界、状态和静态能力注册表 | 当前无持久挂载 | 自身 `/health` |
+| `parser-volume-init` | 一次性 | 把三个解析队列卷所有者改为非 root Node UID/GID | 修改 `parser-input`、`parser-requests`、`parser-output` | 无健康检查，成功退出 |
+| `parser` | 长运行 | 在无网络、只读根文件系统和资源上限内解析隔离文档 | 三个可丢弃解析队列卷 | 等待卷初始化；心跳文件健康检查 |
+| `ai` | 长运行 | AI 边界、状态、静态能力注册表和解析 sidecar 客户端所有权 | 三个可丢弃解析队列卷 | 等待 parser 健康；自身 `/health` |
 | `flowable-init` | 一次性 | 在显式初始化 profile 中维护 Flowable 私有表 | PostgreSQL | 等待 PostgreSQL 健康，成功退出 |
 | `core` | 长运行 | 应用事实、迁移、Flowable 和状态聚合边界 | PostgreSQL | 等待 PostgreSQL 健康和 `flowable-init` 成功 |
 | `host-gateway` | 长运行 | 八路 TCP 回环转发 | 无卷、无密钥 | 只验证自身监听器 |
 
-三个一次性服务的正常终态是 `Exited (0)`。将它们强行设为持续重启会改变初始化语义。
+四个一次性服务的正常终态是 `Exited (0)`。将它们强行设为持续重启会改变初始化语义。
 
 ## 启动依赖图
 
-Compose 中只有四条显式条件依赖：
+Compose 的显式条件依赖包括：
 
 ```text
 minio-volume-init --成功完成--> minio --健康--> minio-init
+parser-volume-init --成功完成--> parser --健康--> ai
 postgres --健康--> flowable-init --成功完成--> core
 host-gateway --无 depends_on，独立启动并建立本地监听器
-kafka、redis、opa、ai --无显式依赖，彼此并行启动
+kafka、redis、opa --无显式依赖，彼此并行启动
 ```
 
 Core 启动时通过 Flyway 应用迁移，因此没有第二个并发迁移容器。Kafka、Redis、MinIO、OPA 和 AI 已配置为集成地址，但当前不是 Core 的 Compose 启动门禁。MinIO 初始化也不阻塞 Core。
@@ -76,7 +79,7 @@ Kafka 使用单节点 KRaft：
 
 ## 持久化边界
 
-精确的四个命名卷为：
+精确的七个命名卷为：
 
 | 卷 | 挂载服务 | 内容与恢复含义 |
 |---|---|---|
@@ -84,8 +87,11 @@ Kafka 使用单节点 KRaft：
 | `kafka-data` | `kafka` | broker 日志和 KRaft 元数据，不是权威业务主存储 |
 | `redis-data` | `redis` | AOF 缓存状态；设计上应可丢失和重建，但当前降级仍需验证 |
 | `minio-data` | `minio-volume-init`、`minio` | 对象、桶和 MinIO 内部配置 |
+| `parser-input` | `parser-volume-init`、`parser`、`ai` | AI 写入、parser 只读的短期隔离输入；不是权威存储 |
+| `parser-requests` | `parser-volume-init`、`parser`、`ai` | 哈希绑定的解析请求和处理中声明；可在停机后清理 |
+| `parser-output` | `parser-volume-init`、`parser`、`ai` | 有界解析结果和 parser 心跳；可丢弃并重建 |
 
-**危险：** `docker compose --env-file infra/compose/.env -f infra/compose/compose.yml down --volumes` 会删除以上四个卷。仅有容器镜像、数据库 SQL 或 `.env` 都不能替代完整恢复点。
+**危险：** `docker compose --env-file infra/compose/.env -f infra/compose/compose.yml down --volumes` 会删除以上七个卷。前四个卷包含运行状态；三个 parser 卷是可丢弃队列。仅有容器镜像、数据库 SQL 或 `.env` 都不能替代完整恢复点。
 
 ## 密钥消费矩阵
 

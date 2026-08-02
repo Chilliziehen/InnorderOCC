@@ -120,6 +120,7 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /strict Core authorization and real OPA integration/u);
   assert.match(result.stdout, /real PostgreSQL governed AI integration/u);
   assert.match(result.stdout, /database\/tests\/postgresql-governed-ai\.test\.mjs/u);
+  assert.match(result.stdout, /services\/ai\/test\/parser-compose-container\.test\.mjs/u);
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
 });
 
