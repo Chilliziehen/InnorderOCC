@@ -8,12 +8,15 @@ export type GuidanceConfiguration = Readonly<{
   policyReleaseDigest: string; embeddingSpaceId: string;
   prompt: Readonly<{ status: string; template: string; hash: string }>;
   agent: Readonly<{ inputSchema: Readonly<Record<string, unknown>>; outputSchema: Readonly<Record<string, unknown>>; inputSchemaHash: string; outputSchemaHash: string; contentHash: string }>;
-  packageStatus: string; providerState: string; profileState: string;
+  packageStatus: string; packageManifest: Readonly<Record<string, unknown>>; packageContentHash: string; providerState: string; profileState: string;
   profile: Readonly<{ maxClassification: DataClassification; maxInputBytes: number; capabilityHash: string; capabilitySnapshot: CapabilitySnapshot }>;
   space: Readonly<{ status: string; dimensions: number; manifestDigest: string; embeddingProfileId: string }>;
 }>;
 
-export type TerminalGuidanceResult = Readonly<{ operationId: string; runId: string; status: "SUCCEEDED"; recommendationId: string }>;
+export type TerminalGuidanceResult =
+  | Readonly<{ operationId: string; runId: string; status: "SUCCEEDED"; recommendationId: string }>
+  | Readonly<{ operationId: string; runId: string; status: "FAILED"; errorCode: string }>
+  | Readonly<{ operationId: string; runId: string; status: "CANCELLED" }>;
 type Queryable = { query(text: string, values?: unknown[]): Promise<QueryResult> };
 
 function abort(signal: AbortSignal): void {
@@ -44,7 +47,8 @@ export class PostgresGuidanceRepository {
         policyReleaseDigest: String(row.policy_release_digest), embeddingSpaceId: String(row.embedding_space_id),
         prompt: { status: String(row.prompt_status), template: String(row.prompt_template), hash: String(row.prompt_hash) },
         agent: { inputSchema: row.input_schema as Record<string, unknown>, outputSchema: row.output_schema as Record<string, unknown>, inputSchemaHash: String(row.input_schema_hash), outputSchemaHash: String(row.output_schema_hash), contentHash: String(row.agent_hash) },
-        packageStatus: String(row.package_status), providerState: String(row.provider_state), profileState: String(row.profile_state),
+        packageStatus: String(row.package_status), packageManifest: row.package_manifest as Record<string, unknown>, packageContentHash: String(row.package_hash),
+        providerState: String(row.provider_state), profileState: String(row.profile_state),
         profile: { maxClassification: String(row.max_classification) as DataClassification, maxInputBytes: Number(row.max_input_bytes), capabilityHash: String(row.capability_hash), capabilitySnapshot: row.capability_snapshot as CapabilitySnapshot },
         space: { status: String(row.space_status), dimensions: Number(row.dimensions), manifestDigest: String(row.manifest_digest), embeddingProfileId: String(row.embedding_profile_id) },
       };
@@ -58,7 +62,20 @@ export class PostgresGuidanceRepository {
       abort(signal);
       if (result.rows.length === 0) return undefined;
       if (result.rows.length !== 1) throw new Error();
-      return { operationId: String(result.rows[0]!.operation_id), runId, status: "SUCCEEDED", recommendationId: String(result.rows[0]!.recommendation_id) };
+      const row = result.rows[0]!;
+      const operationId = String(row.operation_id);
+      const status = String(row.run_status);
+      if (operationId !== runId) throw new Error();
+      if (status === "COMPLETED" && row.recommendation_id !== null && row.error_code === null) {
+        return { operationId, runId, status: "SUCCEEDED", recommendationId: String(row.recommendation_id) };
+      }
+      if (status === "FAILED" && typeof row.error_code === "string" && row.recommendation_id === null) {
+        return { operationId, runId, status: "FAILED", errorCode: row.error_code };
+      }
+      if (status === "CANCELLED" && row.error_code === "OCC-AI-CANCELLED" && row.recommendation_id === null) {
+        return { operationId, runId, status: "CANCELLED" };
+      }
+      throw new Error();
     } catch (error) { return databaseError(error); }
   }
 

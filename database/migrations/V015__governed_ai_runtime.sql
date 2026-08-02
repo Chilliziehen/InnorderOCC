@@ -280,6 +280,7 @@ CREATE TABLE ai.retrieval_trace (
     vector_candidate_count integer NOT NULL CHECK (vector_candidate_count >= 0),
     result_count integer NOT NULL CHECK (result_count >= 0),
     ranking_config jsonb NOT NULL CHECK (platform.is_json_object(ranking_config)),
+    bundle_digest text CHECK (bundle_digest IS NULL OR bundle_digest ~ '^[0-9a-f]{64}$'),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
     legal_hold_id uuid,
@@ -1735,7 +1736,7 @@ RETURNS TABLE (
     package_version_id uuid, policy_release_digest text, embedding_space_id uuid,
     prompt_status text, prompt_template text, prompt_hash text,
     input_schema jsonb, output_schema jsonb, input_schema_hash text,
-    output_schema_hash text, agent_hash text, package_status text,
+    output_schema_hash text, agent_hash text, package_status text, package_manifest jsonb, package_hash text,
     provider_state text, profile_state text, max_classification text,
     max_input_bytes integer, capability_hash text, capability_snapshot jsonb, space_status text,
     dimensions integer, manifest_digest text, embedding_profile_id uuid
@@ -1756,9 +1757,9 @@ BEGIN
            run.package_version_id, grant_row.policy_release_digest, run.embedding_space_id,
            prompt.status, prompt.template, prompt.content_hash,
            agent.input_schema, agent.output_schema,
-           encode(public.digest(convert_to(agent.input_schema::text, 'UTF8'), 'sha256'), 'hex'),
-           encode(public.digest(convert_to(agent.output_schema::text, 'UTF8'), 'sha256'), 'hex'),
-           agent.content_hash, package.status, provider.state, profile.state,
+            package.manifest #>> '{aiGuidance,inputSchemaHash}',
+            package.manifest #>> '{aiGuidance,outputSchemaHash}',
+            agent.content_hash, package.status, package.manifest, package.content_hash, provider.state, profile.state,
            provider.data_policy ->> 'maxClassification',
            (profile.capability_snapshot ->> 'maxInputTokens')::integer,
            profile.capability_snapshot ->> 'snapshotHash', profile.capability_snapshot, space.status,
@@ -1787,17 +1788,18 @@ END;
 $$;
 
 CREATE FUNCTION ai.get_guidance_terminal_result(p_run_id uuid)
-RETURNS TABLE (operation_id uuid, recommendation_id uuid)
+RETURNS TABLE (operation_id uuid, run_status text, error_code text, recommendation_id uuid)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-    RETURN QUERY SELECT run.id, run.recommendation_id
+    RETURN QUERY SELECT run.id, run.status, run.error_code, run.recommendation_id
     FROM ai.ai_run run
     JOIN authz.ai_authorization_grant grant_row
       ON grant_row.id = run.authorization_grant_id AND grant_row.run_id = run.id
-    WHERE run.id = p_run_id AND run.status = 'COMPLETED' AND run.recommendation_id IS NOT NULL;
+    WHERE run.id = p_run_id AND grant_row.consumed_at IS NOT NULL
+      AND run.status IN ('COMPLETED', 'FAILED', 'CANCELLED');
 END;
 $$;
 
@@ -1821,7 +1823,7 @@ BEGIN
             RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid successful guidance outcome';
         END IF;
     ELSIF p_status IN ('FAILED', 'CANCELLED') THEN
-        IF old_status <> 'RUNNING' OR p_error_code !~ '^OCC-AI-[A-Z0-9-]{1,112}$' OR p_recommendation_id IS NOT NULL THEN
+        IF old_status NOT IN ('QUEUED', 'RUNNING') OR p_error_code !~ '^OCC-AI-[A-Z0-9-]{1,112}$' OR p_recommendation_id IS NOT NULL THEN
             RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid unsuccessful guidance outcome';
         END IF;
     ELSE
@@ -1970,6 +1972,143 @@ BEGIN
     VALUES (p_trace_id, p_document_version_id, p_chunk_id, p_lexical_score, p_vector_score,
             p_fused_score, p_rank, p_excerpt_hash, p_injection_detected);
     RETURN p_chunk_id;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_retrieval_bundle(
+    p_id uuid, p_run_id uuid, p_embedding_space_id uuid, p_query_hash text,
+    p_lexical_candidate_count integer, p_vector_candidate_count integer,
+    p_ranking_config jsonb, p_hits jsonb
+)
+RETURNS TABLE (trace_id uuid, retrieval_hit_id uuid, rank integer)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+    existing_trace ai.retrieval_trace%ROWTYPE;
+    bundle_digest text;
+    bundle_payload jsonb;
+    document_count integer;
+    hit_count integer;
+    inserted_count integer;
+    item jsonb;
+    item_ordinal bigint;
+    item_document_version_id uuid;
+    item_chunk_id uuid;
+    item_rank integer;
+    item_excerpt_hash text;
+    chunk_content text;
+    chunk_content_hash text;
+    chunk_document_version integer;
+    chunk_classification text;
+BEGIN
+    IF p_id IS NULL OR p_run_id IS NULL OR p_embedding_space_id IS NULL
+       OR p_query_hash !~ '^[0-9a-f]{64}$'
+       OR p_lexical_candidate_count NOT BETWEEN 0 AND 200
+       OR p_vector_candidate_count NOT BETWEEN 0 AND 200
+       OR jsonb_typeof(p_ranking_config) <> 'object' OR octet_length(p_ranking_config::text) > 4096
+       OR jsonb_typeof(p_hits) <> 'array' OR jsonb_array_length(p_hits) > 100
+       OR octet_length(p_hits::text) > 262144 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bundle bounds';
+    END IF;
+    hit_count := jsonb_array_length(p_hits);
+    bundle_payload := jsonb_build_object(
+        'embeddingSpaceId', p_embedding_space_id,
+        'hits', p_hits,
+        'lexicalCandidateCount', p_lexical_candidate_count,
+        'queryHash', p_query_hash,
+        'rankingConfig', p_ranking_config,
+        'runId', p_run_id,
+        'traceId', p_id,
+        'vectorCandidateCount', p_vector_candidate_count
+    );
+    bundle_digest := encode(pg_catalog.sha256(convert_to(bundle_payload::text, 'UTF8')), 'hex');
+
+    SELECT * INTO STRICT grant_row FROM authz.ai_authorization_grant
+    WHERE run_id = p_run_id AND consumed_at IS NOT NULL FOR SHARE;
+    IF NOT EXISTS (SELECT 1 FROM ai.ai_run run
+                   WHERE run.id = p_run_id AND run.embedding_space_id = p_embedding_space_id) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match governed run';
+    END IF;
+    SELECT count(*) INTO document_count FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
+
+    INSERT INTO ai.retrieval_trace
+        (id, run_id, grant_id, embedding_space_id, query_hash, authorized_set_digest,
+         authorized_document_count, classification_ceiling, lexical_candidate_count,
+         vector_candidate_count, result_count, ranking_config, bundle_digest)
+    VALUES (p_id, p_run_id, grant_row.id, p_embedding_space_id, p_query_hash,
+            grant_row.authorized_set_digest, document_count, grant_row.classification_ceiling,
+            p_lexical_candidate_count, p_vector_candidate_count, hit_count, p_ranking_config, bundle_digest)
+    ON CONFLICT (id) DO NOTHING;
+    GET DIAGNOSTICS inserted_count = ROW_COUNT;
+    SELECT * INTO STRICT existing_trace FROM ai.retrieval_trace WHERE id = p_id FOR UPDATE;
+    IF existing_trace.bundle_digest IS DISTINCT FROM bundle_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'retrieval bundle replay conflicts with immutable digest';
+    END IF;
+
+    IF inserted_count = 1 THEN
+        FOR item, item_ordinal IN SELECT value, ordinality FROM jsonb_array_elements(p_hits) WITH ORDINALITY LOOP
+            IF jsonb_typeof(item) <> 'object'
+               OR item - ARRAY['chunkId','documentVersionId','documentVersion','contentHash','classification',
+                    'lexicalScore','vectorScore','fusedScore','rank','excerptHash','injectionDetected'] <> '{}'::jsonb
+               OR NOT (item ?& ARRAY['chunkId','documentVersionId','documentVersion','contentHash','classification',
+                    'lexicalScore','vectorScore','fusedScore','rank','excerptHash','injectionDetected'])
+               OR jsonb_typeof(item->'chunkId') <> 'string'
+               OR jsonb_typeof(item->'documentVersionId') <> 'string'
+               OR jsonb_typeof(item->'documentVersion') <> 'number'
+               OR jsonb_typeof(item->'contentHash') <> 'string'
+               OR jsonb_typeof(item->'classification') <> 'string'
+               OR jsonb_typeof(item->'fusedScore') <> 'number'
+               OR jsonb_typeof(item->'rank') <> 'number'
+               OR jsonb_typeof(item->'excerptHash') <> 'string'
+               OR jsonb_typeof(item->'injectionDetected') <> 'boolean'
+               OR (item->'lexicalScore' <> 'null'::jsonb AND jsonb_typeof(item->'lexicalScore') <> 'number')
+               OR (item->'vectorScore' <> 'null'::jsonb AND jsonb_typeof(item->'vectorScore') <> 'number') THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bundle hit';
+            END IF;
+            item_document_version_id := (item->>'documentVersionId')::uuid;
+            item_chunk_id := (item->>'chunkId')::uuid;
+            item_rank := (item->>'rank')::integer;
+            item_excerpt_hash := item->>'excerptHash';
+            IF item_rank <> item_ordinal OR item_excerpt_hash !~ '^[0-9a-f]{64}$'
+               OR item->>'contentHash' !~ '^[0-9a-f]{64}$'
+               OR item->>'classification' NOT IN ('PUBLIC','INTERNAL','CONFIDENTIAL','RESTRICTED') THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bundle hit order or digest';
+            END IF;
+            SELECT chunk.content, chunk.content_hash, document.version, document.data_classification
+            INTO STRICT chunk_content, chunk_content_hash, chunk_document_version, chunk_classification
+            FROM authz.ai_authorized_document allowed
+            JOIN ai.knowledge_document_version document ON document.id = allowed.document_version_id
+            JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = document.id
+            WHERE allowed.grant_id = grant_row.id AND document.id = item_document_version_id
+              AND chunk.id = item_chunk_id;
+            IF chunk_content_hash <> item->>'contentHash'
+               OR chunk_document_version <> (item->>'documentVersion')::integer
+               OR chunk_classification <> item->>'classification'
+               OR encode(pg_catalog.sha256(convert_to(chunk_content, 'UTF8')), 'hex') <> item_excerpt_hash THEN
+                RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'retrieval bundle hit does not match authorized chunk evidence';
+            END IF;
+            INSERT INTO ai.retrieval_hit
+                (trace_id, document_version_id, chunk_id, lexical_score, vector_score,
+                 fused_score, rank, excerpt_hash, injection_detected)
+            VALUES (p_id, item_document_version_id, item_chunk_id,
+                    CASE WHEN item->'lexicalScore' = 'null'::jsonb THEN NULL ELSE (item->>'lexicalScore')::double precision END,
+                    CASE WHEN item->'vectorScore' = 'null'::jsonb THEN NULL ELSE (item->>'vectorScore')::double precision END,
+                    (item->>'fusedScore')::double precision, item_rank, item_excerpt_hash,
+                    (item->>'injectionDetected')::boolean);
+        END LOOP;
+    ELSIF (SELECT count(*) FROM ai.retrieval_hit hit WHERE hit.trace_id = p_id) <> hit_count THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retrieval bundle replay found partial persisted evidence';
+    END IF;
+
+    IF hit_count = 0 THEN
+        RETURN QUERY SELECT p_id, NULL::uuid, NULL::integer;
+    ELSE
+        RETURN QUERY SELECT p_id, hit.chunk_id, hit.rank
+        FROM ai.retrieval_hit hit WHERE hit.trace_id = p_id ORDER BY hit.rank;
+    END IF;
 END;
 $$;
 
@@ -2361,12 +2500,15 @@ GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime;
 GRANT USAGE ON SCHEMA authz TO innorder_ai_runtime;
 
 GRANT SELECT ON ai.model_provider, ai.model_profile, ai.prompt_template_version, ai.agent_definition_version,
-    ai.embedding_space, ai.evaluation_dataset_version, ai.evaluation_case, ai.knowledge_document_version,
-    ai.knowledge_chunk, ai.chunk_embedding, ai.ingestion_job, ai.ingestion_attempt,
+    ai.embedding_space, ai.evaluation_dataset_version, ai.evaluation_case,
+    ai.ingestion_job, ai.ingestion_attempt,
     ai.event_consumption, ai.model_invocation, ai.retrieval_trace, ai.retrieval_hit,
     ai.embedding_space_gate_evaluation, ai.embedding_space_gate_case_evidence,
     ai.embedding_space_gate_result, ai.ai_run_artifact, ai.retention_policy
 TO innorder_ai_runtime;
+REVOKE SELECT ON ai.knowledge_document_version FROM innorder_ai_runtime;
+REVOKE SELECT ON ai.knowledge_chunk FROM innorder_ai_runtime;
+REVOKE SELECT ON ai.chunk_embedding FROM innorder_ai_runtime;
 
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai FROM PUBLIC;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai TO innorder_runtime;
@@ -2378,6 +2520,9 @@ REVOKE ALL ON FUNCTION ai.get_ai_operation_status(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.record_retrieval_trace(uuid, uuid, uuid, text, integer, integer, integer, jsonb) FROM PUBLIC, innorder_ai_runtime;
+REVOKE ALL ON FUNCTION ai.record_retrieval_hit(uuid, uuid, uuid, double precision, double precision, double precision, integer, text, boolean) FROM PUBLIC, innorder_ai_runtime;
 REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FROM PUBLIC, innorder_runtime;
 REVOKE ALL ON FUNCTION ai.release_legal_hold(uuid, uuid) FROM PUBLIC, innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
@@ -2389,6 +2534,7 @@ GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO in
 GRANT EXECUTE ON FUNCTION ai.heartbeat_ingestion_job(uuid, text, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.release_legal_hold(uuid, uuid) TO innorder_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
@@ -2404,8 +2550,6 @@ GRANT EXECUTE ON FUNCTION ai.transition_ai_run(uuid, text) TO innorder_ai_runtim
 GRANT EXECUTE ON FUNCTION ai.start_model_invocation(uuid, uuid, uuid, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.finalize_model_invocation(uuid, text, text, text, bigint, bigint, numeric, integer, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_run_artifact(uuid, uuid, text, text, text, text) TO innorder_ai_runtime;
-GRANT EXECUTE ON FUNCTION ai.record_retrieval_trace(uuid, uuid, uuid, text, integer, integer, integer, jsonb) TO innorder_ai_runtime;
-GRANT EXECUTE ON FUNCTION ai.record_retrieval_hit(uuid, uuid, uuid, double precision, double precision, double precision, integer, text, boolean) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.begin_embedding_space_gate(uuid, uuid, uuid, text, uuid, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.record_embedding_gate_case(uuid, uuid, bigint, bigint, bigint, bigint, bigint, text, text, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.finalize_embedding_space_gate(uuid) TO innorder_ai_runtime;

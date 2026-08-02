@@ -422,7 +422,10 @@ test('provisions a separate AI identity before Flyway without granting broad acc
 
   const sql = readMigration('V015__governed_ai_runtime.sql');
   assert.match(sql, /GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime/iu);
-  assert.match(sql, /GRANT SELECT ON[\s\S]*ai\.knowledge_document_version[\s\S]*ai\.knowledge_chunk[\s\S]*ai\.chunk_embedding[\s\S]*TO innorder_ai_runtime/iu);
+  for (const table of ['knowledge_document_version', 'knowledge_chunk', 'chunk_embedding']) {
+    assert.match(sql, new RegExp(`REVOKE (?:ALL|SELECT) ON ai\\.${table} FROM innorder_ai_runtime`, 'iu'));
+    assert.doesNotMatch(sql, new RegExp(`GRANT SELECT ON[^;]*ai\\.${table}[^;]*TO innorder_ai_runtime`, 'iu'));
+  }
   assert.doesNotMatch(sql, /GRANT\s+(?:ALL|CREATE)\s+ON SCHEMA/iu);
   assert.doesNotMatch(sql, /GRANT[^;]*(?:INSERT|UPDATE|DELETE)[^;]*ON[^;]*(?:iam\.|authz\.(?:entity|relationship|authorization_state|policy_release)\b|occ\.|flowable\.|audit\.|ai\.(?:model_provider|knowledge_source|knowledge_document|recommendation|conversation)\b)/iu);
   for (const schema of ['iam', 'occ', 'flowable', 'audit']) {
@@ -512,9 +515,10 @@ test('routes AI mutations through bounded functions and retains governed evidenc
     'finalize_ingestion_job', 'fail_ingestion_job', 'register_event_consumption',
     'finalize_event_consumption', 'fail_event_consumption', 'transition_ai_run',
     'start_model_invocation', 'finalize_model_invocation', 'persist_run_artifact',
-    'record_retrieval_trace', 'record_retrieval_hit',
+    'persist_retrieval_bundle',
   ]) assert.match(sql, new RegExp(`CREATE FUNCTION ai\\.${fn}\\(`, 'iu'), fn);
   assert.match(sql, /GRANT SELECT ON ai\.model_provider/iu);
+  assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION ai\.(?:record_retrieval_trace|record_retrieval_hit)\([^;]*TO innorder_ai_runtime/iu);
   assert.doesNotMatch(sql, /GRANT SELECT, INSERT(?:, UPDATE)? ON ai\.(?:knowledge_document_version|knowledge_chunk|chunk_embedding|ingestion_job|ingestion_attempt|event_consumption|model_invocation|retrieval_trace|retrieval_hit)/iu);
 });
 

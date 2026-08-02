@@ -7,6 +7,13 @@ type Client = Pick<S3Client, "send">;
 type Config = Readonly<{ endpoint: string; bucket: string; prefix: string; accessKeyFile: string; secretKeyFile: string; forcePathStyle: boolean; allowInsecureLocalhost?: boolean; maxObjectBytes?: number; client?: Client }>;
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
+const ONE_YEAR_TOLERANCE_MS = 1000;
+
+function oneYearFromNow(): Date {
+  const retainedUntil = new Date();
+  retainedUntil.setUTCFullYear(retainedUntil.getUTCFullYear() + 1);
+  return retainedUntil;
+}
 
 async function credential(path: string): Promise<string> {
   try {
@@ -100,13 +107,17 @@ export class MinioArtifactObjectStore {
     if (bytes.length < 1 || bytes.length > this.maxObjectBytes || !HASH.test(expectedHash) || createHash("sha256").update(bytes).digest("hex") !== expectedHash) throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
     const checksum = createHash("sha256").update(bytes).digest("base64");
     const Key = this.key(objectId);
+    const retainedUntil = oneYearFromNow();
     let created = false;
     try {
       await this.client.send(new PutObjectCommand({ Bucket: this.config.bucket, Key, Body: bytes, ContentLength: bytes.length,
-        ChecksumSHA256: checksum, ServerSideEncryption: "AES256", IfNoneMatch: "*", ContentType: "application/json" }), { abortSignal: signal });
+        ChecksumSHA256: checksum, ServerSideEncryption: "AES256", IfNoneMatch: "*", ContentType: "application/json",
+        ObjectLockMode: "GOVERNANCE", ObjectLockRetainUntilDate: retainedUntil }), { abortSignal: signal });
       created = true;
       const head = await this.client.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key, ChecksumMode: "ENABLED" }), { abortSignal: signal });
-      if (head.ContentLength !== bytes.length || head.ChecksumSHA256 !== checksum || head.ServerSideEncryption !== "AES256") throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
+      if (head.ContentLength !== bytes.length || head.ChecksumSHA256 !== checksum || head.ServerSideEncryption !== "AES256" ||
+        head.ObjectLockMode !== "GOVERNANCE" || !(head.ObjectLockRetainUntilDate instanceof Date) ||
+        head.ObjectLockRetainUntilDate.getTime() < retainedUntil.getTime() - ONE_YEAR_TOLERANCE_MS) throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
     } catch (error) {
       const status = typeof error === "object" && error !== null && "$metadata" in error ? (error.$metadata as { httpStatusCode?: number }).httpStatusCode : undefined;
       if (status === 412 || (error instanceof Error && error.name === "PreconditionFailed")) throw new Error("OCC-AI-OBJECT-STORE-CONFLICT");

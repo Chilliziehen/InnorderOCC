@@ -8,12 +8,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
-  CreateBucketCommand, HeadObjectCommand, ListBucketsCommand, ListObjectsV2Command, PutObjectCommand, S3Client,
+  CreateBucketCommand, DeleteObjectCommand, GetObjectRetentionCommand, HeadObjectCommand, ListBucketsCommand, ListObjectsV2Command, PutObjectCommand, S3Client,
 } from "@aws-sdk/client-s3";
 
 import { IngestionWorker } from "../dist/ingestion/ingestion-worker.js";
 import { ClamdMalwareScanner } from "../dist/ingestion/malware-scanner.js";
-import { MinioQuarantineObjectStore } from "../dist/object-store/minio-object-store.js";
+import { MinioArtifactObjectStore, MinioQuarantineObjectStore } from "../dist/object-store/minio-object-store.js";
 
 const MINIO_IMAGE = "minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e";
 const CLAMAV_IMAGE = "clamav/clamav@sha256:efc48bad8b67f30867b4e6f198324d2097a6b6d5f22aedaf70f4e634fe0504da";
@@ -68,7 +68,10 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
   const appAccess = "ingestion-app"; const appSecret = "app-secret-at-least-32-bytes";
   const bucket = "knowledge-quarantine"; const prefix = "quarantine/integration";
   await writeFile(join(credentials, "access"), appAccess); await writeFile(join(credentials, "secret"), appSecret);
-  await writeFile(join(credentials, "app-policy.json"), JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"], Resource: [`arn:aws:s3:::${bucket}/${prefix}/*`] }] }));
+    await writeFile(join(credentials, "app-policy.json"), JSON.stringify({ Version: "2012-10-17", Statement: [
+      { Effect: "Allow", Action: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"], Resource: [`arn:aws:s3:::${bucket}/${prefix}/*`] },
+      { Effect: "Allow", Action: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:PutObjectRetention", "s3:GetObjectRetention"], Resource: [`arn:aws:s3:::${bucket}/trace/integration/*`] },
+    ] }));
   await writeFile(join(credentials, "local.ndb"), await readFile(new URL("./fixtures/ingestion/sources/local.ndb", import.meta.url)));
   try {
     const minioRun = docker(["run", "--detach", "--name", minio, "--publish", "127.0.0.1::9000",
@@ -80,7 +83,7 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
     const minioPort = mappedPort(minio, 9000); const endpoint = `http://127.0.0.1:${minioPort}`;
     await waitHttp(`${endpoint}/minio/health/ready`, minio);
     const rootClient = new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", credentials: { accessKeyId: rootAccess, secretAccessKey: rootSecret }, maxAttempts: 1 });
-    await eventually(() => rootClient.send(new CreateBucketCommand({ Bucket: bucket })));
+    await eventually(() => rootClient.send(new CreateBucketCommand({ Bucket: bucket, ObjectLockEnabledForBucket: true })));
     await rootClient.send(new CreateBucketCommand({ Bucket: "other-quarantine" }));
     const mc = (args) => docker(["exec", minio, "mc", ...args]);
     assert.equal(mc(["alias", "set", "local", "http://127.0.0.1:9000", rootAccess, rootSecret]).status, 0);
@@ -107,6 +110,22 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
     const aborted = new AbortController(); aborted.abort();
     await assert.rejects(store.upload("aborted", body, sha256(body), aborted.signal));
     await assert.rejects(appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: "quarantine/integration/aborted" })));
+
+    const artifactStore = await MinioArtifactObjectStore.create({ endpoint, bucket, prefix: "trace/integration",
+      accessKeyFile: join(credentials, "access"), secretKeyFile: join(credentials, "secret"), forcePathStyle: true, allowInsecureLocalhost: true });
+    const artifactBody = Buffer.from('{"generatedContent":true}');
+    await artifactStore.upload("run/artifact.json", artifactBody, sha256(artifactBody), new AbortController().signal);
+    const artifactKey = "trace/integration/run/artifact.json";
+    const artifactHead = await appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey, ChecksumMode: "ENABLED" }));
+    assert.equal(artifactHead.ObjectLockMode, "GOVERNANCE");
+    assert.equal(typeof artifactHead.VersionId, "string");
+    assert.ok(artifactHead.ObjectLockRetainUntilDate instanceof Date);
+    assert.ok(artifactHead.ObjectLockRetainUntilDate.getTime() > Date.now() + 364 * 24 * 60 * 60 * 1000);
+    const retention = await appClient.send(new GetObjectRetentionCommand({ Bucket: bucket, Key: artifactKey }));
+    assert.equal(retention.Retention?.Mode, "GOVERNANCE");
+    assert.ok(retention.Retention?.RetainUntilDate instanceof Date);
+    await assert.rejects(appClient.send(new DeleteObjectCommand({ Bucket: bucket, Key: artifactKey, VersionId: artifactHead.VersionId })));
+    assert.equal((await appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey }))).VersionId, artifactHead.VersionId);
 
     const clamRun = docker(["run", "--detach", "--name", clamav, "--publish", "127.0.0.1::3310",
       "--mount", `type=bind,src=${join(credentials, "local.ndb")},dst=/var/lib/clamav/local.ndb,readonly`,

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { GUIDANCE_OUTPUT_JSON_SCHEMA, GUIDANCE_OUTPUT_JSON_SCHEMA_HASH } from "@innorder/contracts";
+
 import type { ChatRequest } from "../provider/openai-compatible.js";
 import type { PersistedRetrievalHit } from "../retrieval/postgres-retrieval-repository.js";
 
@@ -34,28 +36,16 @@ function evidenceJson(value: unknown): string {
   return canonical(value).replaceAll("<", "\\u003c");
 }
 
-export const GUIDANCE_OUTPUT_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
-  type: "object",
-  required: ["generatedContent", "summary", "steps", "confidence", "citations"],
-  additionalProperties: false,
-  properties: {
-    generatedContent: { const: true }, summary: { type: "string", minLength: 1, maxLength: 2000 },
-    steps: { type: "array", minItems: 1, maxItems: 20, items: { type: "object", required: ["text", "citationRanks"], additionalProperties: false,
-      properties: { text: { type: "string", minLength: 1, maxLength: 2000 }, citationRanks: { type: "array", minItems: 1, maxItems: 10, items: { type: "integer", minimum: 1, maximum: 50 } } } } },
-    confidence: { type: "number", minimum: 0, maximum: 1 },
-    citations: { type: "array", minItems: 1, maxItems: 50, items: { type: "object", required: ["rank", "retrievalHitId", "excerptHash"], additionalProperties: false,
-      properties: { rank: { type: "integer", minimum: 1, maximum: 50 }, retrievalHitId: { type: "string", minLength: 36, maxLength: 36 }, excerptHash: { type: "string", minLength: 64, maxLength: 64 } } } },
-  },
-};
-
 export function buildGuidancePrompt(input: Readonly<{
   template: string;
   templateHash: string;
   taskContext: Readonly<Record<string, unknown>>;
   hits: readonly PersistedRetrievalHit[];
+  outputSchema: Readonly<Record<string, unknown>>;
   maxInputBytes: number;
 }>): Readonly<{ messages: ChatRequest["messages"]; schema: Readonly<Record<string, unknown>>; promptHash: string; schemaHash: string }> {
   if (input.template !== PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE || digest(input.template) !== input.templateHash) throw new Error("OCC-AI-PROMPT-CONFIG");
+  if (canonical(input.outputSchema) !== canonical(GUIDANCE_OUTPUT_JSON_SCHEMA) || digest(canonical(input.outputSchema)) !== GUIDANCE_OUTPUT_JSON_SCHEMA_HASH) throw new Error("OCC-AI-CONFIG-MISMATCH");
   if (!Number.isSafeInteger(input.maxInputBytes) || input.maxInputBytes < 1 || input.hits.length < 1 || input.hits.length > 50) throw new Error("OCC-AI-PROVIDER-LIMIT");
   const context = canonical(input.taskContext);
   if (Buffer.byteLength(context, "utf8") > 32 * 1024) throw new Error("OCC-AI-CONTEXT-LIMIT");
@@ -69,5 +59,5 @@ export function buildGuidancePrompt(input: Readonly<{
   const messages: ChatRequest["messages"] = [{ role: "system", content: input.template }, { role: "user", content: user }];
   const serialized = JSON.stringify(messages);
   if (Buffer.byteLength(serialized, "utf8") > input.maxInputBytes) throw new Error("OCC-AI-PROVIDER-LIMIT");
-  return { messages, schema: GUIDANCE_OUTPUT_JSON_SCHEMA, promptHash: digest(serialized), schemaHash: digest(canonical(GUIDANCE_OUTPUT_JSON_SCHEMA)) };
+  return { messages, schema: input.outputSchema, promptHash: digest(serialized), schemaHash: GUIDANCE_OUTPUT_JSON_SCHEMA_HASH };
 }

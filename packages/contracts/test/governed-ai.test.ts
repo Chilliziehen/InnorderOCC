@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,8 +12,13 @@ import {
   capabilitySnapshotSchema,
   dataClassificationSchema,
   generatedRecommendationSchema,
+  GUIDANCE_INPUT_JSON_SCHEMA,
+  GUIDANCE_INPUT_JSON_SCHEMA_HASH,
+  GUIDANCE_OUTPUT_JSON_SCHEMA,
+  GUIDANCE_OUTPUT_JSON_SCHEMA_HASH,
   guidanceRequestSchema,
   guidanceStatusSchema,
+  guidanceTaskContextSchema,
   knowledgeActivationRequestSchema,
   knowledgeGateMetricsSchema,
   knowledgeGateResultSchema,
@@ -40,6 +47,10 @@ const UUID_3 = "123e4567-e89b-42d3-a456-426614174000";
 const SHA = "a".repeat(64);
 const NOW = "2026-08-01T10:30:00Z";
 const LATER = "2026-08-01T10:35:00Z";
+const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.map(canonical).join(",")}]`
+  : value !== null && typeof value === "object" ? `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`
+    : JSON.stringify(value);
+const canonicalHash = (value: unknown): string => createHash("sha256").update(canonical(value)).digest("hex");
 
 const recommendation = {
   generatedContent: true,
@@ -541,6 +552,30 @@ describe("governed guidance and recommendation contracts", () => {
       { ...recommendation, citations: [...recommendation.citations, recommendation.citations[0]] },
       { ...recommendation, citations: [{ rank: 1, retrievalHitId: UUID, excerptHash: "bad" }] },
     ]) expect(() => generatedRecommendationSchema.parse(invalid)).toThrow();
+  });
+
+  it("publishes exact canonical participant guidance schemas and hashes", () => {
+    expect(GUIDANCE_INPUT_JSON_SCHEMA).toEqual({
+      type: "object", required: ["query", "expectedTargetVersion"], additionalProperties: false,
+      properties: {
+        query: { type: "string", minLength: 1, maxLength: 8192 },
+        expectedTargetVersion: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+      },
+    });
+    expect(GUIDANCE_OUTPUT_JSON_SCHEMA).toMatchObject({
+      type: "object", required: ["generatedContent", "summary", "steps", "confidence", "citations"], additionalProperties: false,
+    });
+    expect(GUIDANCE_INPUT_JSON_SCHEMA_HASH).toBe(canonicalHash(GUIDANCE_INPUT_JSON_SCHEMA));
+    expect(GUIDANCE_OUTPUT_JSON_SCHEMA_HASH).toBe(canonicalHash(GUIDANCE_OUTPUT_JSON_SCHEMA));
+    expect(guidanceTaskContextSchema.parse({ query: "approved checklist", expectedTargetVersion: 4 }))
+      .toEqual({ query: "approved checklist", expectedTargetVersion: 4 });
+    for (const invalid of [
+      { query: "approved checklist", expectedTargetVersion: 4, extra: true },
+      { query: "", expectedTargetVersion: 4 },
+      { query: "x".repeat(8193), expectedTargetVersion: 4 },
+      { query: "approved checklist", expectedTargetVersion: -1 },
+      { query: "approved checklist", expectedTargetVersion: 1.5 },
+    ]) expect(() => guidanceTaskContextSchema.parse(invalid)).toThrow();
   });
 
   it("defines service grant exchange without allowing secrets into requests or events", () => {

@@ -49,6 +49,28 @@ describe("PostgresRetrievalRepository", () => {
       .rejects.toThrow("OCC-AI-RETRIEVAL-BOUNDS");
     expect(query).not.toHaveBeenCalled();
   });
+
+  it("persists the complete ordered retrieval bundle in one bounded function call", async () => {
+    const content = "Authorized procedure";
+    const candidate = { chunkId: ids.chunk, documentVersionId: ids.document, documentVersion: 7, content,
+      contentHash: hash(content), classification: "INTERNAL" as const, lexicalScore: 1, vectorScore: 0.9,
+      fusedScore: 0.03, rank: 1, excerptHash: hash(content), injectionDetected: false };
+    const query = vi.fn().mockResolvedValue({ rows: [{ trace_id: ids.trace, retrieval_hit_id: ids.chunk, rank: 1 }] });
+    const repository = new PostgresRetrievalRepository({ query } as never);
+
+    const result = await repository.persist({ traceId: ids.trace, runId: ids.run, spaceId: ids.space,
+      queryHash: hash("procedure"), authorizedSetDigest: hash("authorized"), authorizedDocumentCount: 1,
+      classificationCeiling: "INTERNAL", lexicalCandidateCount: 1, vectorCandidateCount: 1,
+      rankingConfig: { version: "hybrid-rrf-v1", rrfK: 60 }, hits: [candidate] }, new AbortController().signal);
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(String(query.mock.calls[0]?.[0])).toContain("ai.persist_retrieval_bundle");
+    expect(String(query.mock.calls[0]?.[0])).not.toMatch(/record_retrieval_(?:trace|hit)/u);
+    const { content: _content, ...bundleHit } = candidate;
+    expect(query.mock.calls[0]?.[1]).toEqual([ids.trace, ids.run, ids.space, hash("procedure"), 1, 1,
+      { version: "hybrid-rrf-v1", rrfK: 60 }, JSON.stringify([bundleHit])]);
+    expect(result).toEqual({ traceId: ids.trace, hits: [{ ...candidate, retrievalHitId: ids.chunk, traceId: ids.trace }] });
+  });
 });
 
 describe("HybridRetriever", () => {

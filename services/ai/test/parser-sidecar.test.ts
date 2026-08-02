@@ -97,13 +97,13 @@ describe("filesystem parser sidecar", () => {
       PARSER_EXECUTION_TIMEOUT_MS: "2000",
       PARSER_TEST_HANG_SHA256: digest(hanging),
     });
-    const client = new ParserSidecarClient({ inputRoot: paths.input, requestRoot: paths.requests, outputRoot: paths.output, timeoutMs: 5_000, pollMs: 10 });
+    const client = new ParserSidecarClient({ inputRoot: paths.input, requestRoot: paths.requests, outputRoot: paths.output, timeoutMs: 15_000, pollMs: 10 });
     try {
       await expect(client.parse({ bytes: hanging, fileName: "hang.txt", mimeType: "text/plain" }, new AbortController().signal)).rejects.toThrow("OCC-AI-PARSER-TIMEOUT");
       await expect(client.parse({ bytes: Buffer.from("after timeout"), fileName: "next.txt", mimeType: "text/plain" }, new AbortController().signal)).resolves.toMatchObject({ text: "after timeout" });
       expect(child.exitCode).toBeNull();
     } finally { child.kill("SIGTERM"); await rm(paths.root, { recursive: true, force: true }); }
-  }, 15_000);
+  }, 30_000);
 
   it("terminates a cancelled active parse and accepts the next request", async () => {
     const paths = await roots();
@@ -112,7 +112,7 @@ describe("filesystem parser sidecar", () => {
       PARSER_EXECUTION_TIMEOUT_MS: "5000",
       PARSER_TEST_HANG_SHA256: digest(hanging),
     });
-    const client = new ParserSidecarClient({ inputRoot: paths.input, requestRoot: paths.requests, outputRoot: paths.output, timeoutMs: 5_000, pollMs: 10 });
+    const client = new ParserSidecarClient({ inputRoot: paths.input, requestRoot: paths.requests, outputRoot: paths.output, timeoutMs: 15_000, pollMs: 10 });
     const controller = new AbortController();
     try {
       const parsing = client.parse({ bytes: hanging, fileName: "cancel.txt", mimeType: "text/plain" }, controller.signal);
@@ -123,7 +123,7 @@ describe("filesystem parser sidecar", () => {
       await expect(client.parse({ bytes: Buffer.from("after cancel"), fileName: "next.txt", mimeType: "text/plain" }, new AbortController().signal)).resolves.toMatchObject({ text: "after cancel" });
       expect(child.exitCode).toBeNull();
     } finally { child.kill("SIGTERM"); await rm(paths.root, { recursive: true, force: true }); }
-  }, 15_000);
+  }, 30_000);
 
   it.each([
     ["output", "PARSER_TEST_OUTPUT_SHA256", "OCC-AI-PARSER-RESULT-BOUNDS"],

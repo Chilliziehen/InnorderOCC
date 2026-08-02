@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 
 import pg from "pg";
 import { describe, expect, it } from "vitest";
+import { GUIDANCE_OUTPUT_JSON_SCHEMA } from "@innorder/contracts";
 
 import { buildGuidancePrompt, PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE } from "../src/guidance/prompt-builder.js";
 import { createPostgresPool, PostgresAiRepository } from "../src/persistence/postgres.js";
@@ -95,7 +96,8 @@ describe("real authorization-first pgvector retrieval", () => {
       expect(result.hits.map(({ chunkId }) => chunkId)).toEqual([id.authorizedChunk]);
       const persisted = await admin.query("SELECT hit.chunk_id, trace.authorized_document_count FROM ai.retrieval_hit hit JOIN ai.retrieval_trace trace ON trace.id=hit.trace_id WHERE trace.id=$1", [id.trace]);
       expect(persisted.rows).toEqual([{ chunk_id: id.authorizedChunk, authorized_document_count: 1 }]);
-      const prompt = buildGuidancePrompt({ template: PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE, templateHash: hash(PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE), taskContext: { query: "approved procedure" }, hits: result.hits, maxInputBytes: 65536 });
+      const prompt = buildGuidancePrompt({ template: PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE, templateHash: hash(PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE),
+        taskContext: { query: "approved procedure", expectedTargetVersion: 1 }, hits: result.hits, outputSchema: GUIDANCE_OUTPUT_JSON_SCHEMA, maxInputBytes: 65536 });
       expect(prompt.messages[1]!.content).toContain(authorizedContent);
       expect(prompt.messages[1]!.content).not.toContain(unauthorizedContent);
     } finally {

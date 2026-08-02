@@ -452,6 +452,10 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.match(minioInit, /read_secret \/run\/secrets\/minio_app_password/u);
   assert.match(minioInit, /root_user" = "\$app_user/u);
   assert.match(minioInit, /root_password" = "\$app_password/u);
+  assert.match(minioInit, /mc mb --with-lock --ignore-existing/u);
+  assert.match(minioInit, /s3:PutObjectRetention/u);
+  assert.match(minioInit, /s3:GetObjectRetention/u);
+  assert.doesNotMatch(minioInit, /s3:BypassGovernanceRetention/u);
   assert.match(minioInit, /mc admin policy attach/u);
 
   const example = read("infra/compose/.env.example");

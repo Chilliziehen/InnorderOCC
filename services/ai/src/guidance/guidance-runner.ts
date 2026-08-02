@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { capabilitySnapshotSchema, DATA_CLASSIFICATION_ORDER, type DataClassification } from "@innorder/contracts";
+import { capabilitySnapshotSchema, DATA_CLASSIFICATION_ORDER, GUIDANCE_INPUT_JSON_SCHEMA, GUIDANCE_INPUT_JSON_SCHEMA_HASH,
+  GUIDANCE_OUTPUT_JSON_SCHEMA, GUIDANCE_OUTPUT_JSON_SCHEMA_HASH, guidanceTaskContextSchema, type DataClassification } from "@innorder/contracts";
 
 import type { CoreClient } from "../core/core-client.js";
 import type { OpenAiCompatibleProvider } from "../provider/openai-compatible.js";
@@ -16,12 +17,6 @@ const digest = (value: string | Uint8Array): string => createHash("sha256").upda
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
-  return JSON.stringify(value);
-}
-
-function postgresJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(postgresJson).join(", ")}]`;
-  if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}: ${postgresJson(item)}`).join(", ")}}`;
   return JSON.stringify(value);
 }
 
@@ -50,29 +45,31 @@ export class GuidanceRunner {
   constructor(private readonly dependencies: Dependencies) {}
 
   async run(input: Readonly<{ operationId: string; grant: string | ConsumedGuidanceGrant }>, signal: AbortSignal): Promise<GuidanceRunResult> {
-    if (signal.aborted) throw new Error("OCC-AI-CANCELLED");
     const grant = typeof input.grant === "string" ? await this.consume(input.grant, signal) : input.grant;
-    if (grant.operationId !== input.operationId || grant.runId !== input.operationId || grant.operation !== "PARTICIPANT_GUIDANCE") throw new Error("OCC-AI-GRANT-MISMATCH");
-    if (grant.replayed) {
-      const terminal = await this.dependencies.repository.terminalResult(grant.runId, signal);
-      if (terminal === undefined) throw new Error("OCC-AI-GRANT-REPLAY");
-      return terminal;
-    }
-    const configuration = await this.dependencies.repository.loadConfiguration({
-      runId: grant.runId, agentVersionId: grant.agentVersionId, modelProfileId: grant.modelProfileId,
-      promptVersionId: grant.promptVersionId, packageVersionId: grant.packageVersionId,
-      embeddingSpaceId: grant.embeddingSpaceId, policyReleaseDigest: grant.policyReleaseDigest,
-    }, signal);
-    this.validateConfiguration(grant, configuration);
-    if (DATA_CLASSIFICATION_ORDER.indexOf(grant.classificationCeiling) > DATA_CLASSIFICATION_ORDER.indexOf(configuration.profile.maxClassification)) {
-      throw new Error("OCC-AI-CLASSIFICATION-DENIED");
-    }
-    await this.dependencies.repository.transition({ runId: grant.runId, status: "RUNNING" }, signal);
     let invocationId: string | undefined;
     const started = (this.dependencies.now?.() ?? new Date()).getTime();
     try {
-      const query = grant.boundedContext.query;
-      if (typeof query !== "string" || Buffer.byteLength(query, "utf8") < 1 || Buffer.byteLength(query, "utf8") > 8192) throw new Error("OCC-AI-CONTEXT-INVALID");
+      if (grant.replayed) {
+        if (grant.operationId !== input.operationId || grant.runId !== input.operationId || grant.operation !== "PARTICIPANT_GUIDANCE") throw new Error("OCC-AI-GRANT-MISMATCH");
+        const terminal = await this.dependencies.repository.terminalResult(grant.runId, new AbortController().signal);
+        if (terminal === undefined) throw new Error("OCC-AI-GRANT-REPLAY");
+        return terminal;
+      }
+      if (signal.aborted) throw new Error("OCC-AI-CANCELLED");
+      if (grant.operationId !== input.operationId || grant.runId !== input.operationId || grant.operation !== "PARTICIPANT_GUIDANCE") throw new Error("OCC-AI-GRANT-MISMATCH");
+      const configuration = await this.dependencies.repository.loadConfiguration({
+        runId: grant.runId, agentVersionId: grant.agentVersionId, modelProfileId: grant.modelProfileId,
+        promptVersionId: grant.promptVersionId, packageVersionId: grant.packageVersionId,
+        embeddingSpaceId: grant.embeddingSpaceId, policyReleaseDigest: grant.policyReleaseDigest,
+      }, signal);
+      this.validateConfiguration(grant, configuration);
+      if (DATA_CLASSIFICATION_ORDER.indexOf(grant.classificationCeiling) > DATA_CLASSIFICATION_ORDER.indexOf(configuration.profile.maxClassification)) {
+        throw new Error("OCC-AI-CLASSIFICATION-DENIED");
+      }
+      const context = guidanceTaskContextSchema.safeParse(grant.boundedContext);
+      if (!context.success || Buffer.byteLength(context.data.query, "utf8") > 8192) throw new Error("OCC-AI-CONTEXT-INVALID");
+      await this.dependencies.repository.transition({ runId: grant.runId, status: "RUNNING" }, signal);
+      const query = context.data.query;
       const retrieval = await this.dependencies.retriever.retrieve({
         runId: grant.runId, query, authorizedSetDigest: grant.authorizedSetDigest,
         authorizedDocumentCount: grant.authorizedDocumentVersionIds.length, classificationCeiling: grant.classificationCeiling,
@@ -81,7 +78,7 @@ export class GuidanceRunner {
           manifestDigest: configuration.space.manifestDigest, embeddingProfileId: configuration.space.embeddingProfileId },
       }, signal);
       const prompt = buildGuidancePrompt({ template: configuration.prompt.template, templateHash: configuration.prompt.hash,
-        taskContext: grant.boundedContext, hits: retrieval.hits, maxInputBytes: configuration.profile.maxInputBytes });
+        taskContext: context.data, hits: retrieval.hits, outputSchema: configuration.agent.outputSchema, maxInputBytes: configuration.profile.maxInputBytes });
       invocationId = this.dependencies.invocationId?.() ?? randomUUID();
       await this.dependencies.repository.startInvocation({ id: invocationId, runId: grant.runId, profileId: grant.modelProfileId,
         operation: grant.operationId, requestHash: prompt.promptHash, capabilityHash: configuration.profile.capabilityHash }, signal);
@@ -105,11 +102,9 @@ export class GuidanceRunner {
       const objectKey = `trace/${grant.runId}/${artifactId}.json`;
       await this.dependencies.artifactStore.upload(objectKey, bytes, artifactHash, signal);
       await this.dependencies.repository.persistArtifact({ id: artifactId, runId: grant.runId, artifactKind: "TRACE", objectKey, hash: artifactHash, classification: grant.classificationCeiling }, signal);
-      const expectedTargetVersion = grant.boundedContext.expectedTargetVersion;
-      if (!Number.isSafeInteger(expectedTargetVersion) || (expectedTargetVersion as number) < 0) throw new Error("OCC-AI-CONTEXT-INVALID");
       const idempotencyKey = digest(`${grant.operationId}:${grant.runId}:recommendation`);
       const coreResult = await this.dependencies.core.submitRecommendation({ operationId: grant.operationId, runId: grant.runId,
-        targetEntityId: grant.targetEntityId, expectedTargetVersion: expectedTargetVersion as number, output: validated }, idempotencyKey, signal);
+        targetEntityId: grant.targetEntityId, expectedTargetVersion: context.data.expectedTargetVersion, output: validated }, idempotencyKey, signal);
       const recommendationId = this.recommendationId(coreResult);
       await this.dependencies.repository.transition({ runId: grant.runId, status: "COMPLETED", recommendationId }, signal);
       return { operationId: grant.operationId, runId: grant.runId, status: "SUCCEEDED", recommendationId };
@@ -133,7 +128,15 @@ export class GuidanceRunner {
     const exact = config.runId === grant.runId && config.operation === grant.operation && config.targetEntityId === grant.targetEntityId &&
       config.agentVersionId === grant.agentVersionId && config.modelProfileId === grant.modelProfileId && config.promptVersionId === grant.promptVersionId &&
       config.packageVersionId === grant.packageVersionId && config.embeddingSpaceId === grant.embeddingSpaceId && config.policyReleaseDigest === grant.policyReleaseDigest;
-    const schemas = digest(postgresJson(config.agent.inputSchema)) === config.agent.inputSchemaHash && digest(postgresJson(config.agent.outputSchema)) === config.agent.outputSchemaHash;
+    const schemas = canonical(config.agent.inputSchema) === canonical(GUIDANCE_INPUT_JSON_SCHEMA) &&
+      canonical(config.agent.outputSchema) === canonical(GUIDANCE_OUTPUT_JSON_SCHEMA) &&
+      config.agent.inputSchemaHash === GUIDANCE_INPUT_JSON_SCHEMA_HASH && config.agent.outputSchemaHash === GUIDANCE_OUTPUT_JSON_SCHEMA_HASH &&
+      digest(canonical(config.agent.inputSchema)) === config.agent.inputSchemaHash && digest(canonical(config.agent.outputSchema)) === config.agent.outputSchemaHash;
+    const guidanceManifest = config.packageManifest.aiGuidance;
+    const manifestSchemas = guidanceManifest !== null && typeof guidanceManifest === "object" && !Array.isArray(guidanceManifest) &&
+      Object.keys(guidanceManifest).length === 2 &&
+      (guidanceManifest as Record<string, unknown>).inputSchemaHash === GUIDANCE_INPUT_JSON_SCHEMA_HASH &&
+      (guidanceManifest as Record<string, unknown>).outputSchemaHash === GUIDANCE_OUTPUT_JSON_SCHEMA_HASH;
     const snapshot = capabilitySnapshotSchema.safeParse(config.profile.capabilitySnapshot);
     const snapshotMatches = snapshot.success && snapshot.data.snapshotHash === config.profile.capabilityHash &&
       digest(canonical(Object.fromEntries(Object.entries(snapshot.data).filter(([key]) => key !== "snapshotHash")))) === config.profile.capabilityHash &&
@@ -142,7 +145,8 @@ export class GuidanceRunner {
       config.profileState !== "ACTIVE" || config.space.status !== "ACTIVE" || config.space.embeddingProfileId !== grant.modelProfileId ||
       !DATA_CLASSIFICATION_ORDER.includes(config.profile.maxClassification) ||
       !Number.isSafeInteger(config.space.dimensions) || config.space.dimensions < 1 || !HASH.test(config.space.manifestDigest) ||
-      !HASH.test(config.profile.capabilityHash) || !snapshotMatches || !schemas || !HASH.test(config.agent.contentHash)) throw new Error("OCC-AI-CONFIG-MISMATCH");
+      !HASH.test(config.profile.capabilityHash) || !snapshotMatches || !schemas || !manifestSchemas ||
+      !HASH.test(config.packageContentHash) || !HASH.test(config.agent.contentHash)) throw new Error("OCC-AI-CONFIG-MISMATCH");
   }
 
   private errorCode(error: unknown, signal: AbortSignal): string {

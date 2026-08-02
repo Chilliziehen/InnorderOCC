@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -118,6 +118,8 @@ function expectCoreFailure(sql, pattern) {
   assert.notEqual(result.status, 0, `${sql} unexpectedly succeeded as Core runtime`);
   assert.match(result.stderr, pattern);
 }
+
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
 function fixtureSql(prefix) {
   const id = (suffix) => `${prefix}-0000-7000-8000-${suffix}`;
@@ -286,7 +288,8 @@ function fixtureSql(prefix) {
       ('${id('000000000020')}'::uuid, repeat('a',64), 'jti-main-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000025')}'::uuid, '${id('000000000030')}'::uuid),
       ('${id('000000000040')}'::uuid, repeat('b',64), 'jti-mismatch-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000035')}'::uuid, '${id('000000000031')}'::uuid),
       ('${id('000000000041')}'::uuid, repeat('c',64), 'jti-expired-${prefix}', 0, interval '-10 minutes', interval '-6 minutes', '${id('000000000039')}'::uuid, '${id('000000000032')}'::uuid),
-      ('${id('000000000042')}'::uuid, repeat('e',64), 'jti-stale-${prefix}', 1, interval '0', interval '5 minutes', '${id('00000000003d')}'::uuid, '${id('000000000033')}'::uuid)
+      ('${id('000000000042')}'::uuid, repeat('e',64), 'jti-stale-${prefix}', 1, interval '0', interval '5 minutes', '${id('00000000003d')}'::uuid, '${id('000000000033')}'::uuid),
+      ('${id('000000000050')}'::uuid, repeat('f',64), 'jti-cancel-${prefix}', 0, interval '0', interval '5 minutes', '${id('000000000034')}'::uuid, '${id('000000000034')}'::uuid)
     ) AS grant_input(id, token_hash, jti, revision_offset, issued_offset, expires_offset, event_id, run_id)
     WHERE singleton;
     INSERT INTO authz.ai_authorized_document (grant_id, document_version_id)
@@ -294,7 +297,8 @@ function fixtureSql(prefix) {
       ('${id('000000000020')}', '${id('000000000017')}'),
       ('${id('000000000040')}', '${id('000000000017')}'),
       ('${id('000000000041')}', '${id('000000000017')}'),
-      ('${id('000000000042')}', '${id('000000000017')}');
+      ('${id('000000000042')}', '${id('000000000017')}'),
+      ('${id('000000000050')}', '${id('000000000017')}');
     INSERT INTO ai.ingestion_job
       (id, source_id, document_id, source_version, source_object_hash, normalized_content_hash,
        parser_version, chunker_version, candidate_embedding_space_id,
@@ -661,6 +665,9 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   assert.match(concurrentReactivation.stderr, /legal hold is append-only/iu);
   assert.equal(execSql(`SELECT count(*) FROM ai.ai_run_artifact WHERE id = '${id('000000000636')}';`), '0');
 
+  for (const table of ['knowledge_document_version', 'knowledge_chunk', 'chunk_embedding']) {
+    expectAiFailure(`SELECT count(*) FROM ai.${table};`, /permission denied/iu);
+  }
   const hits = execAiSql(`SELECT string_agg(chunk_id::text, ',') FROM ai.authorized_hybrid_retrieval(
     '${id('000000000030')}', '${id('000000000009')}', 'allowed', '[1,0,0]'::public.vector, 10, 10, 10);`);
   assert.match(hits, /000000000021/);
@@ -676,12 +683,47 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     AND tablename = 'chunk_embedding_${id('000000000009').replaceAll('-', '_')}' AND indexdef ILIKE '%hnsw%';`), /hnsw/iu,
   'HNSW index existence and real vector retrieval');
 
-  assert.equal(execAiSql(`SELECT ai.record_retrieval_trace('${id('000000000045')}', '${id('000000000030')}',
-    '${id('000000000009')}', repeat('5',64), 1, 2, 1, '{}');`), id('000000000045'));
-  execAiSql(`SELECT ai.record_retrieval_hit('${id('000000000045')}', '${id('000000000017')}',
-    '${id('000000000021')}', 1, 1, 2, 1, repeat('6',64), false);`);
-  expectAiFailure(`SELECT ai.record_retrieval_hit('${id('000000000045')}', '${id('000000000018')}',
-    '${id('000000000022')}', 1, 1, 2, 2, repeat('7',64), false);`, /not authorized by grant/iu);
+  expectAiFailure(`SELECT ai.record_retrieval_trace('${id('000000000045')}', '${id('000000000030')}',
+    '${id('000000000009')}', repeat('5',64), 1, 2, 1, '{}');`, /permission denied/iu);
+
+  const authorizedHit = {
+    chunkId: id('000000000021'), documentVersionId: id('000000000017'), documentVersion: 1,
+    contentHash: '4'.repeat(64), classification: 'PUBLIC', lexicalScore: 1, vectorScore: 1,
+    fusedScore: 2, rank: 1, excerptHash: sha256('allowed knowledge'), injectionDetected: false,
+  };
+  const unauthorizedHit = {
+    chunkId: id('000000000022'), documentVersionId: id('000000000018'), documentVersion: 1,
+    contentHash: '5'.repeat(64), classification: 'PUBLIC', lexicalScore: 1, vectorScore: 1,
+    fusedScore: 2, rank: 2, excerptHash: sha256('allowed but unauthorized'), injectionDetected: false,
+  };
+  const bundleSql = (traceId, queryHash, bundleHits) => `SELECT trace_id::text || '|' || coalesce(retrieval_hit_id::text, 'none') || '|' || coalesce(rank::text, 'none')
+    FROM ai.persist_retrieval_bundle('${traceId}', '${id('000000000030')}', '${id('000000000009')}', '${queryHash}',
+      1, 1, '{"version":"hybrid-rrf-v1"}'::jsonb, '${JSON.stringify(bundleHits)}'::jsonb);`;
+  const exactBundle = bundleSql(id('000000000045'), '5'.repeat(64), [authorizedHit]);
+  assert.match(execAiSql(exactBundle), new RegExp(`${id('000000000045')}\\|${id('000000000021')}\\|1`, 'u'));
+  assert.match(execAiSql(exactBundle), new RegExp(`${id('000000000045')}\\|${id('000000000021')}\\|1`, 'u'));
+  expectAiFailure(bundleSql(id('000000000045'), '6'.repeat(64), [authorizedHit]), /immutable digest/iu);
+
+  const failedTraceId = id('000000000046');
+  expectAiFailure(bundleSql(failedTraceId, '5'.repeat(64), [authorizedHit, unauthorizedHit]), /authorized chunk evidence|query returned no rows/iu);
+  assert.equal(execSql(`SELECT count(*) FROM ai.retrieval_trace WHERE id = '${failedTraceId}';`), '0');
+  assert.equal(execSql(`SELECT count(*) FROM ai.retrieval_hit WHERE trace_id = '${failedTraceId}';`), '0');
+
+  const cancelledTraceId = id('000000000047');
+  const grantLock = runSql(`BEGIN; SELECT id FROM authz.ai_authorization_grant WHERE run_id = '${id('000000000030')}' FOR UPDATE; SELECT pg_sleep(1); COMMIT;`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  const cancelledBundle = await runAiSql(`BEGIN; SET LOCAL statement_timeout = '100ms'; ${bundleSql(cancelledTraceId, '5'.repeat(64), [authorizedHit])} COMMIT;`);
+  assert.notEqual(cancelledBundle.code, 0, 'blocked retrieval bundle was not cancelled');
+  assert.match(cancelledBundle.stderr, /statement timeout/iu);
+  await grantLock;
+  assert.equal(execSql(`SELECT count(*) FROM ai.retrieval_trace WHERE id = '${cancelledTraceId}';`), '0');
+
+  const concurrentTraceId = id('000000000048');
+  const concurrentBundle = bundleSql(concurrentTraceId, '5'.repeat(64), [authorizedHit]);
+  const concurrentResults = await Promise.all([runAiSql(concurrentBundle), runAiSql(concurrentBundle)]);
+  for (const result of concurrentResults) assert.equal(result.code, 0, result.stderr);
+  assert.equal(execSql(`SELECT count(*) FROM ai.retrieval_trace WHERE id = '${concurrentTraceId}';`), '1');
+  assert.equal(execSql(`SELECT count(*) FROM ai.retrieval_hit WHERE trace_id = '${concurrentTraceId}';`), '1');
 
   for (const limit of ['NULL', '0', '101']) {
     expectAiFailure(`SELECT * FROM ai.claim_ingestion_jobs('worker-a', ${limit}, interval '30 seconds');`, /invalid ingestion claim bounds/iu);
@@ -746,7 +788,7 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     '${id('000000000037')}', '${id('000000000029')}',
     '[{"id":"${id('000000000039')}","ordinal":10,"content":"batch knowledge","contentHash":"${'7'.repeat(64)}","tokenCount":2,"metadata":{},"embedding":[0,1,0]}]',
     '{"embeddedThrough":11}');`), '1');
-  assert.equal(execAiSql(`SELECT count(*) FROM ai.knowledge_chunk WHERE id IN ('${id('000000000038')}', '${id('000000000039')}');`), '2');
+  assert.equal(execSql(`SELECT count(*) FROM ai.knowledge_chunk WHERE id IN ('${id('000000000038')}', '${id('000000000039')}');`), '2');
   execAiSql(`SELECT ai.finalize_ingestion_job('${id('000000000026')}', 'worker-b', '{"done":true}');`);
   assert.equal(execAiSql(`SELECT status || '|' || stage || '|' || (completed_at IS NOT NULL)
     FROM ai.ingestion_attempt WHERE job_id = '${id('000000000026')}' AND attempt_number = 2;`),
@@ -838,6 +880,19 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   expectAiFailure(`SELECT * FROM ai.authorized_hybrid_retrieval('${id('000000000030')}',
     '${id('000000000029')}', 'candidate', '[1,0,0]'::public.vector, 10, 10, 10);`,
   /embedding space does not match governed run/iu);
+
+  assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000030')}', 'FAILED', 'OCC-AI-PROVIDER-STATUS', NULL);`), 'FAILED');
+  assert.equal(execAiSql(`SELECT operation_id || '|' || run_status || '|' || error_code || '|' || coalesce(recommendation_id::text, 'none')
+    FROM ai.get_guidance_terminal_result('${id('000000000030')}');`), `${id('000000000030')}|FAILED|OCC-AI-PROVIDER-STATUS|none`);
+  execAiSql(consume({ token: 'b', event: id('000000000035'), run: id('000000000031') }));
+  assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000031')}', 'RUNNING', NULL, NULL);`), 'RUNNING');
+  assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000031')}', 'COMPLETED', NULL, '${id('000000000051')}');`), 'COMPLETED');
+  assert.equal(execAiSql(`SELECT run_status || '|' || recommendation_id FROM ai.get_guidance_terminal_result('${id('000000000031')}');`),
+    `COMPLETED|${id('000000000051')}`);
+  execAiSql(consume({ token: 'f', event: id('000000000034'), run: id('000000000034') }));
+  assert.equal(execAiSql(`SELECT ai.finalize_guidance_run('${id('000000000034')}', 'CANCELLED', 'OCC-AI-CANCELLED', NULL);`), 'CANCELLED');
+  assert.equal(execAiSql(`SELECT run_status || '|' || error_code FROM ai.get_guidance_terminal_result('${id('000000000034')}');`),
+    'CANCELLED|OCC-AI-CANCELLED');
 
   const eventId = execAiSql(`SELECT ai.register_event_consumption('${id('000000000027')}', 'consumer',
     '${id('000000000028')}', 'test.event', 1, 'document', '${id('000000000036')}', 1);`);

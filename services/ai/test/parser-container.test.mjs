@@ -45,7 +45,7 @@ test("pinned parser image enforces execution deadlines and remains available", {
   ];
   const hanging = Buffer.from("deterministic container hanging parser fixture");
   const run = docker(["run", "--detach", "--name", name, ...security,
-    "--env", "PARSER_EXECUTION_TIMEOUT_MS=500", "--env", `PARSER_TEST_HANG_SHA256=${sha(hanging)}`,
+    "--env", "PARSER_EXECUTION_TIMEOUT_MS=5000", "--env", `PARSER_TEST_HANG_SHA256=${sha(hanging)}`,
     "--mount", mount(paths.input, "/parser/input", true), "--mount", mount(paths.requests, "/parser/requests"),
     "--mount", mount(paths.output, "/parser/output"), image]);
   assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);

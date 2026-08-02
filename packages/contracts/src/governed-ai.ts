@@ -428,6 +428,21 @@ export const knowledgeActivationRequestSchema = z
   .strict();
 export const knowledgeRollbackRequestSchema = z.object({ targetVersionId: uuidSchema, expectedVersion: versionSchema }).strict();
 
+export const GUIDANCE_INPUT_JSON_SCHEMA = {
+  type: "object",
+  required: ["query", "expectedTargetVersion"],
+  additionalProperties: false,
+  properties: {
+    query: { type: "string", minLength: 1, maxLength: 8192 },
+    expectedTargetVersion: { type: "integer", minimum: 0, maximum: MAX_SAFE_INTEGER },
+  },
+} as const;
+export const GUIDANCE_INPUT_JSON_SCHEMA_HASH = "b306a7d639eb83331f599b3ff5bf38bd7e65840eea65c774da21d2e07f6141d7";
+export const guidanceTaskContextSchema = z.object({
+  query: z.string().min(1).max(8192),
+  expectedTargetVersion: versionSchema,
+}).strict();
+
 export const guidanceRequestSchema = z
   .object({
     targetEntityId: uuidSchema,
@@ -510,6 +525,38 @@ export const generatedRecommendationSchema = z
     });
   });
 export const guidanceOutputSchema = generatedRecommendationSchema;
+export const GUIDANCE_OUTPUT_JSON_SCHEMA = {
+  type: "object",
+  required: ["generatedContent", "summary", "steps", "confidence", "citations"],
+  additionalProperties: false,
+  properties: {
+    generatedContent: { const: true },
+    summary: { type: "string", minLength: 1, maxLength: 2000 },
+    steps: {
+      type: "array", minItems: 1, maxItems: 20,
+      items: {
+        type: "object", required: ["text", "citationRanks"], additionalProperties: false,
+        properties: {
+          text: { type: "string", minLength: 1, maxLength: 2000 },
+          citationRanks: { type: "array", minItems: 1, maxItems: 10, uniqueItems: true, items: { type: "integer", minimum: 1, maximum: 50 } },
+        },
+      },
+    },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    citations: {
+      type: "array", minItems: 1, maxItems: 50, uniqueItems: true,
+      items: {
+        type: "object", required: ["rank", "retrievalHitId", "excerptHash"], additionalProperties: false,
+        properties: {
+          rank: { type: "integer", minimum: 1, maximum: 50 },
+          retrievalHitId: { type: "string", pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          excerptHash: { type: "string", pattern: SHA256_PATTERN },
+        },
+      },
+    },
+  },
+} as const;
+export const GUIDANCE_OUTPUT_JSON_SCHEMA_HASH = "081abfeb883007bd46c26bb621e52c63a1fd4df4afa56d4bc58effd4393a22cc";
 
 export const recommendationStatusSchema = z.enum(["PROPOSED", "ACCEPTED", "REJECTED"]);
 export const recommendationStaleReasonSchema = z.enum([
@@ -607,6 +654,7 @@ export type KnowledgeUploadMetadata = z.infer<typeof knowledgeUploadMetadataSche
 export type KnowledgeIngestionJob = z.infer<typeof knowledgeIngestionJobSchema>;
 export type KnowledgeGateResult = z.infer<typeof knowledgeGateResultSchema>;
 export type GuidanceRequest = z.infer<typeof guidanceRequestSchema>;
+export type GuidanceTaskContext = z.infer<typeof guidanceTaskContextSchema>;
 export type GuidanceStatus = z.infer<typeof guidanceStatusSchema>;
 export type GeneratedRecommendation = z.infer<typeof generatedRecommendationSchema>;
 export type RecommendationItem = z.infer<typeof recommendationItemSchema>;

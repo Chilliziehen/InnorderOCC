@@ -103,21 +103,19 @@ export class PostgresRetrievalRepository {
       throw new Error("OCC-AI-RETRIEVAL-BOUNDS");
     }
     try {
-      const trace = await this.database.query("SELECT ai.record_retrieval_trace($1,$2,$3,$4,$5,$6,$7,$8) AS id", [
+      const bundle = input.hits.map(({ content: _content, ...hit }) => hit);
+      const result = await this.database.query("SELECT * FROM ai.persist_retrieval_bundle($1,$2,$3,$4,$5,$6,$7,$8)", [
         input.traceId, input.runId, input.spaceId, input.queryHash, input.lexicalCandidateCount,
-        input.vectorCandidateCount, input.hits.length, input.rankingConfig,
+        input.vectorCandidateCount, input.rankingConfig, JSON.stringify(bundle),
       ]);
-      if (trace.rows.length !== 1 || String(trace.rows[0]?.id) !== input.traceId) throw new Error();
-      const hits: PersistedRetrievalHit[] = [];
-      for (const hit of input.hits) {
-        cancelled(signal);
-        const persisted = await this.database.query("SELECT ai.record_retrieval_hit($1,$2,$3,$4,$5,$6,$7,$8,$9) AS id", [
-          input.traceId, hit.documentVersionId, hit.chunkId, hit.lexicalScore, hit.vectorScore,
-          hit.fusedScore, hit.rank, hit.excerptHash, hit.injectionDetected,
-        ]);
-        if (persisted.rows.length !== 1 || String(persisted.rows[0]?.id) !== hit.chunkId) throw new Error();
-        hits.push({ ...hit, retrievalHitId: hit.chunkId, traceId: input.traceId });
-      }
+      cancelled(signal);
+      const persisted = result.rows.filter((row) => row.retrieval_hit_id !== null);
+      if (result.rows.length < 1 || result.rows.some((row) => String(row.trace_id) !== input.traceId) || persisted.length !== input.hits.length) throw new Error();
+      const hits = persisted.map((row, index) => {
+        const hit = input.hits[index];
+        if (hit === undefined || Number(row.rank) !== hit.rank || String(row.retrieval_hit_id) !== hit.chunkId) throw new Error();
+        return { ...hit, retrievalHitId: hit.chunkId, traceId: input.traceId };
+      });
       return { traceId: input.traceId, hits };
     } catch (error) {
       if (error instanceof Error && error.message === "OCC-AI-CANCELLED") throw error;
