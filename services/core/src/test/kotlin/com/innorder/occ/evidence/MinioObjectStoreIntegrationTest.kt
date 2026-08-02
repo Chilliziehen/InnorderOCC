@@ -229,7 +229,7 @@ class MinioObjectStoreIntegrationTest {
             .endpoint(faultEndpoint)
             .region("us-east-1")
             .credentials(APP_USER, APP_PASSWORD)
-            .httpClient(OkHttpClient.Builder().callTimeout(500, TimeUnit.MILLISECONDS).build(), true)
+            .httpClient(OkHttpClient.Builder().callTimeout(2, TimeUnit.SECONDS).build(), true)
             .build()
         val faultStore = MinioObjectStore(faultProperties, faultClient)
         val executor = Executors.newSingleThreadExecutor()
@@ -306,6 +306,21 @@ class MinioObjectStoreIntegrationTest {
             .isInstanceOf(ObjectStoreException::class.java)
             .hasMessage("Object storage operation failed")
             .message().doesNotContain(secret)
+    }
+
+    @Test
+    fun `sub millisecond request timeout is rejected before client construction`() {
+        val properties = EvidenceStorageProperties(
+            endpoint = endpoint,
+            bucket = BUCKET,
+            accessKey = APP_USER,
+            secretKey = APP_PASSWORD,
+            requestTimeout = Duration.ofNanos(999_999),
+        )
+
+        assertThatThrownBy { properties.validate() }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("Invalid object storage configuration")
     }
 
     @Test

@@ -41,7 +41,7 @@ class EvidenceStorageProperties(
         require(secretKey.length in 32..128 && secretKey.none(Char::isWhitespace)) {
             "Invalid object storage configuration"
         }
-        require(requestTimeout > Duration.ZERO && requestTimeout <= Duration.ofSeconds(30)) {
+        require(requestTimeout >= Duration.ofMillis(1) && requestTimeout <= Duration.ofSeconds(30)) {
             "Invalid object storage configuration"
         }
         return this
