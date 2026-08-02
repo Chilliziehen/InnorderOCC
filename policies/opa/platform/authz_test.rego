@@ -150,6 +150,32 @@ test_uuid_identity_is_case_insensitive_but_actions_are_not if {
     action_result.reasonCodes == ["NO_MATCHING_ALLOW"]
 }
 
+test_risk_runtime_grants_allow_only_due_actions if {
+    due_grants := [
+        object.union(platform_allow, {
+            "id": "platform-risk-runtime-escalate",
+            "action": "risk.escalate",
+            "entityId": "*",
+            "resourceId": "*",
+        }),
+        object.union(platform_allow, {
+            "id": "platform-risk-runtime-sla-breach",
+            "action": "risk.sla_breach",
+            "entityId": "*",
+            "resourceId": "*",
+        }),
+    ]
+    every action in ["risk.escalate", "risk.sla_breach"] {
+        request := object.union(base_input, {"action": action, "grants": due_grants})
+        result := decision with input as request
+        result.allow
+    }
+    admin_request := object.union(base_input, {"action": "occ.admin", "grants": due_grants})
+    admin_result := decision with input as admin_request
+    not admin_result.allow
+    admin_result.reasonCodes == ["NO_MATCHING_ALLOW"]
+}
+
 test_layer_outcomes_use_only_bound_release_grants if {
     platform_deny := grant("PLATFORM", "DENY", "platform-deny")
     domain_allow := grant("DOMAIN", "ALLOW", "domain-allow")

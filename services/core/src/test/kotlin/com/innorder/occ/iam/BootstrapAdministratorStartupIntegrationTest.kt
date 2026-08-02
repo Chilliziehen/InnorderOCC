@@ -18,6 +18,7 @@ import org.testcontainers.utility.MountableFile
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class BootstrapAdministratorStartupIntegrationTest {
@@ -31,9 +32,19 @@ class BootstrapAdministratorStartupIntegrationTest {
                 .run(*arguments(postgres)).use {
                     assertThat(ready).isTrue()
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                        .isEqualTo(12)
+                        .isEqualTo(13)
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java))
                         .isEqualTo(1)
+                    assertThat(jdbc.queryForObject(
+                        "SELECT count(*) FROM iam.principal WHERE id = ? AND principal_kind = 'SERVICE' AND status = 'ACTIVE'",
+                        Long::class.java,
+                        RISK_SYSTEM_ID,
+                    )).isEqualTo(1)
+                    assertThat(jdbc.queryForObject(
+                        "SELECT count(*) FROM authz.entity WHERE id = ? AND entity_key = 'system:risk-report' AND state = 'ACTIVE'",
+                        Long::class.java,
+                        RISK_REPORT_ID,
+                    )).isEqualTo(1)
                 }
         }
     }
@@ -54,7 +65,7 @@ class BootstrapAdministratorStartupIntegrationTest {
 
             assertThat(ready).isFalse()
             assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                .isEqualTo(12)
+                .isEqualTo(13)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isZero()
         }
     }
@@ -109,6 +120,10 @@ class BootstrapAdministratorStartupIntegrationTest {
         "--occ.status-probes.external-enabled=false",
         "--occ.bootstrap-administrator.password-file=deterministic-startup-secret",
         "--occ.bootstrap-administrator.secret-owner=$OWNER",
+        "--occ.risk-due.enabled=true",
+        "--occ.risk-due.system-principal-id=$RISK_SYSTEM_ID",
+        "--occ.risk-metrics.enabled=true",
+        "--occ.risk-metrics.report-resource-id=$RISK_REPORT_ID",
     )
 
     private fun database(block: (PostgreSQLContainer<*>, JdbcTemplate) -> Unit) {
@@ -145,5 +160,7 @@ class BootstrapAdministratorStartupIntegrationTest {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val OWNER = "occ-service"
         private const val PASSWORD = "startup-bootstrap-test-only"
+        private val RISK_SYSTEM_ID = UUID.fromString("00000000-0000-7000-8000-000000000040")
+        private val RISK_REPORT_ID = UUID.fromString("00000000-0000-7000-8000-000000000041")
     }
 }

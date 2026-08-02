@@ -295,16 +295,16 @@ test("Compose wiring follows application config and completion gates", () => {
   assert.equal(core.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "false");
   assert.equal(core.environment.OCC_RISK_DUE_ENABLED, "true");
   assert.equal(core.environment.OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID,
-    "${OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:?Set OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID}");
+    "${OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:-00000000-0000-7000-8000-000000000040}");
   assert.equal(core.environment.OCC_RISK_METRICS_ENABLED, "true");
   assert.equal(core.environment.OCC_RISK_METRICS_REPORT_RESOURCE_ID,
-    "${OCC_RISK_METRICS_REPORT_RESOURCE_ID:?Set OCC_RISK_METRICS_REPORT_RESOURCE_ID}");
+    "${OCC_RISK_METRICS_REPORT_RESOURCE_ID:-00000000-0000-7000-8000-000000000041}");
   const application = read("services/core/src/main/resources/application.yml");
   assert.match(application, /system-principal-id: \$\{OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:\}/u);
   assert.match(application, /report-resource-id: \$\{OCC_RISK_METRICS_REPORT_RESOURCE_ID:\}/u);
   const envExample = read("infra/compose/.env.example");
-  assert.match(envExample, /^OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID=$/mu);
-  assert.match(envExample, /^OCC_RISK_METRICS_REPORT_RESOURCE_ID=$/mu);
+  assert.match(envExample, /^OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID=00000000-0000-7000-8000-000000000040$/mu);
+  assert.match(envExample, /^OCC_RISK_METRICS_REPORT_RESOURCE_ID=00000000-0000-7000-8000-000000000041$/mu);
   const flowableInit = compose.services["flowable-init"];
   assert.equal(flowableInit.environment.SPRING_PROFILES_ACTIVE, "flowable-init");
   assert.equal(flowableInit.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "true");
@@ -437,8 +437,13 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
     "POSTGRES_RUNTIME_PASSWORD_FILE",
     "REDIS_PASSWORD_FILE",
   ];
+  const nonSecretDefaults = new Set([
+    "OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID",
+    "OCC_RISK_METRICS_REPORT_RESOURCE_ID",
+  ]);
   for (const line of example.split(/\r?\n/u)) {
     if (!line || line.startsWith("#")) continue;
+    if (nonSecretDefaults.has(line.split("=", 1)[0])) continue;
     assert.match(line, /^[A-Z][A-Z0-9_]*=$/u, `environment value must be blank: ${line}`);
   }
   for (const name of expectedSecretPaths) assert.match(example, new RegExp(`^${name}=$`, "mu"));
@@ -530,5 +535,10 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /linux\/amd64/u);
   assert.match(readme, /Core startup gate is PostgreSQL only/u);
   assert.match(readme, /MinIO\s+initialization and readiness are independent/u);
+  assert.match(readme, /risk runtime identities/iu);
+  assert.match(readme, /non-secret/u);
+  assert.match(readme, /collision/u);
+  assert.match(readme, /risk\.escalate/u);
+  assert.match(readme, /risk\.sla_breach/u);
   assert.doesNotMatch(readme, /Core waits for both MinIO readiness/u);
 });

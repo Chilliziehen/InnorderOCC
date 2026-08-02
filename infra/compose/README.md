@@ -26,6 +26,10 @@ interpolation. Do not commit `.env` or any secret file.
 The cursor HMAC key file must contain at least 32 bytes of deployment-specific
 random key material.
 
+The two risk runtime identity UUIDs in `.env.example` are stable, non-secret
+defaults. They can be overridden for an installation that reserves different
+IDs; the configured IDs must remain distinct.
+
 ## Start
 
 From the repository root, validate the fully interpolated configuration:
@@ -48,6 +52,18 @@ docker compose --env-file infra/compose/.env -f infra/compose/compose.yml down
 
 Add `--volumes` only when intentionally deleting all local PostgreSQL, Kafka,
 Redis, and MinIO data.
+
+## Risk Runtime Identities
+
+On Core startup, administrator bootstrap first publishes the immutable platform
+USER, ROLE, and SYSTEM types and the `role:risk-runtime` policy role. The risk
+runtime provisioner then creates the configured SERVICE principal, stable
+`system:risk-report` resource, and role assignment before runtime identity
+validation. Restart verifies the exact existing rows without rewriting them.
+
+The role grants only `risk.escalate` and `risk.sla_breach`; it does not grant
+`occ.admin`, general execute, or read authority. An ID or stable-key collision
+with any non-exact row aborts startup instead of adopting or modifying that row.
 
 ## Credential Boundaries
 

@@ -8,8 +8,15 @@ import com.innorder.occ.auth.AuthService
 import com.innorder.occ.auth.InvalidCredentialsException
 import com.innorder.occ.auth.PasswordService
 import com.innorder.occ.auth.SessionRepository
+import com.innorder.occ.risk.RiskDueProperties
+import com.innorder.occ.risk.RiskMetricsProperties
+import com.innorder.occ.risk.RiskRuntimeConfigurationException
+import com.innorder.occ.risk.RiskRuntimeIdentityProvisioner
+import com.innorder.occ.risk.RiskRuntimeIdentityValidator
+import com.innorder.occ.risk.RiskRuntimeProvisioningResult
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.springframework.boot.DefaultApplicationArguments
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.mockito.Mockito.mock
@@ -41,6 +48,123 @@ import java.util.concurrent.TimeUnit
 class BootstrapAdministratorIntegrationTest {
     @TempDir
     lateinit var temp: Path
+
+    @Test
+    fun `fresh bootstrap provisions exact risk runtime identities and due-only role grants`() {
+        database { jdbc, transactions ->
+            bootstrapPlatform(jdbc, transactions)
+            val before = revision(jdbc)
+            val provisioner = riskProvisioner(jdbc, transactions)
+
+            assertThat(provisioner.provision()).isEqualTo(RiskRuntimeProvisioningResult.CREATED)
+            assertThat(revision(jdbc)).isEqualTo(before + 1)
+            assertThat(jdbc.queryForMap(
+                """SELECT e.id, e.entity_type_id, e.entity_type_version_id, e.entity_key, e.state,
+                          p.principal_kind, p.display_name, p.status
+                   FROM authz.entity e JOIN iam.principal p ON p.id = e.id WHERE e.id = ?""",
+                RISK_SYSTEM_ID,
+            )).containsAllEntriesOf(mapOf(
+                "id" to RISK_SYSTEM_ID,
+                "entity_type_id" to BootstrapIds.USER_TYPE,
+                "entity_type_version_id" to BootstrapIds.USER_TYPE_VERSION,
+                "entity_key" to "service:risk-runtime",
+                "state" to "ACTIVE",
+                "principal_kind" to "SERVICE",
+                "display_name" to "Risk runtime",
+                "status" to "ACTIVE",
+            ))
+            assertThat(jdbc.queryForMap(
+                """SELECT id, entity_type_id, entity_type_version_id, entity_key, state
+                   FROM authz.entity WHERE id = ?""",
+                RISK_REPORT_ID,
+            )).containsAllEntriesOf(mapOf(
+                "id" to RISK_REPORT_ID,
+                "entity_type_id" to BootstrapIds.SYSTEM_TYPE,
+                "entity_type_version_id" to BootstrapIds.SYSTEM_TYPE_VERSION,
+                "entity_key" to "system:risk-report",
+                "state" to "ACTIVE",
+            ))
+            assertThat(jdbc.queryForObject(
+                """SELECT count(*) FROM authz.relationship
+                   WHERE relation_definition_id = ? AND subject_entity_id = ? AND object_entity_id = ?
+                     AND source_kind = 'SYSTEM' AND source_ref = 'risk-runtime-provisioner'
+                     AND revoked_at IS NULL AND valid_until IS NULL""",
+                Long::class.java,
+                BootstrapIds.ROLE_ASSIGNMENT_RELATION,
+                RISK_SYSTEM_ID,
+                BootstrapIds.RISK_RUNTIME_ROLE,
+            )).isEqualTo(1)
+            assertThat(jdbc.queryForObject(
+                """SELECT count(*) FROM jsonb_array_elements(
+                     (SELECT manifest FROM authz.policy_bundle_version WHERE id = ?)->'roleGrants'
+                   ) grant_item
+                   WHERE grant_item->>'subjectRoleEntityKey' = 'role:risk-runtime'
+                     AND grant_item->>'effect' = 'ALLOW' AND grant_item->>'entityId' = '*'
+                     AND grant_item->>'resourceId' = '*'
+                     AND grant_item->>'action' IN ('risk.escalate', 'risk.sla_breach')""",
+                Long::class.java,
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+            )).isEqualTo(2)
+            assertThat(jdbc.queryForObject(
+                """SELECT count(*) FROM jsonb_array_elements(
+                     (SELECT manifest FROM authz.policy_bundle_version WHERE id = ?)->'roleGrants'
+                   ) grant_item WHERE grant_item->>'subjectRoleEntityKey' = 'role:risk-runtime'""",
+                Long::class.java,
+                BootstrapIds.POLICY_BUNDLE_VERSION,
+            )).isEqualTo(2)
+
+            RiskRuntimeIdentityValidator(jdbc, riskDue(), riskMetrics()).run(DefaultApplicationArguments())
+        }
+    }
+
+    @Test
+    fun `risk runtime provisioning restart is idempotent without revision or row changes`() {
+        database { jdbc, transactions ->
+            bootstrapPlatform(jdbc, transactions)
+            val provisioner = riskProvisioner(jdbc, transactions)
+            provisioner.provision()
+            val before = runtimeState(jdbc)
+
+            assertThat(provisioner.provision()).isEqualTo(RiskRuntimeProvisioningResult.ALREADY_PROVISIONED)
+            assertThat(runtimeState(jdbc)).isEqualTo(before)
+        }
+    }
+
+    @Test
+    fun `risk runtime provisioning fails closed and rolls back on identity collision`() {
+        database { jdbc, transactions ->
+            bootstrapPlatform(jdbc, transactions)
+            jdbc.update(
+                """INSERT INTO authz.entity
+                   (id, entity_type_id, entity_type_version_id, entity_key, state)
+                   VALUES (?, ?, ?, 'service:collision', 'ACTIVE')""",
+                RISK_SYSTEM_ID,
+                BootstrapIds.USER_TYPE,
+                BootstrapIds.USER_TYPE_VERSION,
+            )
+            val before = revision(jdbc)
+
+            assertThatThrownBy { riskProvisioner(jdbc, transactions).provision() }
+                .isInstanceOf(RiskRuntimeConfigurationException::class.java)
+            assertThat(revision(jdbc)).isEqualTo(before)
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM authz.entity WHERE id = ?",
+                Long::class.java,
+                RISK_REPORT_ID,
+            )).isZero()
+            assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM iam.principal WHERE id = ?",
+                Long::class.java,
+                RISK_SYSTEM_ID,
+            )).isZero()
+        }
+    }
+
+    @Test
+    fun `risk runtime runners execute after administrator bootstrap and before validation`() {
+        assertThat(BootstrapAdministrator.ORDER).isLessThan(RiskRuntimeIdentityProvisioner.ORDER)
+        assertThat(RiskRuntimeIdentityProvisioner.ORDER).isLessThan(RiskRuntimeIdentityValidator.ORDER)
+    }
 
     @Test
     fun `secret reader accepts one newline and rejects weak malformed oversized and nul secrets`() {
@@ -201,9 +325,10 @@ class BootstrapAdministratorIntegrationTest {
             assertThat(jdbc.queryForObject(
                 """SELECT count(*) FROM catalog.entity_type et
                    JOIN catalog.entity_type_version etv ON etv.entity_type_id = et.id
-                   WHERE (et.id, etv.id, et.type_key, et.name, et.entity_kind, et.authorizable) IN
-                     ((?, ?, 'platform.user', 'User', 'PRINCIPAL', true),
-                      (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true))
+                    WHERE (et.id, etv.id, et.type_key, et.name, et.entity_kind, et.authorizable) IN
+                      ((?, ?, 'platform.user', 'User', 'PRINCIPAL', true),
+                       (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true),
+                       (?, ?, 'platform.system', 'System', 'SYSTEM', true))
                      AND etv.package_version_id = ? AND etv.schema_version = 1
                      AND etv.json_schema = '{}'::jsonb AND etv.ui_schema = '{}'::jsonb
                      AND etv.auth_schema = '{}'::jsonb AND etv.index_spec = '{}'::jsonb""",
@@ -212,19 +337,23 @@ class BootstrapAdministratorIntegrationTest {
                 BootstrapIds.USER_TYPE_VERSION,
                 BootstrapIds.ROLE_TYPE,
                 BootstrapIds.ROLE_TYPE_VERSION,
+                BootstrapIds.SYSTEM_TYPE,
+                BootstrapIds.SYSTEM_TYPE_VERSION,
                 BootstrapIds.PACKAGE_VERSION,
-            )).isEqualTo(2)
+            )).isEqualTo(3)
             assertThat(jdbc.queryForList(
                 """SELECT e.id, e.entity_key, e.entity_type_id, e.entity_type_version_id, e.state,
                           p.display_name, p.status, p.principal_kind
                    FROM authz.entity e JOIN iam.principal p ON p.id = e.id
-                   WHERE e.id IN (?, ?, ?) ORDER BY e.entity_key""",
+                    WHERE e.id IN (?, ?, ?, ?) ORDER BY e.entity_key""",
                 BootstrapIds.VIEWER_ROLE,
                 BootstrapIds.OPERATOR_ROLE,
                 BootstrapIds.ADMINISTRATOR_ROLE,
+                BootstrapIds.RISK_RUNTIME_ROLE,
             )).containsExactly(
                 roleRow(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
                 roleRow(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
+                roleRow(BootstrapIds.RISK_RUNTIME_ROLE, "role:risk-runtime", "Risk runtime"),
                 roleRow(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
             )
             assertThat(jdbc.queryForMap(
@@ -653,6 +782,42 @@ class BootstrapAdministratorIntegrationTest {
         reader: BootstrapSecretReader = testReader(),
     ): BootstrapAdministrator = BootstrapAdministrator(jdbc, transactions, passwords, properties, reader)
 
+    private fun bootstrapPlatform(jdbc: JdbcTemplate, transactions: TransactionTemplate) {
+        administrator(
+            jdbc,
+            transactions,
+            PasswordService(),
+            BootstrapAdministratorProperties(secret(TEST_PASSWORD, "risk-runtime-secret").toString()),
+        ).bootstrap()
+    }
+
+    private fun riskProvisioner(jdbc: JdbcTemplate, transactions: TransactionTemplate) =
+        RiskRuntimeIdentityProvisioner(jdbc, transactions, riskDue(), riskMetrics())
+
+    private fun riskDue() = RiskDueProperties(enabled = true, systemPrincipalId = RISK_SYSTEM_ID.toString())
+
+    private fun riskMetrics() = RiskMetricsProperties(enabled = true, reportResourceId = RISK_REPORT_ID.toString())
+
+    private fun revision(jdbc: JdbcTemplate): Long = jdbc.queryForObject(
+        "SELECT current_revision FROM authz.authorization_state WHERE singleton",
+        Long::class.java,
+    )!!
+
+    private fun runtimeState(jdbc: JdbcTemplate): Map<String, Any> = jdbc.queryForMap(
+        """SELECT
+             (SELECT current_revision FROM authz.authorization_state WHERE singleton) AS revision,
+             (SELECT count(*) FROM authz.entity WHERE id IN ('$RISK_SYSTEM_ID', '$RISK_REPORT_ID')) AS entities,
+             (SELECT coalesce(sum(row_version), 0) FROM authz.entity
+                WHERE id IN ('$RISK_SYSTEM_ID', '$RISK_REPORT_ID')) AS entity_versions,
+             (SELECT count(*) FROM iam.principal WHERE id = '$RISK_SYSTEM_ID') AS principals,
+             (SELECT coalesce(sum(row_version), 0) FROM iam.principal
+                WHERE id = '$RISK_SYSTEM_ID') AS principal_versions,
+             (SELECT count(*) FROM authz.relationship
+                WHERE subject_entity_id = '$RISK_SYSTEM_ID' AND object_entity_id = '${BootstrapIds.RISK_RUNTIME_ROLE}') AS relationships,
+             (SELECT coalesce(sum(row_version), 0) FROM authz.relationship
+                WHERE subject_entity_id = '$RISK_SYSTEM_ID' AND object_entity_id = '${BootstrapIds.RISK_RUNTIME_ROLE}') AS relationship_versions""",
+    )
+
     private fun testReader(failDelete: Boolean = false): BootstrapSecretReader = BootstrapSecretReader(
         SecureSecretDirectoryFactory { parent ->
             object : SecureSecretDirectory {
@@ -794,22 +959,29 @@ class BootstrapAdministratorIntegrationTest {
         )
         jdbc.update(
             """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)
-               VALUES (?, ?, 'platform.user', 'User', 'PRINCIPAL', true),
-                      (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true)""",
+                VALUES (?, ?, 'platform.user', 'User', 'PRINCIPAL', true),
+                       (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true),
+                       (?, ?, 'platform.system', 'System', 'SYSTEM', true)""",
             BootstrapIds.USER_TYPE,
             BootstrapIds.PACKAGE,
             BootstrapIds.ROLE_TYPE,
+            BootstrapIds.PACKAGE,
+            BootstrapIds.SYSTEM_TYPE,
             BootstrapIds.PACKAGE,
         )
         jdbc.update(
             """INSERT INTO catalog.entity_type_version
                (id, entity_type_id, package_version_id, schema_version, json_schema)
-               VALUES (?, ?, ?, 1, '{}'::jsonb), (?, ?, ?, 1, '{}'::jsonb)""",
+                VALUES (?, ?, ?, 1, '{}'::jsonb), (?, ?, ?, 1, '{}'::jsonb),
+                       (?, ?, ?, 1, '{}'::jsonb)""",
             BootstrapIds.USER_TYPE_VERSION,
             BootstrapIds.USER_TYPE,
             BootstrapIds.PACKAGE_VERSION,
             BootstrapIds.ROLE_TYPE_VERSION,
             BootstrapIds.ROLE_TYPE,
+            BootstrapIds.PACKAGE_VERSION,
+            BootstrapIds.SYSTEM_TYPE_VERSION,
+            BootstrapIds.SYSTEM_TYPE,
             BootstrapIds.PACKAGE_VERSION,
         )
         if (includeRelation) {
@@ -871,6 +1043,7 @@ class BootstrapAdministratorIntegrationTest {
             Triple(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
             Triple(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
             Triple(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
+            Triple(BootstrapIds.RISK_RUNTIME_ROLE, "role:risk-runtime", "Risk runtime"),
         ).forEach { (id, key, name) ->
             jdbc.update(
                 """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
@@ -940,5 +1113,7 @@ class BootstrapAdministratorIntegrationTest {
         private val EXTRA_TYPE_VERSION_ID = UUID.fromString("71000000-0000-7000-8000-000000000002")
         private val EXTRA_ACTION_ID = UUID.fromString("71000000-0000-7000-8000-000000000003")
         private val EXTRA_FORM_ID = UUID.fromString("71000000-0000-7000-8000-000000000004")
+        private val RISK_SYSTEM_ID = UUID.fromString("00000000-0000-7000-8000-000000000040")
+        private val RISK_REPORT_ID = UUID.fromString("00000000-0000-7000-8000-000000000041")
     }
 }
