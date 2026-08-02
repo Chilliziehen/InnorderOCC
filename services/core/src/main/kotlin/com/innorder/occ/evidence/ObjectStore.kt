@@ -4,7 +4,7 @@ import java.io.Closeable
 import java.io.InputStream
 import java.time.Instant
 
-interface ObjectStore {
+interface ObjectStore : AutoCloseable {
     fun putQuarantine(request: ObjectPut): StoredObject
 
     fun promote(
@@ -12,7 +12,7 @@ interface ObjectStore {
         immutableKey: String,
         expectedSize: Long,
         expectedSha256: String,
-    ): StoredObject
+    ): PromotionResult
 
     fun get(key: String, range: ObjectRange? = null): ObjectRead
 
@@ -51,6 +51,16 @@ data class StoredObject(
     val contentType: String?,
     val lastModified: Instant,
 )
+
+data class PromotionResult(
+    val `object`: StoredObject,
+    val sourceCleanupDisposition: SourceCleanupDisposition,
+)
+
+enum class SourceCleanupDisposition {
+    REMOVED,
+    SWEEP_REQUIRED,
+}
 
 class ObjectRead(
     val stream: InputStream,

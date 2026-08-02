@@ -1,8 +1,6 @@
 package com.innorder.occ.evidence
 
 import eu.rekawek.toxiproxy.model.ToxicDirection
-import io.minio.MinioClient
-import okhttp3.OkHttpClient
 import org.awaitility.Awaitility.await
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
@@ -21,7 +19,9 @@ import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.images.builder.Transferable
 import org.testcontainers.containers.startupcheck.OneShotStartupCheckStrategy
 import org.testcontainers.utility.DockerImageName
+import okhttp3.Interceptor
 import java.io.ByteArrayInputStream
+import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -32,7 +32,10 @@ import java.nio.file.Path
 import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Suppress("DEPRECATION")
 class MinioObjectStoreIntegrationTest {
@@ -59,10 +62,11 @@ class MinioObjectStoreIntegrationTest {
         assertThat(store.list("quarantine/").map { it.key }).contains(quarantineKey)
         assertThat(anonymousGet(quarantineKey)).isIn(401, 403, 404)
 
-        val promoted = store.promote(quarantineKey, immutableKey, bytes.size.toLong(), hash)
+        val promotion = store.promote(quarantineKey, immutableKey, bytes.size.toLong(), hash)
 
-        assertThat(promoted.key).isEqualTo(immutableKey)
-        assertThat(promoted.sha256).isEqualTo(hash)
+        assertThat(promotion.`object`.key).isEqualTo(immutableKey)
+        assertThat(promotion.`object`.sha256).isEqualTo(hash)
+        assertThat(promotion.sourceCleanupDisposition).isEqualTo(SourceCleanupDisposition.REMOVED)
         assertThatThrownBy { store.stat(quarantineKey) }
             .isInstanceOf(ObjectNotFoundException::class.java)
 
@@ -106,20 +110,105 @@ class MinioObjectStoreIntegrationTest {
     @Test
     fun `quarantine upload cannot overwrite an existing unique key`() {
         val key = "quarantine/unique-${UUID.randomUUID()}"
-        val original = byteArrayOf(1)
-        val replacement = byteArrayOf(2)
+        val original = ByteArray(6 * 1024 * 1024) { 1 }
+        val replacement = ByteArray(6 * 1024 * 1024) { 2 }
         try {
             store.putQuarantine(
-                ObjectPut(key, ByteArrayInputStream(original), 1, sha256(original), "application/octet-stream"),
+                ObjectPut(key, ByteArrayInputStream(original), original.size.toLong(), sha256(original), "application/octet-stream"),
             )
 
             assertThatThrownBy {
                 store.putQuarantine(
-                    ObjectPut(key, ByteArrayInputStream(replacement), 1, sha256(replacement), "application/octet-stream"),
+                    ObjectPut(
+                        key,
+                        ByteArrayInputStream(replacement),
+                        replacement.size.toLong(),
+                        sha256(replacement),
+                        "application/octet-stream",
+                    ),
                 )
             }.isInstanceOf(ObjectAlreadyExistsException::class.java)
             assertThat(store.stat(key).sha256).isEqualTo(sha256(original))
+            assertThat(runMc("mc ls --incomplete app/$BUCKET/$key").trim()).isEmpty()
         } finally {
+            store.delete(key)
+        }
+    }
+
+    @Test
+    fun `lost 412 response preserves original object by nonce reconciliation`() {
+        val key = "quarantine/lost-conflict-${UUID.randomUUID()}"
+        val original = "original".toByteArray()
+        val replacement = "replacement".toByteArray()
+        store.putQuarantine(ObjectPut(key, ByteArrayInputStream(original), original.size.toLong(), sha256(original), "text/plain"))
+
+        val discardedConflict = AtomicBoolean()
+        val primaryFault = Interceptor { chain ->
+            val response = chain.proceed(chain.request())
+            if (chain.request().method == "PUT" && response.code == 412) {
+                discardedConflict.set(true)
+                response.close()
+                throw IOException("conditional response lost")
+            }
+            response
+        }
+        val faultStore = MinioObjectStore(
+            EvidenceStorageProperties(endpoint, BUCKET, APP_USER, APP_PASSWORD, Duration.ofSeconds(3)),
+            primaryFault,
+            null,
+        )
+        try {
+            assertThatThrownBy {
+                faultStore.putQuarantine(
+                    ObjectPut(
+                        key,
+                        ByteArrayInputStream(replacement),
+                        replacement.size.toLong(),
+                        sha256(replacement),
+                        "text/plain",
+                    ),
+                )
+            }.isInstanceOf(ObjectAlreadyExistsException::class.java)
+            assertThat(discardedConflict).isTrue()
+            assertThat(rootStore.stat(key).sha256).isEqualTo(sha256(original))
+        } finally {
+            faultStore.close()
+            store.delete(key)
+        }
+    }
+
+    @Test
+    fun `concurrent large quarantine attempts have exactly one winner`() {
+        val key = "quarantine/concurrent-${UUID.randomUUID()}"
+        val first = ByteArray(6 * 1024 * 1024) { 3 }
+        val second = ByteArray(6 * 1024 * 1024) { 4 }
+        val barrier = CyclicBarrier(2)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val attempts = listOf(first, second).map { bytes ->
+                executor.submit<Result<StoredObject>> {
+                    runCatching {
+                        store.putQuarantine(
+                            ObjectPut(
+                                key,
+                                BarrierInputStream(bytes, barrier),
+                                bytes.size.toLong(),
+                                sha256(bytes),
+                                "application/octet-stream",
+                            ),
+                        )
+                    }
+                }
+            }.map { it.get(15, TimeUnit.SECONDS) }
+
+            assertThat(attempts.count { it.isSuccess }).isEqualTo(1)
+            assertThat(attempts.mapNotNull { it.exceptionOrNull() })
+                .singleElement()
+                .isInstanceOf(ObjectAlreadyExistsException::class.java)
+            assertThat(store.stat(key).sha256).isIn(sha256(first), sha256(second))
+            assertThat(runMc("mc ls --incomplete app/$BUCKET/$key").trim()).isEmpty()
+        } finally {
+            executor.shutdownNow()
             store.delete(key)
         }
     }
@@ -165,50 +254,75 @@ class MinioObjectStoreIntegrationTest {
     fun `persisted upload is deleted when its success response disconnects`() {
         val key = "quarantine/disconnected-${UUID.randomUUID()}"
         val bytes = ByteArray(1024 * 1024) { index -> (index % 251).toByte() }
-        val latency = faultProxy.toxics().latency("hold-success-response", ToxicDirection.DOWNSTREAM, 5_000)
-        val faultEndpoint = "http://${faultProxy.containerIpAddress}:${faultProxy.proxyPort}"
-        val faultProperties = EvidenceStorageProperties(
-            endpoint = faultEndpoint,
-            bucket = BUCKET,
-            accessKey = APP_USER,
-            secretKey = APP_PASSWORD,
-            requestTimeout = Duration.ofSeconds(3),
-        )
-        val faultClient = MinioClient.builder()
-            .endpoint(faultEndpoint)
-            .region("us-east-1")
-            .credentials(APP_USER, APP_PASSWORD)
-            .httpClient(OkHttpClient.Builder().callTimeout(2, TimeUnit.SECONDS).build(), true)
-            .build()
+        val discardedSuccess = AtomicBoolean()
+        val primaryFault = Interceptor { chain ->
+            val response = chain.proceed(chain.request())
+            if (chain.request().method == "PUT" && response.isSuccessful) {
+                discardedSuccess.set(true)
+                response.close()
+                throw IOException("success response lost")
+            }
+            response
+        }
         val faultStore = MinioObjectStore(
-            faultProperties,
-            faultClient,
+            EvidenceStorageProperties(endpoint, BUCKET, APP_USER, APP_PASSWORD, Duration.ofSeconds(3)),
+            primaryFault,
+            null,
         )
-        val executor = Executors.newSingleThreadExecutor()
-        val restoreExecutor = Executors.newSingleThreadScheduledExecutor()
         try {
-            val upload = executor.submit<StoredObject> {
+            assertThatThrownBy {
                 faultStore.putQuarantine(
                     ObjectPut(key, ByteArrayInputStream(bytes), bytes.size.toLong(), sha256(bytes), "application/octet-stream"),
                 )
-            }
-            await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20)).until { rootObjectExists(key) }
-
-            faultProxy.setConnectionCut(true)
-            latency.remove()
-            restoreExecutor.schedule({ faultProxy.setConnectionCut(false) }, 2_500, TimeUnit.MILLISECONDS)
-
-            assertThatThrownBy { upload.get(15, TimeUnit.SECONDS) }
-                .hasCauseInstanceOf(ObjectStoreException::class.java)
-                .rootCause()
+            }.isInstanceOf(ObjectStoreException::class.java)
                 .hasMessage("Object storage operation failed")
+            assertThat(discardedSuccess).isTrue()
             assertThat(rootObjectExists(key)).isFalse()
         } finally {
-            faultProxy.setConnectionCut(false)
-            runCatching { latency.remove() }
-            executor.shutdownNow()
-            restoreExecutor.shutdownNow()
+            faultStore.close()
             if (rootObjectExists(key)) rootStore.delete(key)
+        }
+    }
+
+    @Test
+    fun `promotion preserves validated target and signals sweep when delete response and reconciliation are lost`() {
+        val sourceKey = "quarantine/promotion-deadline-${UUID.randomUUID()}"
+        val targetKey = "evidence/promotion-deadline-${UUID.randomUUID()}"
+        val bytes = "validated-promotion".toByteArray()
+        val hash = sha256(bytes)
+        store.putQuarantine(ObjectPut(sourceKey, ByteArrayInputStream(bytes), bytes.size.toLong(), hash, "text/plain"))
+
+        val deleteWasSent = AtomicBoolean()
+        val cleanupFault = Interceptor { chain ->
+            if (deleteWasSent.get()) throw IOException("cleanup reconciliation unavailable")
+            if (chain.request().method == "DELETE") {
+                chain.proceed(chain.request()).close()
+                deleteWasSent.set(true)
+                throw IOException("delete response lost")
+            }
+            chain.proceed(chain.request())
+        }
+        val faultStore = MinioObjectStore(
+            EvidenceStorageProperties(
+                endpoint,
+                BUCKET,
+                APP_USER,
+                APP_PASSWORD,
+                Duration.ofSeconds(3),
+            ),
+            cleanupFault,
+        )
+        try {
+            val result = faultStore.promote(sourceKey, targetKey, bytes.size.toLong(), hash)
+
+            assertThat(result.sourceCleanupDisposition).isEqualTo(SourceCleanupDisposition.SWEEP_REQUIRED)
+            assertThat(result.`object`.key).isEqualTo(targetKey)
+            assertThat(deleteWasSent).isTrue()
+            assertThat(rootStore.stat(targetKey).sha256).isEqualTo(hash)
+        } finally {
+            faultStore.close()
+            if (rootObjectExists(sourceKey)) rootStore.delete(sourceKey)
+            if (rootObjectExists(targetKey)) rootStore.delete(targetKey)
         }
     }
 
@@ -225,13 +339,7 @@ class MinioObjectStoreIntegrationTest {
             APP_PASSWORD,
             Duration.ofMillis(800),
         )
-        val faultClient = MinioClient.builder()
-            .endpoint(faultEndpoint)
-            .region("us-east-1")
-            .credentials(APP_USER, APP_PASSWORD)
-            .httpClient(OkHttpClient.Builder().callTimeout(2, TimeUnit.SECONDS).build(), true)
-            .build()
-        val faultStore = MinioObjectStore(faultProperties, faultClient)
+        val faultStore = MinioObjectStore(faultProperties)
         val executor = Executors.newSingleThreadExecutor()
         try {
             val upload = executor.submit<StoredObject> {
@@ -253,6 +361,7 @@ class MinioObjectStoreIntegrationTest {
         } finally {
             faultProxy.setConnectionCut(false)
             runCatching { latency.remove() }
+            faultStore.close()
             executor.shutdownNow()
             if (rootObjectExists(key)) rootStore.delete(key)
         }
@@ -302,10 +411,14 @@ class MinioObjectStoreIntegrationTest {
                 requestTimeout = Duration.ofSeconds(2),
             ),
         )
-        assertThatThrownBy { invalidStore.list("quarantine/") }
-            .isInstanceOf(ObjectStoreException::class.java)
-            .hasMessage("Object storage operation failed")
-            .message().doesNotContain(secret)
+        try {
+            assertThatThrownBy { invalidStore.list("quarantine/") }
+                .isInstanceOf(ObjectStoreException::class.java)
+                .hasMessage("Object storage operation failed")
+                .message().doesNotContain(secret)
+        } finally {
+            invalidStore.close()
+        }
     }
 
     @Test
@@ -321,6 +434,77 @@ class MinioObjectStoreIntegrationTest {
         assertThatThrownBy { properties.validate() }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessage("Invalid object storage configuration")
+    }
+
+    @Test
+    fun `closed store rejects new operations`() {
+        val ownedStore = MinioObjectStore(
+            EvidenceStorageProperties(endpoint, BUCKET, APP_USER, APP_PASSWORD, Duration.ofSeconds(2)),
+        )
+
+        ownedStore.close()
+
+        assertThatThrownBy { ownedStore.list("quarantine/") }
+            .isInstanceOf(ObjectStoreException::class.java)
+            .hasMessage("Object storage operation failed")
+    }
+
+    @Test
+    fun `closing store cancels a stalled upload and releases its source`() {
+        val key = "quarantine/shutdown-${UUID.randomUUID()}"
+        val stalled = StalledInputStream()
+        val ownedStore = MinioObjectStore(
+            EvidenceStorageProperties(endpoint, BUCKET, APP_USER, APP_PASSWORD, Duration.ofSeconds(30)),
+        )
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val upload = executor.submit<StoredObject> {
+                ownedStore.putQuarantine(
+                    ObjectPut(key, stalled, 1, "0".repeat(64), "application/octet-stream"),
+                )
+            }
+            assertThat(stalled.started.await(3, TimeUnit.SECONDS)).isTrue()
+
+            ownedStore.close()
+
+            assertThatThrownBy { upload.get(2, TimeUnit.SECONDS) }
+                .hasCauseInstanceOf(ObjectStoreException::class.java)
+            assertThat(stalled.closed).isTrue()
+        } finally {
+            stalled.close()
+            ownedStore.close()
+            executor.shutdownNow()
+            if (rootObjectExists(key)) rootStore.delete(key)
+        }
+    }
+
+    @Test
+    fun `operation deadline cancels a stalled upload and closes its source`() {
+        val key = "quarantine/deadline-${UUID.randomUUID()}"
+        val stalled = StalledInputStream()
+        val ownedStore = MinioObjectStore(
+            EvidenceStorageProperties(endpoint, BUCKET, APP_USER, APP_PASSWORD, Duration.ofMillis(400)),
+        )
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val startedAt = System.nanoTime()
+            val upload = executor.submit<StoredObject> {
+                ownedStore.putQuarantine(
+                    ObjectPut(key, stalled, 1, "0".repeat(64), "application/octet-stream"),
+                )
+            }
+            assertThat(stalled.started.await(3, TimeUnit.SECONDS)).isTrue()
+
+            assertThatThrownBy { upload.get(2, TimeUnit.SECONDS) }
+                .hasCauseInstanceOf(ObjectStoreException::class.java)
+            assertThat(Duration.ofNanos(System.nanoTime() - startedAt)).isLessThan(Duration.ofSeconds(2))
+            assertThat(stalled.closed).isTrue()
+        } finally {
+            stalled.close()
+            ownedStore.close()
+            executor.shutdownNow()
+            if (rootObjectExists(key)) rootStore.delete(key)
+        }
     }
 
     @Test
@@ -427,6 +611,51 @@ class MinioObjectStoreIntegrationTest {
         }
     }
 
+    private class BarrierInputStream(
+        bytes: ByteArray,
+        private val barrier: CyclicBarrier,
+    ) : FilterInputStream(ByteArrayInputStream(bytes)) {
+        private var started = false
+
+        private fun awaitPeer() {
+            if (!started) {
+                started = true
+                barrier.await(5, TimeUnit.SECONDS)
+            }
+        }
+
+        override fun read(): Int {
+            awaitPeer()
+            return super.read()
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            awaitPeer()
+            return super.read(buffer, offset, length)
+        }
+    }
+
+    private class StalledInputStream : InputStream() {
+        val started = CountDownLatch(1)
+        private val released = CountDownLatch(1)
+        @Volatile var closed = false
+            private set
+
+        override fun read(): Int {
+            started.countDown()
+            released.await()
+            if (closed) throw IOException("source closed")
+            return -1
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int = read()
+
+        override fun close() {
+            closed = true
+            released.countDown()
+        }
+    }
+
     companion object {
         private const val ACCESS_KEY_PROPERTY = "occ.object-storage.access-key"
         private const val SECRET_KEY_PROPERTY = "occ.object-storage.secret-key"
@@ -484,6 +713,8 @@ class MinioObjectStoreIntegrationTest {
         @JvmStatic
         @AfterAll
         fun stopMinio() {
+            store.close()
+            rootStore.close()
             toxiproxy.stop()
             minio.stop()
             network.close()
