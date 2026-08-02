@@ -19,10 +19,12 @@ type Binding = {
   key: string;
   session: SessionLike;
   requests: number;
+  pending: Set<AbortController>;
   bodies: Set<BodyTracker>;
   retired: boolean;
   cleanupStarted: boolean;
   expirationStarted: boolean;
+  expirationReason?: Error;
   timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -75,12 +77,14 @@ export function createProfileTransport(dependencies: {
           || (expectedFingerprint.length === 64 && chainContains(request.certificate, expectedFingerprint)));
       callback(valid ? USE_CHROMIUM_RESULT : DENY);
     });
-    return { key, session, requests: 0, bodies: new Set(), retired: false, cleanupStarted: false, expirationStarted: false };
+    return { key, session, requests: 0, pending: new Set(), bodies: new Set(), retired: false, cleanupStarted: false, expirationStarted: false };
   };
 
   const expire = (binding: Binding) => {
     if (binding.expirationStarted) return;
     binding.expirationStarted = true;
+    binding.expirationReason = new Error("Profile response binding retired");
+    binding.pending.forEach((controller) => controller.abort(binding.expirationReason));
     binding.bodies.forEach((body) => body.expire());
   };
 
@@ -165,6 +169,9 @@ export function createProfileTransport(dependencies: {
       const binding = transition(profile);
       if (!binding) throw new Error("Profile transport unavailable");
       binding.requests += 1;
+      const controller = new AbortController();
+      const signal = init?.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal;
+      binding.pending.add(controller);
       let released = false;
       const release = () => {
         if (released) return;
@@ -173,8 +180,16 @@ export function createProfileTransport(dependencies: {
         cleanupIfDrained(binding);
       };
       try {
-        return trackResponse(binding, await binding.session.fetch(input, init), release);
+        const response = await binding.session.fetch(input, { ...init, signal });
+        binding.pending.delete(controller);
+        if (binding.expirationStarted || signal.aborted) {
+          const error = binding.expirationReason ?? signal.reason ?? new Error("Profile request aborted");
+          void response.body?.cancel(error).catch(() => undefined);
+          throw error;
+        }
+        return trackResponse(binding, response, release);
       } catch (error) {
+        binding.pending.delete(controller);
         release();
         throw error;
       }

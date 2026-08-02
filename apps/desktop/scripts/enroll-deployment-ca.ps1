@@ -10,7 +10,7 @@ param(
   [string]$InstallerPath,
   [string]$TestReleasePublicKeyPath,
   [string]$TestStoreRoot,
-  [ValidateSet('', 'AfterJournal', 'AfterStore', 'AfterState')][string]$TestCrashPhase = '',
+  [ValidateSet('', 'BeforeLockPublish', 'AfterJournal', 'AfterStore', 'AfterState')][string]$TestCrashPhase = '',
   [switch]$InstallerConfirmed,
   [switch]$PlanOnly
 )
@@ -65,12 +65,22 @@ function ConvertFrom-Hex([string]$Value) {
 function Enter-LifecycleLock([string]$Root) {
   $lockPath = [IO.Path]::Combine($Root, '.deployment-ca.lifecycle.lock')
   for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    $temporaryPath = "$lockPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $staging = $null
     try {
-      $stream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
       $owner = [Guid]::NewGuid().ToString('D')
       $record = [ordered]@{ version = 1; pid = $PID; processStartUtc = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o'); acquiredAtUtc = [DateTime]::UtcNow.ToString('o'); owner = $owner }
       [byte[]]$bytes = [Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Compress))
-      $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true)
+      $staging = [IO.FileStream]::new($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+      $staging.Write($bytes, 0, $bytes.Length); $staging.Flush($true); $staging.Dispose(); $staging = $null
+      if ($TestCrashPhase -ceq 'BeforeLockPublish') { throw 'Simulated lock publication crash' }
+      [IO.File]::Move($temporaryPath, $lockPath)
+      $stream = [IO.File]::Open($lockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+      [byte[]]$publishedBytes = New-Object byte[] $bytes.Length
+      $publishedOffset = 0
+      while ($publishedOffset -lt $publishedBytes.Length) { $read = $stream.Read($publishedBytes, $publishedOffset, $publishedBytes.Length - $publishedOffset); if ($read -eq 0) { break }; $publishedOffset += $read }
+      if ($stream.Length -ne $bytes.Length -or $publishedOffset -ne $bytes.Length -or [Convert]::ToBase64String($publishedBytes) -cne [Convert]::ToBase64String($bytes)) { $stream.Dispose(); throw 'Published lifecycle lock owner mismatch' }
+      $stream.Position = 0
       return [pscustomobject]@{ Stream = $stream; Path = $lockPath; Owner = $owner }
     } catch [IO.IOException] {
       try {
@@ -81,9 +91,11 @@ function Enter-LifecycleLock([string]$Root) {
           try { $record = [Text.Encoding]::UTF8.GetString($observed) | ConvertFrom-Json } catch { }
           $acquired = [DateTime]::MinValue; $started = [DateTime]::MinValue
           $valid = $null -ne $record -and (@($record.PSObject.Properties.Name | Sort-Object) -join '|') -ceq (@('acquiredAtUtc','owner','pid','processStartUtc','version') -join '|') -and $record.version -eq 1 -and $record.pid -is [int] -and $record.pid -gt 0 -and [string]$record.owner -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' -and [DateTime]::TryParse([string]$record.acquiredAtUtc, [ref]$acquired) -and [DateTime]::TryParse([string]$record.processStartUtc, [ref]$started)
-          if ($valid -and ([DateTime]::UtcNow - ([DateTime]::Parse([string]$record.acquiredAtUtc).ToUniversalTime())).TotalMilliseconds -ge $LockStaleMilliseconds) {
+          $stamp = if ($valid) { ([DateTime]::Parse([string]$record.acquiredAtUtc).ToUniversalTime()) } else { $item.LastWriteTimeUtc }
+          if (([DateTime]::UtcNow - $stamp).TotalMilliseconds -ge $LockStaleMilliseconds) {
             $live = $false; $inspectionKnown = $false
-            try { $liveProcess = Get-Process -Id ([int]$record.pid) -ErrorAction Stop; $live = $liveProcess.StartTime.ToUniversalTime().ToString('o') -ceq [string]$record.processStartUtc; $inspectionKnown = $true } catch { if ($_.FullyQualifiedErrorId -match 'NoProcessFound') { $inspectionKnown = $true } }
+            if ($valid) { try { $liveProcess = Get-Process -Id ([int]$record.pid) -ErrorAction Stop; $live = $liveProcess.StartTime.ToUniversalTime().ToString('o') -ceq [string]$record.processStartUtc; $inspectionKnown = $true } catch { if ($_.FullyQualifiedErrorId -match 'NoProcessFound') { $inspectionKnown = $true } } }
+            else { $probe = $null; try { $probe = [IO.File]::Open($lockPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $inspectionKnown = $true } catch { } finally { if ($null -ne $probe) { $probe.Dispose() } } }
             if ($inspectionKnown -and -not $live) {
               $stalePath = "$lockPath.stale.$([Guid]::NewGuid().ToString('N'))"
               [IO.File]::Move($lockPath, $stalePath)
@@ -95,6 +107,9 @@ function Enter-LifecycleLock([string]$Root) {
         }
       } catch { }
       Start-Sleep -Milliseconds 100
+    } finally {
+      if ($null -ne $staging) { $staging.Dispose() }
+      if (Test-Path -LiteralPath $temporaryPath) { [IO.File]::Delete($temporaryPath) }
     }
   }
   throw 'Timed out acquiring deployment CA lifecycle lock'

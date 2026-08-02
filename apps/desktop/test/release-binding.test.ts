@@ -1,11 +1,11 @@
 // @vitest-environment node
 
 import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   certificateManifestContentSha256,
@@ -76,6 +76,7 @@ async function releasePayload() {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -216,6 +217,33 @@ describe("certificate identity policy", () => {
     })).resolves.toBe("recovered");
   });
 
+  it("never publishes a final lock when durable staging fails before publication", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-publish-fault-"));
+    roots.push(root);
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      currentProcessStart: async () => "2026-01-01T00:00:00.000Z",
+      publishLock: async () => { throw new Error("simulated pre-publish crash"); },
+    })).rejects.toThrow(/pre-publish crash/i);
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("publishes a complete owner record through the no-overwrite dependency", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-publish-complete-"));
+    roots.push(root);
+    let stagedRecord: unknown;
+    await withCertificateLifecycleLock(root, async () => {
+      expect(stagedRecord).toMatchObject({ version: 1, pid: process.pid, owner: expect.stringMatching(/^[0-9a-f-]{36}$/i) });
+    }, {
+      currentProcessStart: async () => "2026-01-01T00:00:00.000Z",
+      publishLock: async (temporaryPath, lockPath) => {
+        stagedRecord = JSON.parse(await readFile(temporaryPath, "utf8"));
+        const { link } = await import("node:fs/promises");
+        await link(temporaryPath, lockPath);
+      },
+    });
+    expect(await readdir(root)).toEqual([]);
+  });
+
   it("preserves a live stale lifecycle lock and a malformed fresh lock", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "occ-lock-live-"));
     roots.push(root);
@@ -244,9 +272,44 @@ describe("certificate identity policy", () => {
     await expect(withCertificateLifecycleLock(root, async () => undefined, {
       now: () => new Date("2026-01-01T00:01:00Z"),
       inspectProcess: async () => null,
+      inspectLegacyHolder: async () => false,
       currentProcessStart: async () => "2026-01-01T00:00:30.000Z",
       sleep: async () => undefined,
       attempts: 2,
+      staleMilliseconds: 1,
+    })).rejects.toThrow(/timed out/i);
+    await expect(readFile(lockPath, "utf8")).resolves.toBe("{");
+  });
+
+  it("recovers an aged malformed legacy lock only after conclusive no-holder proof", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-malformed-proven-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    await writeFile(lockPath, "{");
+    await utimes(lockPath, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+    const inspectLegacyHolder = async () => true;
+    await expect(withCertificateLifecycleLock(root, async () => "recovered", {
+      now: () => new Date("2026-01-01T00:01:00Z"),
+      inspectLegacyHolder,
+      currentProcessStart: async () => "2026-01-01T00:00:30.000Z",
+      sleep: async () => undefined,
+      attempts: 2,
+      staleMilliseconds: 1,
+    })).resolves.toBe("recovered");
+  });
+
+  it.runIf(process.platform === "win32")("fails closed when trusted PowerShell resolution is indeterminate", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "occ-lock-malformed-indeterminate-"));
+    roots.push(root);
+    const lockPath = path.join(root, ".deployment-ca.lifecycle.lock");
+    await writeFile(lockPath, "{");
+    await utimes(lockPath, new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T00:00:00Z"));
+    vi.stubEnv("SystemRoot", "relative-system-root");
+    await expect(withCertificateLifecycleLock(root, async () => undefined, {
+      now: () => new Date("2026-01-01T00:01:00Z"),
+      currentProcessStart: async () => "2026-01-01T00:00:30.000Z",
+      sleep: async () => undefined,
+      attempts: 1,
       staleMilliseconds: 1,
     })).rejects.toThrow(/timed out/i);
     await expect(readFile(lockPath, "utf8")).resolves.toBe("{");

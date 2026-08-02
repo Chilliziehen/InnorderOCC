@@ -3,7 +3,7 @@
 import { execFile } from "node:child_process";
 import { createHash, generateKeyPairSync, sign, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -127,8 +127,48 @@ describe("bounded PowerShell certificate helpers", () => {
       expect(source).toMatch(/priorImportedByProduct/i);
       expect(source).toMatch(/storeHadCertificate/i);
       expect(source).not.toMatch(/inspectionKnown\s*=\s*-not\s+\$valid/i);
+      expect(source).toMatch(/\.tmp[\s\S]+Flush\(\$true\)[\s\S]+\[IO\.File\]::Move/);
+      expect(source).toMatch(/FileMode\]::Open[\s\S]+FileShare\]::None/);
+      expect(source).toMatch(/\$publishedBytes[\s\S]+ToBase64String\(\$publishedBytes\)[\s\S]+ToBase64String\(\$bytes\)/);
     }
   });
+
+  it.each(["enroll", "remove"])("cleans staged %s lock state after a simulated pre-publication crash", async (operation) => {
+    const fixture = await payload();
+    const arguments_ = operation === "enroll"
+      ? [
+          "-PayloadRoot", fixture.root, "-ManifestPath", fixture.manifestPath,
+          "-ReleaseManifestPath", fixture.releaseManifestPath, "-InstallerPath", fixture.installerPath,
+          "-ExpectedManifestSha256", sha256(fixture.manifestBytes), "-ExpectedFingerprint", fixture.fingerprint,
+          "-StateRoot", fixture.stateRoot, "-Mode", "Development", "-InstallerConfirmed",
+          "-TestReleasePublicKeyPath", fixture.testPublicKeyPath, "-TestStoreRoot", fixture.testStoreRoot,
+          "-TestCrashPhase", "BeforeLockPublish",
+        ]
+      : [
+          "-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId,
+          "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode",
+          "-TestCrashPhase", "BeforeLockPublish",
+        ];
+    await expect(runPowerShell(operation === "enroll" ? enrollScript : removeScript, arguments_)).rejects.toThrow(/simulated lock publication crash/i);
+    expect((await readdir(fixture.stateRoot)).filter((name) => name.includes(".deployment-ca.lifecycle.lock"))).toEqual([]);
+  }, 60_000);
+
+  it("serializes concurrent PowerShell lock contenders without leaving staged state", async () => {
+    const fixture = await payload();
+    const arguments_ = [
+      "-StateRoot", fixture.stateRoot, "-DeploymentId", deploymentId,
+      "-TestStoreRoot", fixture.testStoreRoot, "-DevelopmentTestMode",
+    ];
+    const results = await Promise.all([
+      runPowerShell(removeScript, arguments_),
+      runPowerShell(removeScript, arguments_),
+    ]);
+    expect(results).toEqual([
+      expect.objectContaining({ action: "none" }),
+      expect.objectContaining({ action: "none" }),
+    ]);
+    expect((await readdir(fixture.stateRoot)).filter((name) => name.includes(".deployment-ca.lifecycle.lock"))).toEqual([]);
+  }, 60_000);
 
   it("returns an exact development enrollment plan without touching the real store", async () => {
     const fixture = await payload();

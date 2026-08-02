@@ -505,11 +505,28 @@ type CertificateProfileReference = { id: string; caFingerprint?: string | undefi
 type LifecycleLockDependencies = {
   now(): Date;
   inspectProcess(pid: number): Promise<{ processStartUtc: string } | null | undefined>;
+  inspectLegacyHolder(lockPath: string): Promise<boolean>;
   currentProcessStart(): Promise<string>;
+  publishLock(temporaryPath: string, lockPath: string): Promise<void>;
   sleep(milliseconds: number): Promise<void>;
   attempts: number;
   staleMilliseconds: number;
 };
+
+async function inspectLegacyWindowsLockHolder(lockPath: string): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  try {
+    const powerShell = await resolveTrustedPowerShell({ systemRoot: process.env.SystemRoot, pathEnvironment: process.env.PATH, lstat: fs.lstat, realpath: fs.realpath });
+    await execFileAsync(powerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$s=$null;try{$s=[IO.File]::Open($env:OCC_LOCK_PATH,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch{exit 4}finally{if($null-ne $s){$s.Dispose()}}"], {
+      windowsHide: true,
+      timeout: 5_000,
+      env: { ...process.env, OCC_LOCK_PATH: lockPath },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function inspectWindowsProcess(pid: number): Promise<{ processStartUtc: string } | null | undefined> {
   if (process.platform !== "win32") {
@@ -541,13 +558,14 @@ async function recoverStaleLifecycleLock(lockPath: string, dependencies: Lifecyc
   }
   let record: z.infer<typeof lockRecordSchema> | undefined;
   try { record = lockRecordSchema.parse(JSON.parse(bytes.toString("utf8"))); } catch { /* malformed ownership cannot be recovered safely */ }
-  if (!record) return;
-  const timestamp = Date.parse(record.acquiredAtUtc);
+  const timestamp = record ? Date.parse(record.acquiredAtUtc) : lockStat.mtimeMs;
   const age = dependencies.now().getTime() - timestamp;
   if (!Number.isFinite(age) || age < dependencies.staleMilliseconds) return;
-  const processInfo = await dependencies.inspectProcess(record.pid);
-  if (processInfo === undefined) return;
-  if (processInfo?.processStartUtc === record.processStartUtc) return;
+  if (record) {
+    const processInfo = await dependencies.inspectProcess(record.pid);
+    if (processInfo === undefined) return;
+    if (processInfo?.processStartUtc === record.processStartUtc) return;
+  } else if (!await dependencies.inspectLegacyHolder(lockPath)) return;
   const quarantine = `${lockPath}.stale.${randomUUID()}`;
   try {
     await fs.rename(lockPath, quarantine);
@@ -570,11 +588,13 @@ export async function withCertificateLifecycleLock<T>(
   const dependencies: LifecycleLockDependencies = {
     now: () => new Date(),
     inspectProcess: inspectWindowsProcess,
+    inspectLegacyHolder: inspectLegacyWindowsLockHolder,
     currentProcessStart: async () => {
       const current = await inspectWindowsProcess(process.pid);
       if (!current) throw new Error("Current process identity unavailable for lifecycle lock");
       return current.processStartUtc;
     },
+    publishLock: (temporaryPath, lockPath) => fs.link(temporaryPath, lockPath),
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     attempts: 100,
     staleMilliseconds: LOCK_STALE_MILLISECONDS,
@@ -585,12 +605,30 @@ export async function withCertificateLifecycleLock<T>(
   if (stateStat.isSymbolicLink() || !stateStat.isDirectory()) throw new Error("Certificate state path must be a regular directory");
   const lockPath = path.join(stateDirectory, ".deployment-ca.lifecycle.lock");
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let ownedTemporaryPath: string | undefined;
   const processStartUtc = await dependencies.currentProcessStart();
   const owner = randomUUID();
   for (let attempt = 0; attempt < dependencies.attempts && !handle; attempt += 1) {
+    const temporaryPath = `${lockPath}.${randomUUID()}.tmp`;
+    let candidate: Awaited<ReturnType<typeof fs.open>> | undefined;
     try {
-      handle = await fs.open(lockPath, "wx", 0o600);
+      const record = lockRecordSchema.parse({ version: 1, pid: process.pid, processStartUtc, acquiredAtUtc: dependencies.now().toISOString(), owner });
+      candidate = await fs.open(temporaryPath, "wx", 0o600);
+      await candidate.writeFile(JSON.stringify(record));
+      await candidate.sync();
+      await dependencies.publishLock(temporaryPath, lockPath);
+      handle = candidate;
+      candidate = undefined;
+      ownedTemporaryPath = temporaryPath;
+      try {
+        await fs.rm(temporaryPath);
+        ownedTemporaryPath = undefined;
+      } catch {
+        // The held handle still owns the linked final record; retry temp cleanup on release.
+      }
     } catch (error) {
+      await candidate?.close().catch(() => undefined);
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       await recoverStaleLifecycleLock(lockPath, dependencies);
       await dependencies.sleep(100);
@@ -598,12 +636,10 @@ export async function withCertificateLifecycleLock<T>(
   }
   if (!handle) throw new Error("Timed out acquiring deployment CA lifecycle lock");
   try {
-    const record = lockRecordSchema.parse({ version: 1, pid: process.pid, processStartUtc, acquiredAtUtc: dependencies.now().toISOString(), owner });
-    await handle.writeFile(JSON.stringify(record));
-    await handle.sync();
     return await operation();
   } finally {
     await handle.close();
+    if (ownedTemporaryPath) await fs.rm(ownedTemporaryPath, { force: true }).catch(() => undefined);
     try {
       const current = lockRecordSchema.parse(JSON.parse(await fs.readFile(lockPath, "utf8")));
       if (current.owner === owner) await fs.rm(lockPath);

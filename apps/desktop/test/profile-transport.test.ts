@@ -126,6 +126,96 @@ describe("profile-scoped Electron transport", () => {
     expect(new Set(partitions).size).toBe(2);
   });
 
+  it("combines the caller signal with a binding-owned abort signal", async () => {
+    const caller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const session = {
+      setCertificateVerifyProc: vi.fn(),
+      fetch: vi.fn((_input: URL, init?: RequestInit) => { receivedSignal = init?.signal ?? undefined; return Promise.resolve(new Response("A")); }),
+      clearStorageData: vi.fn().mockResolvedValue(undefined),
+    };
+    const transport = createProfileTransport({ fromPartition: () => session });
+    await transport.fetch(profile, new URL("https://occ.example/a"), { signal: caller.signal });
+    expect(receivedSignal).toBeDefined();
+    expect(receivedSignal).not.toBe(caller.signal);
+    caller.abort(new Error("caller cancelled"));
+    expect(receivedSignal?.aborted).toBe(true);
+  });
+
+  it("aborts retired requests waiting for headers without affecting the current binding", async () => {
+    vi.useFakeTimers();
+    const signals: Array<AbortSignal | undefined> = [];
+    const pendingFetch = vi.fn((_input: URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal ?? undefined;
+      signals.push(signal);
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    const sessions = [0, 1].map(() => ({ setCertificateVerifyProc: vi.fn(), fetch: pendingFetch, clearStorageData: vi.fn().mockResolvedValue(undefined) }));
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(sessions[0]).mockReturnValueOnce(sessions[1]), retiredTimeoutMs: 1_000 });
+    const requestA = transport.fetch(profile, new URL("https://occ.example/a"));
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    void transport.fetch(profileB, new URL("https://b.example/b"));
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+    const rejected = expect(requestA).rejects.toThrow(/retired/i);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+    await rejected;
+  });
+
+  it("forces expiry of the oldest pending-header binding when the retired limit overflows", async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    const sessions = [0, 1, 2].map(() => ({
+      setCertificateVerifyProc: vi.fn(),
+      fetch: vi.fn((_input: URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal ?? undefined;
+        signals.push(signal);
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      })),
+      clearStorageData: vi.fn().mockResolvedValue(undefined),
+    }));
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(sessions[0]).mockReturnValueOnce(sessions[1]).mockReturnValueOnce(sessions[2]), retiredTimeoutMs: 60_000, maxRetiredBindings: 1 });
+    const requestA = transport.fetch(profile, new URL("https://occ.example/a"));
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    void transport.fetch(profileB, new URL("https://b.example/b"));
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+    const profileC = { ...profile, id: "7a597dde-f073-4cc8-b5ce-6e6f60bb69b3", origin: "https://c.example" };
+    const rejectedA = expect(requestA).rejects.toThrow(/retired/i);
+    void transport.fetch(profileC, new URL("https://c.example/c"));
+    expect(signals[0]?.aborted).toBe(true);
+    await rejectedA;
+    expect(signals.map((signal) => signal?.aborted)).toEqual([true, false, false]);
+  });
+
+  it("cancels and rejects a response that arrives after its binding expires", async () => {
+    vi.useFakeTimers();
+    let resolveHeaders!: (response: Response) => void;
+    let receivedSignal: AbortSignal | undefined;
+    const cancelLateBody = vi.fn().mockResolvedValue(undefined);
+    const first = {
+      setCertificateVerifyProc: vi.fn(),
+      fetch: vi.fn((_input: URL, init?: RequestInit) => {
+        receivedSignal = init?.signal ?? undefined;
+        return new Promise<Response>((resolve) => { resolveHeaders = resolve; });
+      }),
+      clearStorageData: vi.fn().mockResolvedValue(undefined),
+    };
+    const second = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("B")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second), retiredTimeoutMs: 1_000 });
+    const request = transport.fetch(profile, new URL("https://occ.example/a"));
+    await vi.waitFor(() => expect(first.fetch).toHaveBeenCalledOnce());
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    await transport.fetch(profileB, new URL("https://b.example/b"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    resolveHeaders(new Response(new ReadableStream<Uint8Array>({ cancel: cancelLateBody })));
+    await expect(request).rejects.toThrow(/retired/i);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(cancelLateBody).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(first.clearStorageData).toHaveBeenCalledOnce());
+  });
+
   it("keeps a retired request pinned until its streaming body reaches EOF", async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>;
     const first = {
