@@ -12,8 +12,12 @@ export type {
   SystemStatus,
 } from "./system-status.js";
 
-export { problemDetailsSchema } from "./problem-details.js";
-export type { ProblemDetails } from "./problem-details.js";
+export {
+  OCC_PROBLEM_CODES,
+  occProblemCodeSchema,
+  problemDetailsSchema,
+} from "./problem-details.js";
+export type { OccProblemCode, ProblemDetails } from "./problem-details.js";
 
 export {
   currentUserSchema,

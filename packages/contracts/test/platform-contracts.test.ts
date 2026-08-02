@@ -46,8 +46,6 @@ import {
   EVENT_TYPE_MIN_LENGTH,
 } from "../src/events.js";
 import {
-  PROBLEM_CODE_MAX_LENGTH,
-  PROBLEM_CODE_MIN_LENGTH,
   PROBLEM_DETAIL_MAX_LENGTH,
   PROBLEM_STATUS_MAX,
   PROBLEM_STATUS_MIN,
@@ -445,7 +443,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/invalid-credentials",
       title: "Invalid credentials",
       status: 401,
-      code: "AUTH_INVALID_CREDENTIALS",
+      code: "OCC-AUTH-INVALID-CREDENTIALS",
       correlationId: id,
       detail: "The supplied username or password was not accepted.",
     };
@@ -458,7 +456,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/boundary",
       title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH),
       status: PROBLEM_STATUS_MAX,
-      code: "C".repeat(PROBLEM_CODE_MAX_LENGTH),
+      code: "OCC-API-INTERNAL",
       correlationId: id,
       detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
       currentVersion: 0,
@@ -470,8 +468,7 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH + 1) },
       { ...boundaryProblem, status: PROBLEM_STATUS_MIN - 1 },
       { ...boundaryProblem, status: PROBLEM_STATUS_MAX + 1 },
-      { ...boundaryProblem, code: "C".repeat(PROBLEM_CODE_MIN_LENGTH - 1) },
-      { ...boundaryProblem, code: "C".repeat(PROBLEM_CODE_MAX_LENGTH + 1) },
+      { ...boundaryProblem, code: "OCC-UNKNOWN-CODE" },
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
       { ...boundaryProblem, currentVersion: -1 },
       { ...boundaryProblem, currentVersion: 1.5 },
@@ -486,7 +483,7 @@ describe("problemDetailsSchema", () => {
       type: "https://innorder.example/problems/unicode",
       title: "😀".repeat(PROBLEM_TITLE_MAX_LENGTH),
       status: PROBLEM_STATUS_MIN,
-      code: "UNICODE_DETAIL",
+      code: "OCC-API-REQUEST",
       correlationId: id,
       detail: "😀".repeat(PROBLEM_DETAIL_MAX_LENGTH),
     };
