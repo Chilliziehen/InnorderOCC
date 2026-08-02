@@ -213,11 +213,12 @@ const v14FunctionSecurity = await db.query(`
       'validate_risk_adjudication_insert', 'enforce_risk_occurrence_completeness',
       'validate_resource_availability',
       'validate_resource_reservation', 'reject_resource_reservation_delete',
-      'validate_managed_resource_change', 'snapshot_resource_reservation'
+      'validate_managed_resource_change', 'snapshot_resource_reservation',
+      'validate_resource_reservation_history_change'
     )
 `);
 const reservationSnapshotFunction = v14FunctionSecurity.rows.find((row) => row.proname === 'snapshot_resource_reservation');
-if (v14FunctionSecurity.rows.length !== 15
+if (v14FunctionSecurity.rows.length !== 16
     || !reservationSnapshotFunction?.prosecdef
     || reservationSnapshotFunction.owner_name !== reservationSnapshotFunction.migration_owner
     || reservationSnapshotFunction.runtime_execute
@@ -591,17 +592,57 @@ await expectSqlState(`
   DELETE FROM occ.resource_reservation WHERE id = '92000000-0000-7000-8000-000000000070'
 `, '55000', 'reservation deletion');
 const reservationHistory = await db.query(`
-  SELECT count(*)::integer AS versions
+  SELECT count(*)::integer AS versions,
+         count(*) FILTER (WHERE valid_until IS NULL)::integer AS current_versions,
+         count(*) FILTER (WHERE valid_until IS NOT NULL)::integer AS closed_versions,
+         bool_and(valid_until IS NULL OR valid_until > valid_from) AS valid_intervals
   FROM occ.resource_reservation_history
   WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
 `);
-if (reservationHistory.rows[0]?.versions !== 1) throw new Error('reservation insert history snapshot is missing');
+if (reservationHistory.rows[0]?.versions !== 1
+    || reservationHistory.rows[0]?.current_versions !== 1
+    || reservationHistory.rows[0]?.closed_versions !== 0
+    || !reservationHistory.rows[0]?.valid_intervals) {
+  throw new Error('reservation insert temporal history snapshot is invalid');
+}
+await db.exec(`
+  SET ROLE innorder_runtime;
+  UPDATE occ.resource_reservation SET row_version = row_version + 1
+  WHERE id = '92000000-0000-7000-8000-000000000070';
+  RESET ROLE;
+`);
+const updatedReservationHistory = await db.query(`
+  SELECT count(*)::integer AS versions,
+         count(*) FILTER (WHERE valid_until IS NULL)::integer AS current_versions,
+         count(*) FILTER (WHERE valid_until IS NOT NULL)::integer AS closed_versions,
+         bool_and(valid_until IS NULL OR valid_until > valid_from) AS valid_intervals
+  FROM occ.resource_reservation_history
+  WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
+`);
+if (updatedReservationHistory.rows[0]?.versions !== 2
+    || updatedReservationHistory.rows[0]?.current_versions !== 1
+    || updatedReservationHistory.rows[0]?.closed_versions !== 1
+    || !updatedReservationHistory.rows[0]?.valid_intervals) {
+  throw new Error('reservation update did not close and replace temporal history');
+}
+await expectSqlState(`
+  INSERT INTO occ.resource_reservation_history
+    (reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
+     time_range, capacity, exclusive, state, row_version, created_at, updated_at,
+     confirmed_at, cancelled_at, completed_at, valid_from, valid_until)
+  SELECT reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
+         time_range, capacity, exclusive, state, row_version, created_at, updated_at,
+         confirmed_at, cancelled_at, completed_at, valid_from, valid_until
+  FROM occ.resource_reservation_history
+  WHERE reservation_id = '92000000-0000-7000-8000-000000000070' AND valid_until IS NULL
+`, '23P01', 'overlapping reservation temporal history');
 await expectSqlState(`
   SET ROLE innorder_runtime;
   INSERT INTO occ.resource_reservation_history
   SELECT gen_random_uuid(), reservation_id, resource_id, requester_entity_id,
          process_instance_id, task_id, time_range, capacity, exclusive, state,
-         row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at, clock_timestamp()
+         row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at,
+         valid_from, valid_until
   FROM occ.resource_reservation_history
   WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
 `, '42501', 'runtime reservation history forgery');

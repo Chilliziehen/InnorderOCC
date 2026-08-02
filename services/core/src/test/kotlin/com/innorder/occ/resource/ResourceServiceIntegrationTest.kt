@@ -343,9 +343,14 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
             forgery = runCatching {
                 jdbc.update(
                     """INSERT INTO occ.resource_reservation_history
+                           (history_id, reservation_id, resource_id, requester_entity_id,
+                            process_instance_id, task_id, time_range, capacity, exclusive, state,
+                            row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at,
+                            valid_from, valid_until)
                        SELECT ?, reservation_id, resource_id, requester_entity_id,
                               process_instance_id, task_id, time_range, capacity, exclusive, state,
-                              row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at, clock_timestamp()
+                              row_version, created_at, updated_at, confirmed_at, cancelled_at, completed_at,
+                              valid_from, valid_until
                        FROM occ.resource_reservation_history WHERE reservation_id = ? LIMIT 1""",
                     UUID.randomUUID(), reservation.id,
                 )
@@ -365,6 +370,78 @@ class ResourceServiceIntegrationTest : ResourceIntegrationSupport() {
             Long::class.java,
             reservation.id,
         )).isEqualTo(2)
+    }
+
+    @Test
+    fun `large temporal history schedule plan examines only the requested batch`() {
+        val resource = createResource()
+        val requester = entity("temporal-plan-requester")
+        listOf(
+            reserve(resource.id, requester, instant(9), instant(10), 1),
+            reserve(resource.id, requester, instant(10), instant(11), 1),
+            reserve(resource.id, requester, instant(11), instant(12), 1),
+        )
+        val noise = reserve(resource.id, requester, instant(12), instant(13), 1)
+        repeat(400) { version ->
+            jdbc.update(
+                "UPDATE occ.resource_reservation SET capacity = ?, row_version = ? WHERE id = ?",
+                if (version % 2 == 0) 2 else 1, version + 1L, noise.id,
+            )
+        }
+        flywayJdbc.execute("VACUUM (ANALYZE) occ.resource_reservation_history")
+        val snapshotAt = jdbc.queryForObject("SELECT clock_timestamp()", OffsetDateTime::class.java)!!
+        val batchLimit = 2
+        val planJson = jdbc.queryForObject(
+            """EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+               SELECT reservation_id AS id, resource_id, requester_entity_id, process_instance_id, task_id,
+                      lower(time_range) AS starts_at, upper(time_range) AS ends_at,
+                      capacity, exclusive, state, row_version, created_at
+               FROM occ.resource_reservation_history
+               WHERE resource_id = ?
+                 AND valid_from <= ?::timestamptz
+                 AND (valid_until IS NULL OR valid_until > ?::timestamptz)
+                 AND tstzrange(valid_from, valid_until, '[)') @> ?::timestamptz
+                 AND state IN ('PENDING','CONFIRMED')
+                 AND lower(time_range) < ?::timestamptz
+                 AND upper(time_range) > ?::timestamptz
+                 AND time_range && tstzrange(?::timestamptz, ?::timestamptz, '[)')
+               ORDER BY lower(time_range), reservation_id
+               LIMIT ?""",
+            String::class.java,
+            resource.id, snapshotAt, snapshotAt, snapshotAt,
+            instant(14), instant(8), instant(8), instant(14), batchLimit,
+        )!!
+        val root = mapper.readTree(planJson).path(0).path("Plan")
+        val nodes = mutableListOf<com.fasterxml.jackson.databind.JsonNode>()
+        fun collect(node: com.fasterxml.jackson.databind.JsonNode) {
+            nodes.add(node)
+            node.path("Plans").forEach(::collect)
+        }
+        collect(root)
+
+        val temporalIndex = nodes.singleOrNull {
+            it.path("Index Name").asText() == "ix_resource_reservation_history_temporal_schedule"
+        }
+        assertThat(temporalIndex).describedAs(planJson).isNotNull
+        assertThat(nodes).noneMatch {
+            it.path("Node Type").asText() == "Seq Scan" &&
+                it.path("Relation Name").asText() == "resource_reservation_history"
+        }
+        nodes.filter { it.path("Node Type").asText().contains("Sort") }.forEach { sort ->
+            assertThat(sort.path("Plans").path(0).path("Actual Rows").asLong())
+                .describedAs("sort input remains bounded: $planJson")
+                .isLessThanOrEqualTo(batchLimit + 5L)
+        }
+        val examinedRows = requireNotNull(temporalIndex).path("Actual Rows").asLong() +
+            temporalIndex.path("Rows Removed by Filter").asLong() +
+            temporalIndex.path("Rows Removed by Index Recheck").asLong()
+        assertThat(examinedRows).describedAs(planJson).isLessThanOrEqualTo(batchLimit + 5L)
+        assertThat(root.has("Shared Hit Blocks")).isTrue()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.resource_reservation_history WHERE reservation_id = ?",
+            Long::class.java,
+            noise.id,
+        )).isEqualTo(401)
     }
 
     @Test

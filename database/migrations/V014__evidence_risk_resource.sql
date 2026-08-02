@@ -905,20 +905,82 @@ CREATE TABLE occ.resource_reservation_history (
     confirmed_at timestamptz,
     cancelled_at timestamptz,
     completed_at timestamptz,
-    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    valid_from timestamptz NOT NULL,
+    valid_until timestamptz,
+    CHECK (valid_until IS NULL OR valid_until > valid_from)
 );
 
-CREATE INDEX ix_resource_reservation_history_latest
-ON occ.resource_reservation_history (resource_id, reservation_id, recorded_at DESC, history_id DESC);
+CREATE UNIQUE INDEX uq_resource_reservation_history_current
+ON occ.resource_reservation_history (reservation_id)
+WHERE valid_until IS NULL;
+
+CREATE INDEX ix_resource_reservation_history_temporal_schedule
+ON occ.resource_reservation_history USING gist (
+    resource_id,
+    tstzrange(valid_from, valid_until, '[)'),
+    time_range
+)
+WHERE state IN ('PENDING', 'CONFIRMED');
+
+CREATE INDEX ix_resource_reservation_history_schedule_order
+ON occ.resource_reservation_history (resource_id, (lower(time_range)), reservation_id)
+WHERE state IN ('PENDING', 'CONFIRMED');
 
 INSERT INTO occ.resource_reservation_history
     (reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
      time_range, capacity, exclusive, state, row_version, created_at,
-     updated_at, confirmed_at, cancelled_at, completed_at, recorded_at)
+     updated_at, confirmed_at, cancelled_at, completed_at, valid_from, valid_until)
 SELECT id, resource_id, requester_entity_id, process_instance_id, task_id,
        time_range, capacity, exclusive, state, row_version, created_at,
-       updated_at, confirmed_at, cancelled_at, completed_at, statement_timestamp()
+       updated_at, confirmed_at, cancelled_at, completed_at, statement_timestamp(), NULL
 FROM occ.resource_reservation;
+
+CREATE FUNCTION occ.validate_resource_reservation_history_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, occ, pg_temp
+AS $$
+DECLARE
+    excluded_history_id uuid;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'reservation history facts are immutable';
+    END IF;
+
+    PERFORM 1
+    FROM occ.resource_reservation
+    WHERE id = NEW.reservation_id
+    FOR UPDATE;
+
+    IF TG_OP = 'UPDATE' AND (
+       OLD.valid_until IS NOT NULL
+       OR NEW.valid_until IS NULL
+       OR NEW.valid_until <= OLD.valid_from
+       OR (to_jsonb(NEW) - 'valid_until') IS DISTINCT FROM (to_jsonb(OLD) - 'valid_until')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'reservation history facts are immutable';
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        excluded_history_id := OLD.history_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM occ.resource_reservation_history existing
+        WHERE existing.reservation_id = NEW.reservation_id
+          AND existing.history_id IS DISTINCT FROM excluded_history_id
+          AND tstzrange(existing.valid_from, existing.valid_until, '[)')
+              && tstzrange(NEW.valid_from, NEW.valid_until, '[)')
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23P01', MESSAGE = 'reservation history validity overlaps';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_resource_reservation_history_immutable
+BEFORE INSERT OR UPDATE OR DELETE ON occ.resource_reservation_history
+FOR EACH ROW EXECUTE FUNCTION occ.validate_resource_reservation_history_change();
 
 CREATE FUNCTION occ.snapshot_resource_reservation()
 RETURNS trigger
@@ -926,15 +988,27 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, occ
 AS $$
+DECLARE
+    mutation_at timestamptz := clock_timestamp();
+    closed_versions integer;
 BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        UPDATE occ.resource_reservation_history
+        SET valid_until = mutation_at
+        WHERE reservation_id = NEW.id AND valid_until IS NULL;
+        GET DIAGNOSTICS closed_versions = ROW_COUNT;
+        IF closed_versions <> 1 THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'reservation current history is unavailable';
+        END IF;
+    END IF;
     INSERT INTO occ.resource_reservation_history
         (reservation_id, resource_id, requester_entity_id, process_instance_id, task_id,
          time_range, capacity, exclusive, state, row_version, created_at,
-         updated_at, confirmed_at, cancelled_at, completed_at, recorded_at)
+         updated_at, confirmed_at, cancelled_at, completed_at, valid_from, valid_until)
     VALUES
         (NEW.id, NEW.resource_id, NEW.requester_entity_id, NEW.process_instance_id, NEW.task_id,
          NEW.time_range, NEW.capacity, NEW.exclusive, NEW.state, NEW.row_version, NEW.created_at,
-         NEW.updated_at, NEW.confirmed_at, NEW.cancelled_at, NEW.completed_at, clock_timestamp());
+         NEW.updated_at, NEW.confirmed_at, NEW.cancelled_at, NEW.completed_at, mutation_at, NULL);
     RETURN NEW;
 END;
 $$;
@@ -942,10 +1016,6 @@ $$;
 CREATE TRIGGER trg_resource_reservation_snapshot
 AFTER INSERT OR UPDATE ON occ.resource_reservation
 FOR EACH ROW EXECUTE FUNCTION occ.snapshot_resource_reservation();
-
-CREATE TRIGGER trg_resource_reservation_history_immutable
-BEFORE UPDATE OR DELETE ON occ.resource_reservation_history
-FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
 
 CREATE TABLE occ.resource_availability (
     id uuid PRIMARY KEY,
@@ -1228,6 +1298,7 @@ REVOKE EXECUTE ON FUNCTION occ.validate_resource_reservation() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.reject_resource_reservation_delete() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.validate_managed_resource_change() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION occ.snapshot_resource_reservation() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION occ.validate_resource_reservation_history_change() FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     occ.evidence_object_disposition,
