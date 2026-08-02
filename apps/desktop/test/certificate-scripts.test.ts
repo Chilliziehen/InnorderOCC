@@ -58,12 +58,14 @@ async function payload() {
     },
   };
   const helperBytes = await readFile(enrollScript);
+  const removalHelperBytes = await readFile(removeScript);
   const releaseManifest = {
     version: 1,
     productId: "com.innorder.occ",
     productVersion: "0.1.0",
     installer: { file: "InnorderOCC.exe", sha256: sha256("test installer"), productName: "Innorder OCC", internalName: "InnorderOCC" },
     helper: { file: "enroll-deployment-ca.ps1", sha256: sha256(helperBytes) },
+    removalHelper: { file: "remove-deployment-ca.ps1", sha256: sha256(removalHelperBytes) },
     certificateManifest: { file: "certificate-manifest.json", contentSha256: certificateManifestContentSha256(certificatePayload) },
     publisher: { subject: "CN=Innorder Test", thumbprint: "AB".repeat(20) },
   };

@@ -104,6 +104,7 @@ const releaseManifestSchema = z.object({
     internalName: z.literal("InnorderOCC"),
   }).strict(),
   helper: z.object({ file: z.literal("enroll-deployment-ca.ps1"), sha256: sha256Schema }).strict(),
+  removalHelper: z.object({ file: z.literal("remove-deployment-ca.ps1"), sha256: sha256Schema }).strict(),
   certificateManifest: z.object({ file: z.literal("certificate-manifest.json"), contentSha256: sha256Schema }).strict(),
   publisher: z.object({
     subject: z.string().min(1).max(4096),
@@ -383,8 +384,10 @@ type ReleaseBundleInput = {
   payloadRoot: string;
   certificateManifestPath: string;
   releaseManifestPath: string;
-  helperPath: string;
+  enrollmentHelperPath: string;
+  removalHelperPath: string;
   installerPath: string;
+  expectedCertificateManifestSha256: string;
   expectedFingerprint: string;
   now?: Date;
 };
@@ -398,13 +401,16 @@ async function verifyDeploymentReleaseBundle(
   for (const candidate of [input.certificateManifestPath, input.releaseManifestPath]) {
     if (!path.isAbsolute(candidate) || !isUnder(root, path.resolve(candidate))) throw new Error("Release artifact must be an absolute path under payload root");
   }
-  if (!path.isAbsolute(input.helperPath) || !path.isAbsolute(input.installerPath)) throw new Error("Release executable paths must be absolute");
-  const [certificateManifestBytes, releaseBytes, helperBytes, installerBytes] = await Promise.all([
+  if (![input.enrollmentHelperPath, input.removalHelperPath, input.installerPath].every(path.isAbsolute)) throw new Error("Release executable paths must be absolute");
+  if (new Set([input.enrollmentHelperPath, input.removalHelperPath, input.installerPath].map((value) => path.resolve(value))).size !== 3) throw new Error("Release executable paths must be distinct");
+  const [certificateManifestBytes, releaseBytes, enrollmentHelperBytes, removalHelperBytes, installerBytes] = await Promise.all([
     readBoundedRegularFile(input.certificateManifestPath, MAX_CERTIFICATE_MANIFEST_BYTES, "Certificate manifest", defaultVerificationFileSystem),
     readBoundedRegularFile(input.releaseManifestPath, MAX_CERTIFICATE_MANIFEST_BYTES, "Release manifest", defaultVerificationFileSystem),
-    readBoundedRegularFile(input.helperPath, MAX_CERTIFICATE_BYTES, "Enrollment helper", defaultVerificationFileSystem),
+    readBoundedRegularFile(input.enrollmentHelperPath, MAX_CERTIFICATE_BYTES, "Enrollment helper", defaultVerificationFileSystem),
+    readBoundedRegularFile(input.removalHelperPath, MAX_CERTIFICATE_BYTES, "Removal helper", defaultVerificationFileSystem),
     readBoundedRegularFile(input.installerPath, 512 * 1024 * 1024, "Installer", defaultVerificationFileSystem),
   ]);
+  if (sha256(certificateManifestBytes) !== sha256Schema.parse(input.expectedCertificateManifestSha256)) throw new Error("Certificate manifest SHA-256 mismatch");
   const certificateManifest = manifestSchema.parse(JSON.parse(certificateManifestBytes.toString("utf8")));
   const releaseManifest = releaseManifestSchema.parse(JSON.parse(releaseBytes.toString("utf8")));
   const exactPaths = [
@@ -414,7 +420,9 @@ async function verifyDeploymentReleaseBundle(
   for (const [actual, file] of exactPaths) {
     if (path.resolve(actual) !== path.join(root, file)) throw new Error("Release artifact path does not match signed basename");
   }
-  if (path.basename(input.helperPath) !== releaseManifest.helper.file || path.basename(input.installerPath) !== releaseManifest.installer.file) {
+  if (path.basename(input.enrollmentHelperPath) !== releaseManifest.helper.file
+    || path.basename(input.removalHelperPath) !== releaseManifest.removalHelper.file
+    || path.basename(input.installerPath) !== releaseManifest.installer.file) {
     throw new Error("Release executable basename does not match signed manifest");
   }
   const releaseDigest = sha256(releaseBytes);
@@ -422,7 +430,9 @@ async function verifyDeploymentReleaseBundle(
   if (certificateManifest.releaseManifest.signature.keyId !== expectedKeyId) throw new Error("Release signing key ID mismatch");
   const signature = Buffer.from(certificateManifest.releaseManifest.signature.value, "base64");
   if (!verify("RSA-SHA256", Buffer.from(releaseDigest, "hex"), publicKey, signature)) throw new Error("Release manifest signature is invalid");
-  if (sha256(helperBytes) !== releaseManifest.helper.sha256 || sha256(installerBytes) !== releaseManifest.installer.sha256) {
+  if (sha256(enrollmentHelperBytes) !== releaseManifest.helper.sha256
+    || sha256(removalHelperBytes) !== releaseManifest.removalHelper.sha256
+    || sha256(installerBytes) !== releaseManifest.installer.sha256) {
     throw new Error("Signed release artifact SHA-256 mismatch");
   }
   if (certificateManifestContentSha256(certificateManifest) !== releaseManifest.certificateManifest.contentSha256) {

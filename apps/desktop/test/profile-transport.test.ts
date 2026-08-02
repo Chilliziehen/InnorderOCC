@@ -16,7 +16,7 @@ describe("profile-scoped Electron transport", () => {
     const fromPartition = vi.fn(() => ({ setCertificateVerifyProc, fetch, clearStorageData }));
     const transport = createProfileTransport({ fromPartition });
     await transport.fetch(profile, new URL("https://occ.example/api"), {});
-    expect(fromPartition).toHaveBeenCalledWith(`persist:occ-profile-${profile.id}`);
+    expect(fromPartition).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^persist:occ-profile-${profile.id}-[0-9a-f]{64}$`)));
     expect(fetch).toHaveBeenCalledOnce();
 
     const verifier = setCertificateVerifyProc.mock.calls[0]?.[0];
@@ -54,8 +54,32 @@ describe("profile-scoped Electron transport", () => {
     const transport = createProfileTransport({ fromPartition });
     await transport.setProfile(profile);
     await transport.setProfile({ ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2" });
-    expect(first.setCertificateVerifyProc).toHaveBeenLastCalledWith(null);
+    expect(first.setCertificateVerifyProc).not.toHaveBeenCalledWith(null);
     expect(first.clearStorageData).toHaveBeenCalledOnce();
+  });
+
+  it("keeps A permanently pinned while a concurrent transition to B waits for A", async () => {
+    let finishA!: () => void;
+    const requestA = new Promise<Response>((resolve) => { finishA = () => resolve(new Response("A")); });
+    const first = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn(() => requestA), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const second = { setCertificateVerifyProc: vi.fn(), fetch: vi.fn().mockResolvedValue(new Response("B")), clearStorageData: vi.fn().mockResolvedValue(undefined) };
+    const transport = createProfileTransport({ fromPartition: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) });
+    const pendingA = transport.fetch(profile, new URL("https://occ.example/a"));
+    await vi.waitFor(() => expect(first.fetch).toHaveBeenCalledOnce());
+
+    const profileB = { ...profile, id: "8e635134-d8a0-4bbf-8472-e8e44a0c66e2", origin: "https://b.example" };
+    const pendingB = transport.fetch(profileB, new URL("https://b.example/b"));
+    await Promise.resolve();
+    expect(first.setCertificateVerifyProc).not.toHaveBeenCalledWith(null);
+    expect(first.clearStorageData).not.toHaveBeenCalled();
+    expect(second.setCertificateVerifyProc).toHaveBeenCalledOnce();
+    expect(second.fetch).not.toHaveBeenCalled();
+
+    finishA();
+    await expect(pendingA).resolves.toBeInstanceOf(Response);
+    await expect(pendingB).resolves.toBeInstanceOf(Response);
+    expect(first.clearStorageData).toHaveBeenCalledOnce();
+    expect(first.setCertificateVerifyProc).not.toHaveBeenCalledWith(null);
   });
 
   it("is wired into production CoreClient instead of global fetch", () => {

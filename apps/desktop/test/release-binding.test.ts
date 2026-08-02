@@ -28,11 +28,13 @@ async function releasePayload() {
   const certificate = new X509Certificate(DEPLOYMENT_CA_PEM);
   const certificatePath = path.join(root, "deployment-ca.pem");
   const helperPath = path.join(root, "enroll-deployment-ca.ps1");
+  const removalHelperPath = path.join(root, "remove-deployment-ca.ps1");
   const installerPath = path.join(root, "InnorderOCC.exe");
   const certificateManifestPath = path.join(root, "certificate-manifest.json");
   const releaseManifestPath = path.join(root, "release-manifest.json");
   await writeFile(certificatePath, DEPLOYMENT_CA_PEM, "ascii");
   await writeFile(helperPath, "reviewed helper", "ascii");
+  await writeFile(removalHelperPath, "reviewed removal helper", "ascii");
   await writeFile(installerPath, "signed installer fixture", "ascii");
 
   const certificatePayload = {
@@ -56,6 +58,7 @@ async function releasePayload() {
     productVersion: "0.1.0",
     installer: { file: "InnorderOCC.exe", sha256: sha256("signed installer fixture"), productName: "Innorder OCC", internalName: "InnorderOCC" },
     helper: { file: "enroll-deployment-ca.ps1", sha256: sha256("reviewed helper") },
+    removalHelper: { file: "remove-deployment-ca.ps1", sha256: sha256("reviewed removal helper") },
     certificateManifest: { file: "certificate-manifest.json", contentSha256: certificateManifestContentSha256(certificatePayload) },
     publisher: { subject: "CN=Innorder Release", thumbprint: "AB".repeat(20) },
   };
@@ -69,7 +72,7 @@ async function releasePayload() {
   };
   await writeFile(releaseManifestPath, releaseBytes);
   await writeFile(certificateManifestPath, JSON.stringify(certificateManifest));
-  return { root, certificatePath, helperPath, installerPath, certificateManifestPath, releaseManifestPath, certificateManifest, releaseManifest, publicKey };
+  return { root, certificatePath, helperPath, removalHelperPath, installerPath, certificateManifestPath, releaseManifestPath, certificateManifestBytes: Buffer.from(JSON.stringify(certificateManifest)), certificateManifest, releaseManifest, publicKey };
 }
 
 afterEach(async () => {
@@ -83,25 +86,30 @@ describe("signed deployment release binding", () => {
       payloadRoot: fixture.root,
       certificateManifestPath: fixture.certificateManifestPath,
       releaseManifestPath: fixture.releaseManifestPath,
-      helperPath: fixture.helperPath,
+      enrollmentHelperPath: fixture.helperPath,
+      removalHelperPath: fixture.removalHelperPath,
       installerPath: fixture.installerPath,
+      expectedCertificateManifestSha256: sha256(fixture.certificateManifestBytes),
       expectedFingerprint: new X509Certificate(DEPLOYMENT_CA_PEM).fingerprint256,
       now: new Date("2030-01-01T00:00:00Z"),
     }, fixture.publicKey)).resolves.toMatchObject({ releaseManifest: { productId: "com.innorder.occ" } });
   });
 
-  it.each(["release", "certificate manifest", "helper", "installer"])('rejects a changed %s', async (target) => {
+  it.each(["release", "certificate manifest", "helper", "removal helper", "installer"])('rejects a changed %s', async (target) => {
     const fixture = await releasePayload();
     const targetPath = target === "release" ? fixture.releaseManifestPath
       : target === "certificate manifest" ? fixture.certificateManifestPath
-      : target === "helper" ? fixture.helperPath : fixture.installerPath;
+      : target === "helper" ? fixture.helperPath
+      : target === "removal helper" ? fixture.removalHelperPath : fixture.installerPath;
     await writeFile(targetPath, Buffer.concat([await readFile(targetPath), Buffer.from("changed")]));
     await expect(verifyDeploymentReleaseBundleForTest({
       payloadRoot: fixture.root,
       certificateManifestPath: fixture.certificateManifestPath,
       releaseManifestPath: fixture.releaseManifestPath,
-      helperPath: fixture.helperPath,
+      enrollmentHelperPath: fixture.helperPath,
+      removalHelperPath: fixture.removalHelperPath,
       installerPath: fixture.installerPath,
+      expectedCertificateManifestSha256: sha256(fixture.certificateManifestBytes),
       expectedFingerprint: new X509Certificate(DEPLOYMENT_CA_PEM).fingerprint256,
       now: new Date("2030-01-01T00:00:00Z"),
     }, fixture.publicKey)).rejects.toThrow();
@@ -114,8 +122,10 @@ describe("signed deployment release binding", () => {
       payloadRoot: fixture.root,
       certificateManifestPath: fixture.certificateManifestPath,
       releaseManifestPath: fixture.releaseManifestPath,
-      helperPath: fixture.helperPath,
+      enrollmentHelperPath: fixture.helperPath,
+      removalHelperPath: fixture.removalHelperPath,
       installerPath: fixture.installerPath,
+      expectedCertificateManifestSha256: sha256(fixture.certificateManifestBytes),
       expectedFingerprint: new X509Certificate(DEPLOYMENT_CA_PEM).fingerprint256,
       now: new Date("2030-01-01T00:00:00Z"),
     }, other)).rejects.toThrow(/signature/i);
@@ -126,8 +136,10 @@ describe("signed deployment release binding", () => {
         payloadRoot: fixture.root,
         certificateManifestPath: fixture.certificateManifestPath,
         releaseManifestPath: fixture.releaseManifestPath,
-        helperPath: fixture.helperPath,
+        enrollmentHelperPath: fixture.helperPath,
+        removalHelperPath: fixture.removalHelperPath,
         installerPath: fixture.installerPath,
+        expectedCertificateManifestSha256: sha256(fixture.certificateManifestBytes),
         expectedFingerprint: new X509Certificate(DEPLOYMENT_CA_PEM).fingerprint256,
       }, fixture.publicKey)).rejects.toThrow(/unavailable in production/i);
     } finally {

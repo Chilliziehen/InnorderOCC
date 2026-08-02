@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const OK = "net::OK";
 const USE_CHROMIUM_RESULT = -3;
 const DENY = -2;
@@ -27,18 +29,18 @@ function chainContains(certificate: Certificate, expected: string): boolean {
 }
 
 export function createProfileTransport(dependencies: { fromPartition(name: string): SessionLike }) {
-  let active: { profile: Profile; session: SessionLike } | undefined;
-  const setProfile = async (profile: Profile | null) => {
-    if (active && active.profile.id === profile?.id && active.profile.origin === profile.origin && active.profile.caFingerprint === profile.caFingerprint) return;
-    if (active) {
-      active.session.setCertificateVerifyProc(null);
-      await active.session.clearStorageData();
-      active = undefined;
-    }
-    if (!profile) return;
+  type Binding = { key: string; profile: Profile; session: SessionLike; requests: number; drained: Array<() => void>; retirement: number };
+  const bindings = new Map<string, Binding>();
+  let active: Binding | undefined;
+
+  const bindingFor = (profile: Profile): Binding => {
     const expectedOrigin = new URL(profile.origin);
     const expectedFingerprint = normalize(profile.caFingerprint);
-    const session = dependencies.fromPartition(`persist:occ-profile-${profile.id}`);
+    const key = `${profile.id}\n${expectedOrigin.origin}\n${expectedFingerprint}`;
+    const existing = bindings.get(key);
+    if (existing) return existing;
+    const suffix = createHash("sha256").update(key).digest("hex");
+    const session = dependencies.fromPartition(`persist:occ-profile-${profile.id}-${suffix}`);
     session.setCertificateVerifyProc((request, callback) => {
       const valid = request.hostname.toLowerCase() === expectedOrigin.hostname.toLowerCase()
         && request.verificationResult === OK
@@ -47,15 +49,43 @@ export function createProfileTransport(dependencies: { fromPartition(name: strin
           || (expectedFingerprint.length === 64 && chainContains(request.certificate, expectedFingerprint)));
       callback(valid ? USE_CHROMIUM_RESULT : DENY);
     });
-    active = { profile: { ...profile }, session };
+    const binding = { key, profile: { ...profile }, session, requests: 0, drained: [], retirement: 0 };
+    bindings.set(key, binding);
+    return binding;
   };
+
+  const waitForDrain = (binding: Binding) => binding.requests === 0
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => binding.drained.push(resolve));
+
+  const transition = (profile: Profile | null): { binding?: Binding; cleanup: Promise<void> } => {
+    const next = profile ? bindingFor(profile) : undefined;
+    if (active === next) return { ...(next ? { binding: next } : {}), cleanup: Promise.resolve() };
+    const previous = active;
+    active = next;
+    if (!previous) return { ...(next ? { binding: next } : {}), cleanup: Promise.resolve() };
+    const retirement = ++previous.retirement;
+    const cleanup = waitForDrain(previous).then(async () => {
+      if (active !== previous && previous.retirement === retirement) await previous.session.clearStorageData();
+    });
+    return { ...(next ? { binding: next } : {}), cleanup };
+  };
+
+  const setProfile = async (profile: Profile | null) => transition(profile).cleanup;
   return {
     setProfile,
     async fetch(profile: Profile, input: URL, init?: RequestInit) {
       if (input.origin !== new URL(profile.origin).origin) throw new Error("Profile transport origin mismatch");
-      await setProfile(profile);
-      if (!active) throw new Error("Profile transport unavailable");
-      return active.session.fetch(input, init);
+      const { binding, cleanup } = transition(profile);
+      if (!binding) throw new Error("Profile transport unavailable");
+      binding.requests += 1;
+      try {
+        await cleanup;
+        return await binding.session.fetch(input, init);
+      } finally {
+        binding.requests -= 1;
+        if (binding.requests === 0) binding.drained.splice(0).forEach((resolve) => resolve());
+      }
     },
   };
 }

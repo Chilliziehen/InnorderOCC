@@ -8,7 +8,7 @@ import { app, BrowserWindow, safeStorage, session } from "electron";
 
 import { createCoreClient } from "./core-client";
 import { createCommandIntentRegistry } from "./command-intents";
-import { synchronizeCertificateReferences } from "./certificate-manifest";
+import { synchronizeCertificateReferences, verifyProductionDeploymentReleaseBundle } from "./certificate-manifest";
 import { createConnectivityTracker } from "./connectivity";
 import { handleDeploymentCaLifecycle } from "./deployment-ca-lifecycle";
 import {
@@ -42,6 +42,21 @@ import { fetchSystemStatuses } from "./system-status-ipc";
 const CORE_BASE_URL = process.env.CORE_BASE_URL ?? "http://127.0.0.1:8080";
 const AI_BASE_URL = process.env.AI_BASE_URL ?? "http://127.0.0.1:3100";
 const STATUS_TIMEOUT_MS = 4_000;
+const AUTHENTICODE_PREFLIGHT_COMMAND = [
+  "$ErrorActionPreference='Stop'",
+  "$helperPath=$env:OCC_PREFLIGHT_HELPER_PATH",
+  "$installerPath=$env:OCC_PREFLIGHT_INSTALLER_PATH",
+  "$subject=$env:OCC_PREFLIGHT_PUBLISHER_SUBJECT",
+  "$thumbprint=$env:OCC_PREFLIGHT_PUBLISHER_THUMBPRINT",
+  "$version=$env:OCC_PREFLIGHT_PRODUCT_VERSION",
+  "$helper=Get-AuthenticodeSignature -LiteralPath $helperPath",
+  "$installer=Get-AuthenticodeSignature -LiteralPath $installerPath",
+  "if($helper.Status -ne 'Valid' -or $installer.Status -ne 'Valid'){exit 41}",
+  "if($helper.SignerCertificate.Subject -cne $subject -or $installer.SignerCertificate.Subject -cne $subject){exit 42}",
+  "if($helper.SignerCertificate.Thumbprint -cne $thumbprint -or $installer.SignerCertificate.Thumbprint -cne $thumbprint){exit 43}",
+  "$identity=[Diagnostics.FileVersionInfo]::GetVersionInfo($installerPath)",
+  "if($identity.ProductName -cne 'Innorder OCC' -or $identity.InternalName -cne 'InnorderOCC' -or $identity.ProductVersion -cne $version){exit 44}",
+].join(";");
 
 let mainWindow: BrowserWindow | undefined;
 let disposeDesktopIpc: (() => void) | undefined;
@@ -97,8 +112,26 @@ if (ownsInstance) void app.whenReady().then(async () => {
   }, {
     exists: async (target) => fs.lstat(target).then((stat) => stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && stat.size <= 512 * 1024, () => false),
     read: (target) => fs.readFile(target),
+    verify: (verification) => verifyProductionDeploymentReleaseBundle(verification),
+    preflight: ({ helperPath, installerPath, productVersion, publisherSubject, publisherThumbprint }) => new Promise((resolve, reject) => {
+      execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", AUTHENTICODE_PREFLIGHT_COMMAND], {
+        windowsHide: true,
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          OCC_PREFLIGHT_HELPER_PATH: helperPath,
+          OCC_PREFLIGHT_INSTALLER_PATH: installerPath,
+          OCC_PREFLIGHT_PRODUCT_VERSION: productVersion,
+          OCC_PREFLIGHT_PUBLISHER_SUBJECT: publisherSubject,
+          OCC_PREFLIGHT_PUBLISHER_THUMBPRINT: publisherThumbprint,
+        },
+      }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    }),
     invoke: ({ script, arguments: args }) => new Promise((resolve, reject) => {
-      execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, ...args], { windowsHide: true, timeout: 30_000 }, (error, stdout) => {
+      execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script, ...args], { windowsHide: true, timeout: 30_000 }, (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
       });

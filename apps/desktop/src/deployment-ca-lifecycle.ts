@@ -3,6 +3,18 @@ import { z } from "zod";
 
 type Input = { argv: string[]; resourcesPath: string; userData: string; execPath: string };
 type Invocation = { script: string; mode: "enroll" | "remove"; arguments: string[] };
+type VerificationInput = {
+  payloadRoot: string;
+  certificateManifestPath: string;
+  releaseManifestPath: string;
+  enrollmentHelperPath: string;
+  removalHelperPath: string;
+  installerPath: string;
+  expectedCertificateManifestSha256: string;
+  expectedFingerprint: string;
+};
+type VerifiedRelease = { releaseManifest: { productVersion: string; publisher: { subject: string; thumbprint: string } } };
+type PreflightInput = { helperPath: string; installerPath: string; productVersion: string; publisherSubject: string; publisherThumbprint: string };
 const confirmationSchema = z.object({
   version: z.literal(1),
   productId: z.literal("com.innorder.occ"),
@@ -14,7 +26,13 @@ const confirmationSchema = z.object({
 
 export async function handleDeploymentCaLifecycle(
   input: Input,
-  dependencies: { exists(target: string): Promise<boolean>; read(target: string): Promise<Buffer>; invoke(value: Invocation): Promise<unknown> },
+  dependencies: {
+    exists(target: string): Promise<boolean>;
+    read(target: string): Promise<Buffer>;
+    verify(input: VerificationInput): Promise<VerifiedRelease>;
+    preflight(input: PreflightInput): Promise<void>;
+    invoke(value: Invocation): Promise<unknown>;
+  },
 ): Promise<{ handled: boolean; status: string }> {
   const event = input.argv.find((value) => value === "--squirrel-install" || value === "--squirrel-updated" || value === "--squirrel-uninstall");
   if (!event) return { handled: false, status: "not-squirrel" };
@@ -31,8 +49,32 @@ export async function handleDeploymentCaLifecycle(
   } catch {
     return { handled: true, status: "invalid-payload" };
   }
-  const script = path.join(input.resourcesPath, removing ? "remove-deployment-ca.ps1" : "enroll-deployment-ca.ps1");
+  const enrollmentHelperPath = path.join(input.resourcesPath, "enroll-deployment-ca.ps1");
+  const removalHelperPath = path.join(input.resourcesPath, "remove-deployment-ca.ps1");
+  const script = removing ? removalHelperPath : enrollmentHelperPath;
+  let verified: VerifiedRelease;
   try {
+    verified = await dependencies.verify({
+      payloadRoot: payload,
+      certificateManifestPath: required[1]!,
+      releaseManifestPath: required[0]!,
+      enrollmentHelperPath,
+      removalHelperPath,
+      installerPath: input.execPath,
+      expectedCertificateManifestSha256: confirmation.certificateManifestSha256,
+      expectedFingerprint: confirmation.caFingerprint,
+    });
+  } catch {
+    return { handled: true, status: "invalid-payload" };
+  }
+  try {
+    await dependencies.preflight({
+      helperPath: script,
+      installerPath: input.execPath,
+      productVersion: verified.releaseManifest.productVersion,
+      publisherSubject: verified.releaseManifest.publisher.subject,
+      publisherThumbprint: verified.releaseManifest.publisher.thumbprint,
+    });
     await dependencies.invoke({
       script,
       mode: removing ? "remove" : "enroll",

@@ -203,17 +203,20 @@ if ([string]$manifest.releaseManifest.signature.algorithm -cne 'RSA-SHA256' -or 
 if ($signatureBytes.Length -lt 64 -or $signatureBytes.Length -gt 8192) { throw 'Invalid release signature size' }
 
 $release = [Text.Encoding]::UTF8.GetString($releaseBytes) | ConvertFrom-Json
-Assert-ExactProperties $release @('version', 'productId', 'productVersion', 'installer', 'helper', 'certificateManifest', 'publisher') 'Release manifest'
+Assert-ExactProperties $release @('version', 'productId', 'productVersion', 'installer', 'helper', 'removalHelper', 'certificateManifest', 'publisher') 'Release manifest'
 Assert-ExactProperties $release.installer @('file', 'sha256', 'productName', 'internalName') 'Release installer'
 Assert-ExactProperties $release.helper @('file', 'sha256') 'Release helper'
+Assert-ExactProperties $release.removalHelper @('file', 'sha256') 'Release removal helper'
 Assert-ExactProperties $release.certificateManifest @('file', 'contentSha256') 'Release certificate manifest'
 Assert-ExactProperties $release.publisher @('subject', 'thumbprint') 'Release publisher'
 if ($release.version -ne 1 -or $release.productId -cne $ProductId -or [string]$release.productVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Release identity mismatch' }
 $publisherThumbprint = ([string]$release.publisher.thumbprint).ToUpperInvariant()
-if ([string]$release.installer.file -notmatch '^[^\\/:]{1,255}$' -or $release.helper.file -cne 'enroll-deployment-ca.ps1' -or $release.certificateManifest.file -cne 'certificate-manifest.json' -or $publisherThumbprint -notmatch '^[0-9A-F]{40}$' -or [string]::IsNullOrWhiteSpace([string]$release.publisher.subject) -or ([string]$release.publisher.subject).Length -gt 4096) { throw 'Release manifest field validation failed' }
+if ([string]$release.installer.file -notmatch '^[^\\/:]{1,255}$' -or $release.helper.file -cne 'enroll-deployment-ca.ps1' -or $release.removalHelper.file -cne 'remove-deployment-ca.ps1' -or $release.certificateManifest.file -cne 'certificate-manifest.json' -or $publisherThumbprint -notmatch '^[0-9A-F]{40}$' -or [string]::IsNullOrWhiteSpace([string]$release.publisher.subject) -or ([string]$release.publisher.subject).Length -gt 4096) { throw 'Release manifest field validation failed' }
 $helperItem = Get-Item -LiteralPath $PSCommandPath -Force
 if (($helperItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $helperItem.Length -eq 0 -or $helperItem.Length -gt $MaximumCertificateBytes) { throw 'Enrollment helper must be a bounded regular non-reparse file' }
 if ($release.helper.file -cne [IO.Path]::GetFileName($PSCommandPath) -or (Get-Sha256 ([IO.File]::ReadAllBytes($PSCommandPath))) -cne (ConvertTo-NormalizedSha256 ([string]$release.helper.sha256) 'Helper sha256')) { throw 'Enrollment helper binding mismatch' }
+$removalHelperPath = Assert-AbsoluteRegularPath ([IO.Path]::Combine([IO.Path]::GetDirectoryName($PSCommandPath), [string]$release.removalHelper.file)) 'RemovalHelperPath'
+if ((Get-Sha256 ([IO.File]::ReadAllBytes($removalHelperPath))) -cne (ConvertTo-NormalizedSha256 ([string]$release.removalHelper.sha256) 'Removal helper sha256')) { throw 'Removal helper binding mismatch' }
 $InstallerPath = Assert-AbsoluteRegularPath ([IO.Path]::GetFullPath($InstallerPath)) 'InstallerPath'
 if ($InstallerPath -ceq $PSCommandPath) { throw 'Installer and helper paths must be distinct' }
 $installerItem = Get-Item -LiteralPath $InstallerPath -Force
