@@ -1,10 +1,13 @@
 // @vitest-environment node
 
 import { existsSync, readFileSync } from "node:fs";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import config from "../forge.config";
 import mainViteConfig from "../vite.main.config";
@@ -156,5 +159,141 @@ describe("Windows package configuration", () => {
     expect(mainViteConfig.build?.sourcemap).toBe(false);
     expect(preloadViteConfig.build?.sourcemap).toBe(false);
     expect(rendererViteConfig.build?.sourcemap).toBe(false);
+  });
+
+  it("preflights only the current branded packaged executable", async () => {
+    const helperPath = path.join(desktopRoot, "smoke", "packaged-app.ts");
+    expect(existsSync(helperPath)).toBe(true);
+    if (!existsSync(helperPath)) return;
+
+    const root = await mkdtemp(path.join(tmpdir(), "innorder-packaged-app-"));
+    try {
+      const currentExecutable = path.join(root, "out", "Innorder OCC-win32-x64", "InnorderOCC.exe");
+      const staleExecutable = path.join(root, "out", "@innorder-desktop-win32-x64", "@innorder-desktop.exe");
+      await mkdir(path.dirname(currentExecutable), { recursive: true });
+      await mkdir(path.dirname(staleExecutable), { recursive: true });
+      await writeFile(path.join(root, "package.json"), JSON.stringify({ productName: "Innorder OCC" }));
+      await writeFile(currentExecutable, "current");
+      await writeFile(staleExecutable, "stale");
+
+      const { preflightPackagedExecutable } = await import(pathToFileURL(helperPath).href);
+      expect(await preflightPackagedExecutable(root)).toBe(currentExecutable);
+
+      for (const spec of ["packaged.spec.ts", "accessibility.spec.ts"]) {
+        const source = readFileSync(path.join(desktopRoot, "smoke", spec), "utf8");
+        expect(source).toContain("preflightPackagedExecutable");
+        expect(source).not.toContain("@innorder-desktop-win32-x64");
+        expect(source).not.toContain("@innorder-desktop.exe");
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects missing branded output even when the obsolete executable exists", async () => {
+    const helperPath = path.join(desktopRoot, "smoke", "packaged-app.ts");
+    expect(existsSync(helperPath)).toBe(true);
+    if (!existsSync(helperPath)) return;
+
+    const root = await mkdtemp(path.join(tmpdir(), "innorder-missing-package-"));
+    try {
+      const staleExecutable = path.join(root, "out", "@innorder-desktop-win32-x64", "@innorder-desktop.exe");
+      await mkdir(path.dirname(staleExecutable), { recursive: true });
+      await writeFile(path.join(root, "package.json"), JSON.stringify({ productName: "Innorder OCC" }));
+      await writeFile(staleExecutable, "stale");
+
+      const { preflightPackagedExecutable } = await import(pathToFileURL(helperPath).href);
+      await expect(preflightPackagedExecutable(root)).rejects.toThrow(/InnorderOCC\.exe.*does not exist/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects packaged output when package product identity differs", async () => {
+    const helperPath = path.join(desktopRoot, "smoke", "packaged-app.ts");
+    expect(existsSync(helperPath)).toBe(true);
+    if (!existsSync(helperPath)) return;
+
+    const root = await mkdtemp(path.join(tmpdir(), "innorder-package-identity-"));
+    try {
+      const executable = path.join(root, "out", "Innorder OCC-win32-x64", "InnorderOCC.exe");
+      await mkdir(path.dirname(executable), { recursive: true });
+      await writeFile(path.join(root, "package.json"), JSON.stringify({ productName: "Wrong Product" }));
+      await writeFile(executable, "current");
+
+      const { preflightPackagedExecutable } = await import(pathToFileURL(helperPath).href);
+      await expect(preflightPackagedExecutable(root)).rejects.toThrow(/expected Innorder OCC/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes only the product-owned obsolete package directory", async () => {
+    const helperPath = path.join(desktopRoot, "scripts", "package-output.mts");
+    expect(existsSync(helperPath)).toBe(true);
+    if (!existsSync(helperPath)) return;
+
+    const root = await mkdtemp(path.join(tmpdir(), "innorder-package-output-"));
+    try {
+      const staleFile = path.join(root, "out", "@innorder-desktop-win32-x64", "@innorder-desktop.exe");
+      const currentFile = path.join(root, "out", "Innorder OCC-win32-x64", "InnorderOCC.exe");
+      const unrelatedFile = path.join(root, "out", "user-notes", "keep.txt");
+      for (const file of [staleFile, currentFile, unrelatedFile]) {
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, file);
+      }
+
+      const { removeObsoletePackageOutput } = await import(pathToFileURL(helperPath).href);
+      await removeObsoletePackageOutput(root);
+
+      await expect(access(staleFile)).rejects.toThrow();
+      await expect(access(currentFile)).resolves.toBeUndefined();
+      await expect(access(unrelatedFile)).resolves.toBeUndefined();
+      const runner = readFileSync(path.join(desktopRoot, "scripts", "run-forge.mjs"), "utf8");
+      expect(runner).toContain("removeObsoletePackageOutput");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("permits packaged smoke inspection only for a matching token in generated output", async () => {
+    const helperPath = path.join(desktopRoot, "src", "packaged-smoke-inspector.ts");
+    expect(existsSync(helperPath)).toBe(true);
+    if (!existsSync(helperPath)) return;
+
+    const { enablePackagedSmokeInspector } = await import(pathToFileURL(helperPath).href);
+    const token = "a".repeat(64);
+    const generatedExecutable = path.join(
+      repositoryRoot,
+      "apps",
+      "desktop",
+      "out",
+      "Innorder OCC-win32-x64",
+      "InnorderOCC.exe",
+    );
+    const installedExecutable = path.join("C:\\Program Files", "Innorder OCC", "InnorderOCC.exe");
+    const openInspector = vi.fn();
+
+    expect(enablePackagedSmokeInspector({
+      execPath: installedExecutable,
+      argv: [`--occ-packaged-smoke-token=${token}`],
+      environmentToken: token,
+      openInspector,
+    })).toBe(false);
+    expect(enablePackagedSmokeInspector({
+      execPath: generatedExecutable,
+      argv: ["--occ-packaged-smoke-token=wrong"],
+      environmentToken: token,
+      openInspector,
+    })).toBe(false);
+    expect(openInspector).not.toHaveBeenCalled();
+
+    expect(enablePackagedSmokeInspector({
+      execPath: generatedExecutable,
+      argv: [`--occ-packaged-smoke-token=${token}`],
+      environmentToken: token,
+      openInspector,
+    })).toBe(true);
+    expect(openInspector).toHaveBeenCalledWith(0, "127.0.0.1", false);
   });
 });

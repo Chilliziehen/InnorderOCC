@@ -1,10 +1,6 @@
-import path from "node:path";
-
 import { _electron as electron, expect, test, type Page } from "playwright/test";
 
-const executablePath = path.resolve(
-  "out/@innorder-desktop-win32-x64/@innorder-desktop.exe",
-);
+import { packagedSmokeLaunchOptions, preflightPackagedExecutable } from "./packaged-app";
 
 const mutedTextSelectors = [
   ".section-kicker",
@@ -42,6 +38,7 @@ function contrastRatio(foreground: string, background: string): number {
 }
 
 test("packaged OCC desktop enforces runtime and visual baselines", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const runtimeErrors: string[] = [];
   const monitoredPages = new WeakSet<Page>();
   const monitor = (page: Page) => {
@@ -55,7 +52,7 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     page.on("pageerror", (error) => runtimeErrors.push(error.message));
   };
 
-  const application = await electron.launch({ executablePath });
+  const application = await electron.launch(packagedSmokeLaunchOptions(executablePath));
   application.on("window", monitor);
   application.windows().forEach(monitor);
 

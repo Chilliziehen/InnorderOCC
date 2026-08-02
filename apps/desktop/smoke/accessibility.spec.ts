@@ -6,8 +6,8 @@ import path from "node:path";
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "playwright/test";
 
 import { WORKSPACE_MANIFEST } from "../src/renderer/workspace-manifest";
+import { packagedSmokeLaunchOptions, preflightPackagedExecutable } from "./packaged-app";
 
-const executablePath = path.resolve("out/@innorder-desktop-win32-x64/@innorder-desktop.exe");
 const fixtureChannels = {
   profilesList: "profiles:list",
   profilesCurrent: "profiles:current",
@@ -253,11 +253,12 @@ async function measureFullLayout(page: Page) {
 }
 
 test("packaged bootstrap passes accessibility and reflow checks", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const userData = await mkdtemp(path.join(tmpdir(), "innorder-a11y-"));
-  const application = await electron.launch({
+  const application = await electron.launch(packagedSmokeLaunchOptions(
     executablePath,
-    args: [`--user-data-dir=${userData}`],
-  });
+    [`--user-data-dir=${userData}`],
+  ));
 
   try {
     const page = await application.firstWindow();
@@ -356,11 +357,12 @@ test("packaged bootstrap passes accessibility and reflow checks", async () => {
 });
 
 test("packaged settings restores modal trigger focus after shell isolation clears", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const userData = await mkdtemp(path.join(tmpdir(), "innorder-modal-"));
-  const application = await electron.launch({
+  const application = await electron.launch(packagedSmokeLaunchOptions(
     executablePath,
-    args: [`--user-data-dir=${userData}`],
-  });
+    [`--user-data-dir=${userData}`],
+  ));
 
   try {
     const page = await application.firstWindow();
@@ -393,8 +395,12 @@ test("packaged settings restores modal trigger focus after shell isolation clear
 });
 
 test("packaged authenticated shell navigates every route", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const userData = await mkdtemp(path.join(tmpdir(), "innorder-routes-"));
-  const application = await electron.launch({ executablePath, args: [`--user-data-dir=${userData}`] });
+  const application = await electron.launch(packagedSmokeLaunchOptions(
+    executablePath,
+    [`--user-data-dir=${userData}`],
+  ));
 
   try {
     const page = await application.firstWindow();
@@ -415,8 +421,12 @@ test("packaged authenticated shell navigates every route", async () => {
 });
 
 test("packaged authenticated layout matrix has no overflow or visible overlap", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const userData = await mkdtemp(path.join(tmpdir(), "innorder-layout-"));
-  const application = await electron.launch({ executablePath, args: [`--user-data-dir=${userData}`] });
+  const application = await electron.launch(packagedSmokeLaunchOptions(
+    executablePath,
+    [`--user-data-dir=${userData}`],
+  ));
 
   try {
     const page = await application.firstWindow();
@@ -463,11 +473,12 @@ test("packaged authenticated layout matrix has no overflow or visible overlap", 
 });
 
 test("packaged pending profile removal keeps focus inside the dialog", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const userData = await mkdtemp(path.join(tmpdir(), "innorder-modal-pending-"));
-  const application = await electron.launch({
+  const application = await electron.launch(packagedSmokeLaunchOptions(
     executablePath,
-    args: [`--user-data-dir=${userData}`],
-  });
+    [`--user-data-dir=${userData}`],
+  ));
 
   try {
     const page = await application.firstWindow();

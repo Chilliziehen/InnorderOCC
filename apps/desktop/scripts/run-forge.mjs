@@ -5,6 +5,7 @@ import {
   assertElectronProvenance,
   assertInstalledElectronVersion,
 } from "../../../scripts/electron-provenance.mjs";
+import { removeObsoletePackageOutput } from "./package-output.mts";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 await assertElectronProvenance({ root, environment: process.env });
@@ -14,6 +15,9 @@ await assertInstalledElectronVersion(require.resolve("electron/package.json"));
 const operation = process.argv[2];
 if (operation !== "start" && operation !== "package" && operation !== "make") {
   throw new Error(`Unsupported Forge operation: ${operation ?? "<missing>"}`);
+}
+if (operation === "package" || operation === "make") {
+  await removeObsoletePackageOutput();
 }
 const { api } = await import("@electron-forge/core");
 const options = operation === "package" || operation === "make"

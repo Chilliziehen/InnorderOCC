@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { open as openInspector } from "node:inspector";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -28,6 +29,7 @@ import {
 import { createProfileStore } from "./profile-store";
 import { createReadCache, READ_CACHE_MAX_BYTES } from "./read-cache";
 import { createNotificationStream } from "./notification-stream";
+import { enablePackagedSmokeInspector } from "./packaged-smoke-inspector";
 import { createSessionManager, customerInstanceIdFromAccessToken } from "./session-manager";
 import { createMainReliabilityApi } from "./main-reliability-composition";
 import { fetchSystemStatuses } from "./system-status-ipc";
@@ -72,6 +74,12 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+enablePackagedSmokeInspector({
+  execPath: process.execPath,
+  argv: process.argv,
+  environmentToken: process.env.OCC_PACKAGED_SMOKE_TOKEN,
+  openInspector,
+});
 app.setAppUserModelId("com.innorder.occ");
 const ownsInstance = registerSingleInstanceLifecycle(app, () => mainWindow);
 
