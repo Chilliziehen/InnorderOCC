@@ -58,6 +58,11 @@ flowable:
   database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:false}
 
 occ:
+  cursor:
+    current-key-id: ${OCC_CURSOR_CURRENT_KEY_ID:current}
+    current-key-file: ${OCC_CURSOR_CURRENT_KEY_FILE:}
+    previous-key-id: ${OCC_CURSOR_PREVIOUS_KEY_ID:}
+    previous-key-file: ${OCC_CURSOR_PREVIOUS_KEY_FILE:}
   outbox:
     enabled: ${OCC_OUTBOX_ENABLED:true}
     topic: occ.events.v1

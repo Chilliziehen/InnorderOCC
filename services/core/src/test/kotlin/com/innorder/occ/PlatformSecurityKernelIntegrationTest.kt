@@ -110,7 +110,7 @@ class PlatformSecurityKernelIntegrationTest(
     }
 
     @Test
-    fun `fresh V001 V013 bootstrap v2 authorizes non workflow command without workflow catalog`() {
+    fun `fresh V001 V013 bootstrap v2 installs workflow catalog and preserves non workflow authorization`() {
         val flyway = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
         assertThat(flyway.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java)).isEqualTo(13)
         assertThat(jdbc.queryForObject(
@@ -121,7 +121,13 @@ class PlatformSecurityKernelIntegrationTest(
             "SELECT count(*) FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
             Long::class.java,
             *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
-        )).isZero()
+        )).isEqualTo(5)
+        assertThat(jdbc.queryForObject(
+            """SELECT count(*) FROM authz.entity e
+               JOIN platform.customer_instance ci ON ci.id = e.id AND ci.singleton
+               WHERE e.entity_key = 'customer:' || ci.instance_key AND e.state = 'ACTIVE'""",
+            Long::class.java,
+        )).isEqualTo(1)
 
         val accessToken = login().path("accessToken").textValue()
         val result = command(
