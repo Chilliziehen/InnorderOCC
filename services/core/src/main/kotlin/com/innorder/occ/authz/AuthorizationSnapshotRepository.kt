@@ -65,9 +65,10 @@ class AuthorizationSnapshotRepository(
         if (contextBytes.size > MAX_CONTEXT_BYTES) throw AuthorizationSnapshotException()
         val forbiddenActions = layers.flatMap { it.forbiddenActions }.distinct().sorted()
         if (forbiddenActions.size > MAX_FORBIDDEN_ACTIONS) throw AuthorizationSnapshotException()
+        val relationships = loadRelationships(request, snapshotAt)
 
         return AuthorizationSnapshot(
-            contractVersion = 1,
+            contractVersion = 2,
             requestId = request.requestId,
             authorizationRevision = revision,
             releases = Collections.unmodifiableMap(layers.associate { it.layer to it.bundleVersionId }),
@@ -81,6 +82,7 @@ class AuthorizationSnapshotRepository(
             context = immutableContext(request.context),
             forbiddenActions = Collections.unmodifiableList(forbiddenActions),
             grants = grants,
+            relationships = relationships,
             composedReleaseId = layers.first().composedReleaseId,
             opaRevision = layers.first().opaRevision,
             entityVersions = Collections.unmodifiableMap(mapOf(
@@ -228,6 +230,43 @@ class AuthorizationSnapshotRepository(
         principalId,
     ).toSet()
 
+    private fun loadRelationships(
+        request: AuthorizationRequest,
+        snapshotAt: OffsetDateTime,
+    ): List<AuthorizationRelationshipFact> {
+        val rows = jdbc.query(
+            """SELECT lower(definition.relation_key) AS relation_key,
+                      relationship.subject_entity_id, relationship.object_entity_id
+               FROM authz.active_relationships_at(?) relationship
+               JOIN catalog.relation_definition definition
+                 ON definition.id = relationship.relation_definition_id
+               WHERE lower(definition.relation_key) IN (${RELATION_KEYS.keys.joinToString(",") { "?" }})
+                 AND relationship.subject_entity_id = ?
+                 AND relationship.object_entity_id IN (?, ?)
+               ORDER BY lower(definition.relation_key), relationship.subject_entity_id, relationship.object_entity_id
+               LIMIT 257""",
+            { rs, _ ->
+                AuthorizationRelationshipFact(
+                    RELATION_KEYS.getValue(rs.getString("relation_key")),
+                    rs.getObject("subject_entity_id", UUID::class.java),
+                    rs.getObject("object_entity_id", UUID::class.java),
+                )
+            },
+            snapshotAt,
+            *RELATION_KEYS.keys.toTypedArray(),
+            request.principalId,
+            request.entityId,
+            request.resourceId,
+        )
+        if (rows.size > MAX_RELATIONSHIPS || rows.any { !validUuid(it.subjectId) || !validUuid(it.objectId) }) {
+            throw AuthorizationSnapshotException()
+        }
+        val sorted = rows.distinct().sortedWith(
+            compareBy<AuthorizationRelationshipFact>({ it.relation.name }, { it.subjectId }, { it.objectId }),
+        )
+        return Collections.unmodifiableList(sorted)
+    }
+
     private fun validateRequest(request: AuthorizationRequest) {
         if (!validUuid(request.requestId) || !validUuid(request.principalId) || !validUuid(request.entityId) ||
             !validUuid(request.resourceId) || !validAction(request.action) || request.context.size > MAX_CONTEXT_PROPERTIES
@@ -369,10 +408,18 @@ class AuthorizationSnapshotRepository(
         private const val MAX_CONTEXT_DEPTH = 8
         private const val MAX_FORBIDDEN_ACTIONS = 128
         private const val MAX_GRANTS = 256
+        private const val MAX_RELATIONSHIPS = 256
         private const val MAX_MANIFEST_BYTES = 64 * 1024
         private val NIL_UUID = UUID(0, 0)
         private val ROLE_ASSIGNMENT_RELATION_ID = UUID.fromString("00000000-0000-7000-8000-000000000002")
         private val ACTION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private val UUID_PATTERN = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}${'$'}")
+        private val RELATION_KEYS = mapOf(
+            "cohort_owner" to AuthorizationRelation.COHORT_OWNER,
+            "cohort_teacher" to AuthorizationRelation.COHORT_TEACHER,
+            "cohort_participant" to AuthorizationRelation.COHORT_PARTICIPANT,
+            "task_candidate" to AuthorizationRelation.TASK_CANDIDATE,
+            "task_assignee" to AuthorizationRelation.TASK_ASSIGNEE,
+        )
     }
 }

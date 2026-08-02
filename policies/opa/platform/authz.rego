@@ -2,8 +2,8 @@ package innorder.platform.authz
 
 import rego.v1
 
-contract_version := 1
-opa_revision := "platform-authz-v1"
+contract_version := 2
+opa_revision := "platform-authz-v2"
 max_safe_integer := 9007199254740991
 action_key_max_length := 128
 context_max_properties := 32
@@ -12,9 +12,10 @@ context_max_depth := 8
 forbidden_actions_max_length := 128
 grants_max_length := 256
 grant_id_max_length := 256
+relationships_max_length := 256
 
 default decision := {
-    "contractVersion": 1,
+    "contractVersion": 2,
     "opaRevision": "",
     "requestId": "00000000-0000-0000-0000-000000000000",
     "authorizationRevision": 0,
@@ -175,7 +176,66 @@ grant_matches_layer_release(grant, layer) if {
     uuid_matches(grant.principalId, input.principal.id)
     uuid_matches(grant.entityId, input.entity.id)
     uuid_matches(grant.resourceId, input.resource.id)
+    workflow_relationship_constraint(grant)
 }
+
+workflow_relationship_constraint(_) if {
+    not workflow_action(input.action)
+}
+
+workflow_relationship_constraint(grant) if {
+    input.action == "cohort.create"
+    grant.action == input.action
+}
+
+workflow_relationship_constraint(grant) if {
+    grant.action == input.action
+    input.action in cohort_management_actions
+    some relation in {"COHORT_OWNER", "COHORT_TEACHER"}
+    workflow_relationship(relation, input.entity.id)
+}
+
+workflow_relationship_constraint(grant) if {
+    grant.action == input.action
+    input.action in {"cohort.read", "process.read"}
+    workflow_relationship("COHORT_PARTICIPANT", input.entity.id)
+}
+
+workflow_relationship_constraint(grant) if {
+    grant.action == "task.claim"
+    input.action == "task.claim"
+    workflow_relationship("TASK_CANDIDATE", input.resource.id)
+}
+
+workflow_relationship_constraint(grant) if {
+    grant.action == "task.complete"
+    input.action == "task.complete"
+    workflow_relationship("TASK_ASSIGNEE", input.resource.id)
+    input.context.processState == "RUNNING"
+    input.context.hardBlockersAbsent == true
+}
+
+workflow_relationship(relation, object_id) if {
+    some fact in input.relationships
+    fact.relation == relation
+    lower(fact.subjectId) == lower(input.principal.id)
+    lower(fact.objectId) == lower(object_id)
+}
+
+cohort_management_actions := {
+    "cohort.read", "cohort.update", "cohort.owner.transfer", "cohort.members.manage", "cohort.archive",
+    "cohort.process.start", "process.suspend", "process.resume", "process.cancel", "process.fail",
+    "process.transfer", "process.reconcile", "process.wait.release",
+}
+
+workflow_actions := {
+    "cohort.create", "cohort.read", "cohort.update", "cohort.owner.transfer", "cohort.members.manage",
+    "cohort.archive", "cohort.process.start", "process.read", "process.suspend", "process.resume",
+    "process.cancel", "process.fail", "process.transfer", "process.reconcile", "process.wait.release",
+    "task.read", "task.claim", "task.complete", "task.fail", "task.assignment.manage",
+}
+
+workflow_action(action) if action in workflow_actions
 
 action_matches("*", _)
 
@@ -200,7 +260,7 @@ valid_input if {
     object.keys(input) == {
         "contractVersion", "opaRevision", "requestId", "authorizationRevision", "releases",
         "principal", "entity", "action", "resource", "context",
-        "forbiddenActions", "grants",
+        "forbiddenActions", "grants", "relationships",
     }
     input.contractVersion == contract_version
     input.opaRevision == opa_revision
@@ -214,6 +274,7 @@ valid_input if {
     valid_context(input.context)
     valid_forbidden_actions(input.forbiddenActions)
     valid_grants(input.grants, input.releases)
+    valid_relationships(input.relationships)
 }
 
 valid_revision(value) if {
@@ -342,6 +403,26 @@ valid_grant(grant, releases) if {
     valid_uuid_or_wildcard(grant.principalId)
     valid_uuid_or_wildcard(grant.entityId)
     valid_uuid_or_wildcard(grant.resourceId)
+}
+
+valid_relationships(relationships) if {
+    is_array(relationships)
+    count(relationships) <= relationships_max_length
+    every relationship in relationships {
+        valid_relationship(relationship)
+    }
+    count(relationships) == count({sprintf("%s:%s:%s", [relationship.relation, lower(relationship.subjectId), lower(relationship.objectId)]) |
+        some relationship in relationships})
+}
+
+valid_relationship(relationship) if {
+    is_object(relationship)
+    object.keys(relationship) == {"relation", "subjectId", "objectId"}
+    relationship.relation in {
+        "COHORT_OWNER", "COHORT_TEACHER", "COHORT_PARTICIPANT", "TASK_CANDIDATE", "TASK_ASSIGNEE",
+    }
+    valid_uuid(relationship.subjectId)
+    valid_uuid(relationship.objectId)
 }
 
 valid_action(value) if {

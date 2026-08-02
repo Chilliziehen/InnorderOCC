@@ -11,8 +11,8 @@ resource_id := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 request_id := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 base_input := {
-    "contractVersion": 1,
-    "opaRevision": "platform-authz-v1",
+    "contractVersion": 2,
+    "opaRevision": "platform-authz-v2",
     "requestId": request_id,
     "authorizationRevision": 17,
     "releases": {
@@ -27,6 +27,7 @@ base_input := {
     "context": {"correlationId": request_id},
     "forbiddenActions": [],
     "grants": [],
+    "relationships": [],
 }
 
 platform_allow := {
@@ -52,8 +53,8 @@ grant_ref(id) := sprintf("grant:%s", [crypto.sha256(id)])
 policy_ref(id) := sprintf("policy:%s", [crypto.sha256(id)])
 
 expected(decision_value, codes, ids) := {
-    "contractVersion": 1,
-    "opaRevision": "platform-authz-v1",
+    "contractVersion": 2,
+    "opaRevision": "platform-authz-v2",
     "requestId": request_id,
     "authorizationRevision": 17,
     "releases": base_input.releases,
@@ -65,7 +66,7 @@ expected(decision_value, codes, ids) := {
 }
 
 invalid_envelope := {
-    "contractVersion": 1,
+    "contractVersion": 2,
     "opaRevision": "",
     "requestId": "00000000-0000-0000-0000-000000000000",
     "authorizationRevision": 0,
@@ -192,12 +193,147 @@ test_partial_wildcard_is_invalid if {
 test_revision_and_release_ids_echo_exactly if {
     result := decision with input as object.union(base_input, {"grants": [platform_allow]})
     result.authorizationRevision == 17
-    result.opaRevision == "platform-authz-v1"
+    result.opaRevision == "platform-authz-v2"
     result.releases == base_input.releases
 }
 
 test_runtime_revision_mismatch_fails_closed if {
-    decision with input as object.union(base_input, {"opaRevision": "platform-authz-v2"}) == invalid_envelope
+    decision with input as object.union(base_input, {"opaRevision": "platform-authz-v1"}) == invalid_envelope
+}
+
+workflow_grant(action) := object.union(platform_allow, {
+    "id": sprintf("workflow-%s", [action]),
+    "action": action,
+})
+
+relationship(relation, subject_id, object_id) := {
+    "relation": relation,
+    "subjectId": subject_id,
+    "objectId": object_id,
+}
+
+test_owner_and_teacher_bind_only_cohort_management if {
+    every relation in ["COHORT_OWNER", "COHORT_TEACHER"] {
+        fact := relationship(relation, principal_id, entity_id)
+        grant_value := workflow_grant("cohort.members.manage")
+        request := object.union(base_input, {
+            "action": "cohort.members.manage",
+            "relationships": [fact],
+            "grants": [grant_value],
+        })
+        result := decision with input as request
+        result.allow
+        result.reasonCodes == ["ALLOW_GRANT_MATCH"]
+        result.matchedPolicyIds == [grant_ref(grant_value.id)]
+
+        task_grant := workflow_grant("task.claim")
+        task_request := object.union(base_input, {
+            "action": "task.claim",
+            "relationships": [fact],
+            "grants": [task_grant],
+        })
+        task_result := decision with input as task_request
+        not task_result.allow
+    }
+}
+
+test_participant_binds_only_own_cohort_and_process_read if {
+    fact := relationship("COHORT_PARTICIPANT", principal_id, entity_id)
+    every action in ["cohort.read", "process.read"] {
+        grant_value := workflow_grant(action)
+        request := object.union(base_input, {
+            "action": action,
+            "relationships": [fact],
+            "grants": [grant_value],
+        })
+        result := decision with input as request
+        result.allow
+    }
+    update_grant := workflow_grant("cohort.update")
+    update_request := object.union(base_input, {
+        "action": "cohort.update",
+        "relationships": [fact],
+        "grants": [update_grant],
+    })
+    update_result := decision with input as update_request
+    not update_result.allow
+}
+
+test_candidate_claim_and_assignee_complete_require_exact_task_facts if {
+    candidate := relationship("TASK_CANDIDATE", principal_id, resource_id)
+    claim_grant := workflow_grant("task.claim")
+    claim_request := object.union(base_input, {
+        "action": "task.claim",
+        "relationships": [candidate],
+        "grants": [claim_grant],
+    })
+    claim_result := decision with input as claim_request
+    claim_result.allow
+
+    assignee := relationship("TASK_ASSIGNEE", principal_id, resource_id)
+    complete_grant := workflow_grant("task.complete")
+    complete_request := object.union(base_input, {
+        "action": "task.complete",
+        "context": {"processState": "RUNNING", "hardBlockersAbsent": true},
+        "relationships": [assignee],
+        "grants": [complete_grant],
+    })
+    complete_result := decision with input as complete_request
+    complete_result.allow
+    suspended_request := object.union(complete_request, {"context": {"processState": "SUSPENDED", "hardBlockersAbsent": true}})
+    suspended_result := decision with input as suspended_request
+    not suspended_result.allow
+    blocked_request := object.union(complete_request, {"context": {"processState": "RUNNING", "hardBlockersAbsent": false}})
+    blocked_result := decision with input as blocked_request
+    not blocked_result.allow
+}
+
+test_relationships_are_constraints_not_allow_sources if {
+    fact := relationship("TASK_CANDIDATE", principal_id, resource_id)
+    relationship_only := object.union(base_input, {
+        "action": "task.claim",
+        "relationships": [fact],
+    })
+    relationship_result := decision with input as relationship_only
+    not relationship_result.allow
+
+    grant_only := object.union(base_input, {
+        "action": "task.claim",
+        "grants": [workflow_grant("task.claim")],
+    })
+    grant_result := decision with input as grant_only
+    not grant_result.allow
+}
+
+test_wrong_direction_and_wrong_object_default_deny if {
+    grant_value := workflow_grant("task.claim")
+    every fact in [
+        relationship("TASK_CANDIDATE", resource_id, principal_id),
+        relationship("TASK_CANDIDATE", principal_id, entity_id),
+    ] {
+        request := object.union(base_input, {
+            "action": "task.claim",
+            "relationships": [fact],
+            "grants": [grant_value],
+        })
+        result := decision with input as request
+        not result.allow
+    }
+}
+
+test_unknown_duplicate_oversize_and_v1_relationship_inputs_fail_closed if {
+    fact := relationship("TASK_CANDIDATE", principal_id, resource_id)
+    oversized := [relationship("TASK_CANDIDATE", principal_id, sprintf("00000000-0000-4000-8000-%012d", [i])) |
+        some i in numbers.range(0, 256)]
+    every patch in [
+        {"contractVersion": 1},
+        {"relationships": [relationship("UNKNOWN", principal_id, resource_id)]},
+        {"relationships": [fact, fact]},
+        {"relationships": oversized},
+        {"relationships": [{"relation": "TASK_CANDIDATE", "subjectId": principal_id}]},
+    ] {
+        decision with input as object.union(base_input, patch) == invalid_envelope
+    }
 }
 
 test_reason_and_policy_ids_are_sorted_distinct_and_opaque if {
@@ -323,7 +459,7 @@ test_context_accepts_escaped_controls_and_astral_unicode if {
 
 test_types_uuid_and_integer_bounds_deny if {
     every patch in [
-        {"contractVersion": 2},
+        {"contractVersion": 1},
         {"authorizationRevision": -1},
         {"authorizationRevision": 9007199254740992},
         {"principal": {"id": "not-a-uuid", "enabled": true}},

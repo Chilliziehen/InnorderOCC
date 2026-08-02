@@ -1,7 +1,7 @@
 {
   "baseInput": {
-    "contractVersion": 1,
-    "opaRevision": "platform-authz-v1",
+    "contractVersion": 2,
+    "opaRevision": "platform-authz-v2",
     "requestId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
     "authorizationRevision": 17,
     "releases": {
@@ -15,12 +15,34 @@
     "resource": {"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "active": true},
     "context": {"correlationId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"},
     "forbiddenActions": [],
-    "grants": []
+    "grants": [],
+    "relationships": []
   },
   "valid": [
     {
       "name": "all layers abstain",
       "overrides": {}
+    },
+    {
+      "name": "candidate relationship with exact task claim grant",
+      "overrides": {
+        "action": "task.claim",
+        "relationships": [{
+          "relation": "TASK_CANDIDATE",
+          "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }],
+        "grants": [{
+          "id": "candidate-task-claim",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "task.claim",
+          "principalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "resourceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }]
+      }
     },
     {
       "name": "platform allow with optional layers absent",
@@ -209,6 +231,30 @@
     }
   ],
   "invalid": [
+    {"name": "contract version one", "overrides": {"contractVersion": 1}},
+    {
+      "name": "unknown relationship",
+      "overrides": {"relationships": [{
+        "relation": "UNKNOWN",
+        "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }]}
+    },
+    {
+      "name": "duplicate relationships",
+      "overrides": {"relationships": [
+        {"relation": "TASK_CANDIDATE", "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"},
+        {"relation": "TASK_CANDIDATE", "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
+      ]}
+    },
+    {
+      "name": "malformed relationship UUID",
+      "overrides": {"relationships": [{
+        "relation": "TASK_ASSIGNEE",
+        "subjectId": "not-a-uuid",
+        "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }]}
+    },
     {
       "name": "null DOMAIN release with matching platform allow",
       "malformedOptionalRelease": {"layer": "DOMAIN", "value": null},

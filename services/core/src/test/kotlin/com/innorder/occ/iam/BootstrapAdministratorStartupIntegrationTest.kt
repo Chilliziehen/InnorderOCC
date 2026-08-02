@@ -31,7 +31,7 @@ class BootstrapAdministratorStartupIntegrationTest {
                 .run(*arguments(postgres)).use {
                     assertThat(ready).isTrue()
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                        .isEqualTo(13)
+                        .isEqualTo(14)
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java))
                         .isEqualTo(1)
                 }
@@ -54,7 +54,7 @@ class BootstrapAdministratorStartupIntegrationTest {
 
             assertThat(ready).isFalse()
             assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                .isEqualTo(13)
+                .isEqualTo(14)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isZero()
         }
     }
