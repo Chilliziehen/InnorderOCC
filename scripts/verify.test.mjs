@@ -118,6 +118,8 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /OutboxPublisherIntegrationTest/u);
   assert.match(result.stdout, /KafkaOutboxEventSenderProtocolIntegrationTest/u);
   assert.match(result.stdout, /strict Core authorization and real OPA integration/u);
+  assert.match(result.stdout, /real PostgreSQL governed AI integration/u);
+  assert.match(result.stdout, /database\/tests\/postgresql-governed-ai\.test\.mjs/u);
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
 });
 
@@ -132,6 +134,7 @@ test("quick verification excludes the strict OPA integration gate", () => {
     result.stdout,
     /gradlew(?:\.bat)? :services:core:build --dependency-verification strict -PexcludeStrictAuthz=true/u,
   );
+  assert.doesNotMatch(result.stdout, /database\/tests\/postgresql-governed-ai\.test\.mjs/u);
 });
 
 test("full verification runs the strict OPA test and prints only strict environment key names", () => {

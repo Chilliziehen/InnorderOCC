@@ -26,15 +26,37 @@ const INSTRUCTION_PATTERNS: readonly Readonly<{ category: string; pattern: RegEx
 ];
 
 export function detectInstructionSpans(value: string): readonly Readonly<{ start: number; end: number; category: string }>[] {
-  const normalized = value.normalize("NFKC");
+  const persisted = value.normalize("NFC");
+  const segmenter = new Intl.Segmenter("und", { granularity: "grapheme" });
+  const startOffsets: number[] = [];
+  const endOffsets: number[] = [];
+  let normalized = "";
+  for (const { segment, index } of segmenter.segment(persisted)) {
+    const compatible = segment.normalize("NFKC");
+    const normalizedStart = normalized.length;
+    normalized += compatible;
+    for (let offset = 0; offset < compatible.length; offset += 1) startOffsets[normalizedStart + offset] = index;
+    for (let offset = 1; offset <= compatible.length; offset += 1) endOffsets[normalizedStart + offset] = index + segment.length;
+  }
   const spans: { start: number; end: number; category: string }[] = [];
   for (const { category, pattern } of INSTRUCTION_PATTERNS) {
     pattern.lastIndex = 0;
     for (const match of normalized.matchAll(pattern)) {
-      if (match.index !== undefined && match[0].length > 0) spans.push({ start: match.index, end: match.index + match[0].length, category });
+      if (match.index !== undefined && match[0].length > 0) {
+        const start = startOffsets[match.index];
+        const end = endOffsets[match.index + match[0].length];
+        if (start !== undefined && end !== undefined && end > start) spans.push({ start, end, category });
+      }
     }
   }
-  return spans.sort((left, right) => left.start - right.start || left.end - right.end || left.category.localeCompare(right.category));
+  const sorted = spans.sort((left, right) => left.start - right.start || left.end - right.end || left.category.localeCompare(right.category));
+  const merged: { start: number; end: number; category: string }[] = [];
+  for (const span of sorted) {
+    const previous = merged.at(-1);
+    if (previous !== undefined && previous.category === span.category && span.start <= previous.end) previous.end = Math.max(previous.end, span.end);
+    else merged.push({ ...span });
+  }
+  return merged;
 }
 
 function result(values: readonly Readonly<{ text: string; source: string }>[]): ParsedDocument {

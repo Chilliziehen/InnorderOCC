@@ -194,7 +194,10 @@ function fixtureSql(prefix) {
     INSERT INTO ai.evaluation_dataset (id, dataset_key, name)
     VALUES ('${id('00000000003a')}', 'test.fail.${prefix}', 'Fail dataset');
     INSERT INTO ai.evaluation_dataset_version (id, dataset_id, version, content_hash, status)
-    VALUES ('${id('00000000003b')}', '${id('00000000003a')}', 1, repeat('a', 64), 'DRAFT');
+    VALUES
+      ('${id('00000000003b')}', '${id('00000000003a')}', 1, repeat('a', 64), 'DRAFT'),
+      ('${id('00000000003c')}', '${id('00000000003a')}', 2, repeat('b', 64), 'DRAFT'),
+      ('${id('00000000003d')}', '${id('00000000003a')}', 3, repeat('c', 64), 'DRAFT');
     INSERT INTO ai.evaluation_dataset (id, dataset_key, name) VALUES
       ('${id('000000000060')}', 'test.one.${prefix}', 'One-case dataset'),
       ('${id('000000000061')}', 'test.nineteen.${prefix}', 'Nineteen-case dataset'),
@@ -224,13 +227,15 @@ function fixtureSql(prefix) {
     INSERT INTO ai.evaluation_case (id, dataset_version_id, case_key, input, expected_properties) VALUES
       ${cases('000000000013', 100, 30)},
       ${cases('00000000003b', 130, 20)},
+      ${cases('00000000003c', 150, 20)},
+      ${cases('00000000003d', 170, 20)},
       ${cases('000000000063', 200, 1)},
       ${cases('000000000064', 300, 19)},
       ${cases('000000000065', 400, 20, 19)},
       ${cases('000000000525', 700, 20)},
       ${cases('000000000621', 800, 20)};
     UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
-    WHERE id IN ('${id('000000000013')}', '${id('00000000003b')}', '${id('000000000063')}',
+    WHERE id IN ('${id('000000000013')}', '${id('00000000003b')}', '${id('00000000003c')}', '${id('00000000003d')}', '${id('000000000063')}',
                  '${id('000000000064')}', '${id('000000000065')}', '${id('000000000077')}',
                  '${id('000000000501')}', '${id('000000000503')}', '${id('000000000505')}');
     UPDATE ai.evaluation_dataset_version SET status = 'PUBLISHED'
@@ -986,6 +991,22 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   execAiSql(gateEvidence(id('000000000047'), 130, 20, 18, 20, 0.84));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000047')}');`), 'FAIL');
 
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000049')}', '${id('00000000003c')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('4',64));`);
+  execAiSql(gateEvidence(id('000000000049'), 150, 20, 94, 100, 1));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000049')}');`), 'FAIL',
+    'citation precision below .95 fails while recall passes');
+  assert.equal(execAiSql(`SELECT citation_precision::float8 || '|' || recall_mean::float8
+    FROM ai.embedding_space_gate_result WHERE id = '${id('000000000049')}';`), '0.94|1');
+
+  execAiSql(`SELECT ai.begin_embedding_space_gate('${id('00000000004a')}', '${id('00000000003d')}',
+    '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('5',64));`);
+  execAiSql(gateEvidence(id('00000000004a'), 170, 20, 1, 1, 0.84));
+  assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('00000000004a')}');`), 'FAIL',
+    'recall below .85 fails while citation precision passes');
+  assert.equal(execAiSql(`SELECT citation_precision::float8 || '|' || recall_mean::float8
+    FROM ai.embedding_space_gate_result WHERE id = '${id('00000000004a')}';`), '1|0.84');
+
   execSql(`INSERT INTO ai.knowledge_document_version
       (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
     VALUES ('${id('000000000528')}', '${id('000000000036')}', 4, 'post-pass-${fixture}',
@@ -1008,8 +1029,11 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
       'RUNNING', now() + interval '5 minutes');`);
   execAiSql(`SELECT ai.begin_embedding_space_gate('${id('000000000526')}', '${id('000000000525')}',
     '${id('000000000029')}', repeat('9',64), '${id('000000000009')}', repeat('6',64));`);
-  execAiSql(gateEvidence(id('000000000526'), 700, 20, 1, 1, 1));
+  execAiSql(gateEvidence(id('000000000526'), 700, 20, 95, 100, 0.85));
   assert.equal(execAiSql(`SELECT ai.finalize_embedding_space_gate('${id('000000000526')}');`), 'PASS');
+  assert.equal(execAiSql(`SELECT citation_precision::float8 || '|' || recall_mean::float8
+    FROM ai.embedding_space_gate_result WHERE id = '${id('000000000526')}';`), '0.95|0.85',
+  'exact citation and recall boundaries pass when all other controls pass');
   expectAiFailure(`SELECT ai.finalize_ingestion_job('${id('000000000527')}', 'post-pass-worker', '{}');`,
     /ingestion completion is blocked by finalized gate/iu);
   expectAiFailure(`SELECT ai.begin_embedding_space_gate('${id('000000000048')}', '${id('000000000013')}',

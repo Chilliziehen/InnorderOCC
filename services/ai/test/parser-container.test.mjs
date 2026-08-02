@@ -32,7 +32,7 @@ async function submit(paths, bytes, fileName = "source.txt", mimeType = "text/pl
   return waitFor(join(paths.output, outputFile));
 }
 
-test("pinned parser image runs constrained and parses without network or oversized output", { timeout: 240_000 }, async () => {
+test("pinned parser image enforces execution deadlines and remains available", { timeout: 240_000 }, async () => {
   const build = docker(["build", "--file", "services/ai/parser.Dockerfile", "--tag", image, "."]);
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
   const directory = await mkdtemp(join(tmpdir(), "innorder-parser-container-"));
@@ -43,13 +43,19 @@ test("pinned parser image runs constrained and parses without network or oversiz
     "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
     "--security-opt", `seccomp=${resolve(root, "infra/compose/parser-seccomp.json")}`, "--memory", "512m", "--cpus", "1",
   ];
+  const hanging = Buffer.from("deterministic container hanging parser fixture");
   const run = docker(["run", "--detach", "--name", name, ...security,
+    "--env", "PARSER_EXECUTION_TIMEOUT_MS=500", "--env", `PARSER_TEST_HANG_SHA256=${sha(hanging)}`,
     "--mount", mount(paths.input, "/parser/input", true), "--mount", mount(paths.requests, "/parser/requests"),
     "--mount", mount(paths.output, "/parser/output"), image]);
   assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
   try {
     const inspect = docker(["inspect", name, "--format", "{{.State.Running}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.Config.User}}"]);
     assert.equal(inspect.stdout.trim(), "true|true|536870912|1000000000|node");
+    const timed = await submit(paths, hanging, "hang.txt", "text/plain");
+    assert.equal(timed.ok, false);
+    assert.equal(timed.errorCode, "OCC-AI-PARSER-TIMEOUT");
+
     let golden;
     try { golden = await submit(paths, Buffer.from("container golden")); }
     catch (error) {
@@ -67,13 +73,8 @@ test("pinned parser image runs constrained and parses without network or oversiz
     const network = docker(["run", "--rm", ...security, "--entrypoint", "node", image, "-e", "require('node:net').connect(80,'1.1.1.1').on('error',e=>process.exit(e.code==='EPERM'||e.code==='EACCES'?0:2))"]);
     assert.equal(network.status, 0, `${network.stdout}\n${network.stderr}`);
 
-    const timedRequest = submit(paths, Buffer.from("deadline termination request"));
-    await assert.rejects(Promise.race([timedRequest, new Promise((_, reject) => setTimeout(() => reject(new Error("parser deadline exceeded")), 1))]), /parser deadline exceeded/u);
-    const stopped = docker(["stop", "--time", "1", name]);
-    assert.equal(stopped.status, 0, stopped.stderr);
-    await timedRequest.catch(() => undefined);
     const state = docker(["inspect", name, "--format", "{{.State.Running}}"]);
-    assert.equal(state.stdout.trim(), "false");
+    assert.equal(state.stdout.trim(), "true");
   } finally {
     docker(["rm", "--force", name]);
     docker(["image", "rm", "--force", image]);

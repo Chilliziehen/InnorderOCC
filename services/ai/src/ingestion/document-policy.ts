@@ -64,7 +64,8 @@ function readUInt32(bytes: Uint8Array, offset: number): number {
 }
 
 function inspectZip(bytes: Uint8Array, maxEntries: number, maxExpandedBytes: number): Record<string, Uint8Array> {
-  if (bytes.length < 22 || readUInt32(bytes, 0) !== 0x04034b50) fail("TYPE-MISMATCH");
+  if (bytes.length < 4 || readUInt32(bytes, 0) !== 0x04034b50) fail("TYPE-MISMATCH");
+  if (bytes.length < 22) fail("ARCHIVE-MALFORMED");
   let eocd = -1;
   for (let offset = bytes.length - 22; offset >= Math.max(0, bytes.length - 65_557); offset -= 1) {
     if (readUInt32(bytes, offset) === 0x06054b50) { eocd = offset; break; }
@@ -82,6 +83,7 @@ function inspectZip(bytes: Uint8Array, maxEntries: number, maxExpandedBytes: num
     if (offset + 46 > eocd || readUInt32(bytes, offset) !== 0x02014b50) fail("ARCHIVE-MALFORMED");
     const flags = view.getUint16(offset + 8, true);
     const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
     const size = view.getUint32(offset + 24, true);
     const nameLength = view.getUint16(offset + 28, true);
     const extraLength = view.getUint16(offset + 30, true);
@@ -90,6 +92,7 @@ function inspectZip(bytes: Uint8Array, maxEntries: number, maxExpandedBytes: num
     const name = strictUtf8(bytes.subarray(offset + 46, offset + 46 + nameLength)).replaceAll("\\", "/");
     if ((flags & 1) !== 0) fail("ENCRYPTED");
     if (method !== 0 && method !== 8) fail("COMPRESSION");
+    if (size > 0 && (compressedSize === 0 || size / compressedSize > 100)) fail("ARCHIVE-BOUNDS");
     if (!name || name.startsWith("/") || name.split("/").some((part) => part === ".." || part === ".") || names.has(name)) fail("ARCHIVE-PATH");
     if (((externalAttributes >>> 16) & 0xf000) === 0xa000) fail("ARCHIVE-PATH");
     names.add(name);

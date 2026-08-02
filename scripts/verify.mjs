@@ -170,6 +170,7 @@ async function main() {
 
   if (extended) {
     await runPglite();
+    if (full) await run("real PostgreSQL governed AI integration", process.execPath, ["--test", "database/tests/postgresql-governed-ai.test.mjs"]);
     await run("npm high-severity vulnerability audit", npm, [
       "audit", "--audit-level", "high", "--registry", "https://registry.npmjs.org", "--cache", npmAuditCache,
     ]);

@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { connect } from "node:net";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
-  CreateBucketCommand, GetBucketPolicyCommand, GetObjectAclCommand, HeadObjectCommand,
-  ListObjectsV2Command, S3Client,
+  CreateBucketCommand, HeadObjectCommand, ListBucketsCommand, ListObjectsV2Command, PutObjectCommand, S3Client,
 } from "@aws-sdk/client-s3";
 
+import { IngestionWorker } from "../dist/ingestion/ingestion-worker.js";
 import { ClamdMalwareScanner } from "../dist/ingestion/malware-scanner.js";
 import { MinioQuarantineObjectStore } from "../dist/object-store/minio-object-store.js";
 
@@ -64,55 +64,93 @@ async function eventually(action, timeoutMs = 60_000) {
 test("pinned MinIO quarantine and official clamd fail closed end to end", { timeout: 300_000 }, async () => {
   const suffix = randomUUID(); const minio = `innorder-minio-${suffix}`; const clamav = `innorder-clamav-${suffix}`;
   const credentials = await mkdtemp(join(tmpdir(), "innorder-ingestion-container-"));
-  const access = "innorderintegration"; const secret = "integration-secret-at-least-32-bytes";
-  await writeFile(join(credentials, "access"), access); await writeFile(join(credentials, "secret"), secret);
+  const rootAccess = "innorderroot"; const rootSecret = "root-secret-at-least-32-bytes";
+  const appAccess = "ingestion-app"; const appSecret = "app-secret-at-least-32-bytes";
+  const bucket = "knowledge-quarantine"; const prefix = "quarantine/integration";
+  await writeFile(join(credentials, "access"), appAccess); await writeFile(join(credentials, "secret"), appSecret);
+  await writeFile(join(credentials, "app-policy.json"), JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"], Resource: [`arn:aws:s3:::${bucket}/${prefix}/*`] }] }));
+  await writeFile(join(credentials, "local.ndb"), await readFile(new URL("./fixtures/ingestion/sources/local.ndb", import.meta.url)));
   try {
     const minioRun = docker(["run", "--detach", "--name", minio, "--publish", "127.0.0.1::9000",
-      "--env", `MINIO_ROOT_USER=${access}`, "--env", `MINIO_ROOT_PASSWORD=${secret}`,
+      "--env", `MINIO_ROOT_USER=${rootAccess}`, "--env", `MINIO_ROOT_PASSWORD=${rootSecret}`,
       "--env", "MINIO_KMS_SECRET_KEY=integration-key:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+      "--mount", `type=bind,src=${credentials},dst=/config,readonly`,
       MINIO_IMAGE, "server", "/data"]);
     assert.equal(minioRun.status, 0, minioRun.stderr);
     const minioPort = mappedPort(minio, 9000); const endpoint = `http://127.0.0.1:${minioPort}`;
     await waitHttp(`${endpoint}/minio/health/ready`, minio);
-    const client = new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", credentials: { accessKeyId: access, secretAccessKey: secret }, maxAttempts: 1 });
-    const bucket = "knowledge-quarantine";
-    await eventually(() => client.send(new CreateBucketCommand({ Bucket: bucket })));
-    const store = await MinioQuarantineObjectStore.create({ endpoint, bucket, prefix: "quarantine/integration", accessKeyFile: join(credentials, "access"), secretKeyFile: join(credentials, "secret"), forcePathStyle: true, allowInsecureLocalhost: true });
+    const rootClient = new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", credentials: { accessKeyId: rootAccess, secretAccessKey: rootSecret }, maxAttempts: 1 });
+    await eventually(() => rootClient.send(new CreateBucketCommand({ Bucket: bucket })));
+    await rootClient.send(new CreateBucketCommand({ Bucket: "other-quarantine" }));
+    const mc = (args) => docker(["exec", minio, "mc", ...args]);
+    assert.equal(mc(["alias", "set", "local", "http://127.0.0.1:9000", rootAccess, rootSecret]).status, 0);
+    assert.equal(mc(["admin", "user", "add", "local", appAccess, appSecret]).status, 0);
+    assert.equal(mc(["admin", "policy", "create", "local", "ingestion-quarantine", "/config/app-policy.json"]).status, 0);
+    assert.equal(mc(["admin", "policy", "attach", "local", "ingestion-quarantine", "--user", appAccess]).status, 0);
+    const appClient = new S3Client({ endpoint, forcePathStyle: true, region: "us-east-1", credentials: { accessKeyId: appAccess, secretAccessKey: appSecret }, maxAttempts: 1 });
+    const store = await MinioQuarantineObjectStore.create({ endpoint, bucket, prefix, accessKeyFile: join(credentials, "access"), secretKeyFile: join(credentials, "secret"), forcePathStyle: true, allowInsecureLocalhost: true });
     const body = Buffer.from("private governed upload");
     await store.upload("golden", body, sha256(body), new AbortController().signal);
+    assert.deepEqual(await store.readObject("golden", sha256(body), new AbortController().signal), body);
     await assert.rejects(store.upload("golden", body, sha256(body), new AbortController().signal), /OCC-AI-OBJECT-STORE-CONFLICT/u);
     const key = "quarantine/integration/golden";
-    const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key, ChecksumMode: "ENABLED" }));
+    const head = await appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: key, ChecksumMode: "ENABLED" }));
     assert.equal(head.ContentLength, body.length); assert.equal(head.ServerSideEncryption, "AES256");
     assert.equal(head.ChecksumSHA256, createHash("sha256").update(body).digest("base64"));
-    const listed = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: "quarantine/" }));
-    assert.deepEqual(listed.Contents?.map(({ Key }) => Key), [key]);
-    const acl = await client.send(new GetObjectAclCommand({ Bucket: bucket, Key: key }));
-    assert.equal(acl.Grants?.some(({ Permission }) => Permission === "READ" || Permission === "WRITE"), false);
-    await assert.rejects(client.send(new GetBucketPolicyCommand({ Bucket: bucket })), /policy|NoSuch/iu);
+    await assert.rejects(appClient.send(new PutObjectCommand({ Bucket: bucket, Key: "quarantine/other/denied", Body: body })));
+    await assert.rejects(appClient.send(new PutObjectCommand({ Bucket: "other-quarantine", Key: `${prefix}/denied`, Body: body })));
+    await assert.rejects(appClient.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix })));
+    await assert.rejects(appClient.send(new ListBucketsCommand({})));
     await assert.rejects(fetch(`${endpoint}/${bucket}/${key}`).then(async (response) => { assert.notEqual(response.status, 200); throw new Error("private"); }), /private/u);
     await store.delete("golden", new AbortController().signal);
-    await assert.rejects(client.send(new HeadObjectCommand({ Bucket: bucket, Key: key })));
+    await assert.rejects(appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: key })));
     const aborted = new AbortController(); aborted.abort();
     await assert.rejects(store.upload("aborted", body, sha256(body), aborted.signal));
-    await assert.rejects(client.send(new HeadObjectCommand({ Bucket: bucket, Key: "quarantine/integration/aborted" })));
+    await assert.rejects(appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: "quarantine/integration/aborted" })));
 
-    const clamRun = docker(["run", "--detach", "--name", clamav, "--publish", "127.0.0.1::3310", "--env", "CLAMAV_NO_FRESHCLAMD=true", CLAMAV_IMAGE]);
+    const clamRun = docker(["run", "--detach", "--name", clamav, "--publish", "127.0.0.1::3310",
+      "--mount", `type=bind,src=${join(credentials, "local.ndb")},dst=/var/lib/clamav/local.ndb,readonly`,
+      "--entrypoint", "clamd", CLAMAV_IMAGE, "--foreground"]);
     assert.equal(clamRun.status, 0, clamRun.stderr);
     const clamPort = mappedPort(clamav, 3310); await waitTcp(clamPort, clamav);
-    const scanner = new ClamdMalwareScanner({ host: "127.0.0.1", port: clamPort, maxSignatureAgeMs: 10 * 365 * 24 * 60 * 60 * 1000 });
+    const localSignatureEvidence = { version: "local-eicar-1", updatedAt: new Date("2026-08-02T02:00:00Z") };
+    const scanner = new ClamdMalwareScanner({ host: "127.0.0.1", port: clamPort, maxSignatureAgeMs: 10 * 365 * 24 * 60 * 60 * 1000, localSignatureEvidence });
     try { await eventually(() => scanner.scan(Buffer.from("clean integration payload"), new AbortController().signal), 120_000); }
     catch (error) { const logs = docker(["logs", clamav]); throw new Error(`${error instanceof Error ? error.message : error}\n${logs.stdout}${logs.stderr}`); }
     const eicar = Buffer.from("X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*");
-    await assert.rejects(scanner.scan(eicar, new AbortController().signal), /OCC-AI-MALWARE-FOUND/u);
-    let parserCalled = false;
-    const stale = new ClamdMalwareScanner({ host: "127.0.0.1", port: clamPort, maxSignatureAgeMs: 1, now: () => new Date("2035-01-01T00:00:00Z") });
-    await assert.rejects(stale.scan(body, new AbortController().signal), /OCC-AI-MALWARE-SIGNATURE-STALE/u);
-    assert.equal(parserCalled, false);
+    async function ingest(candidateScanner, fileName, mimeType, source) {
+      let parserCalls = 0;
+      const failures = [];
+      const repository = {
+        claim: async () => [{ id: randomUUID(), stage: "FETCH", checkpoint: {}, sourceObjectHash: sha256(source), normalizedContentHash: sha256("normalized"), candidateEmbeddingSpaceId: randomUUID(), corpusManifestDigest: sha256("manifest"), fileName, mimeType }],
+        heartbeat: async () => undefined, checkpoint: async () => undefined, persistDocument: async () => undefined,
+        persistChunkEmbedding: async () => undefined, persistEmbeddingBatch: async () => undefined, finalize: async () => undefined,
+        fail: async (_id, _worker, code) => { failures.push(code); },
+      };
+      const worker = new IngestionWorker({ workerId: "integration-worker", repository,
+        objectStore: { readObject: async () => source, upload: async () => undefined }, scanner: candidateScanner,
+        parser: { parse: async () => { parserCalls += 1; return { text: "normalized", regions: [{ start: 0, end: 10, source: "fixture", injectionMarked: false }], parserVersion: "governed-parser-v1" }; } },
+        chunker: { version: "governed-chunker-v2", chunk: () => [{ ordinal: 0, content: "normalized", contentHash: sha256("normalized"), tokenCount: 3, metadata: {} }] },
+        embedder: { dimensions: 2, maxBatchSize: 1, embed: async () => [[0.1, 0.2]] },
+      });
+      await worker.runOnce(new AbortController().signal);
+      return { parserCalls, failures };
+    }
+    for (const [format, fileName, mimeType] of [
+      ["text", "eicar.txt", "text/plain"], ["markdown", "eicar.md", "text/markdown"], ["pdf", "eicar.pdf", "application/pdf"],
+      ["docx", "eicar.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+      ["xlsx", "eicar.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    ]) {
+      const result = await ingest(scanner, fileName, mimeType, eicar);
+      assert.equal(result.parserCalls, 0, `${format}-malware-before-parse`);
+      assert.deepEqual(result.failures, ["OCC-AI-INGESTION-MALWARE"], `${format}-malware-before-parse`);
+    }
+    assert.equal((await ingest(scanner, "clean.txt", "text/plain", Buffer.from("clean integration payload"))).parserCalls, 1, "clean-parser-after-scan");
+    const stale = new ClamdMalwareScanner({ host: "127.0.0.1", port: clamPort, maxSignatureAgeMs: 1, now: () => new Date("2035-01-01T00:00:00Z"), localSignatureEvidence });
+    assert.equal((await ingest(stale, "stale.txt", "text/plain", body)).parserCalls, 0, "stale-signatures-before-parse");
     assert.equal(docker(["stop", "--time", "1", clamav]).status, 0);
-    await assert.rejects(scanner.scan(body, new AbortController().signal), /OCC-AI-MALWARE-UNAVAILABLE/u);
-    assert.equal(parserCalled, false);
-    client.destroy();
+    assert.equal((await ingest(scanner, "unavailable.txt", "text/plain", body)).parserCalls, 0, "unavailable-clamd-before-parse");
+    appClient.destroy(); rootClient.destroy();
   } finally {
     docker(["rm", "--force", minio]); docker(["rm", "--force", clamav]);
     await rm(credentials, { recursive: true, force: true });
