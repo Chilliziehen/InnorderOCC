@@ -55,11 +55,13 @@ Redis, and MinIO data.
 
 ## Risk Runtime Identities
 
-On Core startup, administrator bootstrap first publishes the immutable platform
-USER, ROLE, and SYSTEM types and the `role:risk-runtime` policy role. The risk
-runtime provisioner then creates the configured SERVICE principal, stable
-`system:risk-report` resource, and role assignment before runtime identity
-validation. Restart verifies the exact existing rows without rewriting them.
+On Core startup, the unconditional platform security baseline first publishes
+the immutable USER, ROLE, and SYSTEM types and the `role:risk-runtime` policy
+role. Administrator bootstrap is optional and one-shot; Compose deliberately
+configures no administrator password. The risk runtime provisioner creates the
+configured SERVICE principal, stable `system:risk-report` resource, and role
+assignment without an administrator password before runtime identity validation.
+Restart verifies the exact existing rows without rewriting them.
 
 The role grants only `risk.escalate` and `risk.sla_breach`; it does not grant
 `occ.admin`, general execute, or read authority. An ID or stable-key collision

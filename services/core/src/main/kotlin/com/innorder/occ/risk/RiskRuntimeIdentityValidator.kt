@@ -54,6 +54,6 @@ class RiskRuntimeIdentityValidator(
     ) == true
 
     companion object {
-        const val ORDER = 20
+        const val ORDER = 30
     }
 }

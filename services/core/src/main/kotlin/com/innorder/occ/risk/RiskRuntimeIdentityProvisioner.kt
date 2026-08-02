@@ -150,7 +150,7 @@ class RiskRuntimeIdentityProvisioner(
         jdbc.queryForObject(sql, Long::class.java, *arguments)!!
 
     companion object {
-        const val ORDER = 10
+        const val ORDER = 20
         const val SYSTEM_ENTITY_KEY = "service:risk-runtime"
         const val REPORT_ENTITY_KEY = "system:risk-report"
         private const val SYSTEM_DISPLAY_NAME = "Risk runtime"

@@ -540,5 +540,8 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /collision/u);
   assert.match(readme, /risk\.escalate/u);
   assert.match(readme, /risk\.sla_breach/u);
+  assert.match(readme, /administrator bootstrap is optional and one-shot/iu);
+  assert.match(readme, /without an administrator password/iu);
+  assert.doesNotMatch(read("infra/compose/compose.yml"), /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
   assert.doesNotMatch(readme, /Core waits for both MinIO readiness/u);
 });
