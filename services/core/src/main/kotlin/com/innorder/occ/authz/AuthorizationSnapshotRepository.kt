@@ -34,6 +34,7 @@ class AuthorizationSnapshotRepository(
         val snapshotAt = jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)
             ?: throw AuthorizationSnapshotException()
         validateRequest(request)
+        validateWorkflowTarget(request)
         val effectiveContext = authoritativeContext(request)
         validateContext(effectiveContext)
 
@@ -346,6 +347,39 @@ class AuthorizationSnapshotRepository(
         }
     }
 
+    private fun validateWorkflowTarget(request: AuthorizationRequest) {
+        if (request.action !in WORKFLOW_ACTIONS) return
+        val valid = when {
+            request.action == COHORT_CREATE_ACTION ->
+                request.entityId == request.resourceId && targetExists(
+                    "SELECT EXISTS (SELECT 1 FROM platform.customer_instance WHERE singleton AND id = ?)",
+                    request.entityId,
+                )
+            request.action.startsWith(COHORT_ACTION_PREFIX) ->
+                request.entityId == request.resourceId && targetExists(
+                    "SELECT EXISTS (SELECT 1 FROM occ.cohort WHERE id = ?)",
+                    request.entityId,
+                )
+            request.action.startsWith(PROCESS_ACTION_PREFIX) -> targetExists(
+                "SELECT EXISTS (SELECT 1 FROM occ.process_instance WHERE id = ? AND cohort_id = ?)",
+                request.resourceId, request.entityId,
+            )
+            request.action.startsWith(TASK_ACTION_PREFIX) -> targetExists(
+                """SELECT EXISTS (
+                       SELECT 1 FROM occ.task_projection task
+                       JOIN occ.process_instance process ON process.id = task.process_instance_id
+                       WHERE task.id = ? AND process.cohort_id = ?
+                   )""",
+                request.resourceId, request.entityId,
+            )
+            else -> false
+        }
+        if (!valid) throw AuthorizationSnapshotException()
+    }
+
+    private fun targetExists(sql: String, vararg arguments: Any): Boolean =
+        jdbc.queryForObject(sql, Boolean::class.java, *arguments) == true
+
     private fun validateRequest(request: AuthorizationRequest) {
         if (!validUuid(request.requestId) || !validUuid(request.principalId) || !validUuid(request.entityId) ||
             !validUuid(request.resourceId) || !validAction(request.action)
@@ -502,6 +536,10 @@ class AuthorizationSnapshotRepository(
         private const val MAX_GRANTS = 256
         private const val MAX_RELATIONSHIPS = 256
         private const val MAX_MANIFEST_BYTES = 64 * 1024
+        private const val COHORT_CREATE_ACTION = "cohort.create"
+        private const val COHORT_ACTION_PREFIX = "cohort."
+        private const val PROCESS_ACTION_PREFIX = "process."
+        private const val TASK_ACTION_PREFIX = "task."
         private const val TASK_COMPLETE_ACTION = "task.complete"
         private const val TASK_STATE_CONTEXT_KEY = "taskState"
         private const val PROCESS_STATE_CONTEXT_KEY = "processState"

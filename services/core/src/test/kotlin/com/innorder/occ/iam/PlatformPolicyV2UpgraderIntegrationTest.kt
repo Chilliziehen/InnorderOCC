@@ -39,7 +39,9 @@ class PlatformPolicyV2UpgraderIntegrationTest {
 
     @Test
     fun `fresh instance without bootstrap policy is a safe no-op`() {
+        val revision = authorizationRevision()
         assertThat(upgrader().upgrade()).isEqualTo(PlatformPolicyUpgradeResult.NO_ACTION)
+        assertThat(authorizationRevision()).isEqualTo(revision)
         assertThat(runtime.queryForObject("SELECT count(*) FROM authz.policy_release", Long::class.java)).isZero()
         assertThat(runtime.queryForObject("SELECT count(*) FROM authz.policy_bundle_version", Long::class.java)).isZero()
     }
@@ -47,6 +49,7 @@ class PlatformPolicyV2UpgraderIntegrationTest {
     @Test
     fun `existing active v1 upgrades atomically without rewriting immutable rows and restart is idempotent`() {
         seedV1()
+        val revision = authorizationRevision()
         val oldVersion = runtime.queryForMap(
             "SELECT manifest::text AS manifest, content_hash, published_at FROM authz.policy_bundle_version WHERE id = ?",
             BootstrapIds.POLICY_BUNDLE_VERSION_V1,
@@ -57,6 +60,7 @@ class PlatformPolicyV2UpgraderIntegrationTest {
         )
 
         assertThat(upgrader().upgrade()).isEqualTo(PlatformPolicyUpgradeResult.UPGRADED)
+        assertThat(authorizationRevision()).isEqualTo(revision + 1)
 
         assertThat(runtime.queryForMap(
             "SELECT manifest::text AS manifest, content_hash, published_at FROM authz.policy_bundle_version WHERE id = ?",
@@ -93,13 +97,16 @@ class PlatformPolicyV2UpgraderIntegrationTest {
         )).isZero()
 
         val state = policyState()
+        val upgradedRevision = authorizationRevision()
         assertThat(upgrader().upgrade()).isEqualTo(PlatformPolicyUpgradeResult.NO_ACTION)
         assertThat(policyState()).isEqualTo(state)
+        assertThat(authorizationRevision()).isEqualTo(upgradedRevision)
     }
 
     @Test
     fun `v1 content drift fails startup and leaves the active release untouched`() {
         seedV1(manifest = """{"forbiddenActions":["occ.read"],"roleGrants":[],"version":1}""")
+        val revision = authorizationRevision()
 
         assertThatThrownBy { upgrader().run(DefaultApplicationArguments()) }
             .isInstanceOf(PlatformPolicyUpgradeException::class.java)
@@ -123,6 +130,7 @@ class PlatformPolicyV2UpgraderIntegrationTest {
             Long::class.java,
             *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
         )).isZero()
+        assertThat(authorizationRevision()).isEqualTo(revision)
     }
 
     private fun seedV1(manifest: String = BootstrapPolicyV1Baseline.manifest) {
@@ -193,6 +201,11 @@ class PlatformPolicyV2UpgraderIntegrationTest {
            UNION ALL SELECT 'release', id::text, release_number, status FROM authz.policy_release
            ORDER BY kind, number""",
     )
+
+    private fun authorizationRevision() = runtime.queryForObject(
+        "SELECT current_revision FROM authz.authorization_state WHERE singleton",
+        Long::class.java,
+    )!!
 
     private fun workflowRoleRow(role: WorkflowAuthorizationRole) = mapOf(
         "id" to role.id,

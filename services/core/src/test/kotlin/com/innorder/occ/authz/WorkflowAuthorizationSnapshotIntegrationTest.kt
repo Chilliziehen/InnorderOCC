@@ -62,14 +62,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
         val principalId = UUID.fromString("73000000-0000-7000-8000-000000000007")
         val entityId = UUID.fromString("73000000-0000-7000-8000-000000000008")
         val resourceId = UUID.fromString("73000000-0000-7000-8000-000000000009")
-        jdbc.update(
-            """INSERT INTO occ.cohort
-               (id, customer_instance_id, code, name, package_version_id, owner_principal_id,
-                start_date, status, created_by, updated_by)
-               VALUES (?, '00000000-0000-7000-8000-000000000001', 'authz-snapshot', 'Authz snapshot',
-                       '73000000-0000-7000-8000-000000000002', ?, current_date, 'DRAFT', ?, ?)""",
-            entityId, principalId, principalId, principalId,
-        )
+        seedTask(jdbc)
         val relationships = listOf(
             RelationshipSeed(WorkflowAuthorizationRelationDefinitions.TASK_CANDIDATE_ID, resourceId, "active-candidate", "transaction_timestamp()", "NULL", "NULL"),
             RelationshipSeed(WorkflowAuthorizationRelationDefinitions.COHORT_TEACHER_ID, entityId, "expired-teacher", "transaction_timestamp() - interval '2 hours'", "transaction_timestamp() - interval '1 hour'", "NULL"),
@@ -88,11 +81,12 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             )
         }
 
-        val snapshot = repository(jdbc).load(request().copy(action = "cohort.read"))
+        val snapshot = repository(jdbc).load(request().copy(action = "task.read"))
 
         assertThat(snapshot.contractVersion).isEqualTo(2)
         assertThat(snapshot.relationships).containsExactly(
             AuthorizationRelationshipFact(AuthorizationRelation.COHORT_OWNER, principalId, entityId),
+            AuthorizationRelationshipFact(AuthorizationRelation.TASK_ASSIGNEE, principalId, resourceId),
             AuthorizationRelationshipFact(AuthorizationRelation.TASK_CANDIDATE, principalId, resourceId),
         )
         assertThatThrownBy { (snapshot.relationships as MutableList<AuthorizationRelationshipFact>).clear() }
@@ -102,6 +96,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
     @Test
     fun `snapshot excludes non canonical and non authorization workflow relations`() = scenario { jdbc ->
         seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to EMPTY_MANIFEST))
+        seedTask(jdbc)
         jdbc.update(
             "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'spoof-relations', 'Spoof relations', 'ACTIVE')",
             SPOOF_PACKAGE_ID,
@@ -137,7 +132,10 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             )
         }
 
-        assertThat(repository(jdbc).load(request().copy(action = "cohort.read")).relationships).isEmpty()
+        assertThat(repository(jdbc).load(request().copy(action = "task.read")).relationships).containsExactly(
+            AuthorizationRelationshipFact(AuthorizationRelation.COHORT_OWNER, PRINCIPAL_ID, COHORT_ID),
+            AuthorizationRelationshipFact(AuthorizationRelation.TASK_ASSIGNEE, PRINCIPAL_ID, TASK_ID),
+        )
     }
 
     @Test
@@ -148,13 +146,14 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
         ).forEach { mutation ->
             adminScenario { jdbc ->
                 seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to EMPTY_MANIFEST))
+                seedTask(jdbc)
                 jdbc.execute("SET LOCAL session_replication_role = replica")
                 jdbc.update(
                     "UPDATE catalog.relation_definition SET $mutation WHERE id = ?",
                     UUID.fromString(WorkflowAuthorizationRelationDefinitions.COHORT_OWNER_ID),
                 )
 
-                assertThatThrownBy { repository(jdbc).load(request().copy(action = "cohort.read")) }
+                assertThatThrownBy { repository(jdbc).load(request().copy(action = "task.read")) }
                     .isInstanceOf(AuthorizationSnapshotException::class.java)
             }
         }
@@ -163,13 +162,14 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
     @Test
     fun `workflow action fails closed when canonical definitions are absent`() = adminScenario { jdbc ->
         seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to EMPTY_MANIFEST))
+        seedCustomerRootEntity(jdbc)
         jdbc.execute("SET LOCAL session_replication_role = replica")
         jdbc.update(
             "DELETE FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
             *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
         )
 
-        assertThatThrownBy { repository(jdbc).load(request().copy(action = "cohort.create")) }
+        assertThatThrownBy { repository(jdbc).load(targetRequest("cohort.create", CUSTOMER_ROOT_ID, CUSTOMER_ROOT_ID)) }
             .isInstanceOf(AuthorizationSnapshotException::class.java)
     }
 
@@ -180,6 +180,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             mapOf(PolicyLayer.PLATFORM to
                 """{"version":1,"roleGrants":[],"forbiddenActions":[]}"""),
         )
+        seedTask(jdbc)
         val principalId = UUID.fromString("73000000-0000-7000-8000-000000000007")
         val resourceId = UUID.fromString("73000000-0000-7000-8000-000000000009")
         repeat(257) { index ->
@@ -210,7 +211,10 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             )
         }
 
-        assertThat(repository(jdbc).load(request().copy(action = "cohort.read")).relationships).isEmpty()
+        assertThat(repository(jdbc).load(request().copy(action = "task.read")).relationships).containsExactly(
+            AuthorizationRelationshipFact(AuthorizationRelation.COHORT_OWNER, PRINCIPAL_ID, COHORT_ID),
+            AuthorizationRelationshipFact(AuthorizationRelation.TASK_ASSIGNEE, PRINCIPAL_ID, TASK_ID),
+        )
     }
 
     @Test
@@ -330,6 +334,85 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
     }
 
     @Test
+    fun `real PostgreSQL and OPA bind process and task targets to their authoritative cohort`() = scenario { jdbc ->
+        seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to BootstrapPolicyBaseline.manifest))
+        seedTask(jdbc)
+        seedWorkflowRoleMatrix(jdbc)
+        seedSecondWorkflowTarget(jdbc)
+        jdbc.update(
+            """UPDATE authz.relationship SET revoked_at = transaction_timestamp()
+               WHERE relation_definition_id = ? AND subject_entity_id = ?""",
+            BootstrapIds.ROLE_ASSIGNMENT_RELATION, PRINCIPAL_ID,
+        )
+        listOf(WorkflowAuthorizationRoles.processOwner.id, WorkflowAuthorizationRoles.participant.id)
+            .forEach { roleId ->
+                jdbc.update(
+                    """INSERT INTO authz.relationship
+                       (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                       VALUES (?, ?, ?, ?, 'SYSTEM', 'workflow-target-test')""",
+                    UUID.randomUUID(), BootstrapIds.ROLE_ASSIGNMENT_RELATION, PRINCIPAL_ID, roleId,
+                )
+            }
+        val authorization = realAuthorization(jdbc)
+        val sameCohort = mapOf(
+            "cohort.read" to COHORT_ID,
+            "process.read" to PROCESS_ID,
+            "process.fail" to PROCESS_ID,
+            "task.read" to TASK_ID,
+            "task.fail" to TASK_ID,
+            "task.assignment.manage" to TASK_ID,
+            "task.complete" to TASK_ID,
+        )
+        sameCohort.forEach { (action, resourceId) ->
+            authorization.authorize(targetRequest(action, COHORT_ID, resourceId))
+        }
+
+        val crossCohort = mapOf(
+            "process.read" to SECOND_PROCESS_ID,
+            "process.fail" to SECOND_PROCESS_ID,
+            "task.read" to SECOND_TASK_ID,
+            "task.fail" to SECOND_TASK_ID,
+            "task.assignment.manage" to SECOND_TASK_ID,
+            "task.complete" to SECOND_TASK_ID,
+        )
+        crossCohort.forEach { (action, resourceId) ->
+            val spoofed = targetRequest(action, COHORT_ID, resourceId).copy(
+                context = mapOf(
+                    "cohortId" to COHORT_ID.toString(),
+                    "processState" to "RUNNING",
+                    "taskState" to "CLAIMED",
+                    "hardBlockersAbsent" to true,
+                ),
+            )
+            assertThatThrownBy { repository(jdbc).load(spoofed) }
+                .describedAs(action).isInstanceOf(AuthorizationSnapshotException::class.java)
+            assertThatThrownBy { authorization.authorize(spoofed) }
+                .describedAs(action).isInstanceOf(AuthorizationAvailabilityException::class.java)
+        }
+    }
+
+    @Test
+    fun `workflow targets fail closed when authoritative rows are absent or customer root is not exact`() = scenario { jdbc ->
+        seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to EMPTY_MANIFEST))
+        seedTask(jdbc)
+        seedCustomerRootEntity(jdbc)
+
+        assertThat(repository(jdbc).load(
+            targetRequest("cohort.create", CUSTOMER_ROOT_ID, CUSTOMER_ROOT_ID),
+        ).action).isEqualTo("cohort.create")
+        listOf(
+            targetRequest("cohort.create", CUSTOMER_ROOT_ID, MATRIX_ENTITY_ID),
+            targetRequest("cohort.create", MATRIX_ENTITY_ID, MATRIX_ENTITY_ID),
+            targetRequest("cohort.read", TASK_ID, TASK_ID),
+            targetRequest("process.read", COHORT_ID, TASK_ID),
+            targetRequest("task.read", COHORT_ID, PROCESS_ID),
+        ).forEach { invalid ->
+            assertThatThrownBy { repository(jdbc).load(invalid) }
+                .describedAs(invalid.action).isInstanceOf(AuthorizationSnapshotException::class.java)
+        }
+    }
+
+    @Test
     fun `real command executor and OPA bind task completion to target process and blockers`() = scenario { jdbc ->
         seedActiveRelease(jdbc, mapOf(PolicyLayer.PLATFORM to TASK_COMPLETE_MANIFEST))
         seedTask(jdbc)
@@ -398,6 +481,7 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
     }
 
     private fun seedWorkflowRoleMatrix(jdbc: org.springframework.jdbc.core.JdbcTemplate) {
+        seedCustomerRootEntity(jdbc)
         WORKFLOW_ROLE_MATRIX.keys.filter { it.id != MATRIX_ADMINISTRATOR_ROLE_ID }.forEach { role ->
             jdbc.update(
                 """INSERT INTO authz.entity
@@ -424,8 +508,84 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
         }
     }
 
+    private fun seedCustomerRootEntity(jdbc: org.springframework.jdbc.core.JdbcTemplate) {
+        jdbc.update(
+            """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+               VALUES (?, ?, ?, 'customer:default', 'ACTIVE')""",
+            CUSTOMER_ROOT_ID, TYPE_ID, TYPE_VERSION_ID,
+        )
+    }
+
+    private fun seedSecondWorkflowTarget(jdbc: org.springframework.jdbc.core.JdbcTemplate) {
+        jdbc.update(
+            """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+               VALUES (?, ?, ?, 'user:workflow-owner-b', 'ACTIVE')""",
+            SECOND_OWNER_ID, TYPE_ID, TYPE_VERSION_ID,
+        )
+        jdbc.update(
+            """INSERT INTO iam.principal(id, principal_kind, display_name, status)
+               VALUES (?, 'USER', 'Workflow Owner B', 'ACTIVE')""",
+            SECOND_OWNER_ID,
+        )
+        jdbc.update(
+            """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+               VALUES (?, ?, ?, 'cohort:task-authz-b', 'ACTIVE')""",
+            SECOND_COHORT_ID, TYPE_ID, TYPE_VERSION_ID,
+        )
+        jdbc.update(
+            """INSERT INTO occ.cohort
+               (id, customer_instance_id, code, name, package_version_id, owner_principal_id,
+                start_date, status, created_by, updated_by)
+               VALUES (?, ?, 'task-authz-b', 'Task authz B', ?, ?, current_date, 'DRAFT', ?, ?)""",
+            SECOND_COHORT_ID, CUSTOMER_ROOT_ID, PACKAGE_VERSION_ID, SECOND_OWNER_ID,
+            PRINCIPAL_ID, PRINCIPAL_ID,
+        )
+        jdbc.update("UPDATE occ.cohort SET status = 'ACTIVE' WHERE id = ?", SECOND_COHORT_ID)
+        jdbc.update(
+            """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+               VALUES (?, ?, ?, 'process:task-authz-b', 'ACTIVE')""",
+            SECOND_PROCESS_ID, TYPE_ID, TYPE_VERSION_ID,
+        )
+        jdbc.update(
+            """INSERT INTO occ.process_instance
+               (id, definition_binding_id, package_version_id, flowable_instance_id, business_key, state,
+                started_by, cohort_id, started_for_participant_id, participant_id, route_key, route_version)
+               VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?, ?, 'task-authz-b', 1)""",
+            SECOND_PROCESS_ID, BINDING_ID, PACKAGE_VERSION_ID, "instance-$SECOND_PROCESS_ID",
+            "business-$SECOND_PROCESS_ID", PRINCIPAL_ID, SECOND_COHORT_ID, PRINCIPAL_ID, PRINCIPAL_ID,
+        )
+        jdbc.update(
+            """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+               VALUES (?, ?, ?, 'task:task-authz-b', 'ACTIVE')""",
+            SECOND_TASK_ID, TYPE_ID, TYPE_VERSION_ID,
+        )
+        jdbc.update(
+            """INSERT INTO occ.task_projection
+               (id, process_instance_id, activity_key, activity_name, flowable_task_id,
+                flowable_execution_id, state)
+               VALUES (?, ?, 'complete-b', 'Complete B', ?, ?, 'AVAILABLE')""",
+            SECOND_TASK_ID, SECOND_PROCESS_ID, "task-$SECOND_TASK_ID", "execution-$SECOND_TASK_ID",
+        )
+        jdbc.update(
+            """UPDATE occ.task_projection SET state = 'CLAIMED', assignee_id = ?, claimed_at = transaction_timestamp()
+               WHERE id = ?""",
+            PRINCIPAL_ID, SECOND_TASK_ID,
+        )
+        listOf(
+            WorkflowAuthorizationRelationDefinitions.TASK_CANDIDATE_ID,
+            WorkflowAuthorizationRelationDefinitions.TASK_ASSIGNEE_ID,
+        ).forEach { definitionId ->
+            jdbc.update(
+                """INSERT INTO authz.relationship
+                   (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                   VALUES (?, ?::uuid, ?, ?, 'SYSTEM', 'workflow-target-test')""",
+                UUID.randomUUID(), definitionId, PRINCIPAL_ID, SECOND_TASK_ID,
+            )
+        }
+    }
+
     private fun workflowRequest(action: String): AuthorizationRequest {
-        val entityId = if (action == "cohort.create") MATRIX_ENTITY_ID else COHORT_ID
+        val entityId = if (action == "cohort.create") CUSTOMER_ROOT_ID else COHORT_ID
         val resourceId = when {
             action.startsWith("task.") -> TASK_ID
             action.startsWith("process.") -> PROCESS_ID
@@ -436,6 +596,11 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
             mapOf("commandKey" to action),
         )
     }
+
+    private fun targetRequest(action: String, entityId: UUID, resourceId: UUID) = AuthorizationRequest(
+        UUID.randomUUID(), PRINCIPAL_ID, action, entityId, resourceId,
+        mapOf("commandKey" to action),
+    )
 
     private fun commandExecutor(
         jdbc: org.springframework.jdbc.core.JdbcTemplate,
@@ -566,6 +731,11 @@ class WorkflowAuthorizationSnapshotIntegrationTest : AuthorizationSnapshotIntegr
         private val WORKFLOW_ID = UUID.fromString("75000000-0000-7000-8000-000000000001")
         private val BINDING_ID = UUID.fromString("75000000-0000-7000-8000-000000000002")
         private val PROCESS_ID = UUID.fromString("75000000-0000-7000-8000-000000000003")
+        private val CUSTOMER_ROOT_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
+        private val SECOND_COHORT_ID = UUID.fromString("77000000-0000-7000-8000-000000000001")
+        private val SECOND_PROCESS_ID = UUID.fromString("77000000-0000-7000-8000-000000000002")
+        private val SECOND_TASK_ID = UUID.fromString("77000000-0000-7000-8000-000000000003")
+        private val SECOND_OWNER_ID = UUID.fromString("77000000-0000-7000-8000-000000000004")
         private val MATRIX_ENTITY_ID = UUID.fromString("73000000-0000-7000-8000-000000000008")
         private val MATRIX_ADMINISTRATOR_ROLE_ID = UUID.fromString("73000000-0000-7000-8000-000000000010")
         private val MATRIX_ROLE_TYPE_ID = UUID.fromString("73000000-0000-7000-8000-000000000005")

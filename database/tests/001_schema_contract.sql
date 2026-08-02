@@ -64,6 +64,26 @@ SELECT pg_temp.assert_true(
     'authorization lock-order APIs exist'
 );
 SELECT pg_temp.assert_true(
+    to_regclass('authz.authorization_revision_batch') IS NOT NULL
+    AND to_regprocedure('authz.begin_authorization_revision_batch()') IS NOT NULL
+    AND to_regprocedure('authz.finish_authorization_revision_batch()') IS NOT NULL
+    AND has_function_privilege('innorder_runtime', 'authz.begin_authorization_revision_batch()', 'EXECUTE')
+    AND has_function_privilege('innorder_runtime', 'authz.finish_authorization_revision_batch()', 'EXECUTE')
+    AND NOT has_table_privilege(
+        'innorder_runtime', 'authz.authorization_revision_batch', 'SELECT,INSERT,UPDATE,DELETE'
+    ),
+    'authorization revision batches expose only guarded runtime functions'
+);
+SELECT pg_temp.assert_true(
+    EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'authz.authorization_revision_batch'::regclass
+          AND tgname = 'trg_authorization_revision_batch_closed'
+          AND tgdeferrable AND tginitdeferred AND NOT tgisinternal
+    ),
+    'authorization revision batches cannot remain open at commit'
+);
+SELECT pg_temp.assert_true(
     (SELECT count(*) = 4
        FROM pg_trigger
       WHERE tgname IN (
