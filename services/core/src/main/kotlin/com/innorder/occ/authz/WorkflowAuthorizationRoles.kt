@@ -26,6 +26,11 @@ object WorkflowAuthorizationRoles {
     val participantActions = Collections.unmodifiableSet(linkedSetOf(
         "cohort.read", "process.read", "task.read", "task.claim", "task.complete",
     ))
+    val capabilitiesByRoleKey = Collections.unmodifiableMap(linkedMapOf(
+        processOwner.key to processOwnerActions,
+        participant.key to participantActions,
+        domainModeler.key to emptySet(),
+    ))
 
     private fun role(id: String, key: String, displayName: String) =
         WorkflowAuthorizationRole(UUID.fromString(id), key, displayName)
