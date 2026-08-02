@@ -68,8 +68,12 @@ occ:
     max-attempts: 10
   risk-due:
     enabled: ${OCC_RISK_DUE_ENABLED:false}
+    system-principal-id: ${OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:}
     batch-size: ${OCC_RISK_DUE_BATCH_SIZE:50}
     poll-interval: ${OCC_RISK_DUE_POLL_INTERVAL:1m}
+  risk-metrics:
+    enabled: ${OCC_RISK_METRICS_ENABLED:false}
+    report-resource-id: ${OCC_RISK_METRICS_REPORT_RESOURCE_ID:}
   bootstrap-administrator:
     password-file: ${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:}
     username: ${OCC_BOOTSTRAP_ADMIN_USERNAME:admin}

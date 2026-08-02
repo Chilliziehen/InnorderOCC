@@ -84,6 +84,12 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
             currentVersion = currentVersion,
         )
 
+    fun escalationLevelConflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(
+            request, 409, "risk-escalation-level-conflict", "Risk escalation level conflict",
+            "OCC-RISK-ESCALATION-LEVEL-CONFLICT",
+        )
+
     fun authorizationUnavailable(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 503, "authorization-unavailable", "Authorization unavailable", "OCC-AUTHZ-UNAVAILABLE")
 

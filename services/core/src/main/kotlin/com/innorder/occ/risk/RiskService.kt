@@ -19,7 +19,6 @@ import com.innorder.occ.command.CommandMutation
 import com.innorder.occ.command.CommandResult
 import com.innorder.occ.command.InvalidExpectedVersionException
 import com.innorder.occ.command.PendingEventSpec
-import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
@@ -46,14 +45,13 @@ class RiskService(
 
     fun create(metadata: CommandMetadata, decision: RiskDecision): CommandResult {
         if (metadata.expectedVersion != null) throw InvalidExpectedVersionException()
-        val id = RiskRepository.deterministicRiskId(decision)
-        return try {
-            commands.execute(metadata, requestBytes(decisionRequest(decision)), CreateRiskCommand(id, decision))
-                .copy(resourceId = id)
-        } catch (failure: DataIntegrityViolationException) {
-            risks.findByOccurrence(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
-                ?.let(::duplicateResult) ?: throw failure
-        }
+        val riskId = RiskRepository.deterministicRiskId(decision)
+        val commandId = commandInvocationId(metadata)
+        val result = commands.execute(
+            metadata, requestBytes(decisionRequest(decision)), CreateRiskCommand(commandId, riskId, decision),
+        )
+        val resultRiskId = UUID.fromString(result.body.toJsonNode().path("riskId").textValue())
+        return result.copy(resourceId = resultRiskId)
     }
 
     fun acknowledge(metadata: CommandMetadata, riskId: UUID, reason: String): CommandResult =
@@ -176,6 +174,7 @@ class RiskService(
 
     fun adjudicate(metadata: CommandMetadata, request: RiskAdjudicationRequest): CommandResult {
         return transactions.execute {
+            risks.lockAdjudicationIdentity(request.knownEventKey, request.targetEntityId)
             val linkedRisk = request.riskId?.let(risks::lock)
             if (linkedRisk != null && linkedRisk.targetEntityId != request.targetEntityId) {
                 throw InvalidRiskActionException()
@@ -209,7 +208,8 @@ class RiskService(
         end: LocalDate,
     ): RiskMetrics {
         require(end > start)
-        val reportResourceId = metricsProperties.reportResourceId ?: throw AuthorizationAvailabilityException()
+        if (!metricsProperties.enabled) throw AuthorizationAvailabilityException()
+        val reportResourceId = metricsProperties.reportResourceUuid ?: throw AuthorizationAvailabilityException()
         return transactions.execute {
             authorization.authorize(AuthorizationRequest(
                 UUID.randomUUID(), principalId, "risk.metrics.read", reportResourceId, reportResourceId,
@@ -246,13 +246,6 @@ class RiskService(
             RiskActionCommand(riskId, type, reason, data, ownerRelationshipId, severity, escalationLevel, at),
         )
     }
-
-    private fun duplicateResult(risk: RiskRecord): CommandResult = CommandResult(
-        200,
-        json(mapOf("riskId" to risk.id.toString(), "state" to risk.state.name, "version" to risk.rowVersion)),
-        risk.id,
-        replayed = true,
-    )
 
     private fun allowed(principalId: UUID, correlationId: UUID, action: String, risk: RiskRecord): Boolean = try {
         authorization.authorize(AuthorizationRequest(
@@ -302,31 +295,52 @@ class RiskService(
         RiskSeverity.INFO -> 0
     }
 
-    private inner class CreateRiskCommand(private val id: UUID, private val decision: RiskDecision) : AuthorizedCommand {
+    private inner class CreateRiskCommand(
+        private val commandId: UUID,
+        private val riskId: UUID,
+        private val decision: RiskDecision,
+    ) : AuthorizedCommand {
         override val action = "risk.create"
         override val entityId = decision.targetEntityId
         override val resourceId = decision.targetEntityId
-        override val aggregateType = "risk"
-        override val aggregateId = id
+        override val aggregateType = "risk-occurrence-command"
+        override val aggregateId = commandId
         override val expectedVersionRequired = false
         override val changesAuthorizationFacts = false
+        private var existing: RiskRecord? = null
 
-        override fun lockCurrentVersion(context: CommandContext): Long? = null
+        override fun lockCurrentVersion(context: CommandContext): Long? {
+            risks.lockOccurrenceIdentity(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
+            existing = risks.lockByOccurrence(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
+            return null
+        }
 
         override fun execute(context: CommandContext): CommandMutation {
+            existing?.let { risk ->
+                return mutation(
+                    context, 200, commandId, null, 0, "risk.occurrence_observed",
+                    mapOf(
+                        "riskId" to risk.id.toString(), "targetEntityId" to risk.targetEntityId.toString(),
+                        "severity" to risk.severity.name, "state" to risk.state.name, "version" to risk.rowVersion,
+                    ),
+                    null,
+                    aggregateType = "risk-occurrence-command",
+                )
+            }
             val owner = risks.resolveOwner(decision.ruleDefinitionId, decision.targetEntityId, decision.ownerRelationship)
-            risks.create(id, decision, owner)
+            risks.create(riskId, decision, owner)
             val eventId = UUID.randomUUID()
             notifications.emit(RiskNotificationIntent(
                 eventId, context.metadata.principalId, context.metadata.correlationId, context.transactionId,
-                owner, "RISK_OPENED", decision.severity, id,
-                mapOf("riskId" to id.toString(), "severity" to decision.severity.name, "dueAt" to decision.dueAt.toString()),
+                owner, "RISK_OPENED", decision.severity, riskId,
+                mapOf("riskId" to riskId.toString(), "severity" to decision.severity.name, "dueAt" to decision.dueAt.toString()),
             ))
             return mutation(
-                context, 201, id, null, 0, "risk.opened",
-                mapOf("riskId" to id.toString(), "targetEntityId" to decision.targetEntityId.toString(),
+                context, 201, commandId, null, 0, "risk.opened",
+                mapOf("riskId" to riskId.toString(), "targetEntityId" to decision.targetEntityId.toString(),
                     "severity" to decision.severity.name, "state" to RiskState.OPEN.name, "dueAt" to decision.dueAt.toString()),
                 null,
+                aggregateType = "risk-occurrence-command",
             )
         }
     }
@@ -521,6 +535,13 @@ class RiskService(
 
         private fun adjudicationAggregateId(eventKey: String, targetEntityId: UUID): UUID = UUID.nameUUIDFromBytes(
             "risk-adjudication:$eventKey:$targetEntityId".toByteArray(StandardCharsets.UTF_8),
+        )
+
+        private fun commandInvocationId(metadata: CommandMetadata): UUID = UUID.nameUUIDFromBytes(
+            (
+                "risk-occurrence-command:${metadata.principalId}:${metadata.commandKey.length}:${metadata.commandKey}:" +
+                    "${metadata.idempotencyKey.length}:${metadata.idempotencyKey}"
+            ).toByteArray(StandardCharsets.UTF_8),
         )
     }
 }
