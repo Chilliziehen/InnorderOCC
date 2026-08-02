@@ -3,6 +3,7 @@ package com.innorder.occ.iam
 import com.innorder.occ.authz.PolicyLayer
 import com.innorder.occ.authz.PolicyReleaseIntegrity
 import com.innorder.occ.authz.PolicyReleaseItemIntegrity
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import org.springframework.boot.ApplicationArguments
 import org.springframework.boot.ApplicationRunner
 import org.springframework.core.Ordered
@@ -89,6 +90,7 @@ class PlatformPolicyV2Upgrader(
         }
         if (activePlatforms.size != 1) fail()
         val active = activePlatforms.single()
+        ensureWorkflowRoles()
         val items = loadItems(active.releaseId)
         validateReleaseHash(active, items)
         return when (active.opaRevision) {
@@ -100,6 +102,61 @@ class PlatformPolicyV2Upgrader(
             else -> fail()
         }
     }
+
+    private fun ensureWorkflowRoles() {
+        val now = OffsetDateTime.now()
+        WorkflowAuthorizationRoles.all.forEach { role ->
+            ensure(
+                "authz.entity",
+                "id = ? OR (entity_type_id = ? AND entity_key = ?)",
+                arrayOf(role.id, BootstrapIds.ROLE_TYPE, role.key),
+                """id = ? AND entity_type_id = ? AND entity_type_version_id = ? AND entity_key = ?
+                   AND state = 'ACTIVE' AND auth_attributes = '{}'::jsonb AND row_version = 0
+                   AND created_by IS NULL AND updated_by IS NULL""",
+                arrayOf(role.id, BootstrapIds.ROLE_TYPE, BootstrapIds.ROLE_TYPE_VERSION, role.key),
+            ) {
+                jdbc.update(
+                    """INSERT INTO authz.entity
+                       (id, entity_type_id, entity_type_version_id, entity_key, state, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)""",
+                    role.id, BootstrapIds.ROLE_TYPE, BootstrapIds.ROLE_TYPE_VERSION, role.key, now, now,
+                )
+            }
+            ensure(
+                "iam.principal", "id = ?", arrayOf(role.id),
+                """id = ? AND principal_kind = 'ROLE' AND display_name = ? AND status = 'ACTIVE'
+                   AND profile = '{}'::jsonb AND row_version = 0 AND created_by IS NULL AND updated_by IS NULL""",
+                arrayOf(role.id, role.displayName),
+            ) {
+                jdbc.update(
+                    """INSERT INTO iam.principal
+                       (id, principal_kind, display_name, status, created_at, updated_at)
+                       VALUES (?, 'ROLE', ?, 'ACTIVE', ?, ?)""",
+                    role.id, role.displayName, now, now,
+                )
+            }
+        }
+    }
+
+    private fun ensure(
+        table: String,
+        collisionPredicate: String,
+        collisionArguments: Array<Any>,
+        expectedPredicate: String,
+        expectedArguments: Array<Any>,
+        insert: () -> Unit,
+    ) {
+        val collisions = count("SELECT count(*) FROM $table WHERE $collisionPredicate", *collisionArguments)
+        if (collisions == 0L) {
+            insert()
+        } else if (collisions != 1L || count(
+                "SELECT count(*) FROM $table WHERE $expectedPredicate", *expectedArguments,
+            ) != 1L
+        ) fail()
+    }
+
+    private fun count(sql: String, vararg arguments: Any): Long =
+        jdbc.queryForObject(sql, Long::class.java, *arguments) ?: fail()
 
     private fun upgradeV1(active: ActivePlatform, items: List<ReleaseItem>): PlatformPolicyUpgradeResult {
         if (active.releaseId != BootstrapIds.POLICY_RELEASE_V1 || active.releaseNumber != 1L ||

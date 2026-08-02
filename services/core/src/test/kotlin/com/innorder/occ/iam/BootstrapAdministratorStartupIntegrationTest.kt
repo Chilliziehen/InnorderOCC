@@ -85,6 +85,7 @@ class BootstrapAdministratorStartupIntegrationTest {
         database { postgres, jdbc ->
             Flyway.configure().dataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only")
                 .locations("classpath:db/migration").load().migrate()
+            seedRoleCatalog(jdbc)
             seedV1Policy(jdbc)
             val disabledArguments = arguments(postgres).filterNot {
                 it.startsWith("--occ.bootstrap-administrator.")
@@ -109,6 +110,33 @@ class BootstrapAdministratorStartupIntegrationTest {
                     )).isEqualTo(1)
                 }
         }
+    }
+
+    private fun seedRoleCatalog(jdbc: JdbcTemplate) {
+        jdbc.update(
+            "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'platform-iam', 'Platform IAM', 'ACTIVE')",
+            BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
+            BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)
+               VALUES (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true)""",
+            BootstrapIds.ROLE_TYPE, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type_version
+               (id, entity_type_id, package_version_id, schema_version, json_schema)
+               VALUES (?, ?, ?, 1, '{}'::jsonb)""",
+            BootstrapIds.ROLE_TYPE_VERSION, BootstrapIds.ROLE_TYPE, BootstrapIds.PACKAGE_VERSION,
+        )
+        jdbc.update(
+            """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('a', 64),
+                   published_at = transaction_timestamp() WHERE id = ?""",
+            BootstrapIds.PACKAGE_VERSION,
+        )
     }
 
     private fun seedV1Policy(jdbc: JdbcTemplate) {
