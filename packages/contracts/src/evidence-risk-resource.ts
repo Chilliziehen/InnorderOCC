@@ -48,13 +48,32 @@ export const resourceUnavailableProblemSchema = fixedDomainProblemDetailsSchema(
   409,
   "OCC-RESOURCE-UNAVAILABLE",
 );
-export const reservationConflictProblemSchema = fixedDomainProblemDetailsSchema(
+export const idempotencyConflictProblemSchema = fixedDomainProblemDetailsSchema(
   409,
-  "OCC-RESERVATION-CONFLICT",
+  "OCC-COMMAND-IDEMPOTENCY-CONFLICT",
 );
-export const versionConflictProblemSchema = fixedDomainProblemDetailsSchema(
+export const idempotencyInProgressProblemSchema = fixedDomainProblemDetailsSchema(
   409,
-  "OCC-VERSION-CONFLICT",
+  "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS",
+);
+export const idempotencyExpiredProblemSchema = fixedDomainProblemDetailsSchema(
+  409,
+  "OCC-COMMAND-IDEMPOTENCY-EXPIRED",
+);
+export const versionConflictProblemSchema = domainProblemDetailsSchema
+  .extend({
+    status: z.literal(409),
+    code: z.literal("OCC-COMMAND-OPTIMISTIC-CONFLICT"),
+    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export const authorizationUnavailableProblemSchema = fixedDomainProblemDetailsSchema(
+  503,
+  "OCC-AUTHZ-UNAVAILABLE",
+);
+export const commandIntegrityProblemSchema = fixedDomainProblemDetailsSchema(
+  503,
+  "OCC-COMMAND-INTEGRITY",
 );
 export const evidenceTooLargeProblemSchema = fixedDomainProblemDetailsSchema(
   413,
@@ -76,6 +95,51 @@ export const invalidRangeProblemSchema = fixedDomainProblemDetailsSchema(
   416,
   "OCC-INVALID-REQUEST",
 );
+
+export const riskAdjudicationConflictProblemSchema = z.union([
+  idempotencyConflictProblemSchema,
+  idempotencyInProgressProblemSchema,
+  idempotencyExpiredProblemSchema,
+]);
+
+const kernelIdempotencyConflictSchemas = [
+  idempotencyConflictProblemSchema,
+  idempotencyInProgressProblemSchema,
+  idempotencyExpiredProblemSchema,
+] as const;
+
+export const evidenceUploadSessionConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+  evidenceUploadConflictProblemSchema,
+]);
+export const evidenceContentConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  evidenceUploadConflictProblemSchema,
+]);
+export const evidenceSubmitConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+  evidenceUploadConflictProblemSchema,
+]);
+export const evidenceReviewCommandConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+  evidenceReviewConflictProblemSchema,
+]);
+export const riskActionConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+  riskInvalidTransitionProblemSchema,
+]);
+export const reservationCancelConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+]);
+export const protectedCommandUnavailableProblemSchema = z.union([
+  authorizationUnavailableProblemSchema,
+  commandIntegrityProblemSchema,
+]);
 
 const boundedText = (maximum: number, minimum = 1) =>
   z.string().trim().min(minimum).max(maximum);
@@ -688,15 +752,58 @@ export const availabilityWindowPageSchema = z
   .object({ items: z.array(availabilityWindowSchema).max(100), ...pageFields })
   .strict();
 
-export const reservationConflictSchema = z
+export const redactedReservationConflictDescriptorSchema = z
   .object({
     resourceId: z.uuid(),
     interval: halfOpenIntervalSchema,
     kind: reservationConflictKindSchema,
-    redacted: z.boolean(),
-    reservationId: z.uuid().optional(),
+    redacted: z.literal(true),
   })
   .strict();
+
+export const unredactedReservationConflictDescriptorSchema = z
+  .object({
+    resourceId: z.uuid(),
+    interval: halfOpenIntervalSchema,
+    kind: reservationConflictKindSchema,
+    redacted: z.literal(false),
+    reservationId: z.uuid().optional(),
+    requesterEntityId: z.uuid().optional(),
+  })
+  .strict();
+
+export const reservationConflictSchema = z.discriminatedUnion("redacted", [
+  redactedReservationConflictDescriptorSchema,
+  unredactedReservationConflictDescriptorSchema,
+]);
+
+export const reservationConflictProblemSchema = domainProblemDetailsSchema
+  .extend({
+    status: z.literal(409),
+    code: z.literal("OCC-RESERVATION-CONFLICT"),
+    conflict: reservationConflictSchema,
+  })
+  .strict();
+
+export const resourceUpdateConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+  resourceUnavailableProblemSchema,
+  reservationConflictProblemSchema,
+]);
+export const resourceAvailabilityConflictProblemSchema = resourceUpdateConflictProblemSchema;
+
+export const reservationCreateConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  resourceUnavailableProblemSchema,
+  reservationConflictProblemSchema,
+]);
+export const reservationChangeConflictProblemSchema = z.union([
+  ...kernelIdempotencyConflictSchemas,
+  versionConflictProblemSchema,
+  resourceUnavailableProblemSchema,
+  reservationConflictProblemSchema,
+]);
 
 export const reservationAvailabilityRequestSchema = z
   .object({
@@ -893,7 +1000,24 @@ export type EvidenceReviewConflictProblem = z.infer<typeof evidenceReviewConflic
 export type RiskInvalidTransitionProblem = z.infer<typeof riskInvalidTransitionProblemSchema>;
 export type ResourceUnavailableProblem = z.infer<typeof resourceUnavailableProblemSchema>;
 export type ReservationConflictProblem = z.infer<typeof reservationConflictProblemSchema>;
+export type IdempotencyConflictProblem = z.infer<typeof idempotencyConflictProblemSchema>;
+export type IdempotencyInProgressProblem = z.infer<typeof idempotencyInProgressProblemSchema>;
+export type IdempotencyExpiredProblem = z.infer<typeof idempotencyExpiredProblemSchema>;
 export type VersionConflictProblem = z.infer<typeof versionConflictProblemSchema>;
+export type AuthorizationUnavailableProblem = z.infer<typeof authorizationUnavailableProblemSchema>;
+export type CommandIntegrityProblem = z.infer<typeof commandIntegrityProblemSchema>;
+export type RiskAdjudicationConflictProblem = z.infer<typeof riskAdjudicationConflictProblemSchema>;
+export type EvidenceUploadSessionConflictProblem = z.infer<typeof evidenceUploadSessionConflictProblemSchema>;
+export type EvidenceContentConflictProblem = z.infer<typeof evidenceContentConflictProblemSchema>;
+export type EvidenceSubmitConflictProblem = z.infer<typeof evidenceSubmitConflictProblemSchema>;
+export type EvidenceReviewCommandConflictProblem = z.infer<typeof evidenceReviewCommandConflictProblemSchema>;
+export type RiskActionConflictProblem = z.infer<typeof riskActionConflictProblemSchema>;
+export type ResourceUpdateConflictProblem = z.infer<typeof resourceUpdateConflictProblemSchema>;
+export type ResourceAvailabilityConflictProblem = z.infer<typeof resourceAvailabilityConflictProblemSchema>;
+export type ReservationCreateConflictProblem = z.infer<typeof reservationCreateConflictProblemSchema>;
+export type ReservationChangeConflictProblem = z.infer<typeof reservationChangeConflictProblemSchema>;
+export type ReservationCancelConflictProblem = z.infer<typeof reservationCancelConflictProblemSchema>;
+export type ProtectedCommandUnavailableProblem = z.infer<typeof protectedCommandUnavailableProblemSchema>;
 export type EvidenceTooLargeProblem = z.infer<typeof evidenceTooLargeProblemSchema>;
 export type EvidenceDigestMismatchProblem = z.infer<typeof evidenceDigestMismatchProblemSchema>;
 export type EvidenceInvalidContentProblem = z.infer<typeof evidenceInvalidContentProblemSchema>;
@@ -964,6 +1088,8 @@ export type CreateAvailabilityWindowRequest = z.infer<typeof createAvailabilityW
 export type AvailabilityWindowPage = z.infer<typeof availabilityWindowPageSchema>;
 export type Reservation = z.infer<typeof reservationSchema>;
 export type ReservationConflict = z.infer<typeof reservationConflictSchema>;
+export type RedactedReservationConflictDescriptor = z.infer<typeof redactedReservationConflictDescriptorSchema>;
+export type UnredactedReservationConflictDescriptor = z.infer<typeof unredactedReservationConflictDescriptorSchema>;
 export type ReservationAvailabilityRequest = z.infer<typeof reservationAvailabilityRequestSchema>;
 export type ReservationAvailability = z.infer<typeof reservationAvailabilitySchema>;
 export type ReservationScheduleFilters = z.infer<typeof reservationScheduleFiltersSchema>;

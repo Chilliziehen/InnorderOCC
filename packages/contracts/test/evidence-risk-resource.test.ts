@@ -8,15 +8,20 @@ import {
   availabilityWindowSchema,
   cancelReservationRequestSchema,
   changeReservationRequestSchema,
+  commandIntegrityProblemSchema,
   createEvidenceUploadSessionRequestSchema,
   createRiskAdjudicationRequestSchema,
   domainEventEnvelopeSchema,
   domainProblemDetailsSchema,
+  authorizationUnavailableProblemSchema,
   evidenceDigestMismatchProblemSchema,
   evidenceInvalidContentProblemSchema,
   evidenceReviewConflictProblemSchema,
   evidenceTooLargeProblemSchema,
   evidenceUploadConflictProblemSchema,
+  idempotencyConflictProblemSchema,
+  idempotencyExpiredProblemSchema,
+  idempotencyInProgressProblemSchema,
   evidenceContentResultSchema,
   confirmedEvidenceContentResultSchema,
   evidenceDownloadMetadataSchema,
@@ -40,6 +45,8 @@ import {
   reservationConflictSchema,
   reservationEventPayloadSchema,
   reservationConflictProblemSchema,
+  redactedReservationConflictDescriptorSchema,
+  unredactedReservationConflictDescriptorSchema,
   reservationSchedulePageSchema,
   reservationSchema,
   reserveResourceRequestSchema,
@@ -59,6 +66,7 @@ import {
   resourceUnavailableProblemSchema,
   updateResourceRequestSchema,
   versionConflictProblemSchema,
+  riskAdjudicationConflictProblemSchema,
 } from "../src/evidence-risk-resource.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -470,8 +478,6 @@ describe("domain problem details", () => {
       [evidenceReviewConflictProblemSchema, 409, "OCC-EVIDENCE-REVIEW-CONFLICT"],
       [riskInvalidTransitionProblemSchema, 409, "OCC-RISK-INVALID-TRANSITION"],
       [resourceUnavailableProblemSchema, 409, "OCC-RESOURCE-UNAVAILABLE"],
-      [reservationConflictProblemSchema, 409, "OCC-RESERVATION-CONFLICT"],
-      [versionConflictProblemSchema, 409, "OCC-VERSION-CONFLICT"],
       [evidenceTooLargeProblemSchema, 413, "OCC-EVIDENCE-TOO-LARGE"],
       [evidenceDigestMismatchProblemSchema, 422, "OCC-EVIDENCE-DIGEST-MISMATCH"],
       [evidenceInvalidContentProblemSchema, 422, "OCC-EVIDENCE-INVALID-CONTENT"],
@@ -488,6 +494,75 @@ describe("domain problem details", () => {
       expect(schema.safeParse({ ...base, status: status + 1, code }).success).toBe(false);
       expect(schema.safeParse({ ...base, status, code: "OCC-API-INTERNAL" }).success).toBe(false);
     }
+  });
+
+  it("uses runtime kernel codes and requires currentVersion for optimistic conflicts", () => {
+    const problem = {
+      type: "https://innorder.local/problems/optimistic-conflict",
+      title: "Version conflict",
+      status: 409,
+      code: "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+      correlationId: UUID,
+      currentVersion: 3,
+    };
+    expect(versionConflictProblemSchema.safeParse(problem).success).toBe(true);
+    expect(versionConflictProblemSchema.safeParse({ ...problem, currentVersion: undefined }).success).toBe(false);
+    expect(versionConflictProblemSchema.safeParse({ ...problem, code: "OCC-VERSION-CONFLICT" }).success).toBe(false);
+  });
+
+  it("discriminates redacted reservation conflict descriptors", () => {
+    const interval = { start: INSTANT, end: LATER };
+    const redacted = {
+      resourceId: UUID,
+      interval,
+      kind: "CAPACITY",
+      redacted: true,
+    };
+    const unredacted = {
+      ...redacted,
+      redacted: false,
+      reservationId: UUID_2,
+      requesterEntityId: UUID,
+    };
+    const problem = {
+      type: "https://innorder.local/problems/reservation-conflict",
+      title: "Reservation conflict",
+      status: 409,
+      code: "OCC-RESERVATION-CONFLICT",
+      correlationId: UUID,
+    };
+
+    expect(redactedReservationConflictDescriptorSchema.safeParse(redacted).success).toBe(true);
+    expect(unredactedReservationConflictDescriptorSchema.safeParse(unredacted).success).toBe(true);
+    expect(redactedReservationConflictDescriptorSchema.safeParse({ ...redacted, reservationId: UUID_2 }).success).toBe(false);
+    expect(reservationConflictProblemSchema.safeParse({ ...problem, conflict: redacted }).success).toBe(true);
+    expect(reservationConflictProblemSchema.safeParse({ ...problem, conflict: unredacted }).success).toBe(true);
+    expect(reservationConflictProblemSchema.safeParse(problem).success).toBe(false);
+  });
+
+  it("keeps non-versioned adjudication conflicts idempotency-only", () => {
+    const base = {
+      type: "https://innorder.local/problems/command-conflict",
+      title: "Command conflict",
+      status: 409,
+      correlationId: UUID,
+    };
+    for (const [schema, code] of [
+      [idempotencyConflictProblemSchema, "OCC-COMMAND-IDEMPOTENCY-CONFLICT"],
+      [idempotencyInProgressProblemSchema, "OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS"],
+      [idempotencyExpiredProblemSchema, "OCC-COMMAND-IDEMPOTENCY-EXPIRED"],
+    ] as const) {
+      const problem = { ...base, code };
+      expect(schema.safeParse(problem).success).toBe(true);
+      expect(riskAdjudicationConflictProblemSchema.safeParse(problem).success).toBe(true);
+    }
+    expect(riskAdjudicationConflictProblemSchema.safeParse({
+      ...base,
+      code: "OCC-COMMAND-OPTIMISTIC-CONFLICT",
+      currentVersion: 2,
+    }).success).toBe(false);
+    expect(authorizationUnavailableProblemSchema.safeParse({ ...base, status: 503, code: "OCC-AUTHZ-UNAVAILABLE" }).success).toBe(true);
+    expect(commandIntegrityProblemSchema.safeParse({ ...base, status: 503, code: "OCC-COMMAND-INTEGRITY" }).success).toBe(true);
   });
 });
 
