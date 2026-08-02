@@ -4,6 +4,7 @@ import com.innorder.occ.authz.WorkflowAuthorizationRelationDefinitions
 import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import com.innorder.occ.catalog.EmbeddedWorkflowCatalogIds
 import com.innorder.occ.iam.BootstrapIds
+import com.innorder.occ.api.cursor.CursorPayload
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.jdbc.core.JdbcOperations
 import org.springframework.stereotype.Repository
@@ -58,8 +59,8 @@ class CohortRepository(private val jdbc: JdbcOperations) {
         principalId,
     ) == true
 
-    fun eligibleTransferTarget(cohortId: UUID, principalId: UUID): Boolean = activePrincipal(principalId) &&
-        (activeProcessOwner(principalId) || jdbc.queryForObject(
+    fun eligibleTransferTarget(cohortId: UUID, principalId: UUID): Boolean =
+        activePrincipal(principalId) && activeProcessOwner(principalId) && jdbc.queryForObject(
             """SELECT EXISTS (
                  SELECT 1 FROM authz.active_relationships_at(transaction_timestamp())
                  WHERE relation_definition_id = ? AND subject_entity_id = ? AND object_entity_id = ?
@@ -68,7 +69,7 @@ class CohortRepository(private val jdbc: JdbcOperations) {
             WorkflowAuthorizationRelationDefinitions.byKey.getValue("cohort_teacher").id,
             principalId,
             cohortId,
-        ) == true)
+        ) == true
 
     fun beginAuthorizationChange() {
         jdbc.queryForObject("SELECT authz.begin_authorization_revision_batch()", Long::class.java)
@@ -116,6 +117,10 @@ class CohortRepository(private val jdbc: JdbcOperations) {
     }
 
     fun update(cohortId: UUID, request: UpdateCohortRequest, actorId: UUID): CohortDetail {
+        val current = find(cohortId) ?: throw CohortNotFoundException()
+        val mergedStart = request.startDate ?: current.startDate
+        val mergedEnd = if (request.endDateSpecified) request.endDate else current.endDate
+        if (mergedEnd != null && mergedEnd.isBefore(mergedStart)) throw CohortInvalidRequestException()
         val changed = jdbc.update(
             """UPDATE occ.cohort
                SET name = coalesce(?, name),
@@ -226,6 +231,29 @@ class CohortRepository(private val jdbc: JdbcOperations) {
         return requireNotNull(find(cohortId))
     }
 
+    fun eligibleParticipantProcessStart(request: ParticipantProcessStart): Boolean = jdbc.queryForObject(
+        """SELECT EXISTS (
+             SELECT 1 FROM occ.cohort cohort
+             JOIN catalog.package_version package ON package.id = cohort.package_version_id
+             JOIN authz.active_relationships_at(transaction_timestamp()) participant
+               ON participant.object_entity_id = cohort.id
+              AND participant.subject_entity_id = ?
+              AND participant.relation_definition_id = ?
+             JOIN iam.principal principal ON principal.id = participant.subject_entity_id
+             JOIN authz.entity entity ON entity.id = principal.id
+             WHERE cohort.id = ? AND cohort.row_version = ? AND cohort.status = 'ACTIVE'
+               AND cohort.start_date <= current_date
+               AND (cohort.end_date IS NULL OR cohort.end_date >= current_date)
+               AND package.status = 'PUBLISHED'
+               AND principal.status = 'ACTIVE' AND entity.state = 'ACTIVE'
+           )""",
+        Boolean::class.java,
+        request.participantId,
+        participantRelationId,
+        request.cohortId,
+        request.expectedCohortVersion,
+    ) == true
+
     fun find(cohortId: UUID): CohortDetail? {
         val cohort = jdbc.query(
             """SELECT id, code, name, package_version_id, owner_principal_id, start_date, end_date,
@@ -236,6 +264,91 @@ class CohortRepository(private val jdbc: JdbcOperations) {
         ).singleOrNull() ?: return null
         return cohort.copy(members = members(cohortId))
     }
+
+    fun findAuthorized(cohortId: UUID, principalId: UUID): CohortDetail? {
+        val rows = jdbc.query(
+            """WITH active AS MATERIALIZED (
+                 SELECT relationship.*
+                 FROM authz.active_relationships_at(transaction_timestamp()) relationship
+                 WHERE relationship.relation_definition_id IN (?, ?, ?)
+               )
+               SELECT cohort.id, cohort.code, cohort.name, cohort.package_version_id,
+                      cohort.owner_principal_id, cohort.start_date, cohort.end_date, cohort.status,
+                      cohort.row_version, cohort.created_at, cohort.updated_at,
+                      member.subject_entity_id AS member_id, definition.relation_key,
+                      member.valid_from, member.valid_until
+               FROM occ.cohort cohort
+               LEFT JOIN active member ON member.object_entity_id = cohort.id
+               LEFT JOIN catalog.relation_definition definition ON definition.id = member.relation_definition_id
+               WHERE cohort.id = ? AND EXISTS (
+                 SELECT 1 FROM active visible
+                 WHERE visible.object_entity_id = cohort.id AND visible.subject_entity_id = ?
+               )
+               ORDER BY CASE definition.relation_key
+                          WHEN 'cohort_owner' THEN 0 WHEN 'cohort_teacher' THEN 1 ELSE 2 END,
+                        member.subject_entity_id""",
+            { rs, _ ->
+                AuthorizedDetailRow(
+                    detail(rs, emptyList()),
+                    rs.getObject("member_id", UUID::class.java)?.let {
+                        CohortMember(
+                            it,
+                            when (rs.getString("relation_key")) {
+                                "cohort_owner" -> CohortMemberRole.OWNER
+                                "cohort_teacher" -> CohortMemberRole.TEACHER
+                                else -> CohortMemberRole.PARTICIPANT
+                            },
+                            rs.getObject("valid_from", OffsetDateTime::class.java).toInstant(),
+                            rs.getObject("valid_until", OffsetDateTime::class.java)?.toInstant(),
+                        )
+                    },
+                )
+            },
+            *visibilityArguments(cohortId, principalId),
+        )
+        if (rows.isEmpty()) return null
+        return rows.first().detail.copy(members = rows.mapNotNull(AuthorizedDetailRow::member))
+    }
+
+    fun listAuthorized(
+        principalId: UUID,
+        filter: CohortListFilter,
+        seek: CursorPayload?,
+        limit: Int,
+    ): List<CohortSummary> = jdbc.query(
+        """SELECT cohort.id, cohort.code, cohort.name, cohort.package_version_id,
+                  cohort.owner_principal_id, cohort.start_date, cohort.end_date, cohort.status,
+                  cohort.row_version, cohort.created_at, cohort.updated_at
+           FROM occ.cohort cohort
+           WHERE EXISTS (
+             SELECT 1 FROM authz.active_relationships_at(transaction_timestamp()) visible
+             WHERE visible.object_entity_id = cohort.id AND visible.subject_entity_id = ?
+               AND visible.relation_definition_id IN (?, ?, ?)
+           )
+             AND (?::text IS NULL OR cohort.status = ?)
+             AND (?::uuid IS NULL OR cohort.package_version_id = ?)
+             AND (?::timestamptz IS NULL OR cohort.updated_at < ?)
+             AND (?::timestamptz IS NULL OR cohort.updated_at < ?
+                  OR (cohort.updated_at = ? AND cohort.id < ?::uuid))
+           ORDER BY cohort.updated_at DESC, cohort.id DESC
+           LIMIT ?""",
+        { rs, _ -> summary(rs) },
+        principalId,
+        ownerRelationId,
+        teacherRelationId,
+        participantRelationId,
+        filter.status?.name,
+        filter.status?.name,
+        filter.packageVersionId,
+        filter.packageVersionId,
+        filter.updatedBefore?.let(::offset),
+        filter.updatedBefore?.let(::offset),
+        seek?.sortTimestamp?.let(::offset),
+        seek?.sortTimestamp?.let(::offset),
+        seek?.sortTimestamp?.let(::offset),
+        seek?.lastId,
+        limit,
+    )
 
     fun listCandidates(filter: CohortListFilter): List<CohortSummary> = jdbc.query(
         """SELECT id, code, name, package_version_id, owner_principal_id, start_date, end_date,
@@ -298,6 +411,19 @@ class CohortRepository(private val jdbc: JdbcOperations) {
         CohortMemberRole.PARTICIPANT -> WorkflowAuthorizationRelationDefinitions.byKey.getValue("cohort_participant").id
         CohortMemberRole.OWNER -> throw CohortConflictException()
     }
+
+    private fun visibilityArguments(cohortId: UUID, principalId: UUID): Array<Any> = arrayOf(
+        ownerRelationId, teacherRelationId, participantRelationId, cohortId, principalId,
+    )
+
+    private fun offset(value: java.time.Instant): OffsetDateTime =
+        OffsetDateTime.ofInstant(value, java.time.ZoneOffset.UTC)
+
+    private val ownerRelationId get() = WorkflowAuthorizationRelationDefinitions.byKey.getValue("cohort_owner").id
+    private val teacherRelationId get() = WorkflowAuthorizationRelationDefinitions.byKey.getValue("cohort_teacher").id
+    private val participantRelationId get() = WorkflowAuthorizationRelationDefinitions.byKey.getValue("cohort_participant").id
+
+    private data class AuthorizedDetailRow(val detail: CohortDetail, val member: CohortMember?)
 
     private fun detail(rs: ResultSet, members: List<CohortMember>) = CohortDetail(
         rs.getObject("id", UUID::class.java),

@@ -5,9 +5,6 @@ import com.innorder.occ.api.cursor.CursorCodec
 import com.innorder.occ.api.cursor.CursorFilterDigest
 import com.innorder.occ.api.cursor.CursorKeyRing
 import com.innorder.occ.api.cursor.CursorPayload
-import com.innorder.occ.authz.AuthorizationDeniedException
-import com.innorder.occ.authz.AuthorizationRequest
-import com.innorder.occ.authz.AuthorizationService
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
 import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
@@ -26,7 +23,6 @@ data class CohortListFilter(
 @ConditionalOnBean(CursorCodec::class)
 class CohortQueryService(
     private val cohorts: CohortRepository,
-    private val authorization: AuthorizationService,
     transactionManager: PlatformTransactionManager,
     private val cursors: CursorCodec,
     private val filterDigests: CursorFilterDigest,
@@ -36,9 +32,7 @@ class CohortQueryService(
     private val transactions = TransactionTemplate(transactionManager).apply { isReadOnly = true }
 
     fun get(principalId: UUID, correlationId: UUID, cohortId: UUID): CohortDetail = transactions.execute {
-        val detail = cohorts.find(cohortId) ?: throw CohortNotFoundException()
-        authorize(principalId, correlationId, cohortId)
-        detail
+        cohorts.findAuthorized(cohortId, principalId) ?: throw CohortNotFoundException()
     }!!
 
     fun list(
@@ -53,21 +47,7 @@ class CohortQueryService(
         val binding = CursorBinding(principalId, ENDPOINT, digest)
         val seek = cursor?.let { cursors.decode(it, binding) }
         return transactions.execute {
-            val authorized = cohorts.listCandidates(filter).filter { candidate ->
-                try {
-                    authorize(principalId, correlationId, candidate.id)
-                    true
-                } catch (_: AuthorizationDeniedException) {
-                    false
-                }
-            }
-            val afterSeek = seek?.let { payload ->
-                authorized.filter { candidate ->
-                    candidate.updatedAt < payload.sortTimestamp ||
-                        (candidate.updatedAt == payload.sortTimestamp && candidate.id.toString() < payload.lastId.toString())
-                }
-            } ?: authorized
-            val window = afterSeek.take(pageSize + 1)
+            val window = cohorts.listAuthorized(principalId, filter, seek, pageSize + 1)
             val items = window.take(pageSize)
             val next = if (window.size > pageSize) items.last().let { last ->
                 cursors.encode(
@@ -78,15 +58,6 @@ class CohortQueryService(
             } else null
             CohortPage(items, CursorPageInfo(next))
         }!!
-    }
-
-    private fun authorize(principalId: UUID, correlationId: UUID, cohortId: UUID) {
-        authorization.authorize(
-            AuthorizationRequest(
-                UUID.randomUUID(), principalId, "cohort.read", cohortId, cohortId,
-                emptyMap(), correlationId,
-            ),
-        )
     }
 
     private fun filterJson(filter: CohortListFilter): String =

@@ -15,10 +15,12 @@ import com.innorder.occ.command.CommandMutation
 import com.innorder.occ.command.PendingEventSpec
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
+import com.innorder.occ.notification.PendingNotificationSpec
 import java.util.UUID
 
 class CohortNotFoundException : RuntimeException("Cohort was not found")
 class CohortConflictException : RuntimeException("Cohort command conflicts with current state")
+class CohortInvalidRequestException : RuntimeException("Cohort request is invalid")
 
 data class CohortCommandResult(
     val value: CohortDetail,
@@ -128,6 +130,16 @@ class CohortCommandService(
 
     private companion object {
         val CREATE_NAMESPACE: UUID = UUID.fromString("d9374553-0d83-5cc4-979f-fbde8b439229")
+    }
+}
+
+class CohortParticipantProcessService(
+    private val cohorts: CohortRepository,
+    private val starter: ParticipantProcessStarter,
+) {
+    fun start(request: ParticipantProcessStart): ParticipantProcessStartResult {
+        if (!cohorts.eligibleParticipantProcessStart(request)) throw CohortConflictException()
+        return starter.start(request)
     }
 }
 
@@ -327,6 +339,20 @@ private class TransferCohortOwnerCommand(
         cohorts.beginAuthorizationChange()
         val updated = cohorts.transferOwner(aggregateId, request.ownerPrincipalId, actorId)
         cohorts.finishAuthorizationChange()
+        val event = PendingEventSpec(
+            "cohort.owner-transferred",
+            1,
+            json(
+                mapper,
+                mapOf(
+                    "cohortId" to aggregateId,
+                    "previousOwnerPrincipalId" to previousOwner,
+                    "ownerPrincipalId" to request.ownerPrincipalId,
+                ),
+            ),
+            aggregate,
+            before + 1,
+        )
         return CommandMutation(
             200,
             json(mapper, updated),
@@ -334,20 +360,11 @@ private class TransferCohortOwnerCommand(
             listOf(AggregateChange(aggregate, before, before + 1)),
             request.reason,
             json(mapper, mapOf("cohortId" to aggregateId, "ownerPrincipalId" to request.ownerPrincipalId)),
+            listOf(event),
             listOf(
-                PendingEventSpec(
-                    "cohort.owner-transferred",
-                    1,
-                    json(
-                        mapper,
-                        mapOf(
-                            "cohortId" to aggregateId,
-                            "previousOwnerPrincipalId" to previousOwner,
-                            "ownerPrincipalId" to request.ownerPrincipalId,
-                        ),
-                    ),
-                    aggregate,
-                    before + 1,
+                PendingNotificationSpec(
+                    request.ownerPrincipalId, "cohort.owner-transferred", "INFO",
+                    "cohort", aggregateId, event.eventType,
                 ),
             ),
         )

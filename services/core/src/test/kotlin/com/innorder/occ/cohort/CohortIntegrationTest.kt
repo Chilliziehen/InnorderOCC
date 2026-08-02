@@ -32,6 +32,7 @@ import com.innorder.occ.command.IdempotencyRepository
 import com.innorder.occ.command.OptimisticConflictException
 import com.innorder.occ.events.OutboxRepository
 import com.innorder.occ.iam.BootstrapIds
+import com.innorder.occ.notification.JdbcNotificationWriter
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.flywaydb.core.Flyway
@@ -125,6 +126,32 @@ class CohortIntegrationTest {
     }
 
     @Test
+    fun `partial date update validates merged locked range and rolls back as invalid request`() {
+        val jdbc = JdbcTemplate(runtimeDataSource())
+        val service = commandService(jdbc)
+        val created = service.create(
+            ACTOR_ID, "date-merge-create", CORRELATION_ID,
+            CreateCohortRequest(
+                "date-merge", "Date merge", EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                OWNER_ID, LocalDate.parse("2026-08-02"), LocalDate.parse("2026-08-10"),
+            ),
+        ).value
+        val update = ObjectMapper().findAndRegisterModules().readValue(
+            """{"expectedVersion":1,"startDate":"2026-08-11"}""",
+            UpdateCohortRequest::class.java,
+        )
+
+        assertThatThrownBy {
+            service.update(ACTOR_ID, "date-merge-update", CORRELATION_ID, created.id, update)
+        }.isInstanceOf(CohortInvalidRequestException::class.java)
+        assertThat(CohortRepository(jdbc).find(created.id)).isEqualTo(created)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?",
+            Long::class.java, created.id,
+        )).isEqualTo(1)
+    }
+
+    @Test
     fun `membership commands close active intervals and permit re-enrollment with one revision each`() {
         val jdbc = JdbcTemplate(runtimeDataSource())
         val service = commandService(jdbc)
@@ -197,6 +224,17 @@ class CohortIntegrationTest {
         assertThat(transferred.members.filter { it.role == CohortMemberRole.OWNER })
             .extracting<UUID> { it.principalId }.containsExactly(MEMBER_ID)
         assertThat(authorizationRevision(jdbc)).isEqualTo(beforeTransferRevision + 1)
+        assertThat(jdbc.queryForMap(
+            """SELECT notification.recipient_id, notification.resource_id, notification.type,
+                      event.event_type
+               FROM occ.notification notification
+               JOIN audit.outbox_event event ON event.id = notification.event_id
+               WHERE notification.resource_id = ? AND notification.recipient_id = ?""",
+            created.id, MEMBER_ID,
+        )).containsEntry("recipient_id", MEMBER_ID)
+            .containsEntry("resource_id", created.id)
+            .containsEntry("type", "cohort.owner-transferred")
+            .containsEntry("event_type", "cohort.owner-transferred")
         assertThat(jdbc.queryForObject(
             """SELECT count(*) FROM authz.relationship relationship
                JOIN catalog.relation_definition definition ON definition.id = relationship.relation_definition_id
@@ -229,6 +267,37 @@ class CohortIntegrationTest {
     }
 
     @Test
+    fun `owner transfer requires target to be both active teacher and process owner`() {
+        val jdbc = JdbcTemplate(runtimeDataSource())
+        val service = commandService(jdbc)
+        val created = service.create(
+            ACTOR_ID, "owner-strict-create", CORRELATION_ID,
+            CreateCohortRequest(
+                "owner-strict", "Owner strict", EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                OWNER_ID, LocalDate.parse("2026-08-02"), null,
+            ),
+        ).value
+
+        assertThatThrownBy {
+            service.transferOwner(
+                ACTOR_ID, "owner-global-only", CORRELATION_ID, created.id,
+                TransferCohortOwnerRequest(created.version, OWNER_ONLY_ID, "global only"),
+            )
+        }.isInstanceOf(CohortConflictException::class.java)
+
+        val teacher = service.addMember(
+            ACTOR_ID, "owner-strict-teacher", CORRELATION_ID, created.id,
+            AddCohortMemberRequest(created.version, TEACHER_ONLY_ID, CohortMemberRole.TEACHER),
+        ).value
+        assertThatThrownBy {
+            service.transferOwner(
+                ACTOR_ID, "owner-teacher-only", CORRELATION_ID, created.id,
+                TransferCohortOwnerRequest(teacher.version, TEACHER_ONLY_ID, "teacher only"),
+            )
+        }.isInstanceOf(CohortConflictException::class.java)
+    }
+
+    @Test
     fun `list authorizes candidates before seek and binds filters in a tamper evident cursor`() {
         val jdbc = JdbcTemplate(runtimeDataSource())
         val commands = commandService(jdbc)
@@ -241,33 +310,30 @@ class CohortIntegrationTest {
                 ),
             ).value
         }
-        val authorizationCalls = mutableListOf<UUID>()
-        val query = queryService(jdbc) { request ->
-            authorizationCalls += request.resourceId
-            AuthorizationDecisionValue.ALLOW
-        }
+        val query = queryService(jdbc)
         val filter = CohortListFilter(CohortStatus.DRAFT, EmbeddedWorkflowCatalogIds.PACKAGE_VERSION, null)
 
-        val first = query.list(ACTOR_ID, CORRELATION_ID, filter, 1, null)
+        assertThat(query.get(OWNER_ID, CORRELATION_ID, created.first().id).id).isEqualTo(created.first().id)
+
+        val first = query.list(OWNER_ID, CORRELATION_ID, filter, 1, null)
         val cursor = first.page.nextCursor!!
-        authorizationCalls.clear()
-        val second = query.list(ACTOR_ID, CORRELATION_ID, filter, 1, cursor)
+        val second = query.list(OWNER_ID, CORRELATION_ID, filter, 1, cursor)
 
         assertThat(first.items).hasSize(1)
         assertThat(second.items).hasSize(1)
         assertThat(second.items.single().id).isNotEqualTo(first.items.single().id)
-        assertThat(authorizationCalls).containsAll(created.map { it.id })
-        assertThat(authorizationCalls).doesNotHaveDuplicates()
+        val tamperAt = cursor.length / 2
+        val tampered = cursor.replaceRange(tamperAt, tamperAt + 1, if (cursor[tamperAt] == 'A') "B" else "A")
         assertThatThrownBy {
-            query.list(ACTOR_ID, CORRELATION_ID, filter, 1, cursor.dropLast(1) + if (cursor.last() == 'A') "B" else "A")
+            query.list(OWNER_ID, CORRELATION_ID, filter, 1, tampered)
         }.isInstanceOf(InvalidCursorException::class.java)
         assertThatThrownBy {
-            query.list(ACTOR_ID, CORRELATION_ID, filter.copy(status = CohortStatus.ARCHIVED), 1, cursor)
+            query.list(OWNER_ID, CORRELATION_ID, filter.copy(status = CohortStatus.ARCHIVED), 1, cursor)
         }.isInstanceOf(InvalidCursorException::class.java)
     }
 
     @Test
-    fun `get and list fail closed on denial and authorization unavailability`() {
+    fun `get and list hide cohorts without an active canonical membership`() {
         val jdbc = JdbcTemplate(runtimeDataSource())
         val created = commandService(jdbc).create(
             ACTOR_ID, "query-deny-create", CORRELATION_ID,
@@ -276,14 +342,43 @@ class CohortIntegrationTest {
                 OWNER_ID, LocalDate.parse("2026-08-02"), null,
             ),
         ).value
-        val denied = queryService(jdbc) { AuthorizationDecisionValue.DENY }
-        val unavailable = queryService(jdbc) { AuthorizationDecisionValue.ERROR }
+        val query = queryService(jdbc)
 
-        assertThatThrownBy { denied.get(ACTOR_ID, CORRELATION_ID, created.id) }
-            .isInstanceOf(com.innorder.occ.authz.AuthorizationDeniedException::class.java)
-        assertThat(denied.list(ACTOR_ID, CORRELATION_ID, CohortListFilter(), 25, null).items).isEmpty()
-        assertThatThrownBy { unavailable.list(ACTOR_ID, CORRELATION_ID, CohortListFilter(), 25, null) }
-            .isInstanceOf(AuthorizationAvailabilityException::class.java)
+        assertThatThrownBy { query.get(ACTOR_ID, CORRELATION_ID, created.id) }
+            .isInstanceOf(CohortNotFoundException::class.java)
+        assertThat(query.list(ACTOR_ID, CORRELATION_ID, CohortListFilter(), 25, null).items).isEmpty()
+    }
+
+    @Test
+    fun `participant process port delegates only for eligible active participant and preserves replay`() {
+        val jdbc = JdbcTemplate(runtimeDataSource())
+        val commands = commandService(jdbc)
+        val created = commands.create(
+            ACTOR_ID, "starter-create", CORRELATION_ID,
+            CreateCohortRequest(
+                "starter-cohort", "Starter", EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                OWNER_ID, LocalDate.now(), LocalDate.now().plusDays(1),
+            ),
+        ).value
+        jdbc.update("UPDATE occ.cohort SET status = 'ACTIVE', updated_by = ? WHERE id = ?", ACTOR_ID, created.id)
+        val active = CohortRepository(jdbc).find(created.id)!!
+        val member = commands.addMember(
+            ACTOR_ID, "starter-member", CORRELATION_ID, created.id,
+            AddCohortMemberRequest(active.version, MEMBER_ID, CohortMemberRole.PARTICIPANT),
+        ).value
+        val expected = ParticipantProcessStartResult(UUID.randomUUID(), created.id, MEMBER_ID, 1, true)
+        val calls = mutableListOf<ParticipantProcessStart>()
+        val service = CohortParticipantProcessService(CohortRepository(jdbc)) { request -> calls += request; expected }
+
+        val result = service.start(
+            ParticipantProcessStart(created.id, MEMBER_ID, ACTOR_ID, "starter-key", member.version, CORRELATION_ID),
+        )
+
+        assertThat(result).isEqualTo(expected)
+        assertThat(calls).hasSize(1)
+        assertThatThrownBy {
+            service.start(ParticipantProcessStart(created.id, TEACHER_ONLY_ID, ACTOR_ID, "bad", member.version, CORRELATION_ID))
+        }.isInstanceOf(CohortConflictException::class.java)
     }
 
     @Test
@@ -366,6 +461,8 @@ class CohortIntegrationTest {
         private val OWNER_ID = UUID.fromString("61000000-0000-7000-8000-000000000002")
         private val CORRELATION_ID = UUID.fromString("61000000-0000-4000-8000-000000000003")
         private val MEMBER_ID = UUID.fromString("61000000-0000-7000-8000-000000000004")
+        private val OWNER_ONLY_ID = UUID.fromString("61000000-0000-7000-8000-000000000005")
+        private val TEACHER_ONLY_ID = UUID.fromString("61000000-0000-7000-8000-000000000006")
 
         @Container
         @JvmStatic
@@ -437,6 +534,8 @@ class CohortIntegrationTest {
                 arrayOf(ACTOR_ID, BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE_VERSION, "user:actor", "USER", "Actor"),
                 arrayOf(OWNER_ID, BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE_VERSION, "user:owner", "USER", "Owner"),
                 arrayOf(MEMBER_ID, BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE_VERSION, "user:member", "USER", "Member"),
+                arrayOf(OWNER_ONLY_ID, BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE_VERSION, "user:owner-only", "USER", "Owner only"),
+                arrayOf(TEACHER_ONLY_ID, BootstrapIds.USER_TYPE, BootstrapIds.USER_TYPE_VERSION, "user:teacher-only", "USER", "Teacher only"),
                 arrayOf(WorkflowAuthorizationRoles.processOwner.id, BootstrapIds.ROLE_TYPE, BootstrapIds.ROLE_TYPE_VERSION, WorkflowAuthorizationRoles.processOwner.key, "ROLE", "Process Owner"),
             ).forEach { row ->
                 jdbc.update(
@@ -454,6 +553,20 @@ class CohortIntegrationTest {
                    VALUES (?, ?, ?, ?, 'SYSTEM', 'cohort-test')""",
                 UUID.randomUUID(), BootstrapIds.ROLE_ASSIGNMENT_RELATION,
                 OWNER_ID, WorkflowAuthorizationRoles.processOwner.id,
+            )
+            jdbc.update(
+                """INSERT INTO authz.relationship
+                   (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                   VALUES (?, ?, ?, ?, 'SYSTEM', 'cohort-test')""",
+                UUID.randomUUID(), BootstrapIds.ROLE_ASSIGNMENT_RELATION,
+                OWNER_ONLY_ID, WorkflowAuthorizationRoles.processOwner.id,
+            )
+            jdbc.update(
+                """INSERT INTO authz.relationship
+                   (id, relation_definition_id, subject_entity_id, object_entity_id, source_kind, source_ref)
+                   VALUES (?, ?, ?, ?, 'SYSTEM', 'cohort-test')""",
+                UUID.randomUUID(), BootstrapIds.ROLE_ASSIGNMENT_RELATION,
+                MEMBER_ID, WorkflowAuthorizationRoles.processOwner.id,
             )
         }
 
@@ -524,6 +637,7 @@ class CohortIntegrationTest {
                 OutboxRepository(jdbc),
                 AggregateLockRegistry(listOf(cohortAggregateLockResolver())),
                 jdbc,
+                JdbcNotificationWriter(jdbc),
             )
             return CohortCommandService(executor, repository, ObjectMapper().findAndRegisterModules())
         }
@@ -533,38 +647,7 @@ class CohortIntegrationTest {
             Long::class.java,
         )!!
 
-        private fun queryService(
-            jdbc: JdbcTemplate,
-            decide: (com.innorder.occ.authz.AuthorizationRequest) -> AuthorizationDecisionValue,
-        ): CohortQueryService {
-            val releases = mapOf(PolicyLayer.PLATFORM to UUID.fromString("61000000-0000-7000-8000-000000000010"))
-            val requests = java.util.concurrent.ConcurrentHashMap<UUID, com.innorder.occ.authz.AuthorizationRequest>()
-            val authorization = AuthorizationService(
-                { request ->
-                    requests[request.requestId] = request
-                    AuthorizationSnapshot(
-                        2, request.requestId, authorizationRevision(jdbc), releases,
-                        AuthorizationPrincipal(request.principalId, true), AuthorizationEntity(request.entityId),
-                        request.action, AuthorizationResource(request.resourceId, true), request.context,
-                        emptyList(), emptyList(), emptyList(), releases.getValue(PolicyLayer.PLATFORM),
-                        "cohort-test-v1", mapOf(request.principalId to 0L, request.resourceId to 0L),
-                        "0".repeat(64), OffsetDateTime.now(),
-                    )
-                },
-                { snapshot ->
-                    val outcome = decide(requests.getValue(snapshot.requestId))
-                    AuthorizationDecision(
-                        2, snapshot.opaRevision, snapshot.requestId, snapshot.authorizationRevision,
-                        snapshot.releases, outcome, outcome == AuthorizationDecisionValue.ALLOW,
-                        listOf(outcome.name), listOf("policy:${"2".repeat(64)}"),
-                        if (outcome == AuthorizationDecisionValue.ALLOW) listOf("policy:${"2".repeat(64)}") else emptyList(),
-                    )
-                },
-                object : DecisionAuditLog {
-                    override fun persistInCallerTransaction(entry: DecisionLogEntry) = Unit
-                    override fun persistIndependently(entry: DecisionLogEntry) = Unit
-                },
-            )
+        private fun queryService(jdbc: JdbcTemplate): CohortQueryService {
             val keyFile = Files.createTempFile("cohort-cursor", ".key")
             Files.write(keyFile, ByteArray(64) { index -> (index + 1).toByte() })
             keyFile.toFile().deleteOnExit()
@@ -572,7 +655,7 @@ class CohortIntegrationTest {
             val keys = CursorKeyRing.load(CursorProperties("cohort-test", keyFile.toString()), clock)
             val mapper = ObjectMapper().findAndRegisterModules()
             return CohortQueryService(
-                CohortRepository(jdbc), authorization, DataSourceTransactionManager(jdbc.dataSource!!),
+                CohortRepository(jdbc), DataSourceTransactionManager(jdbc.dataSource!!),
                 HmacCursorCodec(keys, mapper, clock), CursorFilterDigest(mapper), keys, clock,
             )
         }

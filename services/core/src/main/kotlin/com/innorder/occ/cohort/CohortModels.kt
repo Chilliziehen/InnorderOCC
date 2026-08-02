@@ -3,6 +3,7 @@ package com.innorder.occ.cohort
 import com.fasterxml.jackson.annotation.JsonAnySetter
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonSetter
 import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.Max
@@ -125,7 +126,7 @@ data class CohortMember(
     val principalId: UUID,
     val role: CohortMemberRole,
     val validFrom: Instant,
-    val validUntil: Instant?,
+    @get:JsonInclude(JsonInclude.Include.NON_NULL) val validUntil: Instant?,
 )
 
 data class CohortSummary(
@@ -157,16 +158,26 @@ data class CohortDetail(
     val members: List<CohortMember>,
 )
 
-data class CursorPageInfo(val nextCursor: String? = null)
+data class CursorPageInfo(@get:JsonInclude(JsonInclude.Include.NON_NULL) val nextCursor: String? = null)
 data class CohortPage(val items: List<CohortSummary>, val page: CursorPageInfo)
 
 data class ParticipantProcessStart(
     val cohortId: UUID,
     val participantId: UUID,
-    val requestedBy: UUID,
-    val expectedVersion: Long,
+    val actorId: UUID,
+    val idempotencyKey: String,
+    val expectedCohortVersion: Long,
+    val correlationId: UUID,
+)
+
+data class ParticipantProcessStartResult(
+    val processId: UUID,
+    val cohortId: UUID,
+    val participantId: UUID,
+    val version: Long,
+    val replayed: Boolean,
 )
 
 fun interface ParticipantProcessStarter {
-    fun start(request: ParticipantProcessStart): UUID
+    fun start(request: ParticipantProcessStart): ParticipantProcessStartResult
 }

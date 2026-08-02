@@ -49,14 +49,26 @@ class CohortModelsTest {
     @Test
     fun `participant process starter is a framework neutral port`() {
         val calls = mutableListOf<ParticipantProcessStart>()
-        val starter = ParticipantProcessStarter { request -> calls += request; UUID.randomUUID() }
-        val request = ParticipantProcessStart(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 4)
+        val result = ParticipantProcessStartResult(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, true)
+        val starter = ParticipantProcessStarter { request -> calls += request; result }
+        val request = ParticipantProcessStart(
+            UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), "process-key", 4, UUID.randomUUID(),
+        )
 
-        starter.start(request)
+        assertThat(starter.start(request)).isEqualTo(result)
 
         assertThat(calls).containsExactly(request)
         assertThat(ParticipantProcessStarter::class.java.declaredMethods.map { it.parameterTypes.toList() }.flatten())
             .noneMatch { it.name.startsWith("org.flowable") }
+    }
+
+    @Test
+    fun `optional response fields are omitted instead of serialized as null`() {
+        val member = CohortMember(OWNER_ID, CohortMemberRole.OWNER, java.time.Instant.parse("2026-08-02T12:00:00Z"), null)
+        val page = CursorPageInfo(null)
+
+        assertThat(mapper.writeValueAsString(member)).doesNotContain("validUntil")
+        assertThat(mapper.writeValueAsString(page)).isEqualTo("{}")
     }
 
     private companion object {

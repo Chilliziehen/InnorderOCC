@@ -211,7 +211,14 @@ describe("cohort contracts", () => {
       ownerPrincipalId: id, startDate: "2026-08-01", endDate: null,
       status: "DRAFT", version: 0, createdAt: at, updatedAt: at,
     } as const;
-    expect(cohortDetailSchema.parse({ ...cohort, members: [] })).toBeDefined();
+    const httpFixture = {
+      ...cohort,
+      members: [{ principalId: id, role: "OWNER", validFrom: at }],
+    };
+    expect(cohortDetailSchema.parse(httpFixture)).toEqual(httpFixture);
+    expect(() => cohortDetailSchema.parse({
+      ...cohort, members: [{ principalId: id, role: "OWNER", validFrom: at, validUntil: null }],
+    })).toThrow();
     expect(cohortPageSchema.parse({ items: [cohort], page: {} })).toBeDefined();
     expect(() => cohortPageSchema.parse({ items: [], page: {}, total: 0 })).toThrow();
   });

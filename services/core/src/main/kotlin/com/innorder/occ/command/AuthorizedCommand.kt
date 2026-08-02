@@ -4,6 +4,7 @@ import com.innorder.occ.authz.AuthorizationDecisionReference
 import org.springframework.jdbc.core.JdbcOperations
 import java.util.Collections
 import java.util.UUID
+import com.innorder.occ.notification.PendingNotificationSpec
 
 data class CommandMetadata(
     val principalId: UUID,
@@ -85,9 +86,11 @@ class CommandMutation(
     val auditReason: String?,
     val auditDetail: CanonicalJsonObject,
     events: List<PendingEventSpec>,
+    notifications: List<PendingNotificationSpec> = emptyList(),
 ) {
     val changes: List<AggregateChange> = Collections.unmodifiableList(changes.toList())
     val events: List<PendingEventSpec> = Collections.unmodifiableList(events.toList())
+    val notifications: List<PendingNotificationSpec> = Collections.unmodifiableList(notifications.toList())
 
     fun copy(
         status: Int = this.status,
@@ -97,8 +100,9 @@ class CommandMutation(
         auditReason: String? = this.auditReason,
         auditDetail: CanonicalJsonObject = this.auditDetail,
         events: List<PendingEventSpec> = this.events,
+        notifications: List<PendingNotificationSpec> = this.notifications,
     ): CommandMutation = CommandMutation(
-        status, body, resourceId, changes, auditReason, auditDetail, events,
+        status, body, resourceId, changes, auditReason, auditDetail, events, notifications,
     )
 }
 

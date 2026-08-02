@@ -15,6 +15,8 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionTemplate
 import java.util.UUID
+import com.innorder.occ.notification.NotificationWriter
+import com.innorder.occ.notification.NoOpNotificationWriter
 
 @Service
 class CommandExecutor(
@@ -26,6 +28,7 @@ class CommandExecutor(
     private val outbox: OutboxRepository,
     private val aggregateLocks: AggregateLockRegistry,
     private val jdbc: JdbcOperations,
+    private val notificationWriter: NotificationWriter = NoOpNotificationWriter,
 ) {
     private val mapper = ObjectMapper().findAndRegisterModules()
     private val transactions = TransactionTemplate(transactionManager).apply {
@@ -77,7 +80,13 @@ class CommandExecutor(
         val auditDetail = audit.detail(mutation)
         validateDataMinimization(mutation, auditDetail, sensitiveValues)
         audit.insert(transactionId, metadata.correlationId, descriptor, mutation, auditDetail)
-        outbox.insert(descriptor, metadata.correlationId, transactionId, mutation)
+        val persistedEvents = outbox.insert(descriptor, metadata.correlationId, transactionId, mutation)
+        mutation.notifications.forEach { notification ->
+            val event = persistedEvents.singleOrNull {
+                it.eventType == notification.eventType && it.aggregateId == notification.resourceId
+            } ?: throw InvalidCommandRequestException()
+            notificationWriter.write(notification, event.id)
+        }
         val result = CommandResult(mutation.status, mutation.body, mutation.resourceId, replayed = false)
         idempotency.complete(idempotencyRecordId, result)
         return result
@@ -161,7 +170,7 @@ class CommandExecutor(
                 it.payload.size() > MAX_EVENT_BYTES || change == null || it.aggregateVersion != change.afterVersion ||
                     it.schemaVersion < 1 || !ACTION.matches(it.eventType) ||
                     (!descriptor.changesAuthorizationFacts && authorizationNamespace(it.eventType))
-            }
+            } || mutation.notifications.size > 128
         ) throw InvalidCommandRequestException()
     }
 
