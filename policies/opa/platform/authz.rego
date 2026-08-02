@@ -141,6 +141,7 @@ layer_matching_allow_refs(layer) := {grant_ref(grant) |
     some grant in input.grants
     grant.effect == "ALLOW"
     grant_matches_layer_release(grant, layer)
+    workflow_relationship_constraint(grant)
 }
 
 layer_matching_deny_refs(layer) := {grant_ref(grant) |
@@ -176,7 +177,6 @@ grant_matches_layer_release(grant, layer) if {
     uuid_matches(grant.principalId, input.principal.id)
     uuid_matches(grant.entityId, input.entity.id)
     uuid_matches(grant.resourceId, input.resource.id)
-    workflow_relationship_constraint(grant)
 }
 
 workflow_relationship_constraint(_) if {

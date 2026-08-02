@@ -390,6 +390,28 @@ test_task_fail_and_assignment_manage_require_cohort_authority if {
     }
 }
 
+test_workflow_wildcard_deny_remains_authoritative_in_every_layer if {
+    allow_grant := workflow_grant("task.complete")
+    every layer in ["PLATFORM", "DOMAIN", "CUSTOMER"] {
+        deny_grant := object.union(grant(layer, "DENY", sprintf("%s-workflow-deny", [lower(layer)])), {
+            "action": "*",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*",
+        })
+        request := object.union(base_input, {
+            "action": "task.complete",
+            "context": {"processState": "RUNNING", "hardBlockersAbsent": true},
+            "relationships": [relationship("TASK_ASSIGNEE", principal_id, resource_id)],
+            "grants": [allow_grant, deny_grant],
+        })
+        result := decision with input as request
+        not result.allow
+        result.reasonCodes == ["EXPLICIT_DENY"]
+        result.matchedPolicyIds == sort({grant_ref(allow_grant.id), grant_ref(deny_grant.id)})
+    }
+}
+
 test_relationships_are_constraints_not_allow_sources if {
     fact := relationship("TASK_CANDIDATE", principal_id, resource_id)
     relationship_only := object.union(base_input, {

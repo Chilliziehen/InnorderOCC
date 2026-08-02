@@ -34,6 +34,8 @@ class AuthorizationSnapshotRepository(
         val snapshotAt = jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)
             ?: throw AuthorizationSnapshotException()
         validateRequest(request)
+        val effectiveContext = authoritativeContext(request)
+        validateContext(effectiveContext)
 
         val states = loadEntityStates(setOf(request.principalId, request.entityId, request.resourceId))
         val principalState = states[request.principalId] ?: throw AuthorizationSnapshotException()
@@ -61,7 +63,7 @@ class AuthorizationSnapshotRepository(
                     template.resourceId,
                 )
             }.let(Collections::unmodifiableList)
-        val contextBytes = canonicalBytes(request.context)
+        val contextBytes = canonicalBytes(effectiveContext)
         if (contextBytes.size > MAX_CONTEXT_BYTES) throw AuthorizationSnapshotException()
         val forbiddenActions = layers.flatMap { it.forbiddenActions }.distinct().sorted()
         if (forbiddenActions.size > MAX_FORBIDDEN_ACTIONS) throw AuthorizationSnapshotException()
@@ -79,7 +81,7 @@ class AuthorizationSnapshotRepository(
             entity = AuthorizationEntity(request.entityId),
             action = request.action,
             resource = AuthorizationResource(request.resourceId, resourceState.entityActive),
-            context = immutableContext(request.context),
+            context = immutableContext(effectiveContext),
             forbiddenActions = Collections.unmodifiableList(forbiddenActions),
             grants = grants,
             relationships = relationships,
@@ -267,11 +269,52 @@ class AuthorizationSnapshotRepository(
         return Collections.unmodifiableList(sorted)
     }
 
+    private fun authoritativeContext(request: AuthorizationRequest): Map<String, Any?> {
+        if (request.action != TASK_COMPLETE_ACTION) return request.context
+        val facts = jdbc.query(
+            """SELECT process.state AS process_state,
+                      NOT EXISTS (
+                          SELECT 1 FROM occ.task_blocker blocker
+                          WHERE blocker.task_id = task.id
+                            AND blocker.resolved_at IS NULL
+                            AND blocker.severity = 'HARD'
+                      ) AND NOT EXISTS (
+                          SELECT 1
+                          FROM occ.task_gate_requirement requirement
+                          LEFT JOIN occ.task_gate_provider_state provider
+                            ON provider.task_id = requirement.task_id
+                           AND provider.provider_key = requirement.provider_key
+                          WHERE requirement.task_id = task.id
+                            AND (
+                                provider.status IS DISTINCT FROM 'READY'
+                                OR provider.source_entity_id IS NULL
+                                OR provider.source_row_version IS DISTINCT FROM
+                                   occ.task_gate_source_row_version(
+                                       requirement.provider_key, provider.source_entity_id, task.id
+                                   )
+                            )
+                      ) AS hard_blockers_absent
+               FROM occ.task_projection task
+               JOIN occ.process_instance process ON process.id = task.process_instance_id
+               WHERE task.id = ?""",
+            { rs, _ -> TaskCompletionFacts(rs.getString("process_state"), rs.getBoolean("hard_blockers_absent")) },
+            request.resourceId,
+        ).singleOrNull() ?: throw AuthorizationSnapshotException()
+        return LinkedHashMap(request.context).apply {
+            put(PROCESS_STATE_CONTEXT_KEY, facts.processState)
+            put(HARD_BLOCKERS_ABSENT_CONTEXT_KEY, facts.hardBlockersAbsent)
+        }
+    }
+
     private fun validateRequest(request: AuthorizationRequest) {
         if (!validUuid(request.requestId) || !validUuid(request.principalId) || !validUuid(request.entityId) ||
-            !validUuid(request.resourceId) || !validAction(request.action) || request.context.size > MAX_CONTEXT_PROPERTIES
+            !validUuid(request.resourceId) || !validAction(request.action)
         ) throw AuthorizationSnapshotException()
-        validateContextNode(request.context, 0)
+    }
+
+    private fun validateContext(context: Map<String, Any?>) {
+        if (context.size > MAX_CONTEXT_PROPERTIES) throw AuthorizationSnapshotException()
+        validateContextNode(context, 0)
     }
 
     private fun validateContextNode(value: Any?, depth: Int) {
@@ -399,6 +442,8 @@ class AuthorizationSnapshotRepository(
         val subjectRoleEntityKey: String,
     )
 
+    private data class TaskCompletionFacts(val processState: String, val hardBlockersAbsent: Boolean)
+
     companion object {
         private val PINNED_BUNDLE_STATUSES = setOf("ACTIVE", "DEPRECATED")
         private val OPA_REVISION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
@@ -410,6 +455,9 @@ class AuthorizationSnapshotRepository(
         private const val MAX_GRANTS = 256
         private const val MAX_RELATIONSHIPS = 256
         private const val MAX_MANIFEST_BYTES = 64 * 1024
+        private const val TASK_COMPLETE_ACTION = "task.complete"
+        private const val PROCESS_STATE_CONTEXT_KEY = "processState"
+        private const val HARD_BLOCKERS_ABSENT_CONTEXT_KEY = "hardBlockersAbsent"
         private val NIL_UUID = UUID(0, 0)
         private val ROLE_ASSIGNMENT_RELATION_ID = UUID.fromString("00000000-0000-7000-8000-000000000002")
         private val ACTION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
