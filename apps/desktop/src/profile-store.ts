@@ -28,6 +28,10 @@ interface ProfileStoreDependencies {
   write(value: unknown): Promise<void>;
   packaged: boolean;
   allowDevelopmentHttp?: boolean;
+  synchronizeCertificateReferences?(
+    profiles: ServerProfile[],
+    selectedId: string | null,
+  ): Promise<void>;
 }
 
 export interface ProfileStore {
@@ -48,6 +52,7 @@ export async function createProfileStore({
   write,
   packaged,
   allowDevelopmentHttp = false,
+  synchronizeCertificateReferences = async () => undefined,
 }: ProfileStoreDependencies): Promise<ProfileStore> {
   const loaded = persistedProfilesSchema.safeParse(await read());
   let profiles: ServerProfile[] = [];
@@ -65,6 +70,8 @@ export async function createProfileStore({
     }
   }
 
+  await synchronizeCertificateReferences(profiles.map(copyProfile), selectedId);
+
   const persist = (
     candidateProfiles: ServerProfile[],
     candidateSelectedId: string | null,
@@ -73,6 +80,19 @@ export async function createProfileStore({
       profiles: candidateProfiles.map(copyProfile),
       selectedId: candidateSelectedId,
     });
+
+  const synchronize = (
+    candidateProfiles: ServerProfile[],
+    candidateSelectedId: string | null,
+  ) => synchronizeCertificateReferences(candidateProfiles.map(copyProfile), candidateSelectedId);
+
+  const safeUnion = (candidateProfiles: ServerProfile[]): ServerProfile[] => {
+    const references = new Map<string, ServerProfile>();
+    for (const profile of [...profiles, ...candidateProfiles]) {
+      references.set(`${profile.id}:${profile.caFingerprint ?? ""}`, profile);
+    }
+    return [...references.values()];
+  };
 
   const enqueueMutation = <T>(mutation: () => Promise<T>): Promise<T> => {
     const result = mutationQueue.then(mutation);
@@ -109,7 +129,9 @@ export async function createProfileStore({
         } else {
           candidateProfiles[existingIndex] = profile;
         }
+        await synchronize(safeUnion(candidateProfiles), selectedId);
         await persist(candidateProfiles, selectedId);
+        await synchronize(candidateProfiles, selectedId);
         profiles = candidateProfiles;
         return copyProfile(profile);
       });
@@ -121,6 +143,7 @@ export async function createProfileStore({
           throw new Error(`Unknown profile: ${id}`);
         }
         await persist(profiles, id);
+        await synchronize(profiles, id);
         selectedId = id;
       });
     },
@@ -130,6 +153,7 @@ export async function createProfileStore({
         const candidateProfiles = profiles.filter((profile) => profile.id !== id);
         const candidateSelectedId = selectedId === id ? null : selectedId;
         await persist(candidateProfiles, candidateSelectedId);
+        await synchronize(candidateProfiles, candidateSelectedId);
         profiles = candidateProfiles;
         selectedId = candidateSelectedId;
       });

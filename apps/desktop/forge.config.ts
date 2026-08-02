@@ -25,6 +25,10 @@ const config: ForgeConfig = {
     appCopyright: "Copyright (c) 2026 Innorder",
     appVersion,
     buildVersion: appVersion,
+    extraResource: [
+      path.resolve(__dirname, "scripts", "enroll-deployment-ca.ps1"),
+      path.resolve(__dirname, "scripts", "remove-deployment-ca.ps1"),
+    ],
     win32metadata: {
       CompanyName: "Innorder",
       FileDescription: description,

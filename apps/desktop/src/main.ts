@@ -7,6 +7,7 @@ import { app, BrowserWindow, safeStorage, session } from "electron";
 
 import { createCoreClient } from "./core-client";
 import { createCommandIntentRegistry } from "./command-intents";
+import { synchronizeCertificateReferences } from "./certificate-manifest";
 import { createConnectivityTracker } from "./connectivity";
 import {
   createAtomicJsonPersistence,
@@ -115,6 +116,12 @@ if (ownsInstance) void app.whenReady().then(async () => {
       app.isPackaged,
       process.env.OCC_ALLOW_DEVELOPMENT_HTTP,
     ),
+    synchronizeCertificateReferences: (candidateProfiles, selectedId) =>
+      synchronizeCertificateReferences({
+        stateDirectory: path.join(userData, "state"),
+        profiles: candidateProfiles,
+        selectedId,
+      }),
   });
   let accessToken: string | null = null;
   let customerInstanceId: string | null = null;

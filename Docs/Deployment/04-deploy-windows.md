@@ -176,6 +176,12 @@ if ($LASTEXITCODE -ne 0) { throw '无法列出 Compose 服务' }
 
 **验证：** `verify:full` 必须以零退出，Docker/PostgreSQL 集成和真实 OPA 测试不得 skipped；`config --quiet` 必须以零退出。失败时保留脱敏日志、修复根因并从失败门禁重跑，不得以 `verify`、`verify:local` 或删除测试结果替代。
 
+### 桌面部署 CA 信任边界
+
+桌面安装包资源包含受限的部署 CA 登记和移除 helper。登记只接受绝对 payload 根目录、该目录内的严格证书 manifest、预先核对的 manifest SHA-256 与 CA SHA-256 指纹，并且只操作当前用户的 Root store。manifest 只允许相对证书文件名、公开证书、DNS/IP SAN、有效期和签名发布 manifest 元数据；不得包含私钥。产品状态保存在桌面 `userData/state` 下，记录产品、部署、owned thumbprint 和引用该 CA 的 profile ID。移除只处理相同产品拥有、无 profile 引用且 store 中指纹精确匹配的证书与状态。
+
+当前 `unsigned-dev` 安装包不是生产登记入口。`-PlanOnly` 可返回不访问真实证书 store 的确定性 JSON 计划；Development 模式可用于隔离测试。Production 模式必须同时验证 helper 和 installer 的有效 Authenticode 签名，否则明确返回 `AUTHENTICODE_REQUIRED` 或失败，不得写入伪造的 enrolled 状态。签名证书、私钥和时间戳凭据保持在仓库外。发布候选先执行 `npm run cert:verify`，再由发布流程传入已批准的 payload manifest SHA-256 和 CA 指纹。
+
 ## 镜像构建
 
 标准构建与启动分开执行，便于把构建失败和运行失败分离。构建会拉取固定 digest 的外部镜像并生成 `opa`、`ai`、`core`、`host-gateway` 本地镜像；不使用 `--no-verify`、自定义 Electron 镜像或未审批代理绕过来源控制。
