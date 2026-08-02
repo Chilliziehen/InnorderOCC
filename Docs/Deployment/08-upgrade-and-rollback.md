@@ -111,6 +111,77 @@ test ! -e "$release_evidence"
 install -d -m 0700 "$release_evidence"
 ```
 
+## 已初始化旧部署的引导路径过渡
+
+本节必须在上述项目全局生命周期锁仍由当前发布会话独占时完成，并且必须早于目标 release 的第一次 `docker compose config`、其他 Compose 命令或任何目标 Compose 插值。适用条件必须同时满足：当前实例已由旧 release 初始化并有现存用户数据、批准的数据库证据确认它不是空实例、受保护的 `infra/compose/.env` 缺少可用的 `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE` 路径。Windows 发布协调端不能构造或证明所需 POSIX 文件；它必须等待 Linux 部署主机在同一受管变更和生命周期锁下完成本节并返回无敏感内容的验证结论，才能执行后续目标 release 命令。
+
+真正未初始化的 clean instance 不得执行本过渡，也不得创建或使用零字节墓碑。它必须按[第 03 章管理员引导密码生命周期](03-secrets-and-configuration.md)创建专用父目录和非空、全新、受限的真实引导密码文件，完成首次引导后再原子替换为墓碑。实例是否已初始化未知时停止；不能用墓碑绕过首次管理员创建。
+
+已初始化旧部署在 Linux 主机执行以下命令。`OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE` 必须是批准的持久本地文件系统上的新专用路径；其父目录不能预先存在，从而避免接管未知目录。脚本不读取、复制或输出任何凭据，只把绝对 tombstone 路径写入 `.env`：
+
+```bash
+set -euo pipefail
+set +x
+: "${lifecycle_lock_fd:?必须先持有项目全局生命周期锁}"
+flock -n "$lifecycle_lock_fd"
+: "${OCC_LEGACY_INSTANCE_STATE:?必须设置旧实例状态}"
+[ "$OCC_LEGACY_INSTANCE_STATE" = initialized-with-existing-users ]
+: "${OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE:?必须设置旧部署墓碑绝对路径}"
+case "$OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE" in /*) ;; *) printf '墓碑路径必须是绝对路径\n' >&2; exit 1;; esac
+
+compose_env="$repository_root/infra/compose/.env"
+[ -f "$compose_env" ] && [ ! -L "$compose_env" ]
+[ "$(stat -c '%u:%g' "$compose_env")" = "$(id -u):$(id -g)" ]
+[ "$(stat -c '%a' "$compose_env")" = 600 ]
+bootstrap_key_count=$(grep -c '^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=' "$compose_env" || true)
+[ "$bootstrap_key_count" -le 1 ]
+
+bootstrap_tombstone="$OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE"
+bootstrap_parent=$(dirname -- "$bootstrap_tombstone")
+bootstrap_parent_parent=$(dirname -- "$bootstrap_parent")
+[ -d "$bootstrap_parent_parent" ] && [ ! -L "$bootstrap_parent_parent" ]
+[ ! -e "$bootstrap_parent" ] && [ ! -L "$bootstrap_parent" ]
+sudo install -d -o 10001 -g 10001 -m 0700 "$bootstrap_parent"
+[ "$(realpath -e -- "$bootstrap_parent")" = "$bootstrap_parent" ]
+[ "$(stat -c '%u:%g %a' "$bootstrap_parent")" = '10001:10001 700' ]
+[ ! -e "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+sudo install -o 10001 -g 10001 -m 0400 /dev/null "$bootstrap_tombstone"
+[ "$(realpath -e -- "$bootstrap_tombstone")" = "$bootstrap_tombstone" ]
+[ -f "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+[ "$(stat -c '%u:%g %a %s' "$bootstrap_tombstone")" = '10001:10001 400 0' ]
+
+env_tmp=$(mktemp --tmpdir="$(dirname -- "$compose_env")" .env.bootstrap-transition.XXXXXX)
+cleanup_bootstrap_transition() { rm -f -- "$env_tmp"; }
+trap cleanup_bootstrap_transition EXIT
+awk -v bootstrap_path="$bootstrap_tombstone" '
+  BEGIN { written=0 }
+  /^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/ {
+    if (!written) printf "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s\n", bootstrap_path
+    written=1
+    next
+  }
+  { print }
+  END {
+    if (!written) printf "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s\n", bootstrap_path
+  }
+' "$compose_env" >"$env_tmp"
+chmod --reference="$compose_env" "$env_tmp"
+chown --reference="$compose_env" "$env_tmp"
+[ -f "$env_tmp" ] && [ ! -L "$env_tmp" ]
+[ "$(stat -c '%u:%g %a' "$env_tmp")" = "$(stat -c '%u:%g %a' "$compose_env")" ]
+[ "$(grep -c '^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=' "$env_tmp")" -eq 1 ]
+[ "$(awk -F= '/^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/{sub(/^[^=]*=/, ""); print}' "$env_tmp")" = "$bootstrap_tombstone" ]
+mv -fT -- "$env_tmp" "$compose_env"
+trap - EXIT
+[ -f "$compose_env" ] && [ ! -L "$compose_env" ]
+[ "$(stat -c '%u:%g %a' "$compose_env")" = "$(id -u):$(id -g) 600" ]
+[ "$(realpath -e -- "$bootstrap_tombstone")" = "$bootstrap_tombstone" ]
+[ -f "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+[ "$(stat -c '%u:%g %a %s' "$bootstrap_tombstone")" = '10001:10001 400 0' ]
+```
+
+把“旧实例状态证据、父目录/文件 realpath、类型、numeric owner、mode、零大小、`.env` 原子替换成功”作为布尔结论写入发布证据；不得收集 `.env` 内容或文件内容。墓碑和 `.env` 项必须保留整个升级及回滚窗口。旧 release 不引用该变量，会忽略 `.env` 中这个额外 key，因此应用/镜像回滚不得删除或改成真实密码。只有全部受支持的目标 release 都不再要求该 bind 路径、回滚窗口已关闭且清理另获批准后，才能在项目全局生命周期锁内清理 `.env` 项和专用墓碑目录；当前支持的目标 release 仍要求它，所以本流程不提供清理命令。
+
 ## Revision、干净状态与发布来源
 
 运行目录必须已经由批准发布机制定位到目标 commit。本流程不执行 `git reset`、`git clean` 或隐式拉取；未知变更必须评审，而不是删除。

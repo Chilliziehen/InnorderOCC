@@ -805,6 +805,7 @@ trap - EXIT
 ## 升级检查单
 
 - [ ] 按[第 08 章](08-upgrade-and-rollback.md)固定当前/目标完整 commit、变更号、窗口、角色和停止条件。
+- [ ] 已初始化旧部署缺少引导路径时，先按[第 08 章过渡步骤](08-upgrade-and-rollback.md)在生命周期锁内创建并验证零字节墓碑、原子更新受保护 `.env`，再执行任何目标 Compose 插值；真正未初始化实例改用非空真实引导文件，绝不使用墓碑。
 - [ ] 工作区、provenance、依赖、Electron、Gradle strict、OPA、`verify:full`和镜像 digest全通过。
 - [ ] 已部署迁移路径/blob不可变；新增迁移事务性、锁、空间、中间态、双向兼容和前向修复已由DBA评审。
 - [ ] 新鲜完整备份、checksum、隔离恢复和所需 off-host trust实时重验通过。
@@ -816,6 +817,7 @@ trap - EXIT
 ## 回滚检查单
 
 - [ ] 明确失败仅在应用/镜像、配置、凭据还是 schema/数据；停止新写入并保存首次证据。
+- [ ] 引导墓碑及 `.env` 路径保留整个回滚窗口；旧 release 忽略额外 key，不恢复真实引导密码，也不提前清理墓碑。
 - [ ] 旧应用对当前 schema兼容性由DBA书面确认；未知即不允许旧镜像回滚。
 - [ ] schema未变时使用记录的旧 image ID/revision；配置/凭据按协调回退，不恢复单边状态。
 - [ ] schema已变且不兼容时选择批准前向修复或完整备份恢复，不编辑迁移历史/checksum。
