@@ -261,6 +261,41 @@ class EvidenceServiceIntegrationTest {
     }
 
     @Test
+    fun `unauthorized PUT cannot prebind content identity or lease`() {
+        val bytes = "authorized content".toByteArray()
+        val session = service.createSession(
+            metadata(fixture.participant, "authz-session", null),
+            sessionRequest(fixture.target, fixture.requirement, "authorization-order", "authorized.txt", bytes),
+        )
+        val before = uploadMutationSnapshot(session.body.id)
+
+        assertThatThrownBy {
+            service.upload(
+                metadata(fixture.reviewer, "attacker-prebind", 0), session.body.id, ByteArrayInputStream(bytes),
+            )
+        }.isInstanceOf(EvidenceUploadConflictException::class.java)
+        assertThat(uploadMutationSnapshot(session.body.id)).isEqualTo(before)
+
+        authorization.denied += session.body.evidenceId
+        assertThatThrownBy {
+            service.upload(
+                metadata(fixture.participant, "denied-prebind", 0), session.body.id, ByteArrayInputStream(bytes),
+            )
+        }.isInstanceOf(AuthorizationDeniedException::class.java)
+        assertThat(uploadMutationSnapshot(session.body.id)).isEqualTo(before)
+        assertThat(runtimeJdbc.queryForObject(
+            "SELECT count(*) FROM audit.idempotency_record WHERE idempotency_key IN ('attacker-prebind','denied-prebind')",
+            Long::class.java,
+        )).isZero()
+        authorization.denied.clear()
+
+        val confirmed = confirmed(service.upload(
+            metadata(fixture.participant, "legitimate-content", 0), session.body.id, ByteArrayInputStream(bytes),
+        ))
+        assertThat(confirmed.body.status).isEqualTo(UploadSessionStatus.CONFIRMED)
+    }
+
+    @Test
     fun `stale submit segregation and authorization denial fail without mutable history`() {
         val bytes = "review me".toByteArray()
         val session = service.createSession(
@@ -605,6 +640,13 @@ class EvidenceServiceIntegrationTest {
         require(table in setOf("occ.evidence_workflow_intent", "occ.evidence_notification_intent"))
         return runtimeJdbc.queryForObject("SELECT count(*) FROM $table WHERE evidence_id=?", Long::class.java, evidenceId)!!
     }
+
+    private fun uploadMutationSnapshot(sessionId: UUID): Map<String, Any?> = runtimeJdbc.queryForMap(
+        """SELECT content_idempotency_key,content_request_hash,status,lease_owner,lease_acquired_at,
+                  lease_heartbeat_at,lease_expires_at,row_version
+           FROM occ.upload_session WHERE id=?""",
+        sessionId,
+    )
 
     private fun assertTerminalFailure(sessionId: UUID, key: String, code: String, status: Int) {
         val failed = repository.session(sessionId)
