@@ -55,6 +55,12 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+// EvidenceParserWorkerMain is a sandboxed subprocess entrypoint that also ships
+// in this jar, so the Spring Boot application class is named explicitly.
+springBoot {
+    mainClass.set("com.innorder.occ.OccCoreApplication")
+}
+
 tasks.processResources {
     from(rootProject.layout.projectDirectory.dir("database/migrations")) {
         into("db/migration")

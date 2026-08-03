@@ -28,7 +28,11 @@
     "typecheck": "npm run build --workspace @innorder/contracts && npm run typecheck --workspaces --if-present",
     "verify": "node scripts/verify.mjs",
     "verify:local": "node scripts/verify.mjs --local",
-    "verify:full": "node scripts/verify.mjs --full"
+    "verify:full": "node scripts/verify.mjs --full",
+    "deploy:preflight": "node scripts/deploy/preflight.mjs",
+    "deploy:up": "node scripts/deploy/deploy.mjs",
+    "deploy:backup": "node scripts/deploy/backup.mjs",
+    "release": "node scripts/deploy/release.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.4",
