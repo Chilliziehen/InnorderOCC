@@ -14,14 +14,62 @@ describe("status client", () => {
     Object.defineProperty(window, "occ", {
       configurable: true,
       value: {
-        getSystemStatuses: vi.fn().mockRejectedValue(new Error("secret path")),
+        runtime: {
+          statuses: vi.fn().mockRejectedValue(new Error("secret path")),
+        },
       },
     });
 
-    await expect(getSystemStatuses()).resolves.toEqual([
-      expect.objectContaining({ service: "occ-core", state: "UNREACHABLE" }),
-      expect.objectContaining({ service: "occ-ai", state: "UNREACHABLE" }),
-    ]);
+    await expect(getSystemStatuses()).resolves.toEqual({
+      statuses: [
+        expect.objectContaining({ service: "occ-core", state: "UNREACHABLE" }),
+        expect.objectContaining({ service: "occ-ai", state: "UNREACHABLE" }),
+      ],
+      successful: false,
+      coreReachable: false,
+      polledAt: expect.any(Number),
+    });
+  });
+
+  it("reports successful polling and explicit Core reachability", async () => {
+    const checkedAt = "2026-08-01T12:00:00.000Z";
+    Object.defineProperty(window, "occ", {
+      configurable: true,
+      value: { runtime: { statuses: vi.fn().mockResolvedValue([{
+        service: "occ-core",
+        version: "0.1.0",
+        state: "UNREACHABLE",
+        checkedAt,
+        components: [],
+      }]) } },
+    });
+
+    await expect(getSystemStatuses()).resolves.toMatchObject({
+      successful: true,
+      coreReachable: false,
+      statuses: [expect.objectContaining({ service: "occ-core" })],
+    });
+  });
+
+  it.each([
+    ["empty", []],
+    ["AI-only", [{
+      service: "occ-ai",
+      version: "0.1.0",
+      state: "READY" as const,
+      checkedAt: "2026-08-01T12:00:00.000Z",
+      components: [],
+    }]],
+  ])("fails closed when a successful %s response omits Core", async (_name, statuses) => {
+    Object.defineProperty(window, "occ", {
+      configurable: true,
+      value: { runtime: { statuses: vi.fn().mockResolvedValue(statuses) } },
+    });
+
+    await expect(getSystemStatuses()).resolves.toMatchObject({
+      successful: true,
+      coreReachable: false,
+    });
   });
 
   it("does not overlap requests or notify after disposal", async () => {
@@ -35,7 +83,7 @@ describe("status client", () => {
     );
     Object.defineProperty(window, "occ", {
       configurable: true,
-      value: { getSystemStatuses: getStatuses },
+      value: { runtime: { statuses: getStatuses } },
     });
     const onStatuses = vi.fn();
 
@@ -46,6 +94,11 @@ describe("status client", () => {
     resolveRequest?.([]);
     await vi.advanceTimersByTimeAsync(0);
     expect(onStatuses).toHaveBeenCalledTimes(1);
+    expect(onStatuses).toHaveBeenCalledWith(expect.objectContaining({
+      statuses: [],
+      successful: true,
+      coreReachable: false,
+    }));
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(getStatuses).toHaveBeenCalledTimes(2);

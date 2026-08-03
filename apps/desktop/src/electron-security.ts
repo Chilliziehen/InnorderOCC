@@ -62,3 +62,54 @@ export function registerProductionCsp(
     });
   });
 }
+
+interface PermissionSession {
+  setPermissionRequestHandler(
+    handler: (webContents: unknown, permission: string, callback: (allowed: boolean) => void) => void,
+  ): void;
+  setPermissionCheckHandler(
+    handler: (webContents: unknown, permission: string) => boolean,
+  ): void;
+}
+
+export function registerPermissionDenial(target: PermissionSession): void {
+  target.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  target.setPermissionCheckHandler(() => false);
+}
+
+export function isDevelopmentHttpEnabled(
+  packaged: boolean,
+  explicitFlag: string | undefined,
+): boolean {
+  return !packaged && explicitFlag === "true";
+}
+
+interface SingleInstanceApp {
+  requestSingleInstanceLock(): boolean;
+  quit(): void;
+  on(event: "second-instance", listener: () => void): unknown;
+}
+
+interface FocusableWindow {
+  isDestroyed(): boolean;
+  isMinimized(): boolean;
+  restore(): void;
+  focus(): void;
+}
+
+export function registerSingleInstanceLifecycle(
+  target: SingleInstanceApp,
+  getWindow: () => FocusableWindow | undefined,
+): boolean {
+  if (!target.requestSingleInstanceLock()) {
+    target.quit();
+    return false;
+  }
+  target.on("second-instance", () => {
+    const window = getWindow();
+    if (!window || window.isDestroyed()) return;
+    if (window.isMinimized()) window.restore();
+    window.focus();
+  });
+  return true;
+}

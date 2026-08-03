@@ -176,6 +176,18 @@ if ($LASTEXITCODE -ne 0) { throw '无法列出 Compose 服务' }
 
 **验证：** `verify:full` 必须以零退出，Docker/PostgreSQL 集成和真实 OPA 测试不得 skipped；`config --quiet` 必须以零退出。失败时保留脱敏日志、修复根因并从失败门禁重跑，不得以 `verify`、`verify:local` 或删除测试结果替代。
 
+### 桌面部署 CA 信任边界
+
+桌面安装包资源包含受限的部署 CA 登记和移除 helper。登记只接受绝对 payload 根目录、该目录内的严格证书/release manifest、预先核对的 manifest SHA-256 与 CA SHA-256 指纹，并且只操作当前用户的 Root store。release manifest 严格绑定 `com.innorder.occ`、产品版本、`InnorderOCC`/`Innorder OCC` PE 身份、installer 以及登记/移除 helper 的精确 basename 和 SHA-256、证书 manifest 内容 SHA-256，以及批准发布者的 subject/thumbprint。证书 manifest 反向绑定 release manifest 文件 SHA-256，并携带对该摘要的 RSA-SHA256 签名；helper 使用内嵌的只读生产 RSA 公钥验证签名，不接受生产 key override。两个 manifest 均不得包含私钥。
+
+发布流水线在 `make` 前把完整且已签名的 `release-manifest.json`、`certificate-manifest.json`、公开 CA 文件和严格 `deployment-ca.confirmed.json` 放入 `apps/desktop/assets/deployment-ca`；Forge 仅在该目录存在时把它复制为 `resources/deployment-ca`。确认文件固定包含 `version: 1`、`productId: com.innorder.occ`、UUID v4 `deploymentId`、`confirmed: true`、证书 manifest SHA-256 和 CA 指纹。四项任一缺失时 Squirrel install/update/uninstall 是 no-op；helper 失败（包括 unsigned-dev 的 `AUTHENTICODE_REQUIRED`）不得阻止安装或卸载。不要在普通开发构建中创建该目录。
+
+产品状态保存在桌面 `userData/state` 下。登记、profile 引用同步和移除使用同一个 `.deployment-ca.lifecycle.lock`，移除在持锁后重新严格读取状态。只有本次实际导入或已有有效 ownership 状态才能令 `importedByProduct=true`；预先存在的精确证书可以被管理和引用，但卸载不得移除。所有 deployment/profile ID 和状态文件名只接受 UUID v4。
+
+release bundle 验证必须声明用途。`enroll` 要求 CA 在当前时间有效；`remove` 仍验证 release 签名、全部文件哈希、CA 结构/身份/指纹和 Authenticode，受信任的移除 helper 仍严格验证 ownership，但仅为清理已拥有状态而允许 CA 已过期或尚未生效。该时间例外不得用于登记、profile 连接或服务器证书验证。
+
+当前 `unsigned-dev` 安装包不是生产登记入口。`-PlanOnly` 可返回不访问真实证书 store 的确定性 JSON 计划；`-TestStoreRoot` 和测试发布公钥只允许 Development 测试路径，Production 会拒绝重定向。受信任的 ASAR main 必须先完成 release RSA 和全部文件哈希验证，再用固定 `-NoProfile -NonInteractive -Command` 逻辑验证目标 helper/installer 的 Authenticode、同一批准发布者 subject/thumbprint 和 PE 产品身份，最后才用精确 `-File` 路径执行 helper；不得使用 execution-policy bypass。任一门禁失败不得启动 helper 或写入 enrolled 状态。签名证书、RSA 私钥和时间戳凭据保持在仓库外。发布候选先执行 `npm run cert:verify`，再执行完整 type/package/make/smoke 门禁。
+
 ## 镜像构建
 
 标准构建与启动分开执行，便于把构建失败和运行失败分离。构建会拉取固定 digest 的外部镜像并生成 `opa`、`ai`、`core`、`host-gateway` 本地镜像；不使用 `--no-verify`、自定义 Electron 镜像或未审批代理绕过来源控制。

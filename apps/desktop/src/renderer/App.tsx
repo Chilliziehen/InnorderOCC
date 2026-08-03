@@ -1,312 +1,289 @@
-import type {
-  ComponentStatus,
-  ServiceState,
-  SystemStatus,
-} from "@innorder/contracts";
-import { ConfigProvider, Tooltip } from "antd";
-import {
-  AlertTriangle,
-  Boxes,
-  CheckCircle2,
-  CircleGauge,
-  CircleHelp,
-  ClipboardCheck,
-  Clock3,
-  FileCheck2,
-  GitBranch,
-  ListTodo,
-  OctagonX,
-  Settings,
-  ShieldAlert,
-  Sparkles,
-  Workflow,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ConfigProvider } from "antd";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { SystemStatus } from "@innorder/contracts";
 
+import type { LoginInput, NotificationConnectionState, ProfileInput, ServerProfile, SessionSnapshot } from "../desktop-contract";
+import {
+  initialAppState,
+  reduceAppState,
+  type AppEvent,
+  type AppState,
+} from "./app-controller";
+import { AppShell } from "./components/AppShell";
+import { Login } from "./components/Login";
+import { ProfileBootstrap } from "./components/ProfileBootstrap";
+import { createHashRouter } from "./routes";
 import { startStatusPolling } from "./status-client";
 
-const NAVIGATION: Array<{ label: string; icon: LucideIcon }> = [
-  { label: "总览", icon: CircleGauge },
-  { label: "今日任务", icon: ListTodo },
-  { label: "流程", icon: Workflow },
-  { label: "审核队列", icon: FileCheck2 },
-  { label: "风险", icon: ShieldAlert },
-  { label: "领域包", icon: Boxes },
-  { label: "系统", icon: Settings },
-];
-
-const METRICS = [
-  { label: "进行中流程", icon: GitBranch },
-  { label: "今日待办", icon: ClipboardCheck },
-  { label: "待审核", icon: Clock3 },
-  { label: "高风险", icon: AlertTriangle },
-];
-
-interface FixedService {
-  id: string;
-  label: string;
-  sourceService?: string;
-  componentId?: string;
-  detail: string;
-}
-
-const SERVICES: FixedService[] = [
-  {
-    id: "occ-core",
-    label: "OCC Core",
-    sourceService: "occ-core",
-    componentId: "core-runtime",
-    detail: "等待核心服务响应",
-  },
-  {
-    id: "occ-ai",
-    label: "AI Service",
-    sourceService: "occ-ai",
-    detail: "等待智能服务响应",
-  },
-  {
-    id: "postgresql",
-    label: "PostgreSQL",
-    componentId: "postgresql",
-    detail: "等待 Core 上报依赖状态",
-  },
-  {
-    id: "flowable",
-    label: "Flowable",
-    componentId: "flowable",
-    detail: "等待 Core 上报依赖状态",
-  },
-  {
-    id: "opa",
-    label: "OPA",
-    componentId: "opa",
-    detail: "等待 Core 上报依赖状态",
-  },
-  {
-    id: "kafka",
-    label: "Kafka",
-    componentId: "kafka",
-    detail: "等待 Core 上报依赖状态",
-  },
-  {
-    id: "redis",
-    label: "Redis",
-    componentId: "redis",
-    detail: "等待 Core 上报依赖状态",
-  },
-  {
-    id: "minio",
-    label: "MinIO",
-    componentId: "minio",
-    detail: "等待 Core 上报依赖状态",
-  },
-];
-
-const STATE_META: Record<
-  ServiceState,
-  { label: string; icon: LucideIcon; className: string }
-> = {
-  READY: { label: "就绪", icon: CheckCircle2, className: "ready" },
-  DEGRADED: { label: "降级", icon: AlertTriangle, className: "degraded" },
-  UNREACHABLE: { label: "不可达", icon: OctagonX, className: "unreachable" },
-  CHECKING: { label: "检查中", icon: CircleHelp, className: "checking" },
-};
-
-interface ServiceView {
-  state: ServiceState;
-  detail: string;
-}
-
-function findComponent(
-  statuses: SystemStatus[],
-  componentId: string,
-): ComponentStatus | undefined {
-  return statuses
-    .find(({ service }) => service === "occ-core")
-    ?.components.find((component) => component.id === componentId);
-}
-
-function serviceView(
-  service: FixedService,
-  statuses: SystemStatus[],
-): ServiceView {
-  if (service.sourceService) {
-    const status = statuses.find(({ service: name }) => name === service.sourceService);
-    if (status && service.componentId && status.state !== "UNREACHABLE") {
-      const component = status.components.find(({ id }) => id === service.componentId);
-      return component
-        ? { state: component.state, detail: component.detail ?? `版本 ${status.version}` }
-        : { state: "CHECKING", detail: service.detail };
-    }
-    return status
-      ? {
-          state: status.state,
-          detail:
-            status.state === "UNREACHABLE"
-              ? "服务端点无响应"
-              : `版本 ${status.version}`,
-        }
-      : { state: "CHECKING", detail: service.detail };
-  }
-
-  const core = statuses.find(({ service }) => service === "occ-core");
-  if (core?.state === "UNREACHABLE") {
-    return { state: "UNREACHABLE", detail: "Core 不可达，依赖状态未知" };
-  }
-
-  const component = service.componentId
-    ? findComponent(statuses, service.componentId)
-    : undefined;
-  return component
-    ? { state: component.state, detail: component.detail ?? "依赖状态已上报" }
-    : { state: "CHECKING", detail: service.detail };
-}
-
-function StatusMark({ state }: { state: ServiceState }) {
-  const meta = STATE_META[state];
-  const Icon = meta.icon;
-  return (
-    <span className={`status-mark status-${meta.className}`}>
-      <Icon aria-hidden="true" size={15} strokeWidth={2} />
-      {meta.label}
-    </span>
-  );
+function nextGeneration(state: AppState): number {
+  return state.sessionGeneration + 1;
 }
 
 export function App() {
-  const [statuses, setStatuses] = useState<SystemStatus[]>([]);
+  const [state, dispatch] = useReducer(reduceAppState, initialAppState);
+  const stateRef = useRef(state);
+  const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [notificationState, setNotificationState] = useState<NotificationConnectionState>();
+  const [statuses, setStatuses] = useState<{
+    profileId: string;
+    generation: number;
+    values: SystemStatus[];
+  } | null>(null);
+  const routerRef = useRef<ReturnType<typeof createHashRouter> | null>(null);
+  stateRef.current = state;
 
-  useEffect(() => startStatusPolling(setStatuses), []);
+  const dispatchEvent = useCallback((event: AppEvent) => {
+    stateRef.current = reduceAppState(stateRef.current, event);
+    dispatch(event);
+  }, []);
+
+  const restore = useCallback(async (profile: ServerProfile, generation: number) => {
+    dispatchEvent({
+      type: "SESSION_OPERATION_STARTED",
+      operation: "restore",
+      profileId: profile.id,
+      generation,
+    });
+    try {
+      const session = await window.occ.session.restore();
+      dispatchEvent({
+        type: "SESSION_RESTORED",
+        profileId: profile.id,
+        generation,
+        session,
+        at: Date.now(),
+      });
+    } catch {
+      dispatchEvent({
+        type: "SESSION_OPERATION_FAILED",
+        operation: "restore",
+        profileId: profile.id,
+        generation,
+      });
+    }
+  }, [dispatchEvent]);
+
+  const initialize = useCallback(async () => {
+    setLoading(true);
+    setLoadFailed(false);
+    try {
+      const [profiles, profile] = await Promise.all([
+        window.occ.profiles.list(),
+        window.occ.profiles.current(),
+      ]);
+      dispatchEvent({
+        type: "PROFILES_LOADED",
+        profiles,
+        selectedProfileId: profile?.id ?? null,
+      });
+      if (profile) {
+        await restore(profile, nextGeneration(stateRef.current));
+      }
+    } catch {
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [dispatchEvent, restore]);
+
+  useEffect(() => {
+    const router = createHashRouter();
+    routerRef.current = router;
+    dispatchEvent({ type: "ROUTE_CHANGED", route: router.get() });
+    const dispose = router.subscribe((route) => dispatchEvent({ type: "ROUTE_CHANGED", route }));
+    void initialize();
+    return () => {
+      dispose();
+      routerRef.current = null;
+    };
+  }, [dispatchEvent, initialize]);
+
+  useEffect(() => {
+    const offline = () => dispatchEvent({ type: "OFFLINE", at: Date.now() });
+    const online = () => dispatchEvent({ type: "ONLINE", at: Date.now() });
+    window.addEventListener("offline", offline);
+    window.addEventListener("online", online);
+    return () => {
+      window.removeEventListener("offline", offline);
+      window.removeEventListener("online", online);
+    };
+  }, [dispatchEvent]);
+
+  useEffect(() => window.occ.notifications.subscribeState(setNotificationState), []);
+
+  useEffect(() => {
+    if (state.mode !== "reconnecting" || state.sessionOperation !== null || state.retryAvailable) return;
+    void restore(state.profile, nextGeneration(state));
+  }, [restore, state]);
+
+  useEffect(() => {
+    if (state.mode !== "authenticated" && state.mode !== "offline" && state.mode !== "reconnecting") return;
+    const expiresAt = Date.parse(state.expiresAt);
+    let timer: number | undefined;
+    const schedule = () => {
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        dispatchEvent({
+          type: "SESSION_EXPIRED",
+          profileId: state.profile.id,
+          generation: state.sessionGeneration,
+        });
+        return;
+      }
+      timer = window.setTimeout(schedule, Math.min(remaining, 2_147_483_647));
+    };
+    schedule();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [dispatchEvent, state]);
+
+  const statusProfileId = state.mode === "bootstrap" || state.mode === "login"
+    ? null
+    : state.profile.id;
+  const statusGeneration = state.mode === "bootstrap" || state.mode === "login"
+    ? null
+    : state.sessionGeneration;
+
+  useEffect(() => {
+    if (statusProfileId === null || statusGeneration === null) {
+      setStatuses(null);
+      return;
+    }
+    const profileId = statusProfileId;
+    const generation = statusGeneration;
+    setStatuses({ profileId, generation, values: [] });
+    return startStatusPolling((sample) => {
+      const current = stateRef.current;
+      if (
+        (current.mode !== "authenticated" && current.mode !== "offline" && current.mode !== "reconnecting") ||
+        current.profile.id !== profileId ||
+        current.sessionGeneration !== generation
+      ) return;
+      setStatuses({ profileId, generation, values: sample.statuses });
+      dispatchEvent({
+        type: sample.successful && sample.coreReachable
+          ? "STATUS_REACHABLE"
+          : "STATUS_UNREACHABLE",
+        profileId,
+        generation,
+        at: sample.polledAt,
+      });
+    });
+  }, [dispatchEvent, statusGeneration, statusProfileId]);
+
+  const selectProfile = async (profile: ServerProfile) => {
+    await window.occ.profiles.select(profile.id);
+    dispatchEvent({ type: "PROFILE_SELECTED", profile });
+    await restore(profile, nextGeneration(stateRef.current));
+  };
+
+  const saveProfile = async (input: ProfileInput) => {
+    const current = stateRef.current;
+    if (current.mode === "offline" || current.mode === "reconnecting") {
+      throw new Error("Profile changes unavailable");
+    }
+    const profile = await window.occ.profiles.save(input);
+    await window.occ.profiles.select(profile.id);
+    const profiles = stateRef.current.profiles.some(({ id }) => id === profile.id)
+      ? stateRef.current.profiles.map((item) => item.id === profile.id ? profile : item)
+      : [...stateRef.current.profiles, profile];
+    dispatchEvent({ type: "PROFILES_LOADED", profiles, selectedProfileId: profile.id });
+    await restore(profile, nextGeneration(stateRef.current));
+    return profile;
+  };
+
+  const removeProfile = async (profileId: string) => {
+    const current = stateRef.current;
+    if (current.mode === "offline" || current.mode === "reconnecting") {
+      throw new Error("Profile changes unavailable");
+    }
+    await window.occ.profiles.remove(profileId);
+    dispatchEvent({ type: "PROFILE_REMOVED", profileId });
+  };
+
+  const login = async (input: LoginInput): Promise<SessionSnapshot> => {
+    const current = stateRef.current;
+    if (current.mode !== "login") throw new Error("Login unavailable");
+    const generation = nextGeneration(current);
+    const profileId = current.profile.id;
+    dispatchEvent({ type: "SESSION_OPERATION_STARTED", operation: "login", profileId, generation });
+    const session = await window.occ.session.login(input);
+    if (session.state !== "authenticated") throw new Error("Login failed");
+    dispatchEvent({ type: "LOGIN_SUCCEEDED", profileId, generation, session, at: Date.now() });
+    return session;
+  };
+
+  const logout = async () => {
+    const current = stateRef.current;
+    if (current.mode !== "authenticated" && current.mode !== "offline" && current.mode !== "reconnecting") return;
+    const profileId = current.profile.id;
+    const generation = current.sessionGeneration;
+    try {
+      await window.occ.session.logout();
+    } catch {
+      // Main clears local credentials even if server revocation is unavailable.
+    } finally {
+      dispatchEvent({ type: "LOGOUT", profileId, generation });
+    }
+  };
+
+  const retryRestore = () => {
+    const current = stateRef.current;
+    if (current.mode !== "reconnecting" || current.sessionOperation !== null) return;
+    void restore(current.profile, nextGeneration(current));
+  };
+
+  let content;
+  if (loading) {
+    content = <main className="entry-screen" aria-busy="true"><p role="status">正在加载服务器配置…</p></main>;
+  } else if (loadFailed) {
+    content = (
+      <main className="entry-screen">
+        <section className="entry-panel"><p className="form-error" role="alert">无法加载服务器配置。</p><button className="primary-action" type="button" onClick={() => void initialize()}>重试</button></section>
+      </main>
+    );
+  } else if (state.mode === "bootstrap") {
+    content = <main className="entry-screen"><ProfileBootstrap profiles={state.profiles} onSave={saveProfile} onSelect={selectProfile} /></main>;
+  } else if (state.mode === "login") {
+    content = (
+      <main className="entry-screen">
+        <Login
+          profile={state.profile}
+          profiles={state.profiles}
+          {...(state.notice ? { notice: state.notice } : {})}
+          onProfileSelect={selectProfile}
+          onSubmit={login}
+        />
+      </main>
+    );
+  } else {
+    const visibleStatuses = statuses?.profileId === state.profile.id &&
+      statuses.generation === state.sessionGeneration
+      ? statuses.values
+      : [];
+    content = (
+      <AppShell
+        state={state}
+        statuses={visibleStatuses}
+        {...(notificationState ? { notificationState } : {})}
+        onLogout={logout}
+        onProfileSelect={selectProfile}
+        onProfileSave={saveProfile}
+        onProfileRemove={removeProfile}
+        onRetry={retryRestore}
+      />
+    );
+  }
 
   return (
-    <ConfigProvider
-      theme={{
-        token: {
-          colorPrimary: "#146c68",
-          borderRadius: 6,
-          fontFamily:
-            'Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif',
-        },
-      }}
-    >
-      <div className="app-shell">
-        <aside className="sidebar">
-          <div className="brand">
-            <span className="brand-mark">序</span>
-            <div>
-              <strong>创序 OCC</strong>
-              <small>运营控制中心</small>
-            </div>
-          </div>
-          <nav aria-label="主导航">
-            {NAVIGATION.map(({ label, icon: Icon }, index) => (
-              <button
-                aria-current={index === 0 ? "page" : undefined}
-                className={index === 0 ? "nav-item active" : "nav-item"}
-                key={label}
-                type="button"
-              >
-                <Icon aria-hidden="true" size={18} />
-                <span>{label}</span>
-              </button>
-            ))}
-          </nav>
-          <div className="operator">
-            <span className="operator-avatar">值</span>
-            <div>
-              <strong>值班席位</strong>
-              <small>本地工作区</small>
-            </div>
-          </div>
-        </aside>
-
-        <main className="workspace">
-          <header className="workspace-header">
-            <div>
-              <p className="section-kicker">运营控制中心</p>
-              <h1>运行总览</h1>
-            </div>
-            <Tooltip title="状态由本地服务定时上报">
-              <span className="poll-indicator" aria-label="状态自动轮询中">
-                <span aria-hidden="true" />
-                自动轮询
-              </span>
-            </Tooltip>
-          </header>
-
-          <section className="metric-grid" aria-label="关键指标">
-            {METRICS.map(({ label, icon: Icon }) => (
-              <article className="metric" key={label}>
-                <div className="metric-label">
-                  <Icon aria-hidden="true" size={17} />
-                  <span>{label}</span>
-                </div>
-                <strong>--</strong>
-                <small>暂无遥测</small>
-              </article>
-            ))}
-          </section>
-
-          <div className="overview-grid">
-            <section className="panel status-panel" aria-labelledby="service-status-title">
-              <div className="panel-heading">
-                <div>
-                  <h2 id="service-status-title">服务状态</h2>
-                  <p>运行时与基础依赖</p>
-                </div>
-                <span className="row-count">8 项</span>
-              </div>
-              <div className="status-table" role="table" aria-label="服务状态">
-                <div className="status-table-head" role="row">
-                  <span role="columnheader">服务</span>
-                  <span role="columnheader">状态</span>
-                  <span role="columnheader">运行详情</span>
-                </div>
-                {SERVICES.map((service) => {
-                  const view = serviceView(service, statuses);
-                  return (
-                    <div className="status-row" role="row" key={service.id}>
-                      <strong role="cell">{service.label}</strong>
-                      <span role="cell"><StatusMark state={view.state} /></span>
-                      <span className="status-detail" role="cell">{view.detail}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="panel workflow-panel" aria-labelledby="workflow-title">
-              <div className="panel-heading">
-                <div>
-                  <h2 id="workflow-title">活动流程</h2>
-                  <p>当前执行摘要</p>
-                </div>
-              </div>
-              <div className="empty-state">
-                <Workflow aria-hidden="true" size={24} />
-                <strong>等待流程遥测</strong>
-                <span>尚未收到流程运行数据</span>
-              </div>
-            </section>
-
-            <section className="panel intervention-panel" aria-labelledby="intervention-title">
-              <div className="panel-heading">
-                <div>
-                  <h2 id="intervention-title">人工介入队列</h2>
-                  <p>异常、审批与策略阻断</p>
-                </div>
-                <span className="row-count" aria-label="队列数量未知">--</span>
-              </div>
-              <div className="empty-state compact">
-                <Sparkles aria-hidden="true" size={22} />
-                <strong>等待介入队列遥测</strong>
-                <span>尚未收到人工介入队列数据</span>
-              </div>
-            </section>
-          </div>
-        </main>
-      </div>
+    <ConfigProvider theme={{ token: {
+      colorPrimary: "#146c68",
+      borderRadius: 6,
+      fontFamily: 'Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif',
+    } }}>
+      {content}
     </ConfigProvider>
   );
 }
