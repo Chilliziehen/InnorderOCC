@@ -33,7 +33,6 @@ Compose 项目名为 `innorder-occ`，包含十三个服务、七个命名卷和
 Compose 的显式条件依赖包括：
 
 ```text
-minio-volume-init --成功完成--> minio --健康--> minio-init
 parser-volume-init --成功完成--> parser --健康--> ai
 postgres --健康--> flowable-init --成功完成--> core
 postgres --健康--> postgres-init --成功完成--> minio --健康--> minio-init
@@ -88,7 +87,7 @@ Kafka 使用单节点 KRaft：
 | `postgres-data` | `postgres` | 数据库、迁移历史、角色和 Flowable 表，是核心事实存储 |
 | `kafka-data` | `kafka` | broker 日志和 KRaft 元数据，不是权威业务主存储 |
 | `redis-data` | `redis` | AOF 缓存状态；设计上应可丢失和重建，但当前降级仍需验证 |
-| `minio-data` | `minio-volume-init`、`minio` | 对象、桶和 MinIO 内部配置 |
+| `minio-data` | `postgres-init`、`minio` | 对象、桶和 MinIO 内部配置 |
 | `parser-input` | `parser-volume-init`、`parser`、`ai` | AI 写入、parser 只读的短期隔离输入；不是权威存储 |
 | `parser-requests` | `parser-volume-init`、`parser`、`ai` | 哈希绑定的解析请求和处理中声明；可在停机后清理 |
 | `parser-output` | `parser-volume-init`、`parser`、`ai` | 有界解析结果和 parser 心跳；可丢弃并重建 |

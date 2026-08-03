@@ -204,12 +204,11 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.equal(compose.networks["host-access"].internal, undefined);
   assert.deepEqual(
     Object.entries(compose.services).filter(([, service]) => service.restart === "no").map(([name]) => name).sort(),
-    ["flowable-init", "minio-init", "postgres-init"],
+    ["flowable-init", "minio-init", "parser-volume-init", "postgres-init"],
   );
 
   for (const [name, service] of Object.entries(compose.services)) {
-    if (!["flowable-init", "minio-init", "minio-volume-init", "parser-volume-init"].includes(name)) {
-    if (!["flowable-init", "minio-init", "postgres-init"].includes(name)) {
+    if (!["flowable-init", "minio-init", "parser-volume-init", "postgres-init"].includes(name)) {
       assert.ok(service.healthcheck?.test, `${name} must have a healthcheck`);
     }
     if (name === "host-gateway") {
@@ -281,18 +280,18 @@ test("Compose wiring follows application config and completion gates", () => {
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
     "OBJECT_STORAGE_ENDPOINT",
+    "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
+    "OCC_BOOTSTRAP_DELETE_SECRET",
+    "OCC_BOOTSTRAP_SECRET_OWNER",
     "OCC_EVIDENCE_CLEANUP_ENABLED",
     "OCC_EVIDENCE_PRODUCTION_ENABLED",
+    "OCC_JWT_ISSUER",
+    "OCC_JWT_PRIVATE_KEY_FILE",
+    "OCC_JWT_PUBLIC_KEY_FILE",
     "OCC_RISK_DUE_ENABLED",
     "OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID",
     "OCC_RISK_METRICS_ENABLED",
     "OCC_RISK_METRICS_REPORT_RESOURCE_ID",
-    "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
-    "OCC_BOOTSTRAP_DELETE_SECRET",
-    "OCC_BOOTSTRAP_SECRET_OWNER",
-    "OCC_JWT_ISSUER",
-    "OCC_JWT_PRIVATE_KEY_FILE",
-    "OCC_JWT_PUBLIC_KEY_FILE",
     "OPA_BASE_URL",
     "REDIS_HOST",
     "REDIS_PORT",
@@ -568,7 +567,7 @@ test("rendered Compose gives only Core runtimes readable production JWT paths", 
       "POSTGRES_ADMIN_PASSWORD_FILE", "POSTGRES_FLYWAY_PASSWORD_FILE", "POSTGRES_RUNTIME_PASSWORD_FILE",
       "REDIS_PASSWORD_FILE", "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE",
       "MINIO_APP_USER_FILE", "MINIO_APP_PASSWORD_FILE", "OCC_JWT_PRIVATE_KEY_FILE", "OCC_JWT_PUBLIC_KEY_FILE",
-      "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
+      "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE", "CURSOR_HMAC_KEY_FILE", "AI_DATABASE_PASSWORD_FILE",
     ].map((name) => {
       const path = join(directory, name.toLowerCase()).replaceAll("\\", "/");
       writeFileSync(path, name.startsWith("OCC_JWT") ? "-----BEGIN TEST KEY-----\nproduction-compose-only\n-----END TEST KEY-----\n" : `${name}-value\n`, "utf8");
@@ -703,7 +702,13 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /risk\.sla_breach/u);
   assert.match(readme, /administrator bootstrap is optional and one-shot/iu);
   assert.match(readme, /without an administrator password/iu);
-  assert.doesNotMatch(read("infra/compose/compose.yml"), /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
+  // The bootstrap password is a one-shot bind mount, so it must never appear as
+  // a Compose file secret even though the bind source interpolates its path.
+  assert.ok(!Object.keys(parse(read(composePath)).secrets ?? {}).some((name) => /bootstrap/u.test(name)));
+  assert.deepEqual(
+    (parse(read(composePath)).services.core.secrets ?? []).filter((secret) => /bootstrap/u.test(secret.source ?? secret)),
+    [],
+  );
   assert.match(readme, /Flowable initialization completes after the\s+`postgres-init` gate and before Core/u);
   assert.match(readme, /MinIO bucket initialization remains\s+independent of Core readiness/u);
   assert.doesNotMatch(readme, /Core waits for both MinIO readiness/u);

@@ -6,28 +6,28 @@ Install Docker Engine with Docker Compose v2. The stack requires Linux
 containers and enough memory for PostgreSQL, Kafka, Core, and supporting
 services.
 
-Create nine files outside the repository. Each file must contain one unique,
-non-empty value without surrounding quotes. Create `infra/compose/.env` from
-Create ten files outside the repository: eight scalar credential files and one
+Create thirteen files outside the repository: eleven scalar credential files,
+each holding one unique non-empty value without surrounding quotes, and one
 PKCS#8 private/X.509 public RSA key pair. Create `infra/compose/.env` from
 `.env.example` and set these variables to the corresponding absolute paths:
 
 - `POSTGRES_ADMIN_PASSWORD_FILE`
-- `CURSOR_HMAC_KEY_FILE`
 - `POSTGRES_FLYWAY_PASSWORD_FILE`
 - `POSTGRES_RUNTIME_PASSWORD_FILE`
+- `AI_DATABASE_PASSWORD_FILE`
+- `CURSOR_HMAC_KEY_FILE`
 - `REDIS_PASSWORD_FILE`
 - `MINIO_ROOT_USER_FILE`
 - `MINIO_ROOT_PASSWORD_FILE`
 - `MINIO_APP_USER_FILE`
 - `MINIO_APP_PASSWORD_FILE`
+- `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE`
 - `OCC_JWT_PRIVATE_KEY_FILE`
 - `OCC_JWT_PUBLIC_KEY_FILE`
-- `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE`
 
 Set required `OCC_JWT_ISSUER` to the deployment's explicit HTTPS issuer URI.
 
-The three PostgreSQL passwords must differ. The MinIO application username and
+The four PostgreSQL passwords must differ. The MinIO application username and
 password must differ from the root credentials. Blank paths stop Compose
 interpolation. Do not commit `.env` or any secret file.
 The cursor HMAC key file must contain at least 32 bytes of deployment-specific
@@ -149,7 +149,14 @@ service endpoints. All published ports bind to `127.0.0.1`; they are not exposed
 to the LAN.
 
 The controlled Flowable initializer and Core run Flyway sequentially against
-the same history; Core never starts concurrently with the initializer. Default
-host ports are Core `8080`, AI `3100`, OPA `8181`,
+the same history; Core never starts concurrently with the initializer.
+
+The Core startup gate is PostgreSQL only. Flowable initialization completes after the
+`postgres-init` gate and before Core. MinIO
+initialization and readiness are independent of that gate: MinIO bucket initialization remains
+independent of Core readiness, so a slow or failed bucket
+initializer never blocks Core from reaching readiness.
+
+Default host ports are Core `8080`, AI `3100`, OPA `8181`,
 PostgreSQL `5432`, Kafka `9092`, Redis `6379`, MinIO API `9000`, and MinIO
 console `9001`.

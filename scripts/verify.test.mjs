@@ -150,8 +150,9 @@ test("full verification runs the strict OPA test and prints only strict environm
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    /strict Core authorization and real OPA integration[\s\S]*--tests com\.innorder\.occ\.PlatformSecurityKernelIntegrationTest/u,
+    /strict complete Core tests with Docker and real OPA[\s\S]*:services:core:test --rerun-tasks/u,
   );
+  assert.doesNotMatch(result.stdout, /--tests com\.innorder\.occ\.PlatformSecurityKernelIntegrationTest/u);
   assert.match(result.stdout, /strict environment keys: OPA_PATH, INNORDER_STRICT_AUTHZ_TESTS/u);
   assert.doesNotMatch(result.stdout, new RegExp(opaSecret.replaceAll("\\", "\\\\"), "u"));
   assert.doesNotMatch(result.stdout, new RegExp(strictSecret, "u"));
@@ -262,7 +263,7 @@ test("tests mode reruns Core without requiring OPA or applying strict JUnit enfo
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /OPA binary unavailable/u);
-  assert.match(result.stdout, /:services:core:test --rerun-tasks --dependency-verification strict/u);
+  assert.match(result.stdout, /:services:core:test --dependency-verification strict -PexcludeStrictAuthz=true/u);
   assert.doesNotMatch(result.stdout, /strict complete Core tests|enforce complete Core/u);
 });
 
