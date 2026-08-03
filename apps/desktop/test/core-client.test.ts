@@ -164,7 +164,7 @@ describe("Core client", () => {
       title: "Conflict containing secret-token",
       detail: "raw server detail",
       status: 409,
-      code: "VERSION_CONFLICT",
+      code: "OCC-COMMAND-OPTIMISTIC-CONFLICT",
       correlationId: "22222222-2222-4222-8222-222222222222",
       currentVersion: 8,
     }, { status: 409, headers: { "x-secret": "header-secret" } }));
@@ -174,7 +174,7 @@ describe("Core client", () => {
     expect(error).toBeInstanceOf(CoreClientError);
     if (!(error instanceof CoreClientError)) throw error;
     expect(error.problem).toEqual({
-      code: "VERSION_CONFLICT",
+      code: "OCC-COMMAND-OPTIMISTIC-CONFLICT",
       status: 409,
       correlationId: "22222222-2222-4222-8222-222222222222",
       currentVersion: 8,
@@ -189,7 +189,7 @@ describe("Core client", () => {
       title: "User operator does not exist",
       detail: "password mismatch",
       status: 401,
-      code: "USER_NOT_FOUND",
+      code: "OCC-AUTH-INVALID-CREDENTIALS",
       correlationId: "22222222-2222-4222-8222-222222222222",
     }, { status: 401 }));
 

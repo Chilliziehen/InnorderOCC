@@ -296,7 +296,9 @@ describe("authenticated shell", () => {
       />,
     );
     expect(refresh).toHaveFocus();
-    expect(requestFrame).toHaveBeenCalledTimes(2);
+    // A data refresh keeps the same focusToken, so it must not schedule
+    // another focus frame on top of the three the route commit already used.
+    expect(requestFrame).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the route heading as the only level-one heading in settings", () => {

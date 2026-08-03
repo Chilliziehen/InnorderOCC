@@ -48,6 +48,11 @@ export function AppShell({ state, statuses, notificationState, onLogout, onProfi
       }
       heading.tabIndex = -1;
       heading.focus();
+      // A competing focus handler can swallow the call while the route is
+      // still settling, so retry until the committed heading actually holds it.
+      if (heading.ownerDocument.activeElement !== heading) {
+        frame = requestAnimationFrame(focusHeading);
+      }
     };
     frame = requestAnimationFrame(focusHeading);
     return () => {
