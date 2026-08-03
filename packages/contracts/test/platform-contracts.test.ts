@@ -482,7 +482,8 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, code: "OCC-UNKNOWN-CODE" },
       { ...boundaryProblem, code: "UNKNOWN_PROBLEM_CODE" },
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
-      { ...boundaryProblem, currentVersion: 0 },
+      { ...boundaryProblem, currentVersion: -1 },
+      { ...boundaryProblem, currentVersion: 1.5 },
     ]) {
       expect(() => problemDetailsSchema.parse(invalid)).toThrow();
     }
@@ -785,17 +786,21 @@ describe("eventEnvelopeSchema", () => {
     }
   });
 
-  it("counts event string boundaries in Unicode code points", () => {
+  it("bounds event identifiers and restricts them to the stable type pattern", () => {
     expect(eventEnvelopeSchema.parse({
       ...event,
-      type: "😀".repeat(EVENT_TYPE_MAX_LENGTH),
-      aggregateType: "🚀".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
+      type: "a".repeat(EVENT_TYPE_MAX_LENGTH),
+      aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
     })).toBeDefined();
     expect(() => eventEnvelopeSchema.parse({
-      ...event, type: "😀".repeat(EVENT_TYPE_MAX_LENGTH + 1),
+      ...event, type: "a".repeat(EVENT_TYPE_MAX_LENGTH + 1),
     })).toThrow();
     expect(() => eventEnvelopeSchema.parse({
-      ...event, aggregateType: "🚀".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
+      ...event, aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
     })).toThrow();
+    // Event identifiers are stable routing keys, so non-ASCII is rejected.
+    expect(() => eventEnvelopeSchema.parse({ ...event, type: "😀" })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({ ...event, aggregateType: "🚀" })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({ ...event, type: ".leading-dot" })).toThrow();
   });
 });

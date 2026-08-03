@@ -44,6 +44,18 @@ export const PLATFORM_PROBLEM_CODES = [
   "OCC-RESOURCE-UNAVAILABLE",
   "OCC-RESERVATION-CONFLICT",
   "OCC-INTERNAL-ERROR",
+  "OCC-RISK-ESCALATION-LEVEL-CONFLICT",
+  "OCC-RISK-NOT-FOUND",
+  "OCC-EVIDENCE-NOT-FOUND",
+  "OCC-EVIDENCE-REQUEST",
+  "OCC-RISK-TERMINAL",
+  "OCC-RISK-ACTION",
+  "OCC-RISK-REQUEST",
+  "OCC-RESERVATION-STATE-CONFLICT",
+  "OCC-RESOURCE-QUERY-VALIDATION",
+  "OCC-RESOURCE-REFERENCE",
+  "OCC-RESOURCE-ID-CONFLICT",
+  "OCC-RESERVATION-NOT-FOUND",
 ] as const;
 
 export const WORKFLOW_ERROR_CODES = [
@@ -98,6 +110,18 @@ export const problemDetailsSchema = z
   .strict();
 
 export type ProblemDetails = z.infer<typeof problemDetailsSchema>;
+
+// Platform optimistic-conflict responses add the caller's recovery version.
+// It lives here rather than on the base so generic problems cannot carry it.
+export const platformConflictProblemDetailsSchema = problemDetailsSchema
+  .extend({
+    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+
+export type PlatformConflictProblemDetails = z.infer<
+  typeof platformConflictProblemDetailsSchema
+>;
 
 export const taskBlockedProblemDetailsSchema = problemDetailsSchema
   .extend({

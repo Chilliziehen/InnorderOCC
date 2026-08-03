@@ -15,6 +15,7 @@ export type {
 export {
   OCC_PROBLEM_CODES,
   occProblemCodeSchema,
+  platformConflictProblemDetailsSchema,
   problemDetailsSchema,
   problemCodeSchema,
   baseProblemCodeSchema,
@@ -70,6 +71,7 @@ export {
 } from "./problem-details.js";
 export type {
   OccProblemCode,
+  PlatformConflictProblemDetails,
   ProblemDetails,
   PlatformProblemCode,
   ProblemCode,
@@ -94,13 +96,6 @@ export type {
   TokenResponse,
 } from "./auth.js";
 
-export {
-  eventEnvelopeSchema,
-  workflowEventSchema,
-  workflowEventSchemas,
-  workflowEventTypeSchema,
-} from "./events.js";
-export type { EventEnvelope, WorkflowEvent, WorkflowEventType } from "./events.js";
 export * from "./governed-ai.js";
 
 export {
@@ -114,6 +109,9 @@ export {
   governedAiEventSchema,
   knowledgeIngestionRequestedEventSchema,
   knowledgeIngestionRequestedPayloadSchema,
+  workflowEventSchema,
+  workflowEventSchemas,
+  workflowEventTypeSchema,
 } from "./events.js";
 export type {
   AiGuidanceRequestedPayload,
@@ -122,6 +120,8 @@ export type {
   EventEnvelope,
   GovernedAiEvent,
   KnowledgeIngestionRequestedPayload,
+  WorkflowEvent,
+  WorkflowEventType,
 } from "./events.js";
 
 export {
@@ -135,6 +135,14 @@ export type {
 
 export * from "./evidence-risk-resource.js";
 export * from "./workflow-common.js";
+export {
+  CURSOR_MAX_LENGTH,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+  idempotencyKeySchema,
+  uuidSchema,
+} from "./workflow-common.js";
+// Equivalent hex patterns are declared per surface; publish one from the root.
+export { SHA256_PATTERN } from "./evidence-risk-resource.js";
 export * from "./cohort.js";
 export * from "./process.js";
 export * from "./task.js";

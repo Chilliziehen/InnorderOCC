@@ -2,6 +2,7 @@ import {
   SystemStatusSchema,
   currentUserSchema,
   loginRequestSchema,
+  platformConflictProblemDetailsSchema,
   problemDetailsSchema,
   refreshRequestSchema,
   tokenResponseSchema,
@@ -177,7 +178,11 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
 
       const value = await readBounded(response, controller);
       if (!response.ok) {
-        const parsed = problemDetailsSchema.safeParse(value);
+        // Conflict payloads carry a recovery version; generic problems do not.
+        const conflict = platformConflictProblemDetailsSchema.safeParse(value);
+        const parsed = conflict.success
+          ? conflict
+          : problemDetailsSchema.safeParse(value);
         if (parsed.success) {
           const problem = parsed.data;
           if (problem.status !== response.status) {
@@ -186,9 +191,9 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
           throw new CoreClientError({
             ...receipt(problem.code, problem.status),
             correlationId: problem.correlationId,
-            ...(problem.currentVersion === undefined
-              ? {}
-              : { currentVersion: problem.currentVersion }),
+            ...(conflict.success
+              ? { currentVersion: conflict.data.currentVersion }
+              : {}),
           });
         }
         throw new CoreClientError(receipt("HTTP_ERROR", response.status));

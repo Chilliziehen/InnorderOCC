@@ -74,13 +74,16 @@ test('keeps published V001 through V012 migration content immutable', () => {
   }
 });
 
-test('V013 is the only migration after V012 and owns workflow authorization revisions', () => {
+test('V013 through V016 follow V012 and V013 owns workflow authorization revisions', () => {
   const migrationNames = readdirSync(root)
     .filter((name) => /^V\d+__.*\.sql$/.test(name))
     .sort();
-  assert.deepEqual(migrationNames.slice(-2), [
+  assert.deepEqual(migrationNames.slice(-5), [
     'V012__outbox_publisher_lifecycle.sql',
     'V013__process_task_workflow.sql',
+    'V014__evidence_risk_resource.sql',
+    'V015__cohort_api_lifecycle.sql',
+    'V016__governed_ai_runtime.sql',
   ]);
 
   const sql = readMigration('V013__process_task_workflow.sql');
@@ -109,18 +112,30 @@ test('V013 deduplicates cohort owner revision bumps within one command transacti
   assert.match(sql, /CREATE OR REPLACE FUNCTION occ\.project_cohort_owner\(\)/iu);
 });
 
-test('registers only V013 in every database schema entrypoint', () => {
-  const migration = 'V013__process_task_workflow.sql';
+test('registers every post-V012 migration in each database schema entrypoint', () => {
+  const postV012 = [
+    'V013__process_task_workflow.sql',
+    'V014__evidence_risk_resource.sql',
+    'V015__cohort_api_lifecycle.sql',
+    'V016__governed_ai_runtime.sql',
+  ];
   const entrypoint = readFileSync(fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)), 'utf8');
   const pgliteSmoke = readFileSync(pgliteSmokePath, 'utf8');
   const explicitApplications = [...pgliteSmoke.matchAll(
     /await\s+applyMigration\(\s*(['"])(V\d+__[^'"]+\.sql)\1\s*\)/gu,
   )].map((match) => match[2]);
-  assert.ok(entrypoint.indexOf(migration) > entrypoint.indexOf('V012__outbox_publisher_lifecycle.sql'));
-  assert.doesNotMatch(entrypoint, /V014__/u);
-  assert.ok(pgliteSmoke.indexOf(migration) > pgliteSmoke.indexOf('V012__outbox_publisher_lifecycle.sql'));
-  assert.ok(explicitApplications.includes(migration), 'PGlite explicitly applies V013');
-  assert.ok(explicitApplications.every((name) => !name.startsWith('V014__')), 'PGlite does not claim V014');
+  let entrypointCursor = entrypoint.indexOf('V012__outbox_publisher_lifecycle.sql');
+  let smokeCursor = pgliteSmoke.indexOf('V012__outbox_publisher_lifecycle.sql');
+  for (const migration of postV012) {
+    const entrypointAt = entrypoint.indexOf(migration);
+    const smokeAt = pgliteSmoke.indexOf(migration);
+    assert.ok(entrypointAt > entrypointCursor, `${migration} ordered in full schema entrypoint`);
+    assert.ok(smokeAt > smokeCursor, `${migration} ordered in PGlite smoke`);
+    assert.ok(explicitApplications.includes(migration), `PGlite explicitly applies ${migration}`);
+    entrypointCursor = entrypointAt;
+    smokeCursor = smokeAt;
+  }
+  assert.doesNotMatch(entrypoint, /V017__/u);
   assert.match(pgliteSmoke, /appliedMigrations\.push\(migration\)/u);
   assert.match(pgliteSmoke, /assert\.deepEqual\(appliedMigrations, migrations/u);
   for (const table of ['occ.cohort', 'occ.task_gate_provider_state', 'occ.task_review_projection_fact', 'occ.notification']) {

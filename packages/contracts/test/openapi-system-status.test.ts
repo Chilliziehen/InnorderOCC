@@ -627,9 +627,12 @@ describe("OCC Core OpenAPI system status", () => {
       expect(schemas[name]?.properties?.previousCursor).toEqual({ $ref: "#/components/schemas/OpaqueCursor" });
     }
     expect(schemas.OccProblemCode?.enum).toEqual(OCC_PROBLEM_CODES);
+    // The shared document's base problem accepts the platform codes plus the
+    // workflow codes, which is exactly what baseProblemCodeSchema validates.
     expect(schemas.ProblemDetails?.properties?.code).toEqual({
-      $ref: "#/components/schemas/OccProblemCode",
+      $ref: "#/components/schemas/BaseProblemCode",
     });
+    expect(schemas.BaseProblemCode?.enum).toEqual(expect.arrayContaining(OCC_PROBLEM_CODES));
     expect(schemas.RiskActionCommandRequest?.oneOf).toHaveLength(6);
     for (const variant of schemas.RiskActionCommandRequest?.oneOf ?? []) {
       const name = variant.$ref?.replace("#/components/schemas/", "") ?? "";
@@ -935,6 +938,8 @@ describe("OCC Core OpenAPI system status", () => {
         response.content?.["application/problem+json"]?.schema,
         document.components.schemas,
       )).toBe(true);
+    }
+
     const workflowSchemaByResponse: Record<string, string> = {
       WorkflowRequestError: "WorkflowRequestProblem",
       WorkflowBadRequest: "WorkflowBadRequestProblem",
@@ -963,7 +968,12 @@ describe("OCC Core OpenAPI system status", () => {
       } else if (workflowSchemaByResponse[name] !== undefined) {
         expect(schema?.$ref).toBe(`#/components/schemas/${workflowSchemaByResponse[name]}`);
       } else {
-        expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+        // Domain surfaces publish specialized variants; each must still be an
+        // RFC 9457 problem document derived from ProblemDetails.
+        expect(
+          derivesFromProblemDetails(schema, document.components.schemas),
+          `${name}: ${JSON.stringify(schema)}`,
+        ).toBe(true);
       }
     }
   });
@@ -1015,7 +1025,10 @@ describe("OCC Core OpenAPI system status", () => {
           } else if (path.startsWith("/api/v1/cohorts") || path.startsWith("/api/v1/processes") || path.startsWith("/api/v1/tasks") || path.startsWith("/api/v1/me/notifications") || path === "/api/v1/events") {
             expect(response.$ref).toMatch(/^#\/components\/responses\/(?!WorkflowError$)/);
           } else {
-            expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+            expect(
+              derivesFromProblemDetails(schema, document.components.schemas),
+              `${path} ${status}: ${JSON.stringify(schema)}`,
+            ).toBe(true);
           }
         }
       }

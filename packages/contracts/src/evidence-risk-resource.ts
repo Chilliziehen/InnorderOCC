@@ -22,7 +22,13 @@ export const EVIDENCE_CONTENT_RANGE_PATTERN =
 export const EVIDENCE_UNSATISFIED_CONTENT_RANGE_PATTERN =
   "^bytes \\*/[0-9]{1,16}$";
 
-export const domainProblemDetailsSchema = problemDetailsSchema;
+// The shared base deliberately carries no recovery fields. Domain problems on
+// this surface may report the caller's current version on optimistic conflicts.
+export const domainProblemDetailsSchema = problemDetailsSchema
+  .extend({
+    currentVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  })
+  .strict();
 
 const fixedDomainProblemDetailsSchema = <
   S extends number,

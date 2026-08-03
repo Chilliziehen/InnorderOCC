@@ -12,9 +12,13 @@ function combine(root, names) {
   return names.map((name) => `\n\\echo applying ${name}\n${readFileSync(`${root}/${name}`, 'utf8')}`).join('\n');
 }
 
-test('fresh PostgreSQL applies V001 through V013 and passes the workflow SQL contract', { timeout: 180_000 }, async () => {
+test('fresh PostgreSQL applies every migration and passes the workflow SQL contract', { timeout: 180_000 }, async () => {
   const migrations = readdirSync(migrationRoot).filter((name) => /^V\d+__.*\.sql$/u.test(name)).sort();
-  assert.deepEqual(migrations.map((name) => name.slice(0, 4)), Array.from({ length: 13 }, (_, index) => `V${String(index + 1).padStart(3, '0')}`));
+  // The chain must stay gap-free and start at V001, whatever its current length.
+  assert.deepEqual(
+    migrations.map((name) => name.slice(0, 4)),
+    Array.from({ length: migrations.length }, (_, index) => `V${String(index + 1).padStart(3, '0')}`),
+  );
   const schema = `${readFileSync(fileURLToPath(new URL('../bootstrap/001-create-runtime-role.sql', import.meta.url)), 'utf8')}\n${combine(migrationRoot, migrations)}`;
   const contractFiles = ['run_all.sql', '000_assert.sql', '001_schema_contract.sql', '002_constraints.sql', '003_process_task_workflow.sql'];
   let container;

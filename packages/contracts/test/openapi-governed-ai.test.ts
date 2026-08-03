@@ -259,8 +259,24 @@ describe("OCC Core governed AI OpenAPI", () => {
   });
 
   it("uses RFC 9457 Problem Details for every governed operation error", () => {
-    for (const response of Object.values(document.components.responses)) {
-      expect(response.content?.["application/problem+json"]?.schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+    const schemas = document.components.schemas as Record<string, any>;
+    // Other surfaces in the shared document publish specialized variants, so
+    // require derivation from ProblemDetails rather than an identical $ref.
+    const derives = (schema: any, seen = new Set<string>()): boolean => {
+      if (!schema) return false;
+      if (schema.$ref === "#/components/schemas/ProblemDetails") return true;
+      if (schema["x-occ-problem-details"] === true) return true;
+      if (schema.$ref) {
+        const name = String(schema.$ref).replace("#/components/schemas/", "");
+        if (seen.has(name)) return false;
+        return derives(schemas[name], new Set(seen).add(name));
+      }
+      if (schema.allOf?.some((member: any) => derives(member, seen))) return true;
+      return schema.oneOf?.every((member: any) => derives(member, seen)) ?? false;
+    };
+    for (const [name, response] of Object.entries(document.components.responses)) {
+      const schema = (response as any).content?.["application/problem+json"]?.schema;
+      expect(derives(schema), `${name}: ${JSON.stringify(schema)}`).toBe(true);
     }
     for (const [path, method] of PATHS) {
       const errors = Object.entries(document.paths[path]?.[method]?.responses ?? {}).filter(([status]) => /^[45]/.test(status));

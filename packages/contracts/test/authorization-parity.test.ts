@@ -91,6 +91,8 @@ function materialize(fixture: FixtureCase): JsonObject {
 }
 
 const describeWithOpa = process.env.OPA_PATH || process.env.OPA_DOCKER_IMAGE ? describe : describe.skip;
+// Spawning OPA (or pulling it through Docker) is slower than the default budget.
+const OPA_INTEGRATION_TIMEOUT_MS = 15_000;
 
 describeWithOpa("authorization Zod/OPA parity", () => {
   beforeAll(() => {
@@ -111,7 +113,7 @@ describeWithOpa("authorization Zod/OPA parity", () => {
     it(`accepts and evaluates: ${fixture.name}`, async () => {
       const input = materialize(fixture);
       expect(authorizationInputSchema.parse(input)).toEqual(input);
-      const decision = await evaluateWithOpa(input);
+      const decision = evaluateWithOpa(input);
       expect(() => authorizationDecisionSchema.parse(decision)).not.toThrow();
       expect(decision).toMatchObject({
         opaRevision: input.opaRevision,
@@ -126,13 +128,13 @@ describeWithOpa("authorization Zod/OPA parity", () => {
     it(`fails closed identically: ${fixture.name}`, async () => {
       const input = materialize(fixture);
       expect(() => authorizationInputSchema.parse(input)).toThrow();
-      expect(await evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
+      expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
     }, OPA_INTEGRATION_TIMEOUT_MS);
   }
 
   it("fails closed when the expected OPA runtime revision differs", () => {
     const input = { ...fixtures.baseInput, opaRevision: "platform-authz-v1" };
     expect(authorizationInputSchema.parse(input)).toEqual(input);
-    expect(await evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
+    expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
   }, OPA_INTEGRATION_TIMEOUT_MS);
 });

@@ -1,6 +1,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer, type Server, type ServerResponse } from "node:https";
+import type { ServerResponse } from "node:http";
+import { createServer, type Server } from "node:https";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 
@@ -79,7 +80,7 @@ function isIdempotencyKey(value: string | undefined): boolean {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-async function readBounded(request: NodeJS.AsyncIterable<Uint8Array>, maximum: number): Promise<{ bytes: Buffer; chunks: number }> {
+async function readBounded(request: AsyncIterable<Uint8Array>, maximum: number): Promise<{ bytes: Buffer; chunks: number }> {
   const chunks: Buffer[] = [];
   let size = 0;
   let count = 0;
