@@ -33,6 +33,7 @@ import com.innorder.occ.command.OptimisticConflictException
 import com.innorder.occ.events.OutboxRepository
 import com.innorder.occ.iam.BootstrapIds
 import com.innorder.occ.notification.JdbcNotificationWriter
+import com.innorder.occ.notification.NotificationWriter
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.flywaydb.core.Flyway
@@ -54,6 +55,9 @@ import java.time.Clock
 import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @Testcontainers(disabledWithoutDocker = true)
 class CohortIntegrationTest {
@@ -382,6 +386,120 @@ class CohortIntegrationTest {
     }
 
     @Test
+    fun `notification writer failure rolls back owner audit outbox idempotency and notification`() {
+        val jdbc = JdbcTemplate(runtimeDataSource())
+        val service = commandService(jdbc)
+        val created = service.create(
+            ACTOR_ID, "rollback-create", CORRELATION_ID,
+            CreateCohortRequest(
+                "rollback-owner", "Rollback", EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                OWNER_ID, LocalDate.now(), null,
+            ),
+        ).value
+        val withTeacher = service.addMember(
+            ACTOR_ID, "rollback-teacher", CORRELATION_ID, created.id,
+            AddCohortMemberRequest(created.version, MEMBER_ID, CohortMemberRole.TEACHER),
+        ).value
+        val jdbcWriter = JdbcNotificationWriter(jdbc)
+        val failing = NotificationWriter { spec, eventId ->
+            jdbcWriter.write(spec, eventId)
+            throw IllegalStateException("notification-test-failure")
+        }
+
+        assertThatThrownBy {
+            commandService(jdbc, notificationWriter = failing).transferOwner(
+                ACTOR_ID, "rollback-transfer", CORRELATION_ID, created.id,
+                TransferCohortOwnerRequest(withTeacher.version, MEMBER_ID, "rollback"),
+            )
+        }.isInstanceOf(IllegalStateException::class.java)
+        assertThat(CohortRepository(jdbc).find(created.id)!!.ownerPrincipalId).isEqualTo(OWNER_ID)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.notification WHERE resource_id = ?", Long::class.java, created.id,
+        )).isZero()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ? AND event_type = 'cohort.owner-transferred'",
+            Long::class.java, created.id,
+        )).isZero()
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.idempotency_record WHERE principal_id = ? AND idempotency_key = 'rollback-transfer'",
+            Long::class.java, ACTOR_ID,
+        )).isZero()
+    }
+
+    @Test
+    fun `concurrent cohort updates serialize and one stale contender loses`() {
+        val jdbc = JdbcTemplate(runtimeDataSource())
+        val service = commandService(jdbc)
+        val created = service.create(
+            ACTOR_ID, "update-race-create", CORRELATION_ID,
+            CreateCohortRequest(
+                "update-race", "Before", EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                OWNER_ID, LocalDate.now(), null,
+            ),
+        ).value
+        fun request(name: String) = ObjectMapper().findAndRegisterModules().readValue(
+            """{"expectedVersion":${created.version},"name":"$name"}""", UpdateCohortRequest::class.java,
+        )
+
+        val outcomes = concurrent(
+            { service.update(ACTOR_ID, "update-race-a", CORRELATION_ID, created.id, request("A")) },
+            { service.update(ACTOR_ID, "update-race-b", CORRELATION_ID, created.id, request("B")) },
+        )
+
+        assertThat(outcomes.count { it is CohortCommandResult }).isEqualTo(1)
+        assertThat(outcomes.filterIsInstance<com.innorder.occ.command.OptimisticConflictException>())
+            .singleElement().extracting("currentVersion").isEqualTo(created.version + 1)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ? AND event_type = 'cohort.updated'",
+            Long::class.java, created.id,
+        )).isEqualTo(1)
+    }
+
+    @Test
+    fun `owner transfer and archive race serialize with one event and no orphan notification`() {
+        val jdbc = JdbcTemplate(runtimeDataSource())
+        val service = commandService(jdbc)
+        val created = service.create(
+            ACTOR_ID, "owner-archive-race-create", CORRELATION_ID,
+            CreateCohortRequest(
+                "owner-archive-race", "Race", EmbeddedWorkflowCatalogIds.PACKAGE_VERSION,
+                OWNER_ID, LocalDate.now(), null,
+            ),
+        ).value
+        val withTeacher = service.addMember(
+            ACTOR_ID, "owner-archive-race-teacher", CORRELATION_ID, created.id,
+            AddCohortMemberRequest(created.version, MEMBER_ID, CohortMemberRole.TEACHER),
+        ).value
+
+        val outcomes = concurrent(
+            {
+                service.transferOwner(
+                    ACTOR_ID, "owner-archive-race-owner", CORRELATION_ID, created.id,
+                    TransferCohortOwnerRequest(withTeacher.version, MEMBER_ID, "race"),
+                )
+            },
+            {
+                service.archive(
+                    ACTOR_ID, "owner-archive-race-archive", CORRELATION_ID, created.id,
+                    ArchiveCohortRequest(withTeacher.version, "race"),
+                )
+            },
+        )
+
+        assertThat(outcomes.count { it is CohortCommandResult }).isEqualTo(1)
+        assertThat(outcomes.count { it is com.innorder.occ.command.OptimisticConflictException }).isEqualTo(1)
+        val eventTypes = jdbc.queryForList(
+            """SELECT event_type FROM audit.outbox_event
+               WHERE aggregate_id = ? AND event_type IN ('cohort.owner-transferred', 'cohort.archived')""",
+            String::class.java, created.id,
+        )
+        assertThat(eventTypes).hasSize(1)
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM occ.notification WHERE resource_id = ?", Long::class.java, created.id,
+        )).isEqualTo(if (eventTypes.single() == "cohort.owner-transferred") 1 else 0)
+    }
+
+    @Test
     fun `create persists aggregate and sole owner relation while revision changes once`() {
         val jdbc = JdbcTemplate(runtimeDataSource())
         val repository = CohortRepository(jdbc)
@@ -585,6 +703,7 @@ class CohortIntegrationTest {
         private fun commandService(
             jdbc: JdbcTemplate,
             decisions: AtomicReference<AuthorizationDecisionValue> = AtomicReference(AuthorizationDecisionValue.ALLOW),
+            notificationWriter: NotificationWriter = JdbcNotificationWriter(jdbc),
         ): CohortCommandService {
             val releases = mapOf(PolicyLayer.PLATFORM to UUID.fromString("61000000-0000-7000-8000-000000000010"))
             val authorization = AuthorizationService(
@@ -637,7 +756,7 @@ class CohortIntegrationTest {
                 OutboxRepository(jdbc),
                 AggregateLockRegistry(listOf(cohortAggregateLockResolver())),
                 jdbc,
-                JdbcNotificationWriter(jdbc),
+                notificationWriter,
             )
             return CohortCommandService(executor, repository, ObjectMapper().findAndRegisterModules())
         }
@@ -658,6 +777,24 @@ class CohortIntegrationTest {
                 CohortRepository(jdbc), DataSourceTransactionManager(jdbc.dataSource!!),
                 HmacCursorCodec(keys, mapper, clock), CursorFilterDigest(mapper), keys, clock,
             )
+        }
+
+        private fun concurrent(first: () -> Any, second: () -> Any): List<Any> {
+            val barrier = CyclicBarrier(3)
+            val pool = Executors.newFixedThreadPool(2)
+            return try {
+                val futures = listOf(first, second).map { operation ->
+                    pool.submit<Any> {
+                        barrier.await(10, TimeUnit.SECONDS)
+                        try { operation() } catch (failure: RuntimeException) { failure }
+                    }
+                }
+                barrier.await(10, TimeUnit.SECONDS)
+                futures.map { it.get(30, TimeUnit.SECONDS) }
+            } finally {
+                pool.shutdownNow()
+                check(pool.awaitTermination(10, TimeUnit.SECONDS))
+            }
         }
     }
 }
