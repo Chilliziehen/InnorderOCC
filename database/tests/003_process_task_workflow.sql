@@ -138,6 +138,10 @@ SELECT pg_temp.assert_true(
   (SELECT start_date = current_date + 1 AND end_date = current_date + 2
    FROM occ.cohort WHERE id = '57000000-0000-7000-8000-000000000001'),
   'cohort dates are mutable while draft');
+SELECT pg_temp.assert_raises(
+  $$UPDATE occ.cohort SET status = 'ARCHIVED', archived_at = transaction_timestamp()
+    WHERE id = '57000000-0000-7000-8000-000000000001'$$,
+  '55000', 'cohort cannot skip ACTIVE');
 CREATE TEMP TABLE cohort_owner_transfer_revision_before AS
 SELECT current_revision FROM authz.authorization_state WHERE singleton = true;
 SELECT pg_temp.assert_raises(

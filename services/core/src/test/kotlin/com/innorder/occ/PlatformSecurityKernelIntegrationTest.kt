@@ -110,9 +110,9 @@ class PlatformSecurityKernelIntegrationTest(
     }
 
     @Test
-    fun `fresh V001 V013 bootstrap v2 installs workflow catalog and preserves non workflow authorization`() {
+    fun `fresh V001 V015 bootstrap v2 installs workflow catalog and preserves non workflow authorization`() {
         val flyway = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
-        assertThat(flyway.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java)).isEqualTo(14)
+        assertThat(flyway.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java)).isEqualTo(15)
         assertThat(jdbc.queryForObject(
             "SELECT opa_revision FROM authz.policy_release WHERE status = 'ACTIVE'",
             String::class.java,
