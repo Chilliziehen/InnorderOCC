@@ -534,6 +534,21 @@ class AuthorizationServiceIntegrationTest {
     }
 
     @Test
+    fun `snapshot bounds canonical context by Unicode code points rather than UTF-8 bytes`() {
+        val jdbc = JdbcTemplate(dataSource())
+        resetAuthorizationFacts(jdbc)
+        val repository = AuthorizationSnapshotRepository(jdbc, ObjectMapper().findAndRegisterModules())
+        val transactions = TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!))
+
+        val atBoundary = request().copy(context = mapOf("value" to "🚀".repeat(4084)))
+        val overBoundary = request().copy(context = mapOf("value" to "🚀".repeat(4085)))
+
+        assertThat(transactions.execute { repository.load(atBoundary) }!!.context).isEqualTo(atBoundary.context)
+        assertThatThrownBy { transactions.execute { repository.load(overBoundary) } }
+            .isInstanceOf(AuthorizationSnapshotException::class.java)
+    }
+
+    @Test
     fun `snapshot rejects authorization revision above the safe integer ceiling`() {
         val jdbc = JdbcTemplate(dataSource())
         resetAuthorizationFacts(jdbc)

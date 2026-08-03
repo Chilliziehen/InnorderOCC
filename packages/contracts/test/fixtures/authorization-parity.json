@@ -228,6 +228,11 @@
       "overrides": {
         "context": {"escaped\nkey": "tab\tquote\"slash\\nul\u0000 astral😀"}
       }
+    },
+    {
+      "name": "4096-codepoint astral serialized context",
+      "contextRepeat": {"value": "🚀", "count": 4084, "target": "value"},
+      "overrides": {}
     }
   ],
   "invalid": [
@@ -506,6 +511,11 @@
           "k32": 32
         }
       }
+    },
+    {
+      "name": "4097-codepoint astral serialized context",
+      "contextRepeat": {"value": "🚀", "count": 4085, "target": "value"},
+      "overrides": {}
     }
   ]
 }

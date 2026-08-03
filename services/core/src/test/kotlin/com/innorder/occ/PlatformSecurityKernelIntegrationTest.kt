@@ -31,6 +31,7 @@ import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
@@ -73,10 +74,12 @@ import java.nio.file.attribute.PosixFilePermission
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import jakarta.servlet.http.HttpServletResponse
 
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
+@EnabledIfEnvironmentVariable(named = "OPA_PATH", matches = ".+")
 @ActiveProfiles("test")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Import(PlatformSecurityKernelIntegrationTest.KernelTestConfiguration::class)
@@ -88,9 +91,11 @@ class PlatformSecurityKernelIntegrationTest(
     @param:Autowired private val facts: AuthorizationFactFixture,
 ) {
     private lateinit var administratorId: UUID
+    private val observedResponses = mutableListOf<ObservedResponse>()
 
     @BeforeEach
     fun prepareAggregate() {
+        observedResponses.clear()
         administratorId = jdbc.queryForObject(
             "SELECT principal_id FROM iam.user_account WHERE username = 'admin'",
             UUID::class.java,
@@ -141,35 +146,41 @@ class PlatformSecurityKernelIntegrationTest(
     @Test
     fun `production security kernel completes correlated allow replay failure recovery and deny journey`(output: CapturedOutput) {
         val bootstrapLogin = login()
+        assertTokenResponse(bootstrapLogin)
         val firstRefresh = bootstrapLogin.path("refreshToken").textValue()
         val rotated = postJson("/api/v1/auth/refresh", """{"refreshToken":"$firstRefresh"}""", 200)
+        assertTokenResponse(rotated)
         assertProblem(postJson("/api/v1/auth/refresh", """{"refreshToken":"$firstRefresh"}""", 401), "OCC-AUTH-INVALID-CREDENTIALS")
         assertProblem(postJson("/api/v1/auth/refresh", """{"refreshToken":"${rotated.path("refreshToken").textValue()}"}""", 401), "OCC-AUTH-INVALID-CREDENTIALS")
 
         val login = login()
+        assertTokenResponse(login)
         val accessToken = login.path("accessToken").textValue()
-        val refreshToken = login.path("refreshToken").textValue()
         val me = correlatedGet("/api/v1/me", accessToken, 200).body
+        assertCurrentUserFields(me)
         assertThat(me.path("capabilities").map(JsonNode::textValue))
             .containsExactly("occ.admin", "occ.execute", "occ.read")
 
         assertProblem(correlatedGet("/api/v1/me", "not-a-jwt", 401).body, "OCC-API-AUTHENTICATION")
 
         val first = command(accessToken, administratorId, "kernel-first", 3, """{"secret":"journey-request-only","value":"first"}""", 200)
+        assertExactFields(first.body, "result", "version")
         assertThat(first.body).isEqualTo(mapper.readTree("""{"result":"first","version":4}"""))
         assertThat(first.replayed).isFalse()
         assertCommandState(version = 4, allows = 1, audit = 1, outbox = 1, idempotency = 1)
 
         val replay = command(accessToken, administratorId, "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 200)
+        assertExactFields(replay.body, "result", "version")
         assertThat(replay.body).isEqualTo(first.body)
         assertThat(replay.replayed).isTrue()
         assertCommandState(version = 4, allows = 2, audit = 1, outbox = 1, idempotency = 1)
 
-        command(accessToken, administratorId, "kernel-first", 3, """{"value":"different"}""", 409)
-        command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 503)
-        command(accessToken, administratorId, "kernel-first", 4, """{"value":"first","secret":"journey-request-only"}""", 409)
-        command(accessToken, administratorId, "kernel-stale", 3, """{"value":"stale"}""", 409)
+        assertProblem(command(accessToken, administratorId, "kernel-first", 3, """{"value":"different"}""", 409).body, "OCC-COMMAND-IDEMPOTENCY-CONFLICT")
+        assertProblem(command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 503).body, "OCC-AUTHZ-UNAVAILABLE")
+        assertProblem(command(accessToken, administratorId, "kernel-first", 4, """{"value":"first","secret":"journey-request-only"}""", 409).body, "OCC-COMMAND-IDEMPOTENCY-CONFLICT")
+        assertProblem(command(accessToken, administratorId, "kernel-stale", 3, """{"value":"stale"}""", 409).body, "OCC-COMMAND-OPTIMISTIC-CONFLICT", "currentVersion")
         val second = command(accessToken, administratorId, "kernel-second", 4, """{"value":"second"}""", 200)
+        assertExactFields(second.body, "result", "version")
         assertThat(second.body.path("version").longValue()).isEqualTo(5)
 
         val beforeUnavailable = kernelCounts()
@@ -181,13 +192,16 @@ class PlatformSecurityKernelIntegrationTest(
         assertThat(commandRecordCount("kernel-opa-down")).isZero()
         assertThat(kernelCounts()).isEqualTo(beforeUnavailable)
         opa.start()
-        command(accessToken, administratorId, "kernel-recovered", 5, """{"value":"recovered"}""", 200)
+        val recovered = recoverCommand(accessToken, administratorId)
+        assertExactFields(recovered.body, "result", "version")
         assertThat(version()).isEqualTo(6)
 
         val revisionBefore = revision()
         facts.revoke(administratorId)
         assertThat(revision()).isEqualTo(revisionBefore + 1)
-        assertThat(correlatedGet("/api/v1/me", accessToken, 200).body.path("capabilities")).isEmpty()
+        val revokedMe = correlatedGet("/api/v1/me", accessToken, 200).body
+        assertCurrentUserFields(revokedMe)
+        assertThat(revokedMe.path("capabilities")).isEmpty()
         val beforeDenied = kernelCounts()
         val denied = command(accessToken, administratorId, "kernel-denied", 6, """{"value":"denied"}""", 403)
         assertProblem(denied.body, "OCC-API-FORBIDDEN")
@@ -196,17 +210,15 @@ class PlatformSecurityKernelIntegrationTest(
         assertThat(decisions("DENY")).isEqualTo(1)
         assertThat(kernelCounts()).isEqualTo(beforeDenied)
 
-        val persisted = jdbc.queryForObject(
-            """SELECT concat_ws(' ',
-                   coalesce((SELECT string_agg(to_jsonb(d)::text, ' ') FROM authz.decision_log d), ''),
-                   coalesce((SELECT string_agg(to_jsonb(a)::text, ' ') FROM audit.audit_record a WHERE actor_entity_id = ?), ''),
-                   coalesce((SELECT string_agg(to_jsonb(o)::text, ' ') FROM audit.outbox_event o WHERE actor_entity_id = ?), ''),
-                   coalesce((SELECT string_agg(to_jsonb(i)::text, ' ') FROM audit.idempotency_record i WHERE principal_id = ?), ''))""",
-            String::class.java, administratorId, administratorId, administratorId,
-        )!!
-        assertThat(persisted).doesNotContain(PASSWORD, accessToken, refreshToken, firstRefresh, "journey-request-only")
-        assertThat(persisted).doesNotContain("password_hash", "refreshToken", "accessToken")
-        assertThat(output.all).doesNotContain(PASSWORD, accessToken, refreshToken, firstRefresh, "journey-request-only")
+        val persisted = applicationDatabaseRecords()
+        val tokenExposures = listOf(bootstrapLogin, rotated, login).flatMap { response ->
+            listOf("accessToken", "refreshToken").map { field -> TokenExposure(response.path(field).textValue(), response, field) }
+        }
+        assertSecretsAbsentFromResponses(PASSWORD, "journey-request-only")
+        assertTokensOnlyInExpectedFields(tokenExposures)
+        val allTokens = tokenExposures.map(TokenExposure::token)
+        assertThat(persisted).doesNotContain(PASSWORD, "journey-request-only", *allTokens.toTypedArray())
+        assertThat(output.all).doesNotContain(PASSWORD, "journey-request-only", *allTokens.toTypedArray())
     }
 
     private fun login(): JsonNode = postJson(
@@ -221,7 +233,7 @@ class PlatformSecurityKernelIntegrationTest(
             content = body
         }.andExpect { status { isEqualTo(status) } }.andReturn()
         assertThat(result.response.getHeader(CorrelationIdFilter.HEADER_NAME)).isEqualTo(correlation)
-        return mapper.readTree(result.response.contentAsString)
+        return observe(path, result.response)
     }
 
     private fun correlatedGet(path: String, token: String, status: Int): HttpResult {
@@ -231,7 +243,7 @@ class PlatformSecurityKernelIntegrationTest(
             header("Authorization", "Bearer $token")
         }.andExpect { status { isEqualTo(status) } }.andReturn()
         assertThat(result.response.getHeader(CorrelationIdFilter.HEADER_NAME)).isEqualTo(correlation)
-        return HttpResult(mapper.readTree(result.response.contentAsString), false)
+        return HttpResult(observe(path, result.response), false)
     }
 
     private fun command(token: String, target: UUID, key: String, version: Long, body: String, status: Int): HttpResult {
@@ -246,14 +258,97 @@ class PlatformSecurityKernelIntegrationTest(
         }.andExpect { status { isEqualTo(status) } }.andReturn()
         assertThat(result.response.getHeader(CorrelationIdFilter.HEADER_NAME)).isEqualTo(correlation)
         return HttpResult(
-            mapper.readTree(result.response.contentAsString),
+            observe("/api/v1/test/kernel/$target", result.response),
             result.response.getHeader("X-Idempotent-Replay") == "true",
         )
     }
 
-    private fun assertProblem(problem: JsonNode, code: String) {
+    private fun recoverCommand(token: String, target: UUID): HttpResult {
+        repeat(10) {
+            val correlation = UUID.randomUUID().toString()
+            val result = mockMvc.post("/api/v1/test/kernel/$target") {
+                header(CorrelationIdFilter.HEADER_NAME, correlation)
+                header("Authorization", "Bearer $token")
+                header("Idempotency-Key", "kernel-recovered")
+                header("Expected-Version", 5)
+                contentType = MediaType.APPLICATION_JSON
+                content = """{"value":"recovered"}"""
+            }.andReturn()
+            assertThat(result.response.getHeader(CorrelationIdFilter.HEADER_NAME)).isEqualTo(correlation)
+            val body = observe("/api/v1/test/kernel/$target", result.response)
+            if (result.response.status == 200) {
+                return HttpResult(body, result.response.getHeader("X-Idempotent-Replay") == "true")
+            }
+            assertThat(result.response.status).isEqualTo(503)
+            assertProblem(body, "OCC-AUTHZ-UNAVAILABLE")
+            Thread.sleep(50)
+        }
+        throw AssertionError("Application authorization path did not recover after OPA restart")
+    }
+
+    private fun assertProblem(problem: JsonNode, code: String, vararg additionalFields: String) {
+        assertExactFields(problem, "type", "title", "status", "code", "correlationId", *additionalFields)
         assertThat(problem.path("code").textValue()).isEqualTo(code)
         assertThat(problem.path("correlationId").textValue()).isNotBlank()
+    }
+
+    private fun assertTokenResponse(response: JsonNode) {
+        assertExactFields(response, "tokenType", "accessToken", "refreshToken", "expiresIn", "user")
+        assertCurrentUserFields(response.path("user"))
+    }
+
+    private fun assertCurrentUserFields(user: JsonNode) {
+        assertExactFields(user, "id", "username", "displayName", "status", "capabilities")
+    }
+
+    private fun assertExactFields(node: JsonNode, vararg fields: String) {
+        assertThat(node.fieldNames().asSequence().toSet()).containsExactlyInAnyOrder(*fields)
+    }
+
+    private fun observe(label: String, response: HttpServletResponse): JsonNode {
+        val body = mapper.readTree((response as org.springframework.mock.web.MockHttpServletResponse).contentAsString)
+        val headers = response.headerNames.associateWith { name -> response.getHeaders(name).joinToString(",") }
+        observedResponses += ObservedResponse(label, body, headers)
+        return body
+    }
+
+    private fun assertTokensOnlyInExpectedFields(exposures: List<TokenExposure>) {
+        exposures.forEach { exposure ->
+            observedResponses.forEach { observed ->
+                assertThat(observed.headers.values.joinToString(" ")).doesNotContain(exposure.token)
+                if (observed.body === exposure.allowedResponse) {
+                    val sanitized = observed.body.deepCopy<JsonNode>() as com.fasterxml.jackson.databind.node.ObjectNode
+                    sanitized.remove(exposure.allowedField)
+                    assertThat(sanitized.toString()).doesNotContain(exposure.token)
+                    assertThat(observed.body.path(exposure.allowedField).textValue()).isEqualTo(exposure.token)
+                } else {
+                    assertThat(observed.body.toString()).doesNotContain(exposure.token)
+                }
+            }
+        }
+    }
+
+    private fun assertSecretsAbsentFromResponses(vararg secrets: String) {
+        observedResponses.forEach { observed ->
+            val responseText = observed.body.toString() + observed.headers.values.joinToString(" ")
+            assertThat(responseText).doesNotContain(*secrets)
+        }
+    }
+
+    private fun applicationDatabaseRecords(): String {
+        val admin = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_admin", "admin-test-only"))
+        val tables = admin.queryForList(
+            """SELECT table_schema || '.' || table_name
+               FROM information_schema.tables
+               WHERE table_type = 'BASE TABLE'
+                 AND table_schema IN ('ai', 'audit', 'authz', 'flowable', 'iam', 'integration', 'occ', 'reporting')
+               ORDER BY table_schema, table_name""",
+            String::class.java,
+        )
+        return tables.joinToString(" ") { table ->
+            val qualified = table.split('.').joinToString(".") { part -> "\"${part.replace("\"", "\"\"")}\"" }
+            admin.queryForObject("SELECT coalesce(string_agg(to_jsonb(t)::text, ' '), '') FROM $qualified t", String::class.java)!!
+        }
     }
 
     private fun assertCommandState(version: Long, allows: Long, audit: Long, outbox: Long, idempotency: Long) {
@@ -278,6 +373,8 @@ class PlatformSecurityKernelIntegrationTest(
 
     data class HttpResult(val body: JsonNode, val replayed: Boolean)
     data class KernelCounts(val version: Long, val allows: Long, val audit: Long, val outbox: Long, val idempotency: Long)
+    data class ObservedResponse(val label: String, val body: JsonNode, val headers: Map<String, String>)
+    data class TokenExposure(val token: String, val allowedResponse: JsonNode, val allowedField: String)
 
     @TestConfiguration(proxyBeanMethods = false)
     class KernelTestConfiguration {
@@ -420,7 +517,7 @@ class PlatformSecurityKernelIntegrationTest(
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
         private const val PASSWORD = "platform-kernel-bootstrap-test-only"
-        private val opa = OpaProcess()
+        private val opa by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OpaProcess() }
 
         @Container
         @JvmStatic

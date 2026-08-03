@@ -34,7 +34,7 @@ Focused security and Flowable acceptance:
 
 ```powershell
 $env:OPA_PATH = 'C:\Tools\opa\opa_windows_amd64.exe'
-./gradlew.bat :services:core:test --tests com.innorder.occ.PlatformSecurityKernelIntegrationTest --tests com.innorder.occ.PostgreSqlFlowableIntegrationTest --dependency-verification strict
+./gradlew.bat :services:core:test --tests com.innorder.occ.PlatformSecurityKernelIntegrationTest --tests com.innorder.occ.FlowableProductionStartupIntegrationTest --tests com.innorder.occ.PostgreSqlFlowableIntegrationTest --dependency-verification strict
 ```
 
 Use `./gradlew` instead of `./gradlew.bat` on Linux. `OPA_PATH` must report `Version: 1.5.1` from `opa version`.
@@ -47,13 +47,13 @@ Use `./gradlew` instead of `./gradlew.bat` on Linux. `OPA_PATH` must report `Ver
 | Electron build and provenance | Mandatory | Mandatory |
 | Packaged Electron smoke | Mandatory | Not launched |
 
-A skipped JUnit suite is not a successful full gate. Full verification reads structured JUnit XML and rejects missing, malformed, zero-test, skipped, failed, or errored mandatory suites. Non-full infrastructure runs may skip a real OPA subprocess only when `OPA_PATH` is absent; `verify:full` never permits that skip.
+A skipped JUnit suite is not a successful full gate. Full verification reruns the complete Core test task under Docker and trusted OPA settings, validates every emitted JUnit XML, and rejects malformed, zero-test, skipped, failed, or errored suites. It also discovers every concrete top-level `*Test.kt` class and requires its corresponding XML. Abstract fixtures and nested classes are deliberately excluded from that source-to-suite check. Non-full infrastructure runs may skip a real OPA subprocess only when `OPA_PATH` is absent; `verify:full` never permits that skip.
 
-Mandatory Core suites are every class selected by the strict command in `scripts/verify.mjs`: the platform/Flowable integration suites and all test classes under the auth, authz, command, bootstrap, Flowable configuration, and outbox/event kernel. This includes the real Kafka `KafkaOutboxEventSenderProtocolIntegrationTest`; the list in the verifier is authoritative and deliberately explicit so missing XML cannot disappear through test discovery changes.
+The explicit mandatory integration guards remain in `scripts/verify.mjs` in addition to complete-suite discovery. They include the production Flowable startup chain, security kernel, real PostgreSQL/Flowable, auth, authorization, command, bootstrap, real Kafka, and outbox suites, so critical acceptance XML cannot disappear through discovery changes.
 
 ## Flowable
 
-Production defaults `FLOWABLE_DATABASE_SCHEMA_UPDATE=false`. Compose runs `flowable-init` once, after PostgreSQL health and before Core, with the explicit `flowable-init` profile and schema update enabled. Core then starts with schema mutation disabled. A startup verifier rejects a Flowable datasource or transaction manager that differs from the application boundary, and rejects schema update outside `development`, `test`, or `flowable-init`.
+Production defaults `FLOWABLE_DATABASE_SCHEMA_UPDATE=false`. Compose runs `postgres-init` after PostgreSQL health, then runs `flowable-init` once with the explicit `flowable-init` profile and schema update enabled. Core starts only after that completion gate, with schema mutation disabled. A startup verifier rejects a Flowable datasource or transaction manager that differs from the application boundary, and rejects schema update outside `development`, `test`, or `flowable-init`.
 
 Flowable operations and OCC projection, audit, and outbox writes share the Spring transaction manager. The PostgreSQL acceptance test proves both rollback and commit behavior with real Flowable runtime/history tables.
 

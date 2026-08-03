@@ -8,6 +8,8 @@ services.
 
 Create nine files outside the repository. Each file must contain one unique,
 non-empty value without surrounding quotes. Create `infra/compose/.env` from
+Create ten files outside the repository: eight scalar credential files and one
+PKCS#8 private/X.509 public RSA key pair. Create `infra/compose/.env` from
 `.env.example` and set these variables to the corresponding absolute paths:
 
 - `POSTGRES_ADMIN_PASSWORD_FILE`
@@ -19,6 +21,11 @@ non-empty value without surrounding quotes. Create `infra/compose/.env` from
 - `MINIO_ROOT_PASSWORD_FILE`
 - `MINIO_APP_USER_FILE`
 - `MINIO_APP_PASSWORD_FILE`
+- `OCC_JWT_PRIVATE_KEY_FILE`
+- `OCC_JWT_PUBLIC_KEY_FILE`
+- `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE`
+
+Set required `OCC_JWT_ISSUER` to the deployment's explicit HTTPS issuer URI.
 
 The three PostgreSQL passwords must differ. The MinIO application username and
 password must differ from the root credentials. Blank paths stop Compose
@@ -29,6 +36,20 @@ random key material.
 The two risk runtime identity UUIDs in `.env.example` are stable, non-secret
 defaults. They can be overridden for an installation that reserves different
 IDs; the configured IDs must remain distinct.
+
+The bootstrap password is a one-shot bind mount, not a Compose file secret.
+On a Linux host, create its parent and file without a symbolic link, owned by
+UID/GID `10001`; the parent must be `0700` and the file `0400`. Core mounts it
+read-only at `/run/innorder-bootstrap/admin-password`, expects owner `innorder`,
+and never deletes it through the read-only mount. `flowable-init` does not receive
+the bootstrap password.
+
+After the first successful startup has created exactly one administrator and the
+active platform policy, stop Core. Atomically replace the host password file with
+an owner-only, zero-byte `0400` tombstone at the same required path, then
+force-recreate Core. Recreating closes the old bind-mounted inode; the existing-user
+gate restarts without reading the tombstone. Never retain the original bootstrap
+password after this verification.
 
 ## Start
 
@@ -81,11 +102,11 @@ function; only the `flowable` schema grants runtime `CREATE`.
 
 MinIO root credentials are mounted only into MinIO and the one-shot `minio-init`
 service. The initializer creates the configured bucket and a bucket-scoped OCC
-account. Core sees only that account. `minio-volume-init` prepares the named
+account. Core sees only that account. `postgres-init` verifies PostgreSQL and prepares the named
 volume as root, while the MinIO server itself runs as UID/GID `10001` and must
-pass `/minio/health/ready`. Core startup gate is PostgreSQL only. MinIO
-initialization and readiness are independent and do not gate Core in this
-foundation.
+pass `/minio/health/ready`. Flowable initialization completes after the
+`postgres-init` gate and before Core; MinIO bucket initialization remains
+independent of Core readiness.
 
 Spring imports mounted secrets with
 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/`. Secret target filenames are
@@ -93,6 +114,9 @@ exact Spring properties, including `spring.datasource.password`,
 `spring.flyway.password`, `occ.object-storage.secret-key`, and
 `occ.cursor.secret`. The cursor key is mounted only into Core; missing or weak
 key material prevents normal Core startup.
+`spring.flyway.password`, and `occ.object-storage.secret-key`. Core and
+`flowable-init` alone receive the JWT private/public files at
+`/run/secrets/occ-jwt-private-key.pem` and `/run/secrets/occ-jwt-public-key.pem`.
 
 ## Immutable Images
 
@@ -124,7 +148,8 @@ It receives no secrets or volumes and forwards loopback traffic to the internal
 service endpoints. All published ports bind to `127.0.0.1`; they are not exposed
 to the LAN.
 
-Core owns application migration startup; Compose does not run a competing
-migration process. Default host ports are Core `8080`, AI `3100`, OPA `8181`,
+The controlled Flowable initializer and Core run Flyway sequentially against
+the same history; Core never starts concurrently with the initializer. Default
+host ports are Core `8080`, AI `3100`, OPA `8181`,
 PostgreSQL `5432`, Kafka `9092`, Redis `6379`, MinIO API `9000`, and MinIO
 console `9001`.

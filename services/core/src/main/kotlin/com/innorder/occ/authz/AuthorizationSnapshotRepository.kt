@@ -1,6 +1,8 @@
 package com.innorder.occ.authz
 
+import com.fasterxml.jackson.core.JsonFactory
 import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.json.JsonWriteFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.MapperFeature
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -23,6 +25,12 @@ class AuthorizationSnapshotRepository(
     }
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+    private val contextLengthMapper = ObjectMapper(
+        JsonFactory.builder().disable(JsonWriteFeature.ESCAPE_NON_ASCII).build(),
+    ).apply {
+        setConfig(serializationConfig.with(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY))
+        enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+    }
 
     override fun load(request: AuthorizationRequest): AuthorizationSnapshot {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) throw AuthorizationSnapshotException()
@@ -64,8 +72,17 @@ class AuthorizationSnapshotRepository(
                     template.resourceId,
                 )
             }.let(Collections::unmodifiableList)
+        // Bound and digest the authoritative context, not the raw request: the
+        // snapshot persists the authoritative form, so that is what must fit.
         val contextBytes = canonicalBytes(effectiveContext)
-        if (contextBytes.size > MAX_CONTEXT_BYTES) throw AuthorizationSnapshotException()
+        val canonicalContext = try {
+            contextLengthMapper.writeValueAsString(effectiveContext)
+        } catch (_: Exception) {
+            throw AuthorizationSnapshotException()
+        }
+        if (canonicalContext.codePointCount(0, canonicalContext.length) > MAX_CONTEXT_CODE_POINTS) {
+            throw AuthorizationSnapshotException()
+        }
         val forbiddenActions = layers.flatMap { it.forbiddenActions }.distinct().sorted()
         if (forbiddenActions.size > MAX_FORBIDDEN_ACTIONS) throw AuthorizationSnapshotException()
         val relationships = if (request.action in WORKFLOW_ACTIONS) {
@@ -417,7 +434,9 @@ class AuthorizationSnapshotRepository(
             val character = value[index]
             index += when {
                 Character.isHighSurrogate(character) -> {
-                    if (index >= value.length || !Character.isLowSurrogate(value[index])) throw AuthorizationSnapshotException()
+                    if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) {
+                        throw AuthorizationSnapshotException()
+                    }
                     2
                 }
                 Character.isLowSurrogate(character) -> throw AuthorizationSnapshotException()
@@ -530,7 +549,7 @@ class AuthorizationSnapshotRepository(
         private val OPA_REVISION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private const val MAX_ACTION_LENGTH = 128
         private const val MAX_CONTEXT_PROPERTIES = 32
-        private const val MAX_CONTEXT_BYTES = 4096
+        private const val MAX_CONTEXT_CODE_POINTS = 4096
         private const val MAX_CONTEXT_DEPTH = 8
         private const val MAX_FORBIDDEN_ACTIONS = 128
         private const val MAX_GRANTS = 256

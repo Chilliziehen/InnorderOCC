@@ -117,11 +117,11 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /CommandExecutorIntegrationTest/u);
   assert.match(result.stdout, /OutboxPublisherIntegrationTest/u);
   assert.match(result.stdout, /KafkaOutboxEventSenderProtocolIntegrationTest/u);
-  assert.match(result.stdout, /strict Core authorization and real OPA integration/u);
+  assert.match(result.stdout, /strict complete Core tests with Docker and real OPA/u);
   assert.match(result.stdout, /real PostgreSQL governed AI integration/u);
   assert.match(result.stdout, /database\/tests\/postgresql-governed-ai\.test\.mjs/u);
   assert.match(result.stdout, /services\/ai\/test\/parser-compose-container\.test\.mjs/u);
-  assert.match(result.stdout, /enforce Docker integration JUnit results/u);
+  assert.match(result.stdout, /enforce complete Core and mandatory integration JUnit results/u);
 });
 
 test("quick verification excludes the strict OPA integration gate", () => {
@@ -251,6 +251,21 @@ test("local verification has explicit non-full success semantics", () => {
   assert.match(result.stdout, /smoke --workspace @innorder\/desktop/u);
 });
 
+test("tests mode reruns Core without requiring OPA or applying strict JUnit enforcement", () => {
+  const environment = { ...process.env };
+  delete environment.OPA_PATH;
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--tests", "--dry-run"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+    env: environment,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /OPA binary unavailable/u);
+  assert.match(result.stdout, /:services:core:test --rerun-tasks --dependency-verification strict/u);
+  assert.doesNotMatch(result.stdout, /strict complete Core tests|enforce complete Core/u);
+});
+
 test("rejects missing or skipped Docker integration JUnit results", async (t) => {
   const module = await helpers();
   assert.equal(typeof module.assertJUnitSuiteExecuted, "function");
@@ -258,8 +273,8 @@ test("rejects missing or skipped Docker integration JUnit results", async (t) =>
   const missing = join(cwd, "missing.xml");
   const skipped = join(cwd, "skipped.xml");
   const passed = join(cwd, "passed.xml");
-  await writeFile(skipped, '<testsuite tests="3" skipped="1" failures="0" errors="0"/>', "utf8");
-  await writeFile(passed, '<testsuite tests="3" skipped="0" failures="0" errors="0"/>', "utf8");
+  await writeFile(skipped, '<testsuite tests="1" skipped="1" failures="0" errors="0"><testcase name="skip"><skipped/></testcase></testsuite>', "utf8");
+  await writeFile(passed, '<testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="pass"/></testsuite>', "utf8");
 
   assert.throws(() => module.assertJUnitSuiteExecuted(missing), /missing/u);
   assert.throws(() => module.assertJUnitSuiteExecuted(skipped), /skipped 1/u);
@@ -276,7 +291,8 @@ test("rejects malformed ambiguous or invalid Docker integration JUnit XML", asyn
     nonInteger: '<testsuite tests="three" skipped="0" failures="0" errors="0"/>',
     decimal: '<testsuite tests="3.5" skipped="0" failures="0" errors="0"/>',
     negative: '<testsuite tests="3" skipped="-1" failures="0" errors="0"/>',
-    zero: '<testsuite tests="0" skipped="0" failures="0" errors="0"/>',
+    zero: '<testsuite tests="0" skipped="0" failures="0" errors="0"></testsuite>',
+    forgedSelfClosing: '<testsuite tests="3" skipped="0" failures="0" errors="0"/>',
     duplicateRoot: '<testsuite tests="3" skipped="0" failures="0" errors="0"/><testsuite tests="3" skipped="0" failures="0" errors="0"/>',
     ambiguousSuites: '<testsuites><testsuite tests="2" skipped="0" failures="0" errors="0"/><testsuite tests="1" skipped="0" failures="0" errors="0"/></testsuites>',
   };
@@ -290,4 +306,108 @@ test("rejects malformed ambiguous or invalid Docker integration JUnit XML", asyn
       `${name} JUnit XML must be rejected`,
     );
   }
+});
+
+test("reconciles JUnit summaries with direct testcase outcomes", async (t) => {
+  const { assertJUnitSuiteExecuted } = await helpers();
+  const cwd = await temporaryCwd(t);
+  const valid = join(cwd, "valid.xml");
+  await writeFile(valid, '<testsuite tests="2" skipped="0" failures="0" errors="0"><properties/><testcase name="one"/><testcase name="two"></testcase><system-out>safe &amp; valid</system-out><system-err></system-err></testsuite>', "utf8");
+  assert.doesNotThrow(() => assertJUnitSuiteExecuted(valid));
+
+  const invalidDocuments = {
+    forgedPass: '<testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="bad"><failure>boom</failure></testcase></testsuite>',
+    childFailure: '<testsuite tests="1" skipped="0" failures="1" errors="0"><testcase name="bad"><failure/></testcase></testsuite>',
+    childError: '<testsuite tests="1" skipped="0" failures="0" errors="1"><testcase name="bad"><error/></testcase></testsuite>',
+    childSkipped: '<testsuite tests="1" skipped="1" failures="0" errors="0"><testcase name="skip"><skipped/></testcase></testsuite>',
+    testCountMismatch: '<testsuite tests="2" skipped="0" failures="0" errors="0"><testcase name="one"/></testsuite>',
+    outcomeMismatch: '<testsuite tests="1" skipped="0" failures="1" errors="0"><testcase name="bad"><error/></testcase></testsuite>',
+    nestedTestcase: '<testsuite tests="1" skipped="0" failures="0" errors="0"><properties><testcase name="fake"/></properties></testsuite>',
+    nestedSuite: '<testsuite tests="1" skipped="0" failures="0" errors="0"><testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="fake"/></testsuite></testsuite>',
+  };
+  for (const [name, xml] of Object.entries(invalidDocuments)) {
+    const path = join(cwd, `${name}.xml`);
+    await writeFile(path, xml, "utf8");
+    assert.throws(() => assertJUnitSuiteExecuted(path), undefined, `${name} must be rejected`);
+  }
+});
+
+test("complete Core JUnit guard discovers every concrete top-level Kotlin test suite", async (t) => {
+  const { assertCompleteCoreJUnitResults, discoverConcreteKotlinTestSuites } = await helpers();
+  const cwd = await temporaryCwd(t);
+  const sourceRoot = join(cwd, "src", "test", "kotlin");
+  const packageRoot = join(sourceRoot, "com", "example");
+  const resultsRoot = join(cwd, "results");
+  await mkdir(packageRoot, { recursive: true });
+  await mkdir(resultsRoot, { recursive: true });
+  await writeFile(join(packageRoot, "AlphaTest.kt"), "  package com.example\n    class AlphaTest {\n fun `brace } decoy`() {}\n}\n", "utf8");
+  await writeFile(join(packageRoot, "BetaTest.kt"), "package com.example\npublic\nfinal\nclass BetaTest\n", "utf8");
+  await writeFile(join(packageRoot, "InternalTest.kt"), "package com.example\n@SpringBootTest\ninternal\nclass InternalTest\n", "utf8");
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.AlphaTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="pass"/></testsuite>',
+    "utf8",
+  );
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.InternalTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="pass"/></testsuite>',
+    "utf8",
+  );
+
+  assert.deepEqual(discoverConcreteKotlinTestSuites(sourceRoot), [
+    "com.example.AlphaTest",
+    "com.example.BetaTest",
+    "com.example.InternalTest",
+  ]);
+  assert.throws(
+    () => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot),
+    /BetaTest.*missing/u,
+  );
+
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.BetaTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="pass"/></testsuite>',
+    "utf8",
+  );
+  assert.doesNotThrow(() => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot));
+});
+
+test("Kotlin discovery rejects abstract nested comment and string decoys", async (t) => {
+  const { discoverConcreteKotlinTestSuites } = await helpers();
+  const cwd = await temporaryCwd(t);
+  const cases = {
+    AbstractTest: "package com.example\npublic abstract class AbstractTest\n",
+    NestedTest: "package com.example\nclass Container {\n class NestedTest\n}\n",
+    CommentTest: "package com.example\n/* class CommentTest */\nval text = \"class CommentTest\"\n",
+    RawStringTest: 'package com.example\nval text = """\nclass RawStringTest\n"""\n',
+    MismatchTest: "package com.example\nclass DifferentTest\n",
+  };
+  for (const [name, source] of Object.entries(cases)) {
+    const root = join(cwd, name, "com", "example");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, `${name}.kt`), source, "utf8");
+    assert.throws(() => discoverConcreteKotlinTestSuites(join(cwd, name)), new RegExp(`${name}.*concrete top-level class`, "u"));
+  }
+});
+
+test("complete Core JUnit guard rejects malformed or skipped arbitrary emitted suites", async (t) => {
+  const { assertCompleteCoreJUnitResults } = await helpers();
+  const cwd = await temporaryCwd(t);
+  const sourceRoot = join(cwd, "src", "test", "kotlin");
+  const packageRoot = join(sourceRoot, "com", "example");
+  const resultsRoot = join(cwd, "results");
+  await mkdir(packageRoot, { recursive: true });
+  await mkdir(resultsRoot, { recursive: true });
+  await writeFile(join(packageRoot, "AlphaTest.kt"), "package com.example\nclass AlphaTest\n", "utf8");
+  await writeFile(
+    join(resultsRoot, "TEST-com.example.AlphaTest.xml"),
+    '<testsuite tests="1" skipped="0" failures="0" errors="0"><testcase name="pass"/></testsuite>',
+    "utf8",
+  );
+  const arbitrary = join(resultsRoot, "TEST-com.example.ArbitraryTest.xml");
+  await writeFile(arbitrary, '<testsuite tests="1" skipped="1" failures="0" errors="0"><testcase name="skip"><skipped/></testcase></testsuite>', "utf8");
+  assert.throws(() => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot), /skipped 1/u);
+
+  await writeFile(arbitrary, '<testsuite tests="1" skipped="0" failures="0" errors="0">', "utf8");
+  assert.throws(() => assertCompleteCoreJUnitResults(sourceRoot, resultsRoot), /malformed/u);
 });

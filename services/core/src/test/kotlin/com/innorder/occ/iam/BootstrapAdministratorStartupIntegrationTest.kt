@@ -136,6 +136,30 @@ class BootstrapAdministratorStartupIntegrationTest {
     }
 
     @Test
+    fun `clean Compose startup creates administrator and policy then restarts without reading tombstone`() {
+        database { postgres, jdbc ->
+            StartupReaderConfiguration.reader = successfulReader()
+            SpringApplicationBuilder(OccCoreApplication::class.java, StartupReaderConfiguration::class.java)
+                .run(*arguments(postgres)).use {
+                    assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isEqualTo(1)
+                    assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release WHERE status = 'ACTIVE'", Long::class.java))
+                        .isEqualTo(1)
+                }
+
+            StartupReaderConfiguration.reader = object : BootstrapSecretReader() {
+                override fun open(path: Path, expectedOwner: String): BootstrapSecretMaterial =
+                    throw AssertionError("an initialized deployment must not read the tombstone")
+            }
+            SpringApplicationBuilder(OccCoreApplication::class.java, StartupReaderConfiguration::class.java)
+                .run(*arguments(postgres)).use {
+                    assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isEqualTo(1)
+                    assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release WHERE status = 'ACTIVE'", Long::class.java))
+                        .isEqualTo(1)
+                }
+        }
+    }
+
+    @Test
     fun `bootstrap failure aborts context before readiness after Flyway initialization`() {
         database { postgres, jdbc ->
             StartupReaderConfiguration.reader = object : BootstrapSecretReader() {
@@ -354,7 +378,7 @@ class BootstrapAdministratorStartupIntegrationTest {
         "--spring.flyway.password=flyway-test-only",
         "--flowable.database-schema=flowable",
         "--occ.status-probes.external-enabled=false",
-        "--occ.bootstrap-administrator.password-file=deterministic-startup-secret",
+        "--occ.bootstrap-administrator.password-file=/run/innorder-bootstrap/admin-password",
         "--occ.bootstrap-administrator.secret-owner=$OWNER",
         "--occ.risk-due.enabled=true",
         "--occ.risk-due.system-principal-id=$RISK_SYSTEM_ID",
@@ -421,7 +445,7 @@ class BootstrapAdministratorStartupIntegrationTest {
 
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
-        private const val OWNER = "occ-service"
+        private const val OWNER = "innorder"
         private const val PASSWORD = "startup-bootstrap-test-only"
         private val RISK_SYSTEM_ID = UUID.fromString("00000000-0000-7000-8000-000000000040")
         private val RISK_REPORT_ID = UUID.fromString("00000000-0000-7000-8000-000000000041")

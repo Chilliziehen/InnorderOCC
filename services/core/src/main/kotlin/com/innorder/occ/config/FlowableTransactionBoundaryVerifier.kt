@@ -1,24 +1,32 @@
 package com.innorder.occ.config
 
 import org.flowable.spring.SpringProcessEngineConfiguration
+import org.flowable.spring.boot.EngineConfigurationConfigurer
 import org.springframework.beans.factory.config.BeanPostProcessor
 import org.springframework.core.env.Environment
+import org.springframework.core.Ordered
+import org.springframework.core.annotation.Order
 import org.springframework.jdbc.datasource.DelegatingDataSource
 import org.springframework.stereotype.Component
 import org.springframework.transaction.PlatformTransactionManager
 import javax.sql.DataSource
 
 @Component
+@Order(Ordered.LOWEST_PRECEDENCE)
 class FlowableTransactionBoundaryVerifier(
     private val applicationDataSource: DataSource,
     private val applicationTransactionManager: PlatformTransactionManager,
     private val environment: Environment,
-) : BeanPostProcessor {
+) : BeanPostProcessor, EngineConfigurationConfigurer<SpringProcessEngineConfiguration> {
     override fun postProcessAfterInitialization(bean: Any, beanName: String): Any {
         if (bean is SpringProcessEngineConfiguration) {
             verify(applicationDataSource, applicationTransactionManager, bean, environment.activeProfiles.toSet())
         }
         return bean
+    }
+
+    override fun configure(engineConfiguration: SpringProcessEngineConfiguration) {
+        verify(applicationDataSource, applicationTransactionManager, engineConfiguration, environment.activeProfiles.toSet())
     }
 
     companion object {

@@ -43,6 +43,7 @@ import {
   EVENT_OCCURRED_AT_PATTERN,
   EVENT_SCHEMA_VERSION_MAX,
   EVENT_SCHEMA_VERSION_MIN,
+  EVENT_STABLE_TYPE_PATTERN,
   EVENT_TYPE_MAX_LENGTH,
   EVENT_TYPE_MIN_LENGTH,
 } from "../src/events.js";
@@ -1307,6 +1308,7 @@ describe("OCC Core OpenAPI system status", () => {
         type: "string",
         minLength: EVENT_TYPE_MIN_LENGTH,
         maxLength: EVENT_TYPE_MAX_LENGTH,
+        pattern: EVENT_STABLE_TYPE_PATTERN,
       },
       schemaVersion: {
         type: "integer",
@@ -1317,6 +1319,7 @@ describe("OCC Core OpenAPI system status", () => {
         type: "string",
         minLength: EVENT_AGGREGATE_TYPE_MIN_LENGTH,
         maxLength: EVENT_AGGREGATE_TYPE_MAX_LENGTH,
+        pattern: EVENT_STABLE_TYPE_PATTERN,
       },
       aggregateId: { type: "string", format: "uuid" },
       aggregateVersion: {

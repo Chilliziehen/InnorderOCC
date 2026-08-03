@@ -602,6 +602,55 @@ test("manual records the required Compose and operational facts", () => {
   assert.doesNotMatch(reference, /^kafka-topics(?:[.]sh)? --bootstrap-server/mu);
 });
 
+test("manual defines the one-shot administrator bootstrap secret lifecycle", () => {
+  const configuration = documents.get("03-secrets-and-configuration.md");
+  const windows = documents.get("04-deploy-windows.md");
+  const linux = documents.get("05-deploy-linux.md");
+  const corpus = `${configuration}\n${windows}\n${linux}`;
+
+  assert.match(corpus, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
+  assert.match(corpus, /10001:10001/u);
+  assert.match(corpus, /0700/u);
+  assert.match(corpus, /0400/u);
+  assert.match(corpus, /零字节/u);
+  assert.match(corpus, /符号链接/u);
+  assert.match(corpus, /flowable-init/u);
+  assert.match(corpus, /成功[\s\S]*替换/u);
+});
+
+test("upgrade transitions initialized legacy bootstrap paths before target Compose interpolation", () => {
+  const upgrade = documents.get("08-upgrade-and-rollback.md");
+  const reference = documents.get("11-command-reference-and-checklists.md");
+  assert.ok(upgrade && reference);
+
+  const transitionStart = upgrade.indexOf("## 已初始化旧部署的引导路径过渡");
+  const targetComposeConfigIndexes = ["@('config','--quiet')", '"${compose[@]}" config --quiet']
+    .map((command) => upgrade.indexOf(command));
+  assert.ok(targetComposeConfigIndexes.every((index) => index >= 0),
+    "upgrade manual must retain both target-release Compose config gates");
+  const firstTargetComposeConfig = Math.min(...targetComposeConfigIndexes);
+  assert.ok(transitionStart >= 0, "upgrade manual must define the initialized legacy transition");
+
+  const transitionEnd = upgrade.indexOf("\n## ", transitionStart + 4);
+  assert.ok(transitionEnd > transitionStart && transitionEnd < firstTargetComposeConfig,
+    "the complete legacy transition must precede the first target-release Compose config/interpolation");
+  const transition = upgrade.slice(transitionStart, transitionEnd);
+  assert.match(transition, /项目全局生命周期锁/u);
+  assert.match(transition, /install -d -o 10001 -g 10001 -m 0700/u);
+  assert.match(transition, /install -o 10001 -g 10001 -m 0400 \/dev\/null/u);
+  assert.match(transition, /realpath/u);
+  assert.match(transition, /\[ -f "\$bootstrap_tombstone" \]/u);
+  assert.match(transition, /\[ ! -L "\$bootstrap_tombstone" \]/u);
+  assert.match(transition, /10001:10001 400 0/u);
+  assert.match(transition, /mktemp[\s\S]*awk[\s\S]*mv -fT/u);
+  assert.match(transition, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s/u);
+  assert.match(transition, /真正未初始化[\s\S]*非空[\s\S]*不得[\s\S]*墓碑/u);
+  assert.match(transition, /回滚窗口[\s\S]*旧 release[\s\S]*忽略[\s\S]*额外/u);
+  assert.match(transition, /全部受支持的目标 release[\s\S]*不再要求[\s\S]*清理/u);
+  assert.match(reference, /升级检查单[\s\S]*已初始化旧部署[\s\S]*第 08 章/u);
+  assert.match(reference, /回滚检查单[\s\S]*引导墓碑[\s\S]*回滚窗口/u);
+});
+
 test("repository sources drive the documented deployment facts", () => {
   const corpus = [...documents.values()].join("\n");
   const architecture = documents.get("01-architecture-and-boundaries.md");
@@ -625,6 +674,12 @@ test("repository sources drive the documented deployment facts", () => {
   ];
   assert.deepEqual(sourceFacts.filter((fact) => !corpus.includes(fact)), []);
   assert.equal(Object.keys(composeModel.services).length, 13);
+  assert.deepEqual(
+    Object.entries(composeModel.services).filter(([, service]) => service.restart === "no").map(([name]) => name).sort(),
+    ["flowable-init", "minio-init", "parser-volume-init", "postgres-init"],
+  );
+  assert.doesNotMatch(corpus, /十服务|十个服务|十个 Compose 服务|十个容器|两个一次性|两个 one-shot|两个 `exited 0`|两 one-shot|八\s*[\/／]\s*两状态|八长运行\s*[\/／]\s*两一次性/u);
+  assert.doesNotMatch(corpus, /minio-volume-init/u);
   assert.equal(composeModel.services.backend, undefined);
   assert.equal(composeModel.networks.backend.internal, true);
   assert.equal(composeModel.services["host-gateway"].ports.length, 8);

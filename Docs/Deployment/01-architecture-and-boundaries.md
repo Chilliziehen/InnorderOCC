@@ -15,7 +15,7 @@ Compose 项目名为 `innorder-occ`，包含十三个服务、七个命名卷和
 | `postgres` | 长运行 | PostgreSQL 16、pgvector、业务与 Flowable 数据 | `postgres-data` | 自身 `pg_isready` |
 | `kafka` | 长运行 | 单节点 KRaft broker/controller | `kafka-data` | 自身 topic-list 探测 |
 | `redis` | 长运行 | 带密码的 AOF Redis | `redis-data` | 认证后 `PING` |
-| `minio-volume-init` | 一次性 | 把对象卷所有者改为 UID/GID `10001` | 修改 `minio-data` | 无健康检查，成功退出 |
+| `postgres-init` | 一次性 | 验证 PostgreSQL 可用并把对象卷所有者改为 UID/GID `10001` | PostgreSQL、`minio-data` | 等待 PostgreSQL 健康，成功退出 |
 | `minio` | 长运行 | S3 兼容对象存储与控制台 | `minio-data` | 等待卷初始化成功 |
 | `minio-init` | 一次性 | 建桶、创建桶级应用账号并附加策略 | MinIO 内部状态 | 等待 MinIO 健康 |
 | `opa` | 长运行 | 加载只读策略并提供无状态决策 | 无命名卷 | 自身 `/health` |
@@ -36,6 +36,8 @@ Compose 的显式条件依赖包括：
 minio-volume-init --成功完成--> minio --健康--> minio-init
 parser-volume-init --成功完成--> parser --健康--> ai
 postgres --健康--> flowable-init --成功完成--> core
+postgres --健康--> postgres-init --成功完成--> minio --健康--> minio-init
+postgres-init --成功完成--> flowable-init --成功完成--> core
 host-gateway --无 depends_on，独立启动并建立本地监听器
 kafka、redis、opa --无显式依赖，彼此并行启动
 ```
@@ -90,6 +92,7 @@ Kafka 使用单节点 KRaft：
 | `parser-input` | `parser-volume-init`、`parser`、`ai` | AI 写入、parser 只读的短期隔离输入；不是权威存储 |
 | `parser-requests` | `parser-volume-init`、`parser`、`ai` | 哈希绑定的解析请求和处理中声明；可在停机后清理 |
 | `parser-output` | `parser-volume-init`、`parser`、`ai` | 有界解析结果和 parser 心跳；可丢弃并重建 |
+| `minio-data` | `postgres-init`、`minio` | 对象、桶和 MinIO 内部配置 |
 
 **危险：** `docker compose --env-file infra/compose/.env -f infra/compose/compose.yml down --volumes` 会删除以上七个卷。前四个卷包含运行状态；三个 parser 卷是可丢弃队列。仅有容器镜像、数据库 SQL 或 `.env` 都不能替代完整恢复点。
 

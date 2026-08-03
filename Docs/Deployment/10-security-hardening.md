@@ -28,6 +28,7 @@ Windows 检查发布监听与进程，任何非回环结果都失败：
 ```powershell
 $ErrorActionPreference = 'Stop'
 $allowedKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$allowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 $config = @{}
 Get-Content -LiteralPath 'infra/compose/.env' | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -59,6 +60,8 @@ set -euo pipefail
 declare -A config=() allowed=() seen=()
 for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 required_paths=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}; [ -z "$key" ] && continue; case "$key" in \#*) continue;; esac
   [[ $key =~ (PASSWORD|SECRET|ACCESS_KEY|TOKEN)$ ]] && exit 1
@@ -149,6 +152,9 @@ $secretRoot = (Resolve-Path -LiteralPath $env:OCC_SECRET_ROOT).Path
 $expectedNames = @('cursor-hmac-key','postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password')
 $entries = @(Get-ChildItem -LiteralPath $secretRoot -Force)
 if ($entries.Count -ne 9 -or (Compare-Object @($expectedNames | Sort-Object) @($entries.Name | Sort-Object))) { throw '密钥目录必须精确包含九个预期文件' }
+$expectedNames = @('postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password','occ-jwt-private-key.pem','occ-jwt-public-key.pem')
+$entries = @(Get-ChildItem -LiteralPath $secretRoot -Force)
+if ($entries.Count -ne 10 -or (Compare-Object @($expectedNames | Sort-Object) @($entries.Name | Sort-Object))) { throw '密钥目录必须精确包含十个预期文件' }
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $systemSid = 'S-1-5-18'; $administratorsSid = 'S-1-5-32-544'
 $allowedSids = @($currentSid,$systemSid,$administratorsSid)
@@ -182,6 +188,10 @@ expected=(cursor-hmac-key postgres-admin-password postgres-flyway-password postg
 mapfile -t entries < <(find "$secret_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
 [ "${#entries[@]}" -eq 9 ] && [ "$(printf '%s\n' "${entries[@]}")" = "$(printf '%s\n' "${wanted[@]}")" ]
+expected=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password occ-jwt-private-key.pem occ-jwt-public-key.pem)
+mapfile -t entries < <(find "$secret_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+[ "${#entries[@]}" -eq 10 ] && [ "$(printf '%s\n' "${entries[@]}")" = "$(printf '%s\n' "${wanted[@]}")" ]
 test "$(stat -c '%a' "$secret_root")" = 700
 test "$(stat -c '%u' "$secret_root")" -eq "$(id -u)"
 for name in "${expected[@]}"; do
@@ -197,6 +207,7 @@ SELinux/AppArmor 拒绝时修复经批准 label/profile；不得 `chmod 644`、�
 ## 凭据唯一性、保管与协调轮换
 
 九个文件型值必须部署专用、全部互异；cursor key 仅供 Core，三个 PostgreSQL 密码两两不同，MinIO root/app 用户名和密码分别不同。Core 只持有 cursor、runtime/Flyway、Redis 和 MinIO 桶级应用凭据；不得获得 PostgreSQL admin 或 MinIO root。网关、AI、OPA、Kafka 不消费这些密钥。
+八个标量值必须部署专用、全部互异；JWT 私钥/公钥必须部署专用且匹配。Core 和 `flowable-init` 持有 JWT 密钥对，私钥不得提供给其他服务；Core 另只持有 runtime/Flyway、Redis 和 MinIO 桶级应用凭据，不得获得 PostgreSQL admin 或 MinIO root。网关、AI、OPA、Kafka 不消费 JWT 私钥。
 
 禁止以下做法：
 
@@ -215,7 +226,7 @@ SELinux/AppArmor 拒绝时修复经批准 label/profile；不得 `chmod 644`、�
 
 ## 不在 env、argv、日志和支持包中泄密
 
-运行配置只允许 `infra/compose/.env` 保存八个绝对文件路径和十二个非敏感覆盖。检查进程和 Compose 时不使用会展开敏感环境/挂载的完整 `docker inspect`，也不收集主机或容器进程命令行；普通支持包不包含 Compose `config`，因为它会暴露主机密钥路径。该限制是当前 Redis argv残余风险的必要补偿控制，不代表管理员无法读取 argv。
+运行配置只允许 `infra/compose/.env` 保存十一个绝对文件路径、必填 JWT issuer 和十二个可选非敏感覆盖。管理员引导路径在首次成功后必须指向第 03 章零字节墓碑，不能长期保留原密码。检查进程和 Compose 时不使用会展开敏感环境/挂载的完整 `docker inspect`，也不收集主机或容器进程命令行；普通支持包不包含 Compose `config`，因为它会暴露主机密钥路径。该限制是当前 Redis argv残余风险的必要补偿控制，不代表管理员无法读取 argv。
 
 日志控制要求：
 
@@ -389,6 +400,7 @@ DNS 使用组织批准解析器并监控变更；TLS必须验证链、主体、�
 - [ ] 管理员、Docker、发布、DBA、备份、审计身份分离；成员、MFA和离职撤销已复核。
 - [ ] Windows ACL/Linux owner/mode、SELinux/AppArmor和仓库只读边界通过精确检查。
 - [ ] 九密钥互异、消费者最小、外部 escrow有效；轮换/部分失败回退已演练。
+- [ ] 八个标量密钥互异、JWT 密钥对匹配、消费者最小、外部 escrow有效；轮换/部分失败回退已演练。
 - [ ] `.env`、环境、日志、支持包、监控和工单无密钥值，支持包无进程命令行；已识别 Redis长运行 argv例外并完成生产风险接受/整改决策。
 - [ ] `install:verified`、npm漏洞评审、Electron官方来源守卫、Gradle strict/keyring、真实 OPA strict/test和 `verify:full` 全通过。
 - [ ] 外部镜像 tag+digest、本地 image ID+release revision以及组织镜像签名/attestation证据一致。
