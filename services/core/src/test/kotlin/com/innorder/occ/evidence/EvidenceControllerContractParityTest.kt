@@ -128,8 +128,11 @@ class EvidenceControllerContractParityTest {
         assertThat(policy.conditionalAdvancement).isFalse()
         assertThat(policy.conditionalFollowUpHours).isEqualTo(48)
         assertThat(policy.content.maximumBytes).isEqualTo(1024)
-        assertThat(EvidenceRequirementPolicy.parse(MAPPER.readTree(POLICY.replace("10.0", "0.5")))
-            .content.archiveLimits.maximumCompressionRatio).isEqualTo(0.5)
+        assertThat(EvidenceRequirementPolicy.parse(MAPPER.readTree(POLICY.replace("10.0", "1.0")))
+            .content.archiveLimits.maximumCompressionRatio).isEqualTo(1.0)
+        assertThatThrownBy {
+            EvidenceRequirementPolicy.parse(MAPPER.readTree(POLICY.replace("10.0", "0.5")))
+        }.isInstanceOf(InvalidEvidenceRequirementException::class.java)
         assertThatThrownBy {
             EvidenceRequirementPolicy.parse(MAPPER.readTree(POLICY.replace("txt", ".TXT")))
         }.isInstanceOf(InvalidEvidenceRequirementException::class.java)

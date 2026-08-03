@@ -10,8 +10,7 @@ data class ArchiveLimits(
     init {
         require(maximumEntries in 1..ABSOLUTE_MAXIMUM_ENTRIES)
         require(maximumExpandedBytes in 1..ABSOLUTE_MAXIMUM_EXPANDED_BYTES)
-        require(maximumCompressionRatio.isFinite() && maximumCompressionRatio > 0.0 &&
-            maximumCompressionRatio <= ABSOLUTE_MAXIMUM_COMPRESSION_RATIO)
+        require(maximumCompressionRatio.isFinite() && maximumCompressionRatio in 1.0..ABSOLUTE_MAXIMUM_COMPRESSION_RATIO)
     }
 
     companion object {
