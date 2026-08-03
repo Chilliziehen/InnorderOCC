@@ -104,6 +104,7 @@ npm run verify:full
 9. [事件处置手册](09-incident-runbooks.md)
 10. [安全加固](10-security-hardening.md)
 11. [命令参考与检查单](11-command-reference-and-checklists.md)
+12. [发布制品与脚本化部署](12-release-and-scripted-deployment.md)
 
 ## 快速生命周期地图
 

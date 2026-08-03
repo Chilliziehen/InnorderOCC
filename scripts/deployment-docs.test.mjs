@@ -26,6 +26,7 @@ const chapters = [
   "09-incident-runbooks.md",
   "10-security-hardening.md",
   "11-command-reference-and-checklists.md",
+  "12-release-and-scripted-deployment.md",
 ];
 const credentialPatterns = [
   ["private key", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u],
@@ -500,7 +501,7 @@ test("deployment lifecycle labels come only from visible H2-H6 headings", () => 
   assert.deepEqual(sectionLabels("# Title\n\n<!-- deployment-contract:prerequisites -->\n\n## Build"), ["Build"]);
 });
 
-test("deployment manual contains exactly the required twelve files", () => {
+test("deployment manual contains exactly the required thirteen files", () => {
   const actual = entries.map((entry) => entry.name);
   const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
   assert.deepEqual({
