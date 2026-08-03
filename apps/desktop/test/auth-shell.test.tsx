@@ -236,8 +236,14 @@ describe("authenticated shell", () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it("focuses and announces the route heading after a hash change", async () => {
+  it("focuses only the committed route h1 and does not steal focus on data refresh", async () => {
     installOcc(createOcc());
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame");
     const { rerender } = render(
       <AppShell
         state={authenticatedState()}
@@ -256,11 +262,41 @@ describe("authenticated shell", () => {
         onProfileSave={vi.fn()}
       />,
     );
+    rerender(
+      <AppShell
+        state={authenticatedState(identity.capabilities, { path: "/processes", focusToken: 2 })}
+        statuses={[]}
+        onLogout={vi.fn()}
+        onProfileSelect={vi.fn()}
+        onProfileSave={vi.fn()}
+      />,
+    );
 
-    const heading = screen.getByRole("heading", { level: 1, name: "风险" });
+    const heading = screen.getByRole("heading", { level: 1, name: "流程" });
+    expect(heading).not.toHaveFocus();
+    expect(requestFrame).toHaveBeenCalledTimes(2);
+    expect(cancelFrame).toHaveBeenCalledWith(1);
+    vi.spyOn(heading, "focus").mockImplementationOnce(() => undefined);
+    frames[1]!(0);
+    expect(requestFrame).toHaveBeenCalledTimes(3);
+    frames[2]!(1);
     await waitFor(() => expect(heading).toHaveFocus());
     expect(heading).toHaveAttribute("tabindex", "-1");
-    expect(screen.getByTestId("page-announcement")).toHaveTextContent("风险");
+    expect(screen.getByTestId("page-announcement")).toHaveTextContent("流程");
+
+    const refresh = screen.getByRole("button", { name: /^刷新$/ });
+    refresh.focus();
+    rerender(
+      <AppShell
+        state={{ ...authenticatedState(identity.capabilities, { path: "/processes", focusToken: 2 }), lastFreshAt: Date.now() }}
+        statuses={[]}
+        onLogout={vi.fn()}
+        onProfileSelect={vi.fn()}
+        onProfileSave={vi.fn()}
+      />,
+    );
+    expect(refresh).toHaveFocus();
+    expect(requestFrame).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the route heading as the only level-one heading in settings", () => {

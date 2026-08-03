@@ -99,6 +99,7 @@ export interface SmokeFixture {
   close(): Promise<void>;
   calls(): Promise<Array<{ channel: string; input?: unknown }>>;
   setOnline(online: boolean): Promise<void>;
+  setUploadPaused(paused: boolean): Promise<void>;
   setQueryState(workspace: string, state: "ready" | "stale" | "conflict"): Promise<void>;
   sendNotificationState(state: "online" | "reconnecting" | "unavailable"): Promise<void>;
 }
@@ -129,14 +130,14 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
     } as const;
     type FixtureState = {
       profiles: Array<Record<string, unknown>>; current: Record<string, unknown> | null; authenticated: boolean;
-      calls: Array<{ channel: string; input?: unknown }>; uploadBytes: number; uploadSize: number; uploadSequence: number; uploadIntent: string; uploadKind: "evidence" | "archive"; uploadActive: boolean;
+      calls: Array<{ channel: string; input?: unknown }>; uploadBytes: number; uploadSize: number; uploadSequence: number; uploadCompleteCount: number; uploadIntent: string; uploadKind: "evidence" | "archive"; uploadActive: boolean; uploadPaused: boolean;
       online: boolean; queryStates: Record<string, "ready" | "stale" | "conflict">;
     };
     const state: FixtureState = {
       profiles: fixture.startWithoutProfile ? [] : [fixture.profile],
       current: fixture.startWithoutProfile ? null : fixture.profile,
       authenticated: !fixture.startWithoutProfile,
-      calls: [], uploadBytes: 0, uploadSize: 1, uploadSequence: 0, uploadIntent: fixture.ids.correlation, uploadKind: "evidence", uploadActive: false, online: true, queryStates: {},
+      calls: [], uploadBytes: 0, uploadSize: 1, uploadSequence: 0, uploadCompleteCount: 0, uploadIntent: fixture.ids.correlation, uploadKind: "evidence", uploadActive: false, uploadPaused: false, online: true, queryStates: {},
     };
     (globalThis as typeof globalThis & { __occSmokeFixture?: FixtureState }).__occSmokeFixture = state;
     const scrub = (value: unknown): unknown => {
@@ -200,18 +201,22 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
       return { state: "completed", commandId: fixture.ids.command, correlationId: fixture.ids.correlation, result: { version: 2 } };
     });
     install(channels.uploadPreflight, (_event, input: Record<string, unknown>) => { assertObject(channels.uploadPreflight, input); record(channels.uploadPreflight, input); return { state: "available", maxBytes: 100 * 1024 * 1024 }; });
-    install(channels.uploadBegin, (_event, input: Record<string, unknown>) => { assertObject(channels.uploadBegin, input); record(channels.uploadBegin, input); state.uploadBytes = 0; state.uploadSize = Number(input.size); state.uploadSequence = 0; state.uploadIntent = String(input.intentHandle); state.uploadKind = input.workspace === "domain-design" ? "archive" : "evidence"; state.uploadActive = true; return { state: "started", uploadId: fixture.ids.upload }; });
-    install(channels.uploadAppend, (_event, input: Record<string, unknown>) => {
+    install(channels.uploadBegin, (_event, input: Record<string, unknown>) => { assertObject(channels.uploadBegin, input); record(channels.uploadBegin, input); state.uploadBytes = 0; state.uploadSize = Number(input.size); state.uploadSequence = 0; state.uploadCompleteCount = 0; state.uploadIntent = String(input.intentHandle); state.uploadKind = input.workspace === "domain-design" ? "archive" : "evidence"; state.uploadActive = true; return { state: "started", uploadId: fixture.ids.upload }; });
+    install(channels.uploadAppend, async (_event, input: Record<string, unknown>) => {
       assertObject(channels.uploadAppend, input); record(channels.uploadAppend, { ...input, data: "[BINARY]" });
       const bytes = (input.data as { byteLength?: number }).byteLength ?? 0;
       if (!state.uploadActive || input.uploadId !== fixture.ids.upload || input.sequence !== state.uploadSequence || bytes <= 0 || bytes > 1024 * 1024 || state.uploadBytes + bytes > state.uploadSize) throw new Error("invalid chunk");
       state.uploadSequence += 1;
       state.uploadBytes += bytes;
       BrowserWindow.getAllWindows()[0]?.webContents.send("uploads:progress", { uploadId: fixture.ids.upload, intentHandle: state.uploadIntent, percent: Math.min(100, Math.round(state.uploadBytes / state.uploadSize * 100)) });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      while (state.uploadPaused) await new Promise((resolve) => setTimeout(resolve, 10));
+      if (!state.uploadActive) throw new Error("upload cancelled");
       return { acceptedBytes: bytes, receivedBytes: state.uploadBytes };
     });
     install(channels.uploadFinish, (_event, uploadId: string) => {
-      record(channels.uploadFinish, uploadId); if (!state.uploadActive || uploadId !== fixture.ids.upload || state.uploadBytes !== state.uploadSize) throw new Error("invalid upload finish");
+      record(channels.uploadFinish, uploadId); if (!state.uploadActive || uploadId !== fixture.ids.upload || state.uploadBytes !== state.uploadSize || state.uploadCompleteCount !== 0) throw new Error("invalid upload finish");
+      state.uploadCompleteCount += 1;
       state.uploadActive = false;
       return state.uploadKind === "archive"
         ? { state: "completed", uploadId, kind: "archive", uploadReference: "packages/pilot-operations.zip", sha256: "a".repeat(64) }
@@ -239,6 +244,7 @@ export async function launchSmokeFixture(options: SmokeFixtureOptions = {}): Pro
     close: async () => { await application.close(); await rm(userData, { recursive: true, force: true }); },
     calls: () => application.evaluate(() => (globalThis as typeof globalThis & { __occSmokeFixture?: { calls: Array<{ channel: string; input?: unknown }> } }).__occSmokeFixture?.calls ?? []),
     setOnline: (online) => application.evaluate((_electron, value) => { const state = (globalThis as typeof globalThis & { __occSmokeFixture?: { online: boolean } }).__occSmokeFixture; if (state) state.online = value; }, online),
+    setUploadPaused: (paused) => application.evaluate((_electron, value) => { const state = (globalThis as typeof globalThis & { __occSmokeFixture?: { uploadPaused: boolean } }).__occSmokeFixture; if (state) state.uploadPaused = value; }, paused),
     setQueryState: (workspace, state) => application.evaluate((_electron, value) => { const fixture = (globalThis as typeof globalThis & { __occSmokeFixture?: { queryStates: Record<string, string> } }).__occSmokeFixture; if (fixture) fixture.queryStates[value.workspace] = value.state; }, { workspace, state }),
     sendNotificationState: (state) => application.evaluate(({ BrowserWindow }, value) => BrowserWindow.getAllWindows()[0]?.webContents.send("notifications:state", { state: value, changedAt: "2026-08-02T08:00:00.000Z", lastEventAt: "2026-08-02T07:59:00.000Z" }), state),
   };

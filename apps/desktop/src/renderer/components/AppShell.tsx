@@ -37,11 +37,23 @@ export function AppShell({ state, statuses, notificationState, onLogout, onProfi
 
   useEffect(() => {
     if ((state.route?.focusToken ?? 0) <= 0) return;
-    const heading = contentRef.current?.querySelector<HTMLElement>("h1, h2");
-    if (heading) {
+    let frame = 0;
+    let cancelled = false;
+    const focusHeading = () => {
+      if (cancelled) return;
+      const heading = contentRef.current?.querySelector<HTMLHeadingElement>("h1");
+      if (!heading?.isConnected) {
+        frame = requestAnimationFrame(focusHeading);
+        return;
+      }
       heading.tabIndex = -1;
       heading.focus();
-    }
+    };
+    frame = requestAnimationFrame(focusHeading);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
   }, [state.route?.focusToken]);
 
   return (
