@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -41,8 +42,11 @@ const migrations = [
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V013__process_task_workflow.sql',
   'V014__evidence_risk_resource.sql',
+  'V015__cohort_api_lifecycle.sql',
 ];
+const appliedMigrations = [];
 
 async function applyMigration(migration) {
   let sql = readFileSync(join(migrationDir, migration), 'utf8');
@@ -53,6 +57,7 @@ async function applyMigration(migration) {
     );
   }
   await db.exec(sql);
+  appliedMigrations.push(migration);
   console.log(`applied ${migration}`);
 }
 
@@ -60,7 +65,9 @@ const stagedUpgradeMigrations = new Set([
   'V010__platform_security_kernel.sql',
   'V011__account_failed_attempt_window.sql',
   'V012__outbox_publisher_lifecycle.sql',
+  'V013__process_task_workflow.sql',
   'V014__evidence_risk_resource.sql',
+  'V015__cohort_api_lifecycle.sql',
 ]);
 for (const migration of migrations.filter((name) => !stagedUpgradeMigrations.has(name))) {
   await applyMigration(migration);
@@ -195,6 +202,7 @@ if (legacyAccountWindow.rows.length !== 1
 console.log('passed V011 legacy account failure-window backfill');
 
 await applyMigration('V012__outbox_publisher_lifecycle.sql');
+await applyMigration('V013__process_task_workflow.sql');
 await applyMigration('V014__evidence_risk_resource.sql');
 
 const v14FunctionSecurity = await db.query(`
@@ -656,6 +664,22 @@ await expectSqlState(`
   WHERE reservation_id = '92000000-0000-7000-8000-000000000070'
 `, '55000', 'reservation history mutation');
 console.log('passed portable V014 provenance, history, risk, reservation, and legal-hold behavior');
+await applyMigration('V015__cohort_api_lifecycle.sql');
+assert.deepEqual(appliedMigrations, migrations, 'PGlite must apply every declared migration in order');
+
+const workflowSchema = await db.query(`
+  SELECT to_regclass('occ.cohort') IS NOT NULL AS cohort,
+         to_regclass('occ.task_gate_provider_state') IS NOT NULL AS gate_provider_state,
+         to_regclass('occ.task_review_projection_fact') IS NOT NULL AS review_projection_fact,
+         to_regclass('occ.notification') IS NOT NULL AS notification
+`);
+assert.deepEqual(workflowSchema.rows, [{
+  cohort: true,
+  gate_provider_state: true,
+  review_projection_fact: true,
+  notification: true,
+}], 'V013 workflow objects must exist after migration application');
+console.log('verified applied migration list and V013 workflow objects');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)
@@ -670,7 +694,7 @@ try {
 }
 console.log('passed sequential idempotency terminal transition coverage');
 
-for (const testFile of ['000_assert.sql', '001_schema_contract.sql', '002_constraints.sql']) {
+for (const testFile of ['000_assert.sql', '001_schema_contract.sql', '002_constraints.sql', '003_process_task_workflow.sql']) {
   const sql = readFileSync(resolve('database/tests', testFile), 'utf8')
     .split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('\\'))

@@ -12,24 +12,26 @@ import java.util.UUID
 class OutboxRepository(
     private val jdbc: JdbcTemplate,
 ) {
-    fun insert(descriptor: CommandDescriptor, correlationId: UUID, transactionId: UUID, mutation: CommandMutation) {
+    fun insert(descriptor: CommandDescriptor, correlationId: UUID, transactionId: UUID, mutation: CommandMutation): List<PersistedOutboxEvent> {
         check(TransactionSynchronizationManager.isActualTransactionActive()) { "Outbox repository requires a transaction" }
-        mutation.events.forEach { event ->
+        return mutation.events.map { event ->
             try {
                 EventPayloadPolicy.validate(event.payload.toJsonNode())
             } catch (_: InvalidEventPayloadException) {
                 throw InvalidCommandRequestException()
             }
+            val eventId = UUID.randomUUID()
             jdbc.update(
                 """INSERT INTO audit.outbox_event
                    (id, customer_instance_id, aggregate_type, aggregate_id, aggregate_version,
                     event_type, schema_version, payload, actor_entity_id, correlation_id, causation_id,
                     available_at, next_attempt_at, status)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, statement_timestamp(), statement_timestamp(), 'PENDING')""",
-                UUID.randomUUID(), DEFAULT_CUSTOMER_INSTANCE_ID, mutation.aggregateType, mutation.aggregateId,
+                eventId, DEFAULT_CUSTOMER_INSTANCE_ID, event.aggregate.type, event.aggregate.id,
                 event.aggregateVersion, event.eventType, event.schemaVersion, event.payload.canonicalText(),
                 descriptor.principalId, correlationId, transactionId,
             )
+            PersistedOutboxEvent(eventId, event.eventType, event.aggregate.type, event.aggregate.id)
         }
     }
 
@@ -37,3 +39,5 @@ class OutboxRepository(
         val DEFAULT_CUSTOMER_INSTANCE_ID: UUID = UUID.fromString("00000000-0000-7000-8000-000000000001")
     }
 }
+
+data class PersistedOutboxEvent(val id: UUID, val eventType: String, val aggregateType: String, val aggregateId: UUID)

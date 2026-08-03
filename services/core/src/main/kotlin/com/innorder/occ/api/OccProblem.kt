@@ -66,6 +66,9 @@ class OccProblemResponses(private val objectMapper: ObjectMapper) {
     fun conflict(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 409, "version-conflict", "Version conflict", "OCC-API-CONFLICT")
 
+    fun cohortInvalidRequest(request: HttpServletRequest): ResponseEntity<OccProblem> =
+        response(request, 400, "cohort-invalid-request", "Invalid cohort request", "OCC_INVALID_REQUEST")
+
     fun invalidIdempotencyKey(request: HttpServletRequest): ResponseEntity<OccProblem> =
         response(request, 400, "invalid-idempotency-key", "Invalid idempotency key", "OCC-COMMAND-IDEMPOTENCY-KEY")
 

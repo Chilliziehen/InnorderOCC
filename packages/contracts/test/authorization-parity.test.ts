@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { authorizationDecisionSchema, authorizationInputSchema } from "../src/index.js";
 
@@ -20,9 +20,10 @@ const fixtures = JSON.parse(
   readFileSync(new URL("./fixtures/authorization-parity.json", import.meta.url), "utf8"),
 ) as Fixtures;
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+const dockerContainer = `innorder-authz-parity-${process.pid}`;
 const invalidPolicyId = "policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176";
 const canonicalInvalidDecision = {
-  contractVersion: 1,
+  contractVersion: 2,
   opaRevision: "",
   requestId: "00000000-0000-0000-0000-000000000000",
   authorizationRevision: 0,
@@ -35,9 +36,17 @@ const canonicalInvalidDecision = {
 };
 
 function evaluateWithOpa(input: JsonObject): unknown {
+  const executable = process.env.OPA_PATH ?? "docker";
+  const opaArguments = [
+    "eval", "--format=json", "--data", "policies/opa", "--stdin-input",
+    "data.innorder.platform.authz.decision",
+  ];
+  const args = process.env.OPA_PATH
+    ? opaArguments
+    : ["exec", "-i", dockerContainer, "/opa", ...opaArguments];
   const result = spawnSync(
-    process.env.OPA_PATH,
-    ["eval", "--format=json", "--data", "policies/opa", "--stdin-input", "data.innorder.platform.authz.decision"],
+    executable,
+    args,
     { cwd: repositoryRoot, encoding: "utf8", input: JSON.stringify(input) },
   );
   expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -81,9 +90,23 @@ function materialize(fixture: FixtureCase): JsonObject {
   return input;
 }
 
-const describeWithOpa = process.env.OPA_PATH ? describe : describe.skip;
+const describeWithOpa = process.env.OPA_PATH || process.env.OPA_DOCKER_IMAGE ? describe : describe.skip;
 
 describeWithOpa("authorization Zod/OPA parity", () => {
+  beforeAll(() => {
+    if (process.env.OPA_PATH) return;
+    const result = spawnSync("docker", [
+      "run", "--rm", "-d", "--name", dockerContainer,
+      "-v", `${repositoryRoot}:/workspace`, "-w", "/workspace",
+      process.env.OPA_DOCKER_IMAGE!, "run", "--server", "policies/opa",
+    ], { cwd: repositoryRoot, encoding: "utf8" });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  });
+
+  afterAll(() => {
+    if (!process.env.OPA_PATH) spawnSync("docker", ["rm", "-f", dockerContainer]);
+  });
+
   for (const fixture of fixtures.valid) {
     it(`accepts and evaluates: ${fixture.name}`, () => {
       const input = materialize(fixture);
@@ -108,7 +131,7 @@ describeWithOpa("authorization Zod/OPA parity", () => {
   }
 
   it("fails closed when the expected OPA runtime revision differs", () => {
-    const input = { ...fixtures.baseInput, opaRevision: "platform-authz-v2" };
+    const input = { ...fixtures.baseInput, opaRevision: "platform-authz-v1" };
     expect(authorizationInputSchema.parse(input)).toEqual(input);
     expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
   });

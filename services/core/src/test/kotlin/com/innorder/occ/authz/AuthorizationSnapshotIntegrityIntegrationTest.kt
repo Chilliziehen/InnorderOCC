@@ -22,7 +22,7 @@ import java.security.MessageDigest
 import java.util.UUID
 
 @Testcontainers(disabledWithoutDocker = true)
-class AuthorizationSnapshotIntegrityIntegrationTest {
+open class AuthorizationSnapshotIntegrityIntegrationTest {
     @Test
     fun `loads exact platform domain customer allow and deny layers`() = scenario { jdbc ->
         val manifests = mapOf(
@@ -122,7 +122,7 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
         }
     }
 
-    private fun scenario(block: (JdbcTemplate) -> Unit) {
+    protected fun scenario(block: (JdbcTemplate) -> Unit) {
         val jdbc = JdbcTemplate(dataSource())
         TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!)).execute { status ->
             try {
@@ -133,7 +133,18 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
         }
     }
 
-    private fun seedActiveRelease(jdbc: JdbcTemplate, manifests: Map<PolicyLayer, String>): UUID {
+    protected fun adminScenario(block: (JdbcTemplate) -> Unit) {
+        val jdbc = JdbcTemplate(adminDataSource())
+        TransactionTemplate(DataSourceTransactionManager(jdbc.dataSource!!)).execute { status ->
+            try {
+                block(jdbc)
+            } finally {
+                status.setRollbackOnly()
+            }
+        }
+    }
+
+    protected fun seedActiveRelease(jdbc: JdbcTemplate, manifests: Map<PolicyLayer, String>): UUID {
         val items = manifests.map { (layer, manifest) -> bundle(jdbc, layer, manifest) }
         return activate(jdbc, items)
     }
@@ -199,9 +210,9 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
         return releaseId
     }
 
-    private fun repository(jdbc: JdbcTemplate) = AuthorizationSnapshotRepository(jdbc, ObjectMapper().findAndRegisterModules())
+    protected fun repository(jdbc: JdbcTemplate) = AuthorizationSnapshotRepository(jdbc, ObjectMapper().findAndRegisterModules())
 
-    private fun request() = AuthorizationRequest(
+    protected fun request() = AuthorizationRequest(
         REQUEST_ID, PRINCIPAL_ID, "occ.read", ENTITY_ID, RESOURCE_ID,
         mapOf("correlationId" to REQUEST_ID.toString()),
     )
@@ -227,7 +238,7 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
 
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
-        private const val OPA_REVISION = "platform-authz-v1"
+        private const val OPA_REVISION = "platform-authz-v2"
         private val PACKAGE_ID = UUID.fromString("73000000-0000-7000-8000-000000000001")
         private val PACKAGE_VERSION_ID = UUID.fromString("73000000-0000-7000-8000-000000000002")
         private val TYPE_ID = UUID.fromString("73000000-0000-7000-8000-000000000003")
@@ -263,6 +274,31 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
             jdbc.update("INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable) VALUES (?, ?, 'matrix.subject', 'Subject', 'PRINCIPAL', true), (?, ?, 'matrix.role', 'Role', 'PRINCIPAL', true)", TYPE_ID, PACKAGE_ID, ROLE_TYPE_ID, PACKAGE_ID)
             jdbc.update("INSERT INTO catalog.entity_type_version(id, entity_type_id, package_version_id, schema_version, json_schema) VALUES (?, ?, ?, 1, '{}'::jsonb), (?, ?, ?, 1, '{}'::jsonb)", TYPE_VERSION_ID, TYPE_ID, PACKAGE_VERSION_ID, ROLE_TYPE_VERSION_ID, ROLE_TYPE_ID, PACKAGE_VERSION_ID)
             jdbc.update("INSERT INTO catalog.relation_definition(id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant) VALUES (?, ?, 'platform.role-assignment', ?, ?, 'MANY_TO_MANY', true)", RELATION_ID, PACKAGE_VERSION_ID, TYPE_ID, ROLE_TYPE_ID)
+            (WorkflowAuthorizationRelationDefinitions.all.map { it.id.toString() to it.key } +
+                ("74000000-0000-7000-8000-000000000006" to "unrelated_authority")).forEach { (id, key) ->
+                jdbc.update(
+                    """INSERT INTO catalog.relation_definition
+                       (id, package_version_id, relation_key, subject_type_id, object_type_id, cardinality, auth_relevant)
+                       VALUES (?::uuid, ?, ?, ?, ?, 'MANY_TO_MANY', true)""",
+                    id, PACKAGE_VERSION_ID, key, TYPE_ID, TYPE_ID,
+                )
+            }
+            jdbc.update(
+                """INSERT INTO catalog.workflow_definition
+                   (id, package_version_id, workflow_key, bpmn_object_key, content_hash)
+                   VALUES ('75000000-0000-7000-8000-000000000001', ?, 'task-authz',
+                           'task-authz.bpmn', repeat('c', 64))""",
+                PACKAGE_VERSION_ID,
+            )
+            jdbc.update(
+                """INSERT INTO occ.process_definition_binding
+                   (id, workflow_definition_id, package_version_id, bpmn_key,
+                    flowable_deployment_id, flowable_definition_id, content_hash)
+                   VALUES ('75000000-0000-7000-8000-000000000002',
+                           '75000000-0000-7000-8000-000000000001', ?, 'task-authz',
+                           'task-authz-deployment', 'task-authz-definition', repeat('d', 64))""",
+                PACKAGE_VERSION_ID,
+            )
             listOf(
                 arrayOf(PRINCIPAL_ID, TYPE_ID, TYPE_VERSION_ID, "matrix:user"),
                 arrayOf(ENTITY_ID, TYPE_ID, TYPE_VERSION_ID, "matrix:entity"),
@@ -278,6 +314,12 @@ class AuthorizationSnapshotIntegrityIntegrationTest {
             setURL(postgres.jdbcUrl)
             user = "innorder_runtime"
             password = "runtime-test-only"
+        }
+
+        private fun adminDataSource() = PGSimpleDataSource().apply {
+            setURL(postgres.jdbcUrl)
+            user = postgres.username
+            password = postgres.password
         }
     }
 }

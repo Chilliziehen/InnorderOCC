@@ -16,6 +16,49 @@ x-command-response-headers: &commandResponseHeaders
     $ref: "#/components/headers/CorrelationId"
   Idempotency-Replayed:
     $ref: "#/components/headers/IdempotencyReplayed"
+x-workflow-request-response: &workflowRequestResponse { $ref: "#/components/responses/WorkflowRequestError" }
+x-workflow-bad-request-response: &workflowBadRequestResponse { $ref: "#/components/responses/WorkflowBadRequest" }
+x-workflow-unauthorized-response: &workflowUnauthorizedResponse { $ref: "#/components/responses/WorkflowUnauthorized" }
+x-workflow-forbidden-response: &workflowForbiddenResponse { $ref: "#/components/responses/WorkflowForbidden" }
+x-workflow-not-found-response: &workflowNotFoundResponse { $ref: "#/components/responses/WorkflowNotFound" }
+x-workflow-internal-response: &workflowInternalResponse { $ref: "#/components/responses/WorkflowInternalError" }
+x-workflow-authorization-unavailable-response: &workflowAuthorizationUnavailableResponse { $ref: "#/components/responses/WorkflowAuthorizationUnavailable" }
+x-workflow-unavailable-response: &workflowUnavailableResponse { $ref: "#/components/responses/WorkflowUnavailable" }
+x-idempotency-key: &idempotencyKey
+  name: Idempotency-Key
+  in: header
+  required: true
+  schema: { type: string, minLength: 1, maxLength: 256 }
+x-cohort-id: &cohortId
+  name: cohortId
+  in: path
+  required: true
+  schema: { type: string, format: uuid }
+x-participant-id: &participantId
+  name: participantId
+  in: path
+  required: true
+  schema: { type: string, format: uuid }
+x-process-id: &processId
+  name: processId
+  in: path
+  required: true
+  schema: { type: string, format: uuid }
+x-task-id: &taskId
+  name: taskId
+  in: path
+  required: true
+  schema: { type: string, format: uuid }
+x-notification-id: &notificationId
+  name: notificationId
+  in: path
+  required: true
+  schema: { type: string, format: uuid }
+x-activity-key: &activityKey
+  name: activityKey
+  in: path
+  required: true
+  schema: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
 paths:
   /api/v1/system/status:
     get:
@@ -1038,6 +1081,225 @@ paths:
           $ref: "#/components/responses/CommandUnavailable"
         "500":
           $ref: "#/components/responses/InternalServerError"
+  /api/v1/cohorts:
+    get:
+      operationId: listCohorts
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/CohortStatus" } }
+        - { name: packageVersionId, in: query, schema: { type: string, format: uuid } }
+        - { name: updatedBefore, in: query, schema: { type: string, format: date-time } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Authorized cohorts, content: { application/json: { schema: { $ref: "#/components/schemas/CohortPage" } } } } }
+    post:
+      operationId: createCohort
+      parameters: [*idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CreateCohortRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "201": { description: Cohort created, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } }, "409": { $ref: "#/components/responses/CohortCreationConflict" } }
+  /api/v1/cohorts/{cohortId}:
+    get:
+      operationId: getCohort
+      parameters: [*cohortId]
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Cohort detail, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } } }
+    patch:
+      operationId: updateCohort
+      parameters: [*cohortId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/UpdateCohortRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Cohort updated, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } }, "409": { $ref: "#/components/responses/VersionedCommandConflict" } }
+  /api/v1/cohorts/{cohortId}/members:
+    post:
+      operationId: addCohortMember
+      parameters: [*cohortId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AddCohortMemberRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Member added, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } }, "409": { $ref: "#/components/responses/VersionedCommandConflict" } }
+    delete:
+      operationId: removeCohortMember
+      parameters: [*cohortId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RemoveCohortMemberRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Member removed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } }, "409": { $ref: "#/components/responses/VersionedCommandConflict" } }
+  /api/v1/cohorts/{cohortId}/archive:
+    post:
+      operationId: archiveCohort
+      parameters: [*cohortId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ArchiveCohortRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Cohort archived, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } }, "409": { $ref: "#/components/responses/VersionedCommandConflict" } }
+  /api/v1/cohorts/{cohortId}/owner:
+    post:
+      operationId: transferCohortOwner
+      parameters: [*cohortId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TransferCohortOwnerRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Ownership transferred, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/CohortDetail" } } } }, "409": { $ref: "#/components/responses/VersionedCommandConflict" } }
+  /api/v1/cohorts/{cohortId}/participants/{participantId}/process:
+    post:
+      operationId: startParticipantProcess
+      parameters: [*cohortId, *participantId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StartParticipantProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "201": { description: Participant process started, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/StartParticipantProcessResponse" } } } }, "409": { $ref: "#/components/responses/ParticipantProcessStartConflict" } }
+  /api/v1/processes:
+    get:
+      operationId: listProcesses
+      parameters:
+        - { name: cohortId, in: query, schema: { type: string, format: uuid } }
+        - { name: participantId, in: query, schema: { type: string, format: uuid } }
+        - { name: state, in: query, schema: { $ref: "#/components/schemas/ProcessState" } }
+        - { name: packageVersionId, in: query, schema: { type: string, format: uuid } }
+        - { name: updatedBefore, in: query, schema: { type: string, format: date-time } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Authorized processes, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessPage" } } } } }
+  /api/v1/processes/{processId}:
+    get:
+      operationId: getProcess
+      parameters: [*processId]
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process detail, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } } }
+  /api/v1/processes/{processId}/progress:
+    get:
+      operationId: getProcessProgress
+      parameters: [*processId]
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process progress, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessProgress" } } } } }
+  /api/v1/processes/{processId}/participants:
+    get:
+      operationId: listProcessParticipants
+      parameters:
+        - *processId
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process participants, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessParticipantPage" } } } } }
+  /api/v1/processes/{processId}/tasks:
+    get:
+      operationId: listProcessTasks
+      parameters:
+        - *processId
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process tasks, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessTaskPage" } } } } }
+  /api/v1/processes/{processId}/timeline:
+    get:
+      operationId: listProcessTimeline
+      parameters:
+        - *processId
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process timeline, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessTimelinePage" } } } } }
+  /api/v1/processes/{processId}/suspend:
+    post:
+      operationId: suspendProcess
+      parameters: [*processId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SuspendProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process suspended, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessCommandConflict" } }
+  /api/v1/processes/{processId}/resume:
+    post:
+      operationId: resumeProcess
+      parameters: [*processId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ResumeProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process resumed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessCommandConflict" } }
+  /api/v1/processes/{processId}/cancel:
+    post:
+      operationId: cancelProcess
+      parameters: [*processId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CancelProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process cancelled, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessCommandConflict" } }
+  /api/v1/processes/{processId}/fail:
+    post:
+      operationId: failProcess
+      parameters: [*processId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/FailProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process failed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessCommandConflict" } }
+  /api/v1/processes/{processId}/transfer:
+    post:
+      operationId: transferProcess
+      parameters: [*processId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TransferProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process transferred, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessTransferConflict" } }
+  /api/v1/processes/{processId}/reconcile:
+    post:
+      operationId: reconcileProcess
+      parameters: [*processId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ReconcileProcessRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Process reconciled, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessCommandConflict" } }
+  /api/v1/processes/{processId}/waits/{activityKey}/release:
+    post:
+      operationId: releaseProcessWait
+      parameters: [*processId, *activityKey, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ReleaseProcessWaitRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Wait released, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/ProcessDetail" } } } }, "409": { $ref: "#/components/responses/ProcessWaitReleaseConflict" } }
+  /api/v1/tasks/my-work:
+    get:
+      operationId: listMyWork
+      parameters:
+        - { name: presentationState, in: query, schema: { $ref: "#/components/schemas/TaskPresentationState" } }
+        - { name: processId, in: query, schema: { type: string, format: uuid } }
+        - { name: cohortId, in: query, schema: { type: string, format: uuid } }
+        - { name: dueBefore, in: query, schema: { type: string, format: date-time } }
+        - { name: blockerCode, in: query, schema: { $ref: "#/components/schemas/BlockerCode" } }
+        - { name: updatedBefore, in: query, schema: { type: string, format: date-time } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Authorized work, content: { application/json: { schema: { $ref: "#/components/schemas/TaskPage" } } } } }
+  /api/v1/tasks/{taskId}:
+    get:
+      operationId: getTask
+      parameters: [*taskId]
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Task detail, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } } }
+  /api/v1/tasks/{taskId}/history:
+    get:
+      operationId: listTaskHistory
+      parameters:
+        - *taskId
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Task history, content: { application/json: { schema: { $ref: "#/components/schemas/TaskHistoryPage" } } } } }
+  /api/v1/tasks/{taskId}/blockers:
+    get:
+      operationId: listTaskBlockers
+      parameters:
+        - *taskId
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Task blockers, content: { application/json: { schema: { $ref: "#/components/schemas/TaskBlockerPage" } } } } }
+  /api/v1/tasks/{taskId}/claim:
+    post:
+      operationId: claimTask
+      parameters: [*taskId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ClaimTaskRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Task claimed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }, "409": { $ref: "#/components/responses/TaskClaimConflict" } }
+  /api/v1/tasks/{taskId}/complete:
+    post:
+      operationId: completeTask
+      parameters: [*taskId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CompleteTaskRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": { $ref: "#/components/responses/TaskGateUnavailable" }, "500": *workflowInternalResponse, "200": { description: Task completed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }, "409": { $ref: "#/components/responses/TaskBlocked" } }
+  /api/v1/tasks/{taskId}/fail:
+    post:
+      operationId: failTask
+      parameters: [*taskId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/FailTaskRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Task failed, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }, "409": { $ref: "#/components/responses/TaskCommandConflict" } }
+  /api/v1/me/notifications:
+    get:
+      operationId: listNotifications
+      parameters:
+        - { name: unread, in: query, schema: { type: boolean } }
+        - { name: type, in: query, schema: { $ref: "#/components/schemas/NotificationType" } }
+        - { name: severity, in: query, schema: { $ref: "#/components/schemas/NotificationSeverity" } }
+        - { name: createdBefore, in: query, schema: { type: string, format: date-time } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Notifications, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationPage" } } } } }
+  /api/v1/me/notifications/{notificationId}/read:
+    post:
+      operationId: markNotificationRead
+      parameters: [*notificationId, *idempotencyKey]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/MarkNotificationReadRequest" } } } }
+      responses: { "400": *workflowRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "404": *workflowNotFoundResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Notification marked read, headers: { X-Idempotent-Replay: { $ref: "#/components/headers/IdempotentReplay" } }, content: { application/json: { schema: { $ref: "#/components/schemas/Notification" } } } }, "409": { $ref: "#/components/responses/VersionedCommandConflict" } }
+  /api/v1/events:
+    get:
+      operationId: catchUpAuthorizedEvents
+      parameters:
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 4096 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: filter, in: query, schema: { type: string, enum: [cohort.created, cohort.updated, cohort.owner-transferred, cohort.member-added, cohort.member-removed, cohort.activated, cohort.archived, process.started, process.suspended, process.resumed, process.transferred, process.completed, process.cancelled, process.failed, process.projection-reconciled, task.available, task.claimed, task.assignee-changed, task.blocked, task.pending-review, task.returned, task.completed, task.cancelled, task.failed, task.projection-reconciled] } }
+      responses: { "400": *workflowBadRequestResponse, "401": *workflowUnauthorizedResponse, "403": *workflowForbiddenResponse, "503": *workflowAuthorizationUnavailableResponse, "500": *workflowInternalResponse, "200": { description: Currently authorized event catch-up, content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowEventPage" } } } } }
 components:
   securitySchemes:
     bearerAuth:
@@ -1257,6 +1519,11 @@ components:
         type: string
         format: uuid
   headers:
+    IdempotentReplay:
+      description: Whether the successful command response was replayed
+      schema:
+        type: string
+        enum: ["true", "false"]
     CorrelationId:
       description: Correlation UUID for this request and its emitted work
       required: true
@@ -1289,6 +1556,36 @@ components:
         maxLength: 24
         pattern: "^bytes \\*/[0-9]{1,16}$"
   responses:
+    WorkflowRequestError: { description: Invalid workflow request, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowRequestProblem" } } } }
+    WorkflowBadRequest: { description: Invalid workflow request or cursor, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowBadRequestProblem" } } } }
+    WorkflowUnauthorized: { description: Workflow authentication is required, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowUnauthorizedProblem" } } } }
+    WorkflowForbidden: { description: Workflow action is forbidden, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowForbiddenProblem" } } } }
+    WorkflowNotFound: { description: Workflow resource was not found or is not visible, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowNotFoundProblem" } } } }
+    WorkflowInternalError: { description: Unexpected workflow failure, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowInternalProblem" } } } }
+    WorkflowAuthorizationUnavailable: { description: Workflow authorization is unavailable, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowAuthorizationUnavailableProblem" } } } }
+    WorkflowUnavailable: { description: Workflow authorization or engine is unavailable, content: { application/problem+json: { schema: { $ref: "#/components/schemas/WorkflowUnavailableProblem" } } } }
+    CohortCreationConflict: { description: Cohort creation conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/CohortCreationConflictProblem" } } } }
+    VersionedCommandConflict: { description: Versioned command conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/VersionedCommandConflictProblem" } } } }
+    ParticipantProcessStartConflict: { description: Participant process start conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/ParticipantProcessStartConflictProblem" } } } }
+    ProcessCommandConflict: { description: Process command conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/ProcessCommandConflictProblem" } } } }
+    ProcessTransferConflict: { description: Process transfer conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/ProcessTransferConflictProblem" } } } }
+    ProcessWaitReleaseConflict: { description: Process wait release conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/ProcessWaitReleaseConflictProblem" } } } }
+    TaskClaimConflict: { description: Task claim conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/TaskClaimConflictProblem" } } } }
+    TaskCommandConflict: { description: Task command conflict, content: { application/problem+json: { schema: { $ref: "#/components/schemas/TaskCommandConflictProblem" } } } }
+    TaskBlocked:
+      description: Authorized blocker details prevent task completion
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/TaskCompletionConflictProblem"
+    TaskGateUnavailable:
+      description: Authorized provider details are unavailable or stale
+      content:
+        application/problem+json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/TaskGateUnavailableProblem"
+              - $ref: "#/components/schemas/TaskCompletionDependencyProblem"
     BadRequest:
       description: Invalid request
       content:
@@ -1456,6 +1753,45 @@ components:
           schema:
             $ref: "#/components/schemas/ProblemDetails"
   schemas:
+    ProblemCode:
+      type: string
+      enum:
+        - OCC-API-VALIDATION
+        - OCC-API-AUTHENTICATION
+        - OCC-AUTH-INVALID-CREDENTIALS
+        - OCC-API-FORBIDDEN
+        - OCC-API-CONFLICT
+        - OCC-COMMAND-IDEMPOTENCY-KEY
+        - OCC-COMMAND-IDEMPOTENCY-CONFLICT
+        - OCC-COMMAND-METADATA
+        - OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS
+        - OCC-COMMAND-IDEMPOTENCY-EXPIRED
+        - OCC-COMMAND-INTEGRITY
+        - OCC-COMMAND-OPTIMISTIC-CONFLICT
+        - OCC-AUTHZ-UNAVAILABLE
+        - OCC-API-INTERNAL
+        - OCC-API-REQUEST
+        - OCC_INVALID_REQUEST
+        - OCC_INVALID_CURSOR
+        - OCC_UNAUTHENTICATED
+        - OCC_FORBIDDEN
+        - OCC_NOT_FOUND
+        - OCC_IDEMPOTENCY_CONFLICT
+        - OCC_DUPLICATE_COHORT_CODE
+        - OCC_STALE_VERSION
+        - OCC_CLAIM_CONFLICT
+        - OCC_PARTICIPANT_PROCESS_EXISTS
+        - OCC_INVALID_TRANSITION
+        - OCC_PROCESS_NOT_RUNNING
+        - OCC_TASK_BLOCKED
+        - OCC_WAIT_NOT_ACTIVE
+        - OCC_TASK_GATE_UNAVAILABLE
+        - OCC_AUTHORIZATION_UNAVAILABLE
+        - OCC_WORKFLOW_UNAVAILABLE
+        - OCC_INTERNAL_ERROR
+    BaseProblemCode:
+      type: string
+      enum: [OCC-API-VALIDATION, OCC-API-AUTHENTICATION, OCC-AUTH-INVALID-CREDENTIALS, OCC-API-FORBIDDEN, OCC-API-CONFLICT, OCC-COMMAND-IDEMPOTENCY-KEY, OCC-COMMAND-IDEMPOTENCY-CONFLICT, OCC-COMMAND-METADATA, OCC-COMMAND-IDEMPOTENCY-IN-PROGRESS, OCC-COMMAND-IDEMPOTENCY-EXPIRED, OCC-COMMAND-INTEGRITY, OCC-COMMAND-OPTIMISTIC-CONFLICT, OCC-AUTHZ-UNAVAILABLE, OCC-API-INTERNAL, OCC-API-REQUEST, OCC-INVALID-REQUEST, OCC-AUTHENTICATION-REQUIRED, OCC-FORBIDDEN, OCC-NOT-FOUND, OCC-IDEMPOTENCY-CONFLICT, OCC-VERSION-CONFLICT, OCC-EVIDENCE-TOO-LARGE, OCC-EVIDENCE-DIGEST-MISMATCH, OCC-EVIDENCE-INVALID-CONTENT, OCC-EVIDENCE-UPLOAD-CONFLICT, OCC-EVIDENCE-REVIEW-CONFLICT, OCC-RISK-INVALID-TRANSITION, OCC-RESOURCE-UNAVAILABLE, OCC-RESERVATION-CONFLICT, OCC-INTERNAL-ERROR, OCC_INVALID_REQUEST, OCC_INVALID_CURSOR, OCC_UNAUTHENTICATED, OCC_FORBIDDEN, OCC_NOT_FOUND, OCC_IDEMPOTENCY_CONFLICT, OCC_DUPLICATE_COHORT_CODE, OCC_CLAIM_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_TASK_BLOCKED, OCC_WAIT_NOT_ACTIVE, OCC_TASK_GATE_UNAVAILABLE, OCC_AUTHORIZATION_UNAVAILABLE, OCC_WORKFLOW_UNAVAILABLE, OCC_INTERNAL_ERROR]
     ProblemDetails:
       type: object
       additionalProperties: false
@@ -1478,7 +1814,7 @@ components:
           minimum: 400
           maximum: 599
         code:
-          $ref: "#/components/schemas/OccProblemCode"
+          $ref: "#/components/schemas/BaseProblemCode"
         correlationId:
           type: string
           format: uuid
@@ -1833,6 +2169,790 @@ components:
         payload:
           type: object
           additionalProperties: true
+    CohortCreatedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.created }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortCreatedPayload" } } }] }
+    CohortUpdatedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.updated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortUpdatedPayload" } } }] }
+    CohortOwnerTransferredEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.owner-transferred }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortOwnerTransferredPayload" } } }] }
+    CohortMemberAddedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-added }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberAddedPayload" } } }] }
+    CohortMemberRemovedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.member-removed }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortMemberRemovedPayload" } } }] }
+    CohortActivatedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.activated }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortActivatedPayload" } } }] }
+    CohortArchivedEvent: { x-occ-aggregate-id-field: payload.cohortId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: cohort.archived }, schemaVersion: { const: 1 }, aggregateType: { const: COHORT }, payload: { $ref: "#/components/schemas/CohortArchivedPayload" } } }] }
+    ProcessStartedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.started }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessStartedPayload" } } }] }
+    ProcessSuspendedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.suspended }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessSuspendedPayload" } } }] }
+    ProcessResumedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.resumed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessResumedPayload" } } }] }
+    ProcessTransferredEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.transferred }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessTransferredPayload" } } }] }
+    ProcessCompletedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.completed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCompletedPayload" } } }] }
+    ProcessCancelledEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessCancelledPayload" } } }] }
+    ProcessFailedEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.failed }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessFailedPayload" } } }] }
+    ProcessProjectionReconciledEvent: { x-occ-aggregate-id-field: payload.processId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: process.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: PROCESS }, payload: { $ref: "#/components/schemas/ProcessProjectionReconciledPayload" } } }] }
+    TaskAvailableEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.available }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAvailablePayload" } } }] }
+    TaskClaimedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.claimed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskClaimedPayload" } } }] }
+    TaskAssigneeChangedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.assignee-changed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskAssigneeChangedPayload" } } }] }
+    TaskBlockedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.blocked }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskBlockedPayload" } } }] }
+    TaskPendingReviewEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.pending-review }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskPendingReviewPayload" } } }] }
+    TaskReturnedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.returned }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskReturnedPayload" } } }] }
+    TaskCompletedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.completed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCompletedPayload" } } }] }
+    TaskCancelledEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.cancelled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskCancelledPayload" } } }] }
+    TaskFailedEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.failed }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskFailedPayload" } } }] }
+    TaskProjectionReconciledEvent: { x-occ-aggregate-id-field: payload.taskId, allOf: [{ $ref: "#/components/schemas/EventEnvelope" }, { type: object, required: [type, schemaVersion, aggregateType, payload], properties: { type: { const: task.projection-reconciled }, schemaVersion: { const: 1 }, aggregateType: { const: TASK }, payload: { $ref: "#/components/schemas/TaskProjectionReconciledPayload" } } }] }
+    CohortCreatedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, packageVersionId, ownerPrincipalId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        packageVersionId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+        status: { type: string, const: DRAFT }
+    CohortUpdatedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/CohortStatus" }
+    CohortOwnerTransferredPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, previousOwnerPrincipalId, ownerPrincipalId]
+      properties:
+        cohortId: { type: string, format: uuid }
+        previousOwnerPrincipalId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+    CohortMemberAddedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, principalId, role]
+      properties:
+        cohortId: { type: string, format: uuid }
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [TEACHER, PARTICIPANT] }
+    CohortMemberRemovedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, principalId, role]
+      properties:
+        cohortId: { type: string, format: uuid }
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [TEACHER, PARTICIPANT] }
+    CohortActivatedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        status: { type: string, const: ACTIVE }
+    CohortArchivedPayload:
+      type: object
+      additionalProperties: false
+      required: [cohortId, status]
+      properties:
+        cohortId: { type: string, format: uuid }
+        status: { type: string, const: ARCHIVED }
+    ProcessStartedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, cohortId, participantId, packageVersionId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        participantId: { type: string, format: uuid }
+        packageVersionId: { type: string, format: uuid }
+        state: { type: string, const: RUNNING }
+    ProcessSuspendedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { type: string, const: SUSPENDED }
+    ProcessResumedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { type: string, const: RUNNING }
+    ProcessTransferredPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, previousParticipantId, participantId]
+      properties:
+        processId: { type: string, format: uuid }
+        previousParticipantId: { type: string, format: uuid }
+        participantId: { type: string, format: uuid }
+    ProcessCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { type: string, const: COMPLETED }
+    ProcessCancelledPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state, code]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { type: string, const: CANCELLED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    ProcessFailedPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, state, code]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { type: string, const: FAILED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    ProcessProjectionReconciledPayload:
+      type: object
+      additionalProperties: false
+      required: [processId, repairedTaskIds]
+      properties:
+        processId: { type: string, format: uuid }
+        repairedTaskIds: { type: array, maxItems: 1000, items: { type: string, format: uuid } }
+    TaskAvailablePayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, cohortId, activityKey]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+    TaskClaimedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, assigneeId]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+    TaskAssigneeChangedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId]
+      anyOf:
+        - required: [previousAssigneeId]
+        - required: [assigneeId]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        previousAssigneeId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+    TaskBlockedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, blockerCodes]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        blockerCodes: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BlockerCode" } }
+    TaskPendingReviewPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, evidenceVersionId, reviewSequence]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        evidenceVersionId: { type: string, format: uuid }
+        reviewSequence: { $ref: "#/components/schemas/ReviewSequence" }
+    TaskReturnedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, assigneeId, decision]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+        decision: { type: string, enum: [REJECTED, CONDITIONAL] }
+    TaskCompletedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, state]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        state: { type: string, const: COMPLETED }
+    TaskCancelledPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, state, code]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        state: { type: string, const: CANCELLED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    TaskFailedPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId, state, code]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        state: { type: string, const: FAILED }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    TaskProjectionReconciledPayload:
+      type: object
+      additionalProperties: false
+      required: [taskId, processId]
+      properties:
+        taskId: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+    SafeVersion:
+      type: integer
+      format: int64
+      minimum: 0
+      maximum: 9007199254740991
+    ReviewSequence:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 9007199254740991
+    NotificationType:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+    NotificationResourceType:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+    NotificationSeverity:
+      type: string
+      enum: [INFO, WARNING, CRITICAL]
+    BlockerSeverity:
+      type: string
+      enum: [SOFT, HARD]
+    ConditionalRuleVersion:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    PageSize:
+      type: integer
+      minimum: 1
+      maximum: 100
+      default: 25
+    CohortStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, ARCHIVED]
+    ProcessState:
+      type: string
+      enum: [RUNNING, SUSPENDED, COMPLETED, CANCELLED, FAILED]
+    TaskPresentationState:
+      type: string
+      enum: [AVAILABLE, CLAIMED, BLOCKED, PENDING_REVIEW, RETURNED, COMPLETED, CANCELLED, FAILED]
+    TaskEngineState:
+      type: string
+      enum: [AVAILABLE, CLAIMED, COMPLETED, CANCELLED, FAILED]
+    BlockerCode:
+      type: string
+      enum: [PREREQUISITE_UNSATISFIED, EVIDENCE_REQUIRED, EVIDENCE_REVIEW_PENDING, EVIDENCE_RETURNED, RESOURCE_REQUIRED, RESOURCE_CONFLICT, PROCESS_SUSPENDED, PROCESS_CANCELLED, POLICY_DENIED, GATE_PROVIDER_UNAVAILABLE]
+    ProviderKey:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+    GateProviderStatus:
+      type: string
+      enum: [READY, UNAVAILABLE, STALE]
+    CursorPageInfo:
+      type: object
+      additionalProperties: false
+      properties:
+        nextCursor: { type: string, minLength: 1, maxLength: 4096 }
+    CreateCohortRequest:
+      type: object
+      additionalProperties: false
+      x-occ-cross-field-constraint: endDate-gte-startDate
+      required: [code, name, packageVersionId, ownerPrincipalId, startDate]
+      properties:
+        code: { type: string, minLength: 1, maxLength: 64, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        packageVersionId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+    UpdateCohortRequest:
+      type: object
+      additionalProperties: false
+      x-occ-cross-field-constraint: endDate-gte-startDate
+      required: [expectedVersion]
+      anyOf:
+        - required: [name]
+        - required: [startDate]
+        - required: [endDate]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        startDate: { type: string, format: date }
+        endDate: { type: [string, "null"], format: date }
+    AddCohortMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, principalId, role]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [TEACHER, PARTICIPANT] }
+        validUntil: { type: string, format: date-time }
+    RemoveCohortMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, principalId, role]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [TEACHER, PARTICIPANT] }
+    ArchiveCohortRequest: &reasonCommand
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, reason]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        reason: { type: string, minLength: 1, maxLength: 1024 }
+    TransferCohortOwnerRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, ownerPrincipalId, reason]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        ownerPrincipalId: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 1024 }
+    StartParticipantProcessRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+    SuspendProcessRequest: *reasonCommand
+    ResumeProcessRequest: *reasonCommand
+    ReconcileProcessRequest: *reasonCommand
+    CancelProcessRequest: &failureCommand
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, code, reason]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+        reason: { type: string, minLength: 1, maxLength: 1024 }
+    FailProcessRequest: *failureCommand
+    TransferProcessRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, participantId, reason]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        participantId: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 1024 }
+    ReleaseProcessWaitRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, factType, factId, factVersion, reason]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+        factType: { type: string, enum: [PROCUREMENT_COMPLETED, RESOURCE_READY] }
+        factId: { type: string, format: uuid }
+        factVersion: { $ref: "#/components/schemas/SafeVersion" }
+        reason: { type: string, minLength: 1, maxLength: 1024 }
+    ClaimTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+    CompleteTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+    FailTaskRequest: *failureCommand
+    MarkNotificationReadRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { $ref: "#/components/schemas/SafeVersion" }
+    CohortSummary: &cohortSummary
+      type: object
+      additionalProperties: false
+      required: [id, code, name, packageVersionId, ownerPrincipalId, startDate, endDate, status, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, minLength: 1, maxLength: 64 }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        packageVersionId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: [string, "null"], format: date }
+        status: { $ref: "#/components/schemas/CohortStatus" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CohortMember:
+      type: object
+      additionalProperties: false
+      required: [principalId, role, validFrom]
+      properties:
+        principalId: { type: string, format: uuid }
+        role: { type: string, enum: [OWNER, TEACHER, PARTICIPANT] }
+        validFrom: { type: string, format: date-time }
+        validUntil: { type: string, format: date-time }
+    CohortDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, minLength: 1, maxLength: 64 }
+        name: { type: string, minLength: 1, maxLength: 256 }
+        packageVersionId: { type: string, format: uuid }
+        ownerPrincipalId: { type: string, format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: [string, "null"], format: date }
+        status: { $ref: "#/components/schemas/CohortStatus" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        members: { type: array, maxItems: 10000, items: { $ref: "#/components/schemas/CohortMember" } }
+      required: [id, code, name, packageVersionId, ownerPrincipalId, startDate, endDate, status, version, createdAt, updatedAt, members]
+    CohortPage: &cohortPage
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/CohortSummary" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    StartParticipantProcessResponse:
+      type: object
+      additionalProperties: false
+      required: [processId, cohortId, participantId, version]
+      properties:
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        participantId: { type: string, format: uuid }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+    ProcessDetail: &processDetail
+      type: object
+      additionalProperties: false
+      required: [id, cohortId, participantId, startedForParticipantId, packageVersionId, state, version, startedAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        participantId: { type: string, format: uuid }
+        startedForParticipantId: { type: string, format: uuid }
+        packageVersionId: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/ProcessState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        startedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time }
+    ProcessPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ProcessDetail" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    ProcessProgress:
+      type: object
+      additionalProperties: false
+      required: [processId, state, completedActivities, activeActivities, version, updatedAt]
+      properties:
+        processId: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/ProcessState" }
+        completedActivities: { $ref: "#/components/schemas/SafeVersion" }
+        activeActivities: { type: array, items: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" } }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        updatedAt: { type: string, format: date-time }
+    ProcessParticipant:
+      type: object
+      additionalProperties: false
+      required: [principalId, current, startedFor]
+      properties:
+        principalId: { type: string, format: uuid }
+        current: { type: boolean }
+        startedFor: { type: boolean }
+    ProcessParticipantPage: &participantPage
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ProcessParticipant" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    ProcessTask:
+      type: object
+      additionalProperties: false
+      required: [taskId, activityKey, state, createdAt]
+      properties:
+        taskId: { type: string, format: uuid }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        state: { $ref: "#/components/schemas/TaskEngineState" }
+        createdAt: { type: string, format: date-time }
+    ProcessTaskPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ProcessTask" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    ProcessTimelineEntry:
+      type: object
+      additionalProperties: false
+      required: [id, type, occurredAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [STARTED, SUSPENDED, RESUMED, TRANSFERRED, COMPLETED, CANCELLED, FAILED, WAIT_RELEASED, PROJECTION_RECONCILED] }
+        occurredAt: { type: string, format: date-time }
+        actorId: { type: string, format: uuid }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    ProcessTimelinePage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ProcessTimelineEntry" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    TaskBlocker:
+      type: object
+      additionalProperties: false
+      required: [id, code, severity, sourceType, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        code: { $ref: "#/components/schemas/BlockerCode" }
+        severity: { $ref: "#/components/schemas/BlockerSeverity" }
+        sourceType: { type: string, enum: [TASK, EVIDENCE, RESOURCE, PROCESS, POLICY, PROVIDER] }
+        sourceId: { type: string, format: uuid }
+        providerKey: { $ref: "#/components/schemas/ProviderKey" }
+        createdAt: { type: string, format: date-time }
+        resolvedAt: { type: string, format: date-time }
+    TaskSummary: &taskSummary
+      type: object
+      additionalProperties: false
+      required: [id, processId, cohortId, activityKey, activityName, state, presentationState, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        activityName: { type: string, minLength: 1, maxLength: 256 }
+        state: { $ref: "#/components/schemas/TaskEngineState" }
+        presentationState: { $ref: "#/components/schemas/TaskPresentationState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        assigneeId: { type: string, format: uuid }
+        formKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        dueAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        failureCode: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+        followUpDueAt: { type: string, format: date-time }
+        conditionalRuleVersion: { $ref: "#/components/schemas/ConditionalRuleVersion" }
+    TaskDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        processId: { type: string, format: uuid }
+        cohortId: { type: string, format: uuid }
+        activityKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        activityName: { type: string, minLength: 1, maxLength: 256 }
+        state: { $ref: "#/components/schemas/TaskEngineState" }
+        presentationState: { $ref: "#/components/schemas/TaskPresentationState" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        assigneeId: { type: string, format: uuid }
+        formKey: { type: string, minLength: 1, maxLength: 128, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        dueAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        failureCode: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+        followUpDueAt: { type: string, format: date-time }
+        conditionalRuleVersion: { $ref: "#/components/schemas/ConditionalRuleVersion" }
+        blockers: { type: array, items: { $ref: "#/components/schemas/TaskBlocker" } }
+      required: [id, processId, cohortId, activityKey, activityName, state, presentationState, version, createdAt, updatedAt, blockers]
+    TaskPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TaskSummary" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    TaskHistoryEntry:
+      type: object
+      additionalProperties: false
+      required: [id, type, occurredAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [AVAILABLE, CLAIMED, ASSIGNEE_CHANGED, BLOCKED, UNBLOCKED, PENDING_REVIEW, RETURNED, COMPLETED, CANCELLED, FAILED, PROJECTION_RECONCILED] }
+        occurredAt: { type: string, format: date-time }
+        actorId: { type: string, format: uuid }
+        code: { type: string, minLength: 1, maxLength: 128, pattern: "^[A-Z][A-Z0-9_]*$" }
+    TaskHistoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TaskHistoryEntry" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    TaskBlockerPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TaskBlocker" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    Notification:
+      type: object
+      additionalProperties: false
+      required: [id, type, severity, resourceType, resourceId, cursor, version, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/NotificationType" }
+        severity: { $ref: "#/components/schemas/NotificationSeverity" }
+        resourceType: { $ref: "#/components/schemas/NotificationResourceType" }
+        resourceId: { type: string, format: uuid }
+        cursor: { $ref: "#/components/schemas/SafeVersion" }
+        version: { $ref: "#/components/schemas/SafeVersion" }
+        createdAt: { type: string, format: date-time }
+        readAt: { type: string, format: date-time }
+    NotificationPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    WorkflowEventPage:
+      type: object
+      additionalProperties: false
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items:
+            oneOf:
+              - { $ref: "#/components/schemas/CohortCreatedEvent" }
+              - { $ref: "#/components/schemas/CohortUpdatedEvent" }
+              - { $ref: "#/components/schemas/CohortOwnerTransferredEvent" }
+              - { $ref: "#/components/schemas/CohortMemberAddedEvent" }
+              - { $ref: "#/components/schemas/CohortMemberRemovedEvent" }
+              - { $ref: "#/components/schemas/CohortActivatedEvent" }
+              - { $ref: "#/components/schemas/CohortArchivedEvent" }
+              - { $ref: "#/components/schemas/ProcessStartedEvent" }
+              - { $ref: "#/components/schemas/ProcessSuspendedEvent" }
+              - { $ref: "#/components/schemas/ProcessResumedEvent" }
+              - { $ref: "#/components/schemas/ProcessTransferredEvent" }
+              - { $ref: "#/components/schemas/ProcessCompletedEvent" }
+              - { $ref: "#/components/schemas/ProcessCancelledEvent" }
+              - { $ref: "#/components/schemas/ProcessFailedEvent" }
+              - { $ref: "#/components/schemas/ProcessProjectionReconciledEvent" }
+              - { $ref: "#/components/schemas/TaskAvailableEvent" }
+              - { $ref: "#/components/schemas/TaskClaimedEvent" }
+              - { $ref: "#/components/schemas/TaskAssigneeChangedEvent" }
+              - { $ref: "#/components/schemas/TaskBlockedEvent" }
+              - { $ref: "#/components/schemas/TaskPendingReviewEvent" }
+              - { $ref: "#/components/schemas/TaskReturnedEvent" }
+              - { $ref: "#/components/schemas/TaskCompletedEvent" }
+              - { $ref: "#/components/schemas/TaskCancelledEvent" }
+              - { $ref: "#/components/schemas/TaskFailedEvent" }
+              - { $ref: "#/components/schemas/TaskProjectionReconciledEvent" }
+        page: { $ref: "#/components/schemas/CursorPageInfo" }
+    WorkflowRequestProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 400 }, code: { type: string, const: OCC_INVALID_REQUEST } } }] }
+    WorkflowBadRequestProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 400 }, code: { type: string, enum: [OCC_INVALID_REQUEST, OCC_INVALID_CURSOR] } } }] }
+    WorkflowUnauthorizedProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 401 }, code: { type: string, const: OCC_UNAUTHENTICATED } } }] }
+    WorkflowForbiddenProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 403 }, code: { type: string, const: OCC_FORBIDDEN } } }] }
+    WorkflowNotFoundProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 404 }, code: { type: string, const: OCC_NOT_FOUND } } }] }
+    WorkflowInternalProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 500 }, code: { type: string, const: OCC_INTERNAL_ERROR } } }] }
+    WorkflowAuthorizationUnavailableProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 503 }, code: { type: string, const: OCC_AUTHORIZATION_UNAVAILABLE } } }] }
+    WorkflowUnavailableProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 503 }, code: { type: string, enum: [OCC_AUTHORIZATION_UNAVAILABLE, OCC_WORKFLOW_UNAVAILABLE] } } }] }
+    CohortCreationConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_DUPLICATE_COHORT_CODE] } } }] }
+    StaleVersionProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, correlationId, currentVersion]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 409 }
+        code: { type: string, const: OCC_STALE_VERSION }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        currentVersion: { $ref: "#/components/schemas/SafeVersion" }
+    ParticipantProcessExistsProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, correlationId, existingProcessId]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 409 }
+        code: { type: string, const: OCC_PARTICIPANT_PROCESS_EXISTS }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        existingProcessId: { type: string, format: uuid, x-occ-visibility: authorized }
+    VersionedCommandGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION] } } }] }
+    VersionedCommandConflictProblem: { oneOf: [{ $ref: "#/components/schemas/VersionedCommandGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    ParticipantProcessStartGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION] } } }] }
+    ParticipantProcessStartConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ParticipantProcessStartGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }, { $ref: "#/components/schemas/ParticipantProcessExistsProblem" }] }
+    ProcessCommandGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    ProcessCommandConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ProcessCommandGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    ProcessTransferGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    ProcessTransferConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ProcessTransferGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }, { $ref: "#/components/schemas/ParticipantProcessExistsProblem" }] }
+    ProcessWaitReleaseGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_PROCESS_NOT_RUNNING, OCC_WAIT_NOT_ACTIVE] } } }] }
+    ProcessWaitReleaseConflictProblem: { oneOf: [{ $ref: "#/components/schemas/ProcessWaitReleaseGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    TaskClaimGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING, OCC_CLAIM_CONFLICT] } } }] }
+    TaskClaimConflictProblem: { oneOf: [{ $ref: "#/components/schemas/TaskClaimGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    TaskCommandGenericConflictProblem: { allOf: [{ $ref: "#/components/schemas/ProblemDetails" }, { type: object, required: [status, code], properties: { status: { type: integer, const: 409 }, code: { type: string, enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING] } } }] }
+    TaskCommandConflictProblem: { oneOf: [{ $ref: "#/components/schemas/TaskCommandGenericConflictProblem" }, { $ref: "#/components/schemas/StaleVersionProblem" }] }
+    TaskGateUnavailableProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, correlationId, providerKeys]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 503 }
+        code: { type: string, const: OCC_TASK_GATE_UNAVAILABLE }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        providerKeys: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/ProviderKey" } }
+    TaskBlockedProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, correlationId, blockerCodes]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        status: { type: integer, const: 409 }
+        code: { type: string, const: OCC_TASK_BLOCKED }
+        correlationId: { type: string, format: uuid }
+        detail: { type: string, minLength: 0, maxLength: 4096 }
+        blockerCodes: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/BlockerCode" } }
+    TaskCompletionGenericConflictProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          required: [status, code]
+          properties:
+            status: { type: integer, const: 409 }
+            code:
+              type: string
+              enum: [OCC_IDEMPOTENCY_CONFLICT, OCC_INVALID_TRANSITION, OCC_PROCESS_NOT_RUNNING]
+    TaskCompletionConflictProblem:
+      oneOf:
+        - $ref: "#/components/schemas/TaskCompletionGenericConflictProblem"
+        - $ref: "#/components/schemas/StaleVersionProblem"
+        - $ref: "#/components/schemas/TaskBlockedProblem"
+    TaskCompletionDependencyProblem:
+      allOf:
+        - $ref: "#/components/schemas/ProblemDetails"
+        - type: object
+          required: [status, code]
+          properties:
+            status: { type: integer, const: 503 }
+            code: { type: string, enum: [OCC_AUTHORIZATION_UNAVAILABLE, OCC_WORKFLOW_UNAVAILABLE] }
     ServiceState:
       type: string
       enum:
@@ -1921,11 +3041,6 @@ components:
       minLength: 8
       maxLength: 2048
       pattern: "^[A-Za-z0-9._~-]{8,2048}$"
-    SafeVersion:
-      type: integer
-      format: int64
-      minimum: 0
-      maximum: 9007199254740991
     PositiveVersion:
       type: integer
       format: int64

@@ -5,7 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.innorder.occ.api.CorrelationIdFilter
 import com.innorder.occ.auth.AccessTokenPrincipal
 import com.innorder.occ.authz.AuthorizationRevisionLockRepository
+import com.innorder.occ.authz.WorkflowAuthorizationRelationDefinitions
 import com.innorder.occ.command.AuthorizedCommand
+import com.innorder.occ.command.AggregateLockPlan
+import com.innorder.occ.command.AggregateLockResolver
+import com.innorder.occ.command.AggregateReference
+import com.innorder.occ.command.AggregateChange
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
 import com.innorder.occ.command.CommandExecutor
@@ -105,6 +110,35 @@ class PlatformSecurityKernelIntegrationTest(
     }
 
     @Test
+    fun `fresh V001 V013 bootstrap v2 installs workflow catalog and preserves non workflow authorization`() {
+        val flyway = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
+        assertThat(flyway.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java)).isEqualTo(14)
+        assertThat(jdbc.queryForObject(
+            "SELECT opa_revision FROM authz.policy_release WHERE status = 'ACTIVE'",
+            String::class.java,
+        )).isEqualTo("platform-authz-v2")
+        assertThat(jdbc.queryForObject(
+            "SELECT count(*) FROM catalog.relation_definition WHERE id IN (${WorkflowAuthorizationRelationDefinitions.all.joinToString(",") { "?" }})",
+            Long::class.java,
+            *WorkflowAuthorizationRelationDefinitions.all.map { it.id }.toTypedArray(),
+        )).isEqualTo(5)
+        assertThat(jdbc.queryForObject(
+            """SELECT count(*) FROM authz.entity e
+               JOIN platform.customer_instance ci ON ci.id = e.id AND ci.singleton
+               WHERE e.entity_key = 'customer:' || ci.instance_key AND e.state = 'ACTIVE'""",
+            Long::class.java,
+        )).isEqualTo(1)
+
+        val accessToken = login().path("accessToken").textValue()
+        val result = command(
+            accessToken, administratorId, "fresh-non-workflow", 3, """{"value":"fresh"}""", 200,
+        )
+
+        assertThat(result.body).isEqualTo(mapper.readTree("""{"result":"fresh","version":4}"""))
+        assertThat(result.replayed).isFalse()
+    }
+
+    @Test
     fun `production security kernel completes correlated allow replay failure recovery and deny journey`(output: CapturedOutput) {
         val bootstrapLogin = login()
         val firstRefresh = bootstrapLogin.path("refreshToken").textValue()
@@ -129,10 +163,10 @@ class PlatformSecurityKernelIntegrationTest(
         val replay = command(accessToken, administratorId, "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 200)
         assertThat(replay.body).isEqualTo(first.body)
         assertThat(replay.replayed).isTrue()
-        assertCommandState(version = 4, allows = 1, audit = 1, outbox = 1, idempotency = 1)
+        assertCommandState(version = 4, allows = 2, audit = 1, outbox = 1, idempotency = 1)
 
         command(accessToken, administratorId, "kernel-first", 3, """{"value":"different"}""", 409)
-        command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 409)
+        command(accessToken, UUID.randomUUID(), "kernel-first", 3, """{"value":"first","secret":"journey-request-only"}""", 503)
         command(accessToken, administratorId, "kernel-first", 4, """{"value":"first","secret":"journey-request-only"}""", 409)
         command(accessToken, administratorId, "kernel-stale", 3, """{"value":"stale"}""", 409)
         val second = command(accessToken, administratorId, "kernel-second", 4, """{"value":"second"}""", 200)
@@ -255,6 +289,15 @@ class PlatformSecurityKernelIntegrationTest(
         fun kernelTestController(executor: CommandExecutor, mapper: ObjectMapper) = KernelTestController(executor, mapper)
 
         @Bean
+        fun kernelAggregateLockResolver() = AggregateLockResolver("platform-kernel-test", 100) { jdbc, id ->
+            jdbc.query(
+                "SELECT row_version FROM occ.platform_kernel_test WHERE id = ? FOR UPDATE",
+                { result, _ -> result.getLong(1) },
+                id,
+            ).singleOrNull()
+        }
+
+        @Bean
         fun authorizationFactFixture(
             jdbc: JdbcTemplate,
             transactions: TransactionTemplate,
@@ -299,10 +342,7 @@ class PlatformSecurityKernelIntegrationTest(
         override val aggregateType = "platform-kernel-test"
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
-
-        override fun lockCurrentVersion(context: CommandContext): Long = context.jdbc.queryForObject(
-            "SELECT row_version FROM occ.platform_kernel_test WHERE id = ? FOR UPDATE", Long::class.java, aggregateId,
-        )!!
+        override val lockPlan get() = AggregateLockPlan(existing = listOf(AggregateReference(aggregateType, aggregateId)))
 
         override fun execute(context: CommandContext): CommandMutation {
             val before = requireNotNull(context.descriptor.expectedVersion)
@@ -310,9 +350,13 @@ class PlatformSecurityKernelIntegrationTest(
             context.jdbc.update("UPDATE occ.platform_kernel_test SET value = ?, row_version = ? WHERE id = ?", value, after, aggregateId)
             fun json(text: String) = CanonicalJsonObject.from(mapper.readTree(text))
             return CommandMutation(
-                200, json("""{"result":"$value","version":$after}"""), aggregateId, aggregateId,
-                aggregateType, before, after, "platform kernel acceptance", json("""{"value":"$value"}"""),
-                listOf(PendingEventSpec("platform-kernel.updated", 1, json("""{"value":"$value","version":$after}"""), after)),
+                200, json("""{"result":"$value","version":$after}"""), aggregateId,
+                listOf(AggregateChange(AggregateReference(aggregateType, aggregateId), before, after)),
+                "platform kernel acceptance", json("""{"value":"$value"}"""),
+                listOf(PendingEventSpec(
+                    "platform-kernel.updated", 1, json("""{"value":"$value","version":$after}"""),
+                    AggregateReference(aggregateType, aggregateId), after,
+                )),
             )
         }
     }
@@ -411,7 +455,8 @@ class PlatformSecurityKernelIntegrationTest(
 
     private class OpaProcess {
         private val executable = System.getenv("OPA_PATH")?.takeIf(String::isNotBlank)
-            ?: throw IllegalStateException("PlatformSecurityKernelIntegrationTest requires OPA_PATH for OPA 1.5.1")
+        private val dockerImage = System.getenv("OPA_DOCKER_IMAGE")?.takeIf(String::isNotBlank)
+        private val containerName = "innorder-core-opa-${UUID.randomUUID()}"
         private val policyDirectory = sequenceOf(Path.of("policies", "opa"), Path.of("..", "..", "policies", "opa"))
             .map(Path::toAbsolutePath).firstOrNull(Files::isDirectory)
             ?: throw IllegalStateException("Repository OPA policy directory is unavailable")
@@ -419,18 +464,30 @@ class PlatformSecurityKernelIntegrationTest(
         private var process: Process? = null
 
         init {
-            val version = ProcessBuilder(executable, "version").redirectErrorStream(true).start().run {
+            check(executable != null || dockerImage != null) {
+                "PlatformSecurityKernelIntegrationTest requires OPA_PATH or OPA_DOCKER_IMAGE for OPA 1.5.1"
+            }
+            val versionCommand = executable?.let { listOf(it, "version") }
+                ?: listOf("docker", "run", "--rm", dockerImage!!, "version")
+            val version = ProcessBuilder(versionCommand).redirectErrorStream(true).start().run {
                 val output = inputStream.bufferedReader().readText()
-                check(waitFor(10, TimeUnit.SECONDS) && exitValue() == 0) { "OPA version check failed" }
+                check(waitFor(30, TimeUnit.SECONDS) && exitValue() == 0) { "OPA version check failed" }
                 output
             }
-            check(Regex("(?m)^Version:\\s+1\\.5\\.1\\s*$").containsMatchIn(version)) { "OPA_PATH must reference OPA 1.5.1" }
+            check(Regex("(?m)^Version:\\s+1\\.5\\.1\\s*$").containsMatchIn(version)) { "OPA runtime must be 1.5.1" }
         }
 
         @Synchronized
         fun start() {
             if (process?.isAlive == true) return
-            process = ProcessBuilder(executable, "run", "--server", "--addr=127.0.0.1:$port", policyDirectory.toString())
+            val command = executable?.let {
+                listOf(it, "run", "--server", "--addr=127.0.0.1:$port", policyDirectory.toString())
+            } ?: listOf(
+                "docker", "run", "--rm", "--name", containerName,
+                "-v", "$policyDirectory:/policies:ro", "-p", "127.0.0.1:$port:$port",
+                dockerImage!!, "run", "--server", "--addr=0.0.0.0:$port", "/policies",
+            )
+            process = ProcessBuilder(command)
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start()
             repeat(100) {
                 if (process?.isAlive != true) throw IllegalStateException("OPA exited before readiness")
@@ -446,7 +503,12 @@ class PlatformSecurityKernelIntegrationTest(
 
         @Synchronized
         fun stop() {
-            process?.destroy()
+            if (executable == null && process?.isAlive == true) {
+                ProcessBuilder("docker", "stop", containerName).redirectErrorStream(true).start()
+                    .waitFor(10, TimeUnit.SECONDS)
+            } else {
+                process?.destroy()
+            }
             if (process?.waitFor(5, TimeUnit.SECONDS) == false) process?.destroyForcibly()
             process = null
         }

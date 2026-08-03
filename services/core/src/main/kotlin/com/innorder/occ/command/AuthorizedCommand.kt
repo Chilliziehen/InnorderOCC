@@ -4,6 +4,7 @@ import com.innorder.occ.authz.AuthorizationDecisionReference
 import org.springframework.jdbc.core.JdbcOperations
 import java.util.Collections
 import java.util.UUID
+import com.innorder.occ.notification.PendingNotificationSpec
 
 data class CommandMetadata(
     val principalId: UUID,
@@ -30,12 +31,11 @@ interface AuthorizedCommand {
     val aggregateType: String
     val aggregateId: UUID
     val expectedVersionRequired: Boolean
+    val lockPlan: AggregateLockPlan?
 
     /** IAM, relationship, and policy mutation commands must declare this mode. */
     val changesAuthorizationFacts: Boolean
 
-    /** Called after authorization. Update commands must lock their aggregate row with FOR UPDATE before returning. */
-    fun lockCurrentVersion(context: CommandContext): Long?
     fun execute(context: CommandContext): CommandMutation
 }
 
@@ -50,6 +50,7 @@ data class CommandDescriptor(
     val changesAuthorizationFacts: Boolean,
     val expectedVersion: Long?,
     val principalId: UUID,
+    val lockPlan: AggregateLockPlan?,
 )
 
 class CommandContext internal constructor(
@@ -59,43 +60,49 @@ class CommandContext internal constructor(
     val authorization: AuthorizationDecisionReference,
     val requestDigest: String,
     val transactionId: UUID,
+    val lockedVersions: Map<AggregateReference, Long>,
+    val createdAggregates: Set<AggregateReference>,
 )
 
 data class PendingEventSpec(
     val eventType: String,
     val schemaVersion: Int,
     val payload: CanonicalJsonObject,
+    val aggregate: AggregateReference,
     val aggregateVersion: Long,
+)
+
+data class AggregateChange(
+    val ref: AggregateReference,
+    val beforeVersion: Long,
+    val afterVersion: Long,
 )
 
 class CommandMutation(
     val status: Int,
     val body: CanonicalJsonObject,
     val resourceId: UUID,
-    val aggregateId: UUID,
-    val aggregateType: String,
-    val beforeVersion: Long?,
-    val afterVersion: Long,
+    changes: List<AggregateChange>,
     val auditReason: String?,
     val auditDetail: CanonicalJsonObject,
     events: List<PendingEventSpec>,
+    notifications: List<PendingNotificationSpec> = emptyList(),
 ) {
+    val changes: List<AggregateChange> = Collections.unmodifiableList(changes.toList())
     val events: List<PendingEventSpec> = Collections.unmodifiableList(events.toList())
+    val notifications: List<PendingNotificationSpec> = Collections.unmodifiableList(notifications.toList())
 
     fun copy(
         status: Int = this.status,
         body: CanonicalJsonObject = this.body,
         resourceId: UUID = this.resourceId,
-        aggregateId: UUID = this.aggregateId,
-        aggregateType: String = this.aggregateType,
-        beforeVersion: Long? = this.beforeVersion,
-        afterVersion: Long = this.afterVersion,
+        changes: List<AggregateChange> = this.changes,
         auditReason: String? = this.auditReason,
         auditDetail: CanonicalJsonObject = this.auditDetail,
         events: List<PendingEventSpec> = this.events,
+        notifications: List<PendingNotificationSpec> = this.notifications,
     ): CommandMutation = CommandMutation(
-        status, body, resourceId, aggregateId, aggregateType, beforeVersion, afterVersion,
-        auditReason, auditDetail, events,
+        status, body, resourceId, changes, auditReason, auditDetail, events, notifications,
     )
 }
 

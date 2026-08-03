@@ -181,6 +181,7 @@ interface OpenApiOperation {
 interface OpenApiResponse {
   content?: Record<string, { schema?: { $ref?: string } }>;
   headers?: Record<string, unknown>;
+  content?: Record<string, { schema?: OpenApiSchemaProperty }>;
   $ref?: string;
 }
 
@@ -933,6 +934,36 @@ describe("OCC Core OpenAPI system status", () => {
         response.content?.["application/problem+json"]?.schema,
         document.components.schemas,
       )).toBe(true);
+    const workflowSchemaByResponse: Record<string, string> = {
+      WorkflowRequestError: "WorkflowRequestProblem",
+      WorkflowBadRequest: "WorkflowBadRequestProblem",
+      WorkflowUnauthorized: "WorkflowUnauthorizedProblem",
+      WorkflowForbidden: "WorkflowForbiddenProblem",
+      WorkflowNotFound: "WorkflowNotFoundProblem",
+      WorkflowInternalError: "WorkflowInternalProblem",
+      WorkflowAuthorizationUnavailable: "WorkflowAuthorizationUnavailableProblem",
+      WorkflowUnavailable: "WorkflowUnavailableProblem",
+      CohortCreationConflict: "CohortCreationConflictProblem",
+      VersionedCommandConflict: "VersionedCommandConflictProblem",
+      ParticipantProcessStartConflict: "ParticipantProcessStartConflictProblem",
+      ProcessCommandConflict: "ProcessCommandConflictProblem",
+      ProcessTransferConflict: "ProcessTransferConflictProblem",
+      ProcessWaitReleaseConflict: "ProcessWaitReleaseConflictProblem",
+      TaskClaimConflict: "TaskClaimConflictProblem",
+      TaskCommandConflict: "TaskCommandConflictProblem",
+    };
+    for (const [name, response] of Object.entries(document.components.responses ?? {})) {
+      const schema = response.content?.["application/problem+json"]?.schema;
+      if (name === "TaskBlocked") {
+        expect(schema?.$ref).toBe("#/components/schemas/TaskCompletionConflictProblem");
+      } else if (name === "TaskGateUnavailable") {
+        expect(schema?.oneOf).toHaveLength(2);
+        expect(schema?.oneOf?.[1]?.$ref).toBe("#/components/schemas/TaskCompletionDependencyProblem");
+      } else if (workflowSchemaByResponse[name] !== undefined) {
+        expect(schema?.$ref).toBe(`#/components/schemas/${workflowSchemaByResponse[name]}`);
+      } else {
+        expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+      }
     }
   });
 
@@ -953,7 +984,7 @@ describe("OCC Core OpenAPI system status", () => {
       Object.keys(document.paths["/api/v1/auth/logout"]?.post?.responses ?? {}),
     ).toEqual(expect.arrayContaining(["400", "401", "500"]));
 
-    for (const pathItem of Object.values(document.paths)) {
+    for (const [path, pathItem] of Object.entries(document.paths)) {
       for (const [method, operation] of Object.entries(pathItem)) {
         if (!HTTP_METHODS.has(method)) continue;
 
@@ -962,7 +993,7 @@ describe("OCC Core OpenAPI system status", () => {
         );
         expect(errorResponses.length).toBeGreaterThan(0);
 
-        for (const [, response] of errorResponses) {
+        for (const [status, response] of errorResponses) {
           const componentName = response.$ref?.replace(
             "#/components/responses/",
             "",
@@ -974,6 +1005,17 @@ describe("OCC Core OpenAPI system status", () => {
             resolvedResponse?.content?.["application/problem+json"]?.schema,
             document.components.schemas,
           )).toBe(true);
+          const schema = resolvedResponse?.content?.["application/problem+json"]?.schema;
+          if (path === "/api/v1/tasks/{taskId}/complete" && status === "409") {
+            expect(schema?.$ref).toBe("#/components/schemas/TaskCompletionConflictProblem");
+          } else if (path === "/api/v1/tasks/{taskId}/complete" && status === "503") {
+            expect(schema?.oneOf).toHaveLength(2);
+            expect(schema?.oneOf?.[1]?.$ref).toBe("#/components/schemas/TaskCompletionDependencyProblem");
+          } else if (path.startsWith("/api/v1/cohorts") || path.startsWith("/api/v1/processes") || path.startsWith("/api/v1/tasks") || path.startsWith("/api/v1/me/notifications") || path === "/api/v1/events") {
+            expect(response.$ref).toMatch(/^#\/components\/responses\/(?!WorkflowError$)/);
+          } else {
+            expect(schema?.$ref).toBe("#/components/schemas/ProblemDetails");
+          }
         }
       }
     }
@@ -1174,17 +1216,12 @@ describe("OCC Core OpenAPI system status", () => {
         maximum: PROBLEM_STATUS_MAX,
       },
       code: { $ref: "#/components/schemas/OccProblemCode" },
+      code: { $ref: "#/components/schemas/BaseProblemCode" },
       correlationId: { type: "string", format: "uuid" },
       detail: {
         type: "string",
         minLength: PROBLEM_DETAIL_MIN_LENGTH,
         maxLength: PROBLEM_DETAIL_MAX_LENGTH,
-      },
-      currentVersion: {
-        type: "integer",
-        format: "int64",
-        minimum: 0,
-        maximum: Number.MAX_SAFE_INTEGER,
       },
     });
 

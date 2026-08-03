@@ -64,6 +64,12 @@ occ:
       enabled: ${OCC_EVIDENCE_CLEANUP_ENABLED:false}
       poll-interval: ${OCC_EVIDENCE_CLEANUP_POLL_INTERVAL:5m}
       batch-size: ${OCC_EVIDENCE_CLEANUP_BATCH_SIZE:50}
+  cursor:
+    current-key-id: ${OCC_CURSOR_CURRENT_KEY_ID:current}
+    current-key-file: ${OCC_CURSOR_CURRENT_KEY_FILE:}
+    previous-key-id: ${OCC_CURSOR_PREVIOUS_KEY_ID:}
+    previous-key-file: ${OCC_CURSOR_PREVIOUS_KEY_FILE:}
+    previous-key-not-after: ${OCC_CURSOR_PREVIOUS_KEY_NOT_AFTER:}
   outbox:
     enabled: ${OCC_OUTBOX_ENABLED:true}
     topic: occ.events.v1

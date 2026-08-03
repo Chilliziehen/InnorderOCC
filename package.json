@@ -14,11 +14,11 @@
     "test:workspaces": "npm run test --workspaces --if-present",
     "test:infra": "node --test infra/compose/compose.contract.test.mjs infra/compose/gateway.test.mjs",
     "test:authz-parity": "npm run test --workspace @innorder/contracts -- --run test/authorization-parity.test.ts",
-    "test:database": "node --test database/tests/schema-static.test.mjs",
+    "test:database": "node --test database/tests/schema-static.test.mjs database/tests/postgresql-process-task.test.mjs database/tests/postgresql-workflow-races.test.mjs",
     "test:electron-provenance": "node --test scripts/electron-provenance.test.mjs",
     "test:deployment-docs": "node --test scripts/deployment-docs.test.mjs",
     "test:database:pglite": "node scripts/verify.mjs --pglite",
-    "test:database:postgresql-race": "node --test database/tests/postgresql-idempotency-race.test.mjs",
+    "test:database:postgresql-race": "node --test database/tests/postgresql-idempotency-race.test.mjs database/tests/postgresql-workflow-races.test.mjs",
     "test:database:postgresql-reservation-race": "node --test database/tests/postgresql-reservation-race.test.mjs",
     "build": "npm run build --workspace @innorder/contracts && npm run build --workspace @innorder/ai-service && npm run build --workspace @innorder/desktop",
     "typecheck": "npm run build --workspace @innorder/contracts && npm run typecheck --workspaces --if-present",
@@ -29,7 +29,9 @@
   "devDependencies": {
     "@electric-sql/pglite": "0.5.4",
     "dockerfile-ast": "0.7.1",
+    "pg": "8.22.0",
     "saxes": "6.0.0",
+    "testcontainers": "11.14.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4",
     "yaml": "2.9.0"

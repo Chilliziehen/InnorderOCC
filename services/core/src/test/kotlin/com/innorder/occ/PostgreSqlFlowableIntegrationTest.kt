@@ -40,7 +40,10 @@ import com.innorder.occ.config.FlowableTransactionBoundaryVerifier
 @Testcontainers(disabledWithoutDocker = true)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @ActiveProfiles("test")
-@Import(PostgreSqlFlowableIntegrationTest.AtomicityConfiguration::class)
+@Import(
+    PostgreSqlFlowableIntegrationTest.AtomicityConfiguration::class,
+    PlatformCatalogPrerequisiteTestConfiguration::class,
+)
 class PostgreSqlFlowableIntegrationTest(
     @param:Autowired private val jdbcTemplate: JdbcTemplate,
     @param:Autowired private val repositoryService: RepositoryService,
@@ -119,7 +122,13 @@ class PostgreSqlFlowableIntegrationTest(
     @Test
     fun `real PostgreSQL executes all schema contract SQL`() {
         val testDirectory = databaseTestDirectory()
-        listOf("000_assert.sql", "001_schema_contract.sql", "002_constraints.sql", "run_all.sql").forEach { name ->
+        listOf(
+            "000_assert.sql",
+            "001_schema_contract.sql",
+            "002_constraints.sql",
+            "003_process_task_workflow.sql",
+            "run_all.sql",
+        ).forEach { name ->
             postgres.copyFileToContainer(MountableFile.forHostPath(testDirectory.resolve(name)), "/tmp/database-tests/$name")
         }
 
@@ -161,7 +170,7 @@ class PostgreSqlFlowableIntegrationTest(
             .containsExactly("innorder_flyway")
         // Agent 06 must reconcile this exact list to V001-V015 after merging reserved V013 and V015.
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14)
+            .containsExactlyElementsOf((1..15).toList())
         assertThat(flywayJdbc.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'user_account' ORDER BY ordinal_position",
             String::class.java,

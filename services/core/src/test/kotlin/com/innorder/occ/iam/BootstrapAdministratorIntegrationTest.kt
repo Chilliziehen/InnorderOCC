@@ -8,6 +8,7 @@ import com.innorder.occ.auth.AuthService
 import com.innorder.occ.auth.InvalidCredentialsException
 import com.innorder.occ.auth.PasswordService
 import com.innorder.occ.auth.SessionRepository
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import com.innorder.occ.risk.RiskDueProperties
 import com.innorder.occ.risk.RiskMetricsProperties
 import com.innorder.occ.risk.RiskRuntimeConfigurationException
@@ -264,7 +265,7 @@ class BootstrapAdministratorIntegrationTest {
                 BootstrapPolicyBaseline.manifest,
             )).containsAllEntriesOf(mapOf(
                 "release_id" to BootstrapIds.POLICY_RELEASE,
-                "release_number" to 1L,
+                "release_number" to 2L,
                 "release_status" to "ACTIVE",
                 "release_hash" to BootstrapPolicyBaseline.releaseHash,
                 "opa_revision" to BootstrapPolicyBaseline.OPA_REVISION,
@@ -272,8 +273,8 @@ class BootstrapAdministratorIntegrationTest {
                 "bundle_key" to "platform-core-authorization",
                 "layer" to "PLATFORM",
                 "bundle_status" to "ACTIVE",
-                "version_id" to BootstrapIds.POLICY_BUNDLE_VERSION,
-                "version" to 1,
+                "version_id" to BootstrapIds.POLICY_BUNDLE_VERSION_V2,
+                "version" to 2,
                 "version_status" to "PUBLISHED",
                 "version_hash" to BootstrapPolicyBaseline.contentHash,
                 "manifest_matches" to true,
@@ -346,14 +347,18 @@ class BootstrapAdministratorIntegrationTest {
                 """SELECT e.id, e.entity_key, e.entity_type_id, e.entity_type_version_id, e.state,
                           p.display_name, p.status, p.principal_kind
                    FROM authz.entity e JOIN iam.principal p ON p.id = e.id
-                    WHERE e.id IN (?, ?, ?, ?) ORDER BY e.entity_key""",
+                   WHERE e.id IN (?, ?, ?, ?, ?, ?, ?) ORDER BY e.entity_key""",
                 BootstrapIds.VIEWER_ROLE,
                 BootstrapIds.OPERATOR_ROLE,
                 BootstrapIds.ADMINISTRATOR_ROLE,
                 BootstrapIds.RISK_RUNTIME_ROLE,
+                *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
             )).containsExactly(
                 roleRow(BootstrapIds.ADMINISTRATOR_ROLE, "role:administrator", "Administrator"),
+                roleRow(WorkflowAuthorizationRoles.domainModeler.id, "role:domain-modeler", "Domain Modeler"),
                 roleRow(BootstrapIds.OPERATOR_ROLE, "role:operator", "Operator"),
+                roleRow(WorkflowAuthorizationRoles.participant.id, "role:participant", "Participant"),
+                roleRow(WorkflowAuthorizationRoles.processOwner.id, "role:process-owner", "Process Owner"),
                 roleRow(BootstrapIds.RISK_RUNTIME_ROLE, "role:risk-runtime", "Risk runtime"),
                 roleRow(BootstrapIds.VIEWER_ROLE, "role:viewer", "Viewer"),
             )
@@ -380,6 +385,13 @@ class BootstrapAdministratorIntegrationTest {
                 "actors_match" to true,
                 "row_version" to 0L,
             ))
+            assertThat(jdbc.queryForObject(
+                """SELECT count(*) FROM authz.relationship
+                   WHERE relation_definition_id = ? AND object_entity_id IN (?, ?, ?) AND revoked_at IS NULL""",
+                Long::class.java,
+                BootstrapIds.ROLE_ASSIGNMENT_RELATION,
+                *WorkflowAuthorizationRoles.all.map { it.id }.toTypedArray(),
+            )).isZero()
             assertThat(Files.exists(path)).isTrue()
 
             val principals = PrincipalRepository(jdbc)

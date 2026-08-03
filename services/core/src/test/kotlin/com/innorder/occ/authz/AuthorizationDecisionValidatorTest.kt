@@ -26,7 +26,7 @@ class AuthorizationDecisionValidatorTest {
                 reasonIds = listOf(NO_MATCHING_ALLOW_POLICY),
             ),
             AuthorizationDecision(
-                1,
+                2,
                 "",
                 UUID(0, 0),
                 0,
@@ -94,8 +94,8 @@ class AuthorizationDecisionValidatorTest {
     }
 
     private fun allow() = AuthorizationDecision(
-        1,
-        "platform-authz-v1",
+        2,
+        "platform-authz-v2",
         REQUEST_ID,
         17,
         mapOf(PolicyLayer.PLATFORM to PLATFORM_RELEASE),
@@ -119,7 +119,7 @@ class AuthorizationDecisionValidatorTest {
     )
 
     private fun canonicalInvalid() = AuthorizationDecision(
-        1, "", UUID(0, 0), 0, emptyMap(), AuthorizationDecisionValue.DENY, false,
+        2, "", UUID(0, 0), 0, emptyMap(), AuthorizationDecisionValue.DENY, false,
         listOf("INVALID_INPUT"), listOf(INVALID_INPUT_POLICY), emptyList(),
     )
 

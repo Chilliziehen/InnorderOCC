@@ -2,8 +2,11 @@ package com.innorder.occ.auth
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.innorder.occ.authz.WorkflowAuthorizationRole
+import com.innorder.occ.authz.WorkflowAuthorizationRoles
 import com.innorder.occ.iam.CurrentUser
 import com.innorder.occ.iam.PrincipalRepository
+import com.innorder.occ.PlatformCatalogPrerequisiteTestConfiguration
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
@@ -52,7 +55,7 @@ import org.springframework.security.crypto.password.PasswordEncoder
 @AutoConfigureMockMvc
 @Testcontainers(disabledWithoutDocker = true)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-@Import(AuthControllerIntegrationTest.ClockConfiguration::class)
+@Import(AuthControllerIntegrationTest.ClockConfiguration::class, PlatformCatalogPrerequisiteTestConfiguration::class)
 class AuthControllerIntegrationTest(
     @param:Autowired private val mockMvc: MockMvc,
     @param:Autowired private val objectMapper: ObjectMapper,
@@ -483,6 +486,32 @@ class AuthControllerIntegrationTest(
     }
 
     @Test
+    fun `me exposes exact sorted workflow capabilities from effective role assignments`() {
+        val relationshipIds = seedWorkflowCapabilityAssignments()
+        try {
+            val login = login()
+
+            val result = mockMvc.get("/api/v1/me") {
+                header("Authorization", "Bearer ${login["accessToken"].asText()}")
+            }.andExpect { status { isOk() } }.andReturn()
+            val capabilities = objectMapper.readTree(result.response.contentAsString)["capabilities"]
+                .map(JsonNode::asText)
+
+            assertThat(capabilities).containsExactlyElementsOf(
+                (WorkflowAuthorizationRoles.processOwnerActions +
+                    WorkflowAuthorizationRoles.participantActions).sorted(),
+            )
+            assertThat(capabilities).doesNotContain("occ.admin", "occ.execute", "occ.read")
+        } finally {
+            jdbc.update(
+                """UPDATE authz.relationship SET revoked_at = greatest(statement_timestamp(), valid_from)
+                   WHERE id IN (?, ?, ?, ?, ?, ?) AND revoked_at IS NULL""",
+                *relationshipIds.toTypedArray(),
+            )
+        }
+    }
+
+    @Test
     fun `different key auth relevant relationship to administrator role grants no capabilities`() {
         val relationshipId = seedUnrelatedAdministratorRole()
         try {
@@ -646,6 +675,56 @@ class AuthControllerIntegrationTest(
             ROLE_ID,
         )
         return relationshipId
+    }
+
+    private fun seedWorkflowCapabilityAssignments(): List<UUID> {
+        jdbc.update(
+            """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('a', 64),
+                   published_at = statement_timestamp() WHERE id = ? AND status IN ('DRAFT', 'VALIDATED')""",
+            VERSION_ID,
+        )
+        val roles = listOf(
+            WorkflowAuthorizationRoles.processOwner,
+            WorkflowAuthorizationRoles.participant,
+            WorkflowAuthorizationRoles.domainModeler,
+            WorkflowAuthorizationRole(ADMIN_ROLE_ID, "role:administrator", "Administrator"),
+            WorkflowAuthorizationRole(ROLE_ID, "role:operator", "Operator"),
+            WorkflowAuthorizationRole(VIEWER_ROLE_ID, "role:viewer", "Viewer"),
+        )
+        roles.forEach { role ->
+            jdbc.update(
+                """INSERT INTO authz.entity(id, entity_type_id, entity_type_version_id, entity_key, state)
+                   VALUES (?, ?, ?, ?, 'ACTIVE') ON CONFLICT DO NOTHING""",
+                role.id, TYPE_ID, TYPE_VERSION_ID, role.key,
+            )
+            jdbc.update(
+                """INSERT INTO iam.principal(id, principal_kind, display_name, status)
+                   VALUES (?, 'ROLE', ?, 'ACTIVE') ON CONFLICT DO NOTHING""",
+                role.id, role.displayName,
+            )
+        }
+        val relationshipIds = List(roles.size) { UUID.randomUUID() }
+        jdbc.update(
+            """INSERT INTO authz.relationship
+               (id, relation_definition_id, subject_entity_id, object_entity_id, valid_from, valid_until,
+                revoked_at, source_kind, source_ref)
+               VALUES (?, ?, ?, ?, statement_timestamp(), NULL, NULL, 'ADMIN', 'workflow-process-owner'),
+                      (?, ?, ?, ?, statement_timestamp() - interval '1 hour',
+                       statement_timestamp() + interval '1 hour', NULL, 'ADMIN', 'workflow-participant'),
+                      (?, ?, ?, ?, statement_timestamp(), NULL, NULL, 'ADMIN', 'workflow-domain-modeler'),
+                      (?, ?, ?, ?, statement_timestamp() + interval '1 hour', NULL, NULL, 'ADMIN', 'future-admin'),
+                      (?, ?, ?, ?, statement_timestamp() - interval '2 hours',
+                       statement_timestamp() - interval '1 hour', NULL, 'ADMIN', 'expired-operator'),
+                      (?, ?, ?, ?, statement_timestamp() - interval '2 hours', NULL,
+                       statement_timestamp() - interval '1 hour', 'ADMIN', 'revoked-viewer')""",
+            relationshipIds[0], RELATION_DEFINITION_ID, USER_ID, roles[0].id,
+            relationshipIds[1], RELATION_DEFINITION_ID, USER_ID, roles[1].id,
+            relationshipIds[2], RELATION_DEFINITION_ID, USER_ID, roles[2].id,
+            relationshipIds[3], RELATION_DEFINITION_ID, USER_ID, roles[3].id,
+            relationshipIds[4], RELATION_DEFINITION_ID, USER_ID, roles[4].id,
+            relationshipIds[5], RELATION_DEFINITION_ID, USER_ID, roles[5].id,
+        )
+        return relationshipIds
     }
 
     private fun seedUnrelatedAdministratorRole(): UUID {
@@ -831,6 +910,7 @@ class AuthControllerIntegrationTest(
         private val USER_ID = UUID.fromString("61000000-0000-7000-8000-000000000005")
         private val INSTANCE_ID = UUID.fromString("00000000-0000-7000-8000-000000000001")
         private val ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000006")
+        private val VIEWER_ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000008")
         private val SECOND_USER_ID = UUID.fromString("61000000-0000-7000-8000-000000000007")
         private val RELATION_DEFINITION_ID = PrincipalRepository.PLATFORM_ROLE_ASSIGNMENT_RELATION_DEFINITION_ID
         private val ADMIN_ROLE_ID = UUID.fromString("61000000-0000-7000-8000-000000000009")

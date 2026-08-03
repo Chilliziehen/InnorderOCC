@@ -34,6 +34,9 @@ class AuthorizationSnapshotRepository(
         val snapshotAt = jdbc.queryForObject("SELECT transaction_timestamp()", OffsetDateTime::class.java)
             ?: throw AuthorizationSnapshotException()
         validateRequest(request)
+        validateWorkflowTarget(request)
+        val effectiveContext = authoritativeContext(request)
+        validateContext(effectiveContext)
 
         val states = loadEntityStates(setOf(request.principalId, request.entityId, request.resourceId))
         val principalState = states[request.principalId] ?: throw AuthorizationSnapshotException()
@@ -61,13 +64,18 @@ class AuthorizationSnapshotRepository(
                     template.resourceId,
                 )
             }.let(Collections::unmodifiableList)
-        val contextBytes = canonicalBytes(request.context)
+        val contextBytes = canonicalBytes(effectiveContext)
         if (contextBytes.size > MAX_CONTEXT_BYTES) throw AuthorizationSnapshotException()
         val forbiddenActions = layers.flatMap { it.forbiddenActions }.distinct().sorted()
         if (forbiddenActions.size > MAX_FORBIDDEN_ACTIONS) throw AuthorizationSnapshotException()
+        val relationships = if (request.action in WORKFLOW_ACTIONS) {
+            loadRelationships(request, snapshotAt)
+        } else {
+            emptyList()
+        }
 
         return AuthorizationSnapshot(
-            contractVersion = 1,
+            contractVersion = 2,
             requestId = request.requestId,
             authorizationRevision = revision,
             releases = Collections.unmodifiableMap(layers.associate { it.layer to it.bundleVersionId }),
@@ -78,9 +86,10 @@ class AuthorizationSnapshotRepository(
             entity = AuthorizationEntity(request.entityId),
             action = request.action,
             resource = AuthorizationResource(request.resourceId, resourceState.entityActive),
-            context = immutableContext(request.context),
+            context = immutableContext(effectiveContext),
             forbiddenActions = Collections.unmodifiableList(forbiddenActions),
             grants = grants,
+            relationships = relationships,
             composedReleaseId = layers.first().composedReleaseId,
             opaRevision = layers.first().opaRevision,
             entityVersions = Collections.unmodifiableMap(mapOf(
@@ -228,11 +237,158 @@ class AuthorizationSnapshotRepository(
         principalId,
     ).toSet()
 
+    private fun loadRelationships(
+        request: AuthorizationRequest,
+        snapshotAt: OffsetDateTime,
+    ): List<AuthorizationRelationshipFact> {
+        validateWorkflowRelationDefinitions()
+        val definitions = WorkflowAuthorizationRelationDefinitions.all
+        val rows = jdbc.query(
+            """SELECT definition.id AS relation_definition_id,
+                       relationship.subject_entity_id, relationship.object_entity_id
+                FROM authz.active_relationships_at(?) relationship
+                JOIN catalog.relation_definition definition
+                  ON definition.id = relationship.relation_definition_id
+                JOIN (VALUES ${definitions.joinToString(",") { "(?::uuid, ?)" }}) canonical(id, relation_key)
+                  ON canonical.id = definition.id
+                 AND canonical.relation_key = definition.relation_key
+                WHERE definition.auth_relevant
+                  AND relationship.subject_entity_id = ?
+                  AND relationship.object_entity_id IN (?, ?)
+                ORDER BY definition.id, relationship.subject_entity_id, relationship.object_entity_id
+                LIMIT 257""",
+            { rs, _ ->
+                AuthorizationRelationshipFact(
+                    WorkflowAuthorizationRelationDefinitions.byId
+                        .getValue(rs.getObject("relation_definition_id", UUID::class.java)).relation,
+                    rs.getObject("subject_entity_id", UUID::class.java),
+                    rs.getObject("object_entity_id", UUID::class.java),
+                )
+            },
+            snapshotAt,
+            *definitions.flatMap { listOf(it.id, it.key) }.toTypedArray(),
+            request.principalId,
+            request.entityId,
+            request.resourceId,
+        )
+        if (rows.size > MAX_RELATIONSHIPS || rows.any { !validUuid(it.subjectId) || !validUuid(it.objectId) }) {
+            throw AuthorizationSnapshotException()
+        }
+        val sorted = rows.distinct().sortedWith(
+            compareBy<AuthorizationRelationshipFact>({ it.relation.name }, { it.subjectId }, { it.objectId }),
+        )
+        return Collections.unmodifiableList(sorted)
+    }
+
+    private fun validateWorkflowRelationDefinitions() {
+        val expected = WorkflowAuthorizationRelationDefinitions.byId
+        val rows = jdbc.query(
+            """SELECT id, relation_key, auth_relevant
+               FROM catalog.relation_definition
+               WHERE id IN (${expected.keys.joinToString(",") { "?" }})""",
+            { rs, _ ->
+                CanonicalRelationMetadata(
+                    rs.getObject("id", UUID::class.java),
+                    rs.getString("relation_key"),
+                    rs.getBoolean("auth_relevant"),
+                )
+            },
+            *expected.keys.toTypedArray(),
+        )
+        if (rows.size != expected.size || rows.any { row ->
+                val definition = expected[row.id]
+                definition == null || row.key != definition.key || !row.authRelevant
+            }
+        ) throw AuthorizationSnapshotException()
+    }
+
+    private fun authoritativeContext(request: AuthorizationRequest): Map<String, Any?> {
+        if (request.action != TASK_COMPLETE_ACTION) return request.context
+        val facts = jdbc.query(
+            """SELECT task.state AS task_state,
+                      process.state AS process_state,
+                      NOT EXISTS (
+                          SELECT 1 FROM occ.task_blocker blocker
+                          WHERE blocker.task_id = task.id
+                            AND blocker.resolved_at IS NULL
+                            AND blocker.severity = 'HARD'
+                      ) AND NOT EXISTS (
+                          SELECT 1
+                          FROM occ.task_gate_requirement requirement
+                          LEFT JOIN occ.task_gate_provider_state provider
+                            ON provider.task_id = requirement.task_id
+                           AND provider.provider_key = requirement.provider_key
+                          WHERE requirement.task_id = task.id
+                            AND (
+                                provider.status IS DISTINCT FROM 'READY'
+                                OR provider.source_entity_id IS NULL
+                                OR provider.source_row_version IS DISTINCT FROM
+                                   occ.task_gate_source_row_version(
+                                       requirement.provider_key, provider.source_entity_id, task.id
+                                   )
+                            )
+                      ) AS hard_blockers_absent
+               FROM occ.task_projection task
+               JOIN occ.process_instance process ON process.id = task.process_instance_id
+               WHERE task.id = ?""",
+            { rs, _ ->
+                TaskCompletionFacts(
+                    rs.getString("task_state"),
+                    rs.getString("process_state"),
+                    rs.getBoolean("hard_blockers_absent"),
+                )
+            },
+            request.resourceId,
+        ).singleOrNull() ?: throw AuthorizationSnapshotException()
+        return LinkedHashMap(request.context).apply {
+            put(TASK_STATE_CONTEXT_KEY, facts.taskState)
+            put(PROCESS_STATE_CONTEXT_KEY, facts.processState)
+            put(HARD_BLOCKERS_ABSENT_CONTEXT_KEY, facts.hardBlockersAbsent)
+        }
+    }
+
+    private fun validateWorkflowTarget(request: AuthorizationRequest) {
+        if (request.action !in WORKFLOW_ACTIONS) return
+        val valid = when {
+            request.action == COHORT_CREATE_ACTION ->
+                request.entityId == request.resourceId && targetExists(
+                    "SELECT EXISTS (SELECT 1 FROM platform.customer_instance WHERE singleton AND id = ?)",
+                    request.entityId,
+                )
+            request.action.startsWith(COHORT_ACTION_PREFIX) ->
+                request.entityId == request.resourceId && targetExists(
+                    "SELECT EXISTS (SELECT 1 FROM occ.cohort WHERE id = ?)",
+                    request.entityId,
+                )
+            request.action.startsWith(PROCESS_ACTION_PREFIX) -> targetExists(
+                "SELECT EXISTS (SELECT 1 FROM occ.process_instance WHERE id = ? AND cohort_id = ?)",
+                request.resourceId, request.entityId,
+            )
+            request.action.startsWith(TASK_ACTION_PREFIX) -> targetExists(
+                """SELECT EXISTS (
+                       SELECT 1 FROM occ.task_projection task
+                       JOIN occ.process_instance process ON process.id = task.process_instance_id
+                       WHERE task.id = ? AND process.cohort_id = ?
+                   )""",
+                request.resourceId, request.entityId,
+            )
+            else -> false
+        }
+        if (!valid) throw AuthorizationSnapshotException()
+    }
+
+    private fun targetExists(sql: String, vararg arguments: Any): Boolean =
+        jdbc.queryForObject(sql, Boolean::class.java, *arguments) == true
+
     private fun validateRequest(request: AuthorizationRequest) {
         if (!validUuid(request.requestId) || !validUuid(request.principalId) || !validUuid(request.entityId) ||
-            !validUuid(request.resourceId) || !validAction(request.action) || request.context.size > MAX_CONTEXT_PROPERTIES
+            !validUuid(request.resourceId) || !validAction(request.action)
         ) throw AuthorizationSnapshotException()
-        validateContextNode(request.context, 0)
+    }
+
+    private fun validateContext(context: Map<String, Any?>) {
+        if (context.size > MAX_CONTEXT_PROPERTIES) throw AuthorizationSnapshotException()
+        validateContextNode(context, 0)
     }
 
     private fun validateContextNode(value: Any?, depth: Int) {
@@ -360,7 +516,16 @@ class AuthorizationSnapshotRepository(
         val subjectRoleEntityKey: String,
     )
 
+    private data class TaskCompletionFacts(
+        val taskState: String,
+        val processState: String,
+        val hardBlockersAbsent: Boolean,
+    )
+    private data class CanonicalRelationMetadata(val id: UUID, val key: String, val authRelevant: Boolean)
+
     companion object {
+        private val WORKFLOW_ACTIONS = WorkflowAuthorizationRoles.processOwnerActions +
+            WorkflowAuthorizationRoles.participantActions
         private val PINNED_BUNDLE_STATUSES = setOf("ACTIVE", "DEPRECATED")
         private val OPA_REVISION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")
         private const val MAX_ACTION_LENGTH = 128
@@ -369,7 +534,16 @@ class AuthorizationSnapshotRepository(
         private const val MAX_CONTEXT_DEPTH = 8
         private const val MAX_FORBIDDEN_ACTIONS = 128
         private const val MAX_GRANTS = 256
+        private const val MAX_RELATIONSHIPS = 256
         private const val MAX_MANIFEST_BYTES = 64 * 1024
+        private const val COHORT_CREATE_ACTION = "cohort.create"
+        private const val COHORT_ACTION_PREFIX = "cohort."
+        private const val PROCESS_ACTION_PREFIX = "process."
+        private const val TASK_ACTION_PREFIX = "task."
+        private const val TASK_COMPLETE_ACTION = "task.complete"
+        private const val TASK_STATE_CONTEXT_KEY = "taskState"
+        private const val PROCESS_STATE_CONTEXT_KEY = "processState"
+        private const val HARD_BLOCKERS_ABSENT_CONTEXT_KEY = "hardBlockersAbsent"
         private val NIL_UUID = UUID(0, 0)
         private val ROLE_ASSIGNMENT_RELATION_ID = UUID.fromString("00000000-0000-7000-8000-000000000002")
         private val ACTION = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]*${'$'}")

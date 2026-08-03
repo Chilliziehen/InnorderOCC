@@ -12,6 +12,8 @@
 \ir migrations/V010__platform_security_kernel.sql
 \ir migrations/V011__account_failed_attempt_window.sql
 \ir migrations/V012__outbox_publisher_lifecycle.sql
+\ir migrations/V013__process_task_workflow.sql
 BEGIN;
 \ir migrations/V014__evidence_risk_resource.sql
 COMMIT;
+\ir migrations/V015__cohort_api_lifecycle.sql

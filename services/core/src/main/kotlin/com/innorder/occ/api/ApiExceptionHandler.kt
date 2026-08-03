@@ -36,6 +36,9 @@ import com.innorder.occ.evidence.EvidenceInvalidContentException
 import com.innorder.occ.evidence.EvidenceInvalidRangeException
 import com.innorder.occ.evidence.EvidenceSubmitConflictException
 import com.innorder.occ.evidence.EvidenceReviewConflictException
+import com.innorder.occ.cohort.CohortConflictException
+import com.innorder.occ.cohort.CohortNotFoundException
+import com.innorder.occ.cohort.CohortInvalidRequestException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import org.springframework.http.HttpStatus
@@ -265,6 +268,23 @@ class ApiExceptionHandler(
         exception: ReservationNotFoundException,
         request: HttpServletRequest,
     ): ResponseEntity<OccProblem> = responses.reservationNotFound(request)
+    @ExceptionHandler(CohortConflictException::class)
+    fun cohortConflict(
+        exception: CohortConflictException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.conflict(request)
+
+    @ExceptionHandler(CohortNotFoundException::class)
+    fun cohortNotFound(
+        exception: CohortNotFoundException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.requestError(request, HttpStatus.NOT_FOUND)
+
+    @ExceptionHandler(CohortInvalidRequestException::class)
+    fun cohortInvalidRequest(
+        exception: CohortInvalidRequestException,
+        request: HttpServletRequest,
+    ): ResponseEntity<OccProblem> = responses.cohortInvalidRequest(request)
 
     @ExceptionHandler(AuthorizationDeniedException::class)
     fun authorizationDenied(

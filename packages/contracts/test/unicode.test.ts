@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hasUnicodeCodePointLengthWithin } from "../src/unicode.js";
+import { hasUnicodeCodePointLengthWithin, unicodeBoundedStringSchema } from "../src/unicode.js";
 
 describe("hasUnicodeCodePointLengthWithin", () => {
   it("counts Unicode code points rather than UTF-16 code units", () => {
@@ -20,5 +20,14 @@ describe("hasUnicodeCodePointLengthWithin", () => {
 
     expect(hasUnicodeCodePointLengthWithin(guardedCodePoints(), 0, 3)).toBe(false);
     expect(iterations).toBe(4);
+  });
+});
+
+describe("unicodeBoundedStringSchema", () => {
+  it("enforces string bounds in Unicode code points", () => {
+    const schema = unicodeBoundedStringSchema(1, 2);
+    expect(schema.parse("😀😀")).toBe("😀😀");
+    expect(() => schema.parse("")).toThrow();
+    expect(() => schema.parse("😀😀😀")).toThrow();
   });
 });

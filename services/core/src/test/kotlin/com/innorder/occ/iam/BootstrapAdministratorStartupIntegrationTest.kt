@@ -3,6 +3,10 @@ package com.innorder.occ.iam
 import com.innorder.occ.OccCoreApplication
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import com.innorder.occ.authz.PolicyLayer
+import com.innorder.occ.authz.PolicyReleaseIntegrity
+import com.innorder.occ.authz.PolicyReleaseItemIntegrity
+import com.innorder.occ.catalog.WorkflowCatalogInstallationException
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.Test
 import org.postgresql.ds.PGSimpleDataSource
@@ -19,6 +23,7 @@ import org.testcontainers.utility.MountableFile
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -113,7 +118,7 @@ class BootstrapAdministratorStartupIntegrationTest {
                 .run(*arguments(postgres)).use {
                     assertThat(ready).isTrue()
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                        .isEqualTo(13)
+                        .isEqualTo(15)
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java))
                         .isEqualTo(1)
                     assertThat(jdbc.queryForObject(
@@ -146,7 +151,7 @@ class BootstrapAdministratorStartupIntegrationTest {
 
             assertThat(ready).isFalse()
             assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                .isEqualTo(13)
+                .isEqualTo(15)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isZero()
             assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM catalog.package_version WHERE id = ? AND status = 'PUBLISHED'",
@@ -168,6 +173,137 @@ class BootstrapAdministratorStartupIntegrationTest {
                 RISK_SYSTEM_ID,
             )).isZero()
         }
+    }
+
+    @Test
+    fun `fresh migrated startup without bootstrap fails safely before readiness`() {
+        database { postgres, jdbc ->
+            val disabledArguments = arguments(postgres).filterNot {
+                it.startsWith("--occ.bootstrap-administrator.")
+            }.toTypedArray()
+            val ready = AtomicBoolean()
+
+            assertThatThrownBy {
+                SpringApplicationBuilder(OccCoreApplication::class.java)
+                    .listeners(ApplicationListener<ApplicationReadyEvent> { ready.set(true) })
+                    .run(*disabledArguments)
+            }.isInstanceOf(WorkflowCatalogInstallationException::class.java)
+                .hasMessage("Embedded workflow catalog installation conflicts with existing data")
+                .hasMessageNotContaining("SELECT")
+                .hasMessageNotContaining("catalog.entity_type")
+                .hasMessageNotContaining("platform.user")
+            assertThat(ready).isFalse()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_release", Long::class.java)).isZero()
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM authz.policy_bundle_version", Long::class.java)).isZero()
+        }
+    }
+
+    @Test
+    fun `disabled bootstrap upgrades an existing active v1 policy during startup`() {
+        database { postgres, jdbc ->
+            Flyway.configure().dataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only")
+                .locations("classpath:db/migration").load().migrate()
+            seedRoleCatalog(jdbc)
+            seedV1Policy(jdbc)
+            val disabledArguments = arguments(postgres).filterNot {
+                it.startsWith("--occ.bootstrap-administrator.")
+            }.toTypedArray()
+
+            SpringApplicationBuilder(OccCoreApplication::class.java)
+                .run(*disabledArguments).use {
+                    assertThat(jdbc.queryForObject(
+                        "SELECT status FROM authz.policy_release WHERE id = ?",
+                        String::class.java,
+                        BootstrapIds.POLICY_RELEASE_V1,
+                    )).isEqualTo("RETIRED")
+                    assertThat(jdbc.queryForObject(
+                        """SELECT count(*) FROM authz.policy_release pr
+                           JOIN authz.policy_release_item pri ON pri.release_id = pr.id
+                           WHERE pr.id = ? AND pr.release_number = 2 AND pr.status = 'ACTIVE'
+                             AND pr.opa_revision = ? AND pri.bundle_version_id = ?""",
+                        Long::class.java,
+                        BootstrapIds.POLICY_RELEASE_V2,
+                        BootstrapPolicyBaseline.OPA_REVISION,
+                        BootstrapIds.POLICY_BUNDLE_VERSION_V2,
+                    )).isEqualTo(1)
+                }
+        }
+    }
+
+    private fun seedRoleCatalog(jdbc: JdbcTemplate) {
+        jdbc.update(
+            "INSERT INTO catalog.domain_package(id, package_key, name, status) VALUES (?, 'platform-iam', 'Platform IAM', 'ACTIVE')",
+            BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            "INSERT INTO catalog.package_version(id, package_id, semver, status) VALUES (?, ?, '1.0.0', 'DRAFT')",
+            BootstrapIds.PACKAGE_VERSION, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)
+               VALUES (?, ?, 'platform.user', 'User', 'PRINCIPAL', true)""",
+            BootstrapIds.USER_TYPE, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type_version
+               (id, entity_type_id, package_version_id, schema_version, json_schema)
+               VALUES (?, ?, ?, 1, '{}'::jsonb)""",
+            BootstrapIds.USER_TYPE_VERSION, BootstrapIds.USER_TYPE, BootstrapIds.PACKAGE_VERSION,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type(id, package_id, type_key, name, entity_kind, authorizable)
+               VALUES (?, ?, 'platform.role', 'Role', 'PRINCIPAL', true)""",
+            BootstrapIds.ROLE_TYPE, BootstrapIds.PACKAGE,
+        )
+        jdbc.update(
+            """INSERT INTO catalog.entity_type_version
+               (id, entity_type_id, package_version_id, schema_version, json_schema)
+               VALUES (?, ?, ?, 1, '{}'::jsonb)""",
+            BootstrapIds.ROLE_TYPE_VERSION, BootstrapIds.ROLE_TYPE, BootstrapIds.PACKAGE_VERSION,
+        )
+        jdbc.update(
+            """UPDATE catalog.package_version SET status = 'PUBLISHED', content_hash = repeat('a', 64),
+                   published_at = transaction_timestamp() WHERE id = ?""",
+            BootstrapIds.PACKAGE_VERSION,
+        )
+    }
+
+    private fun seedV1Policy(jdbc: JdbcTemplate) {
+        val now = OffsetDateTime.now()
+        val releaseHash = PolicyReleaseIntegrity.contentHash(
+            BootstrapPolicyV1Baseline.OPA_REVISION,
+            listOf(PolicyReleaseItemIntegrity(
+                PolicyLayer.PLATFORM,
+                BootstrapIds.POLICY_BUNDLE,
+                BootstrapIds.POLICY_BUNDLE_VERSION_V1,
+                BootstrapPolicyV1Baseline.contentHash,
+            )),
+        )
+        jdbc.update(
+            """INSERT INTO authz.policy_bundle(id, bundle_key, layer, status, created_at)
+               VALUES (?, 'platform-core-authorization', 'PLATFORM', 'ACTIVE', ?)""",
+            BootstrapIds.POLICY_BUNDLE, now,
+        )
+        jdbc.update(
+            """INSERT INTO authz.policy_bundle_version
+               (id, bundle_id, version, status, manifest, content_hash, created_at, published_at)
+               VALUES (?, ?, 1, 'PUBLISHED', ?::jsonb, ?, ?, ?)""",
+            BootstrapIds.POLICY_BUNDLE_VERSION_V1, BootstrapIds.POLICY_BUNDLE,
+            BootstrapPolicyV1Baseline.manifest, BootstrapPolicyV1Baseline.contentHash, now, now,
+        )
+        jdbc.update(
+            """INSERT INTO authz.policy_release(id, release_number, status, content_hash, created_at)
+               VALUES (?, 1, 'STAGED', ?, ?)""",
+            BootstrapIds.POLICY_RELEASE_V1, releaseHash, now,
+        )
+        jdbc.update(
+            "INSERT INTO authz.policy_release_item(release_id, bundle_id, bundle_version_id) VALUES (?, ?, ?)",
+            BootstrapIds.POLICY_RELEASE_V1, BootstrapIds.POLICY_BUNDLE, BootstrapIds.POLICY_BUNDLE_VERSION_V1,
+        )
+        jdbc.update(
+            """UPDATE authz.policy_release SET status = 'ACTIVE', opa_revision = ?, published_at = ? WHERE id = ?""",
+            BootstrapPolicyV1Baseline.OPA_REVISION, now, BootstrapIds.POLICY_RELEASE_V1,
+        )
     }
 
     private fun successfulReader(): BootstrapSecretReader = BootstrapSecretReader(

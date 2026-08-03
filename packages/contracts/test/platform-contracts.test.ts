@@ -66,8 +66,8 @@ const actionForbiddenPolicyHash = "policy:105106f1faa19167cdeb0d067dd88443f361b1
 const noMatchingAllowPolicyHash = "policy:7ec3d68be5ac070a6d48cb53daaf85bf7b4d76d09985923af422194f7735ab7b";
 
 const authorizationInput = {
-  contractVersion: 1,
-  opaRevision: "platform-authz-v1",
+  contractVersion: 2,
+  opaRevision: "platform-authz-v2",
   requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   authorizationRevision: 17,
   releases: {
@@ -93,13 +93,14 @@ const authorizationInput = {
       resourceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     },
   ],
+  relationships: [],
 } as const;
 
 describe("authorization contracts", () => {
-  it("parses the exact version-1 input and decision envelopes", () => {
+  it("parses the exact version-2 input and decision envelopes", () => {
     expect(authorizationInputSchema.parse(authorizationInput)).toEqual(authorizationInput);
     const decision = {
-      contractVersion: 1,
+      contractVersion: 2,
       opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: authorizationInput.authorizationRevision,
@@ -126,7 +127,7 @@ describe("authorization contracts", () => {
 
   it("rejects malformed versions, UUIDs, revisions, and context", () => {
     for (const invalid of [
-      { ...authorizationInput, contractVersion: 2 },
+      { ...authorizationInput, contractVersion: 1 },
       { ...authorizationInput, opaRevision: "" },
       { ...authorizationInput, opaRevision: "platform authz v1" },
       { ...authorizationInput, opaRevision: "x".repeat(257) },
@@ -275,7 +276,7 @@ describe("authorization contracts", () => {
 
   it("rejects inconsistent, unsorted, duplicate, or unknown decision fields", () => {
     const baseDecision = {
-      contractVersion: 1,
+      contractVersion: 2,
       opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: 17,
@@ -303,7 +304,7 @@ describe("authorization contracts", () => {
 
   it("accepts only the canonical invalid-input decision envelope", () => {
     const invalidEnvelope = {
-      contractVersion: 1,
+      contractVersion: 2,
       opaRevision: "",
       requestId: "00000000-0000-0000-0000-000000000000",
       authorizationRevision: 0,
@@ -327,7 +328,7 @@ describe("authorization contracts", () => {
 
   it("accepts exactly possible allow and deny reason semantics", () => {
     const allowDecision = {
-      contractVersion: 1,
+      contractVersion: 2,
       opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: 17,
@@ -414,7 +415,7 @@ describe("authorization contracts", () => {
 
   it("rejects case-insensitive duplicate release IDs in decisions", () => {
     const decision = {
-      contractVersion: 1,
+      contractVersion: 2,
       opaRevision: authorizationInput.opaRevision,
       requestId: authorizationInput.requestId,
       authorizationRevision: 17,
@@ -459,7 +460,6 @@ describe("problemDetailsSchema", () => {
       code: "OCC-API-INTERNAL",
       correlationId: id,
       detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
-      currentVersion: 0,
     };
 
     expect(problemDetailsSchema.parse(boundaryProblem)).toEqual(boundaryProblem);
@@ -469,10 +469,9 @@ describe("problemDetailsSchema", () => {
       { ...boundaryProblem, status: PROBLEM_STATUS_MIN - 1 },
       { ...boundaryProblem, status: PROBLEM_STATUS_MAX + 1 },
       { ...boundaryProblem, code: "OCC-UNKNOWN-CODE" },
+      { ...boundaryProblem, code: "UNKNOWN_PROBLEM_CODE" },
       { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
-      { ...boundaryProblem, currentVersion: -1 },
-      { ...boundaryProblem, currentVersion: 1.5 },
-      { ...boundaryProblem, currentVersion: Number.MAX_SAFE_INTEGER + 1 },
+      { ...boundaryProblem, currentVersion: 0 },
     ]) {
       expect(() => problemDetailsSchema.parse(invalid)).toThrow();
     }
@@ -769,5 +768,19 @@ describe("eventEnvelopeSchema", () => {
     ]) {
       expect(() => eventEnvelopeSchema.parse(invalid)).toThrow();
     }
+  });
+
+  it("counts event string boundaries in Unicode code points", () => {
+    expect(eventEnvelopeSchema.parse({
+      ...event,
+      type: "😀".repeat(EVENT_TYPE_MAX_LENGTH),
+      aggregateType: "🚀".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
+    })).toBeDefined();
+    expect(() => eventEnvelopeSchema.parse({
+      ...event, type: "😀".repeat(EVENT_TYPE_MAX_LENGTH + 1),
+    })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({
+      ...event, aggregateType: "🚀".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
+    })).toThrow();
   });
 });

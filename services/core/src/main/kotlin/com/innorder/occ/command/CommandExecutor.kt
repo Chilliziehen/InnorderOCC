@@ -2,6 +2,7 @@ package com.innorder.occ.command
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.innorder.occ.authz.AuthorizationDecisionReference
 import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationRevisionLockRepository
 import com.innorder.occ.authz.AuthorizationService
@@ -14,6 +15,8 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.support.TransactionTemplate
 import java.util.UUID
+import com.innorder.occ.notification.NotificationWriter
+import com.innorder.occ.notification.NoOpNotificationWriter
 
 @Service
 class CommandExecutor(
@@ -23,7 +26,9 @@ class CommandExecutor(
     private val idempotency: IdempotencyRepository,
     private val audit: AuditRepository,
     private val outbox: OutboxRepository,
+    private val aggregateLocks: AggregateLockRegistry,
     private val jdbc: JdbcOperations,
+    private val notificationWriter: NotificationWriter = NoOpNotificationWriter,
 ) {
     private val mapper = ObjectMapper().findAndRegisterModules()
     private val transactions = TransactionTemplate(transactionManager).apply {
@@ -32,14 +37,17 @@ class CommandExecutor(
     fun execute(metadata: CommandMetadata, requestBytes: ByteArray, command: AuthorizedCommand): CommandResult {
         val request = CanonicalJsonObject.parse(requestBytes, MAX_REQUEST_BYTES)
         val descriptor = captureDescriptor(metadata, command)
+        val primary = AggregateReference(descriptor.aggregateType, descriptor.aggregateId)
+        aggregateLocks.validate(descriptor.lockPlan, primary)
         val fingerprint = fingerprint(descriptor, request)
         val sensitiveValues = sensitiveValues(request)
         validatePreAcquireDataMinimization(metadata, descriptor, sensitiveValues)
         return transactions.execute {
+            val authorization = authorize(metadata, descriptor, fingerprint)
             when (val acquisition = idempotency.acquire(descriptor, metadata.idempotencyKey, fingerprint)) {
-                is IdempotencyAcquisition.Replay -> acquisition.result
+                is IdempotencyAcquisition.Replay -> idempotency.replay(acquisition.recordId)
                 is IdempotencyAcquisition.Owner -> executeOwned(
-                    metadata, descriptor, fingerprint, sensitiveValues, command, acquisition.recordId,
+                    metadata, descriptor, authorization, fingerprint, sensitiveValues, command, acquisition.recordId,
                 )
             }
         }!!
@@ -48,13 +56,49 @@ class CommandExecutor(
     private fun executeOwned(
         metadata: CommandMetadata,
         descriptor: CommandDescriptor,
+        authorization: AuthorizationDecisionReference,
         requestDigest: String,
         sensitiveValues: Set<String>,
         command: AuthorizedCommand,
         idempotencyRecordId: UUID,
     ): CommandResult {
+        val transactionId = UUID.randomUUID()
+        val acquired = aggregateLocks.acquire(jdbc, requireNotNull(descriptor.lockPlan))
+        val context = CommandContext(
+            jdbc,
+            metadata, descriptor, authorization, requestDigest, transactionId,
+            acquired.versions, acquired.created,
+        )
+        val primary = AggregateReference(descriptor.aggregateType, descriptor.aggregateId)
+        val currentVersion = acquired.versions[primary]
+        if (descriptor.requiresExpectedVersion && currentVersion != descriptor.expectedVersion) {
+            throw OptimisticConflictException(currentVersion ?: 0)
+        }
+        val mutation = command.execute(context)
+        validateMutation(descriptor, mutation, acquired)
+        aggregateLocks.verifyVersions(jdbc, mutation.changes)
+        val auditDetail = audit.detail(mutation)
+        validateDataMinimization(mutation, auditDetail, sensitiveValues)
+        audit.insert(transactionId, metadata.correlationId, descriptor, mutation, auditDetail)
+        val persistedEvents = outbox.insert(descriptor, metadata.correlationId, transactionId, mutation)
+        mutation.notifications.forEach { notification ->
+            val event = persistedEvents.singleOrNull {
+                it.eventType == notification.eventType && it.aggregateId == notification.resourceId
+            } ?: throw InvalidCommandRequestException()
+            notificationWriter.write(notification, event.id)
+        }
+        val result = CommandResult(mutation.status, mutation.body, mutation.resourceId, replayed = false)
+        idempotency.complete(idempotencyRecordId, result)
+        return result
+    }
+
+    private fun authorize(
+        metadata: CommandMetadata,
+        descriptor: CommandDescriptor,
+        requestDigest: String,
+    ): AuthorizationDecisionReference {
         if (descriptor.changesAuthorizationFacts) authorizationLocks.acquireForChange()
-        val authorization = authorizationService.authorize(
+        return authorizationService.authorize(
             AuthorizationRequest(
                 UUID.randomUUID(), descriptor.principalId, descriptor.action, descriptor.entityId, descriptor.resourceId,
                 mapOf(
@@ -65,24 +109,6 @@ class CommandExecutor(
                 metadata.correlationId,
             ),
         )
-        val transactionId = UUID.randomUUID()
-        val context = CommandContext(
-            jdbc,
-            metadata, descriptor, authorization, requestDigest, transactionId,
-        )
-        val currentVersion = command.lockCurrentVersion(context)
-        if (currentVersion != null && currentVersion !in 0..MAX_SAFE_INTEGER) throw InvalidCommandRequestException()
-        if (descriptor.requiresExpectedVersion && currentVersion != descriptor.expectedVersion) {
-            throw OptimisticConflictException(currentVersion ?: 0)
-        }
-        val mutation = command.execute(context)
-        validateMutation(descriptor, mutation, currentVersion)
-        validateDataMinimization(mutation, sensitiveValues)
-        audit.insert(transactionId, metadata.correlationId, descriptor, mutation)
-        outbox.insert(descriptor, metadata.correlationId, transactionId, mutation)
-        val result = CommandResult(mutation.status, mutation.body, mutation.resourceId, replayed = false)
-        idempotency.complete(idempotencyRecordId, result)
-        return result
     }
 
     private fun captureDescriptor(metadata: CommandMetadata, command: AuthorizedCommand): CommandDescriptor {
@@ -97,6 +123,7 @@ class CommandExecutor(
             command.changesAuthorizationFacts,
             metadata.expectedVersion,
             metadata.principalId,
+            command.lockPlan,
         )
         if (!ACTION.matches(descriptor.action) || !ACTION.matches(descriptor.aggregateType) ||
             listOf(descriptor.principalId, descriptor.entityId, descriptor.resourceId, descriptor.aggregateId)
@@ -113,22 +140,37 @@ class CommandExecutor(
         return descriptor
     }
 
-    private fun validateMutation(descriptor: CommandDescriptor, mutation: CommandMutation, currentVersion: Long?) {
-        if (mutation.status !in 100..599 || mutation.aggregateType.length !in 1..128 ||
-            mutation.aggregateType != descriptor.aggregateType || mutation.resourceId != descriptor.resourceId ||
-            mutation.aggregateId != descriptor.aggregateId || mutation.afterVersion !in 0..MAX_SAFE_INTEGER ||
-            mutation.beforeVersion != currentVersion || mutation.afterVersion <= (mutation.beforeVersion ?: -1) ||
-            (descriptor.requiresExpectedVersion && mutation.afterVersion != requireNotNull(currentVersion) + 1) ||
+    private fun validateMutation(
+        descriptor: CommandDescriptor,
+        mutation: CommandMutation,
+        acquired: AcquiredAggregateLocks,
+    ) {
+        val primary = AggregateReference(descriptor.aggregateType, descriptor.aggregateId)
+        val primaryChange = mutation.changes.singleOrNull { it.ref == primary }
+        val changesByRef = mutation.changes.associateBy { it.ref }
+        if (mutation.status !in 100..599 || mutation.resourceId != descriptor.resourceId || primaryChange == null ||
+            mutation.changes.isEmpty() || mutation.changes.size > 128 || changesByRef.size != mutation.changes.size ||
+            mutation.changes.any { change ->
+                change.beforeVersion !in 0..MAX_SAFE_INTEGER || change.afterVersion !in 1..MAX_SAFE_INTEGER ||
+                    when (val lockedVersion = acquired.versions[change.ref]) {
+                        null -> change.ref !in acquired.created || change.beforeVersion != 0L || change.afterVersion != 1L
+                        else -> change.beforeVersion != lockedVersion || change.afterVersion != lockedVersion + 1
+                    }
+            } ||
             mutation.auditReason?.let { it.length !in 1..1024 || it.any(Char::isISOControl) } == true ||
-            mutation.body.size() > MAX_RESPONSE_BYTES || mutation.auditDetail.size() > MAX_AUDIT_BYTES ||
+            mutation.body.size() > MAX_RESPONSE_BYTES ||
             mutation.events.isEmpty() || mutation.events.size > 128 ||
-            mutation.events.map { it.aggregateVersion }.distinct().size != mutation.events.size ||
-            mutation.events.map { it.aggregateVersion } != mutation.events.map { it.aggregateVersion }.sorted() ||
+            mutation.events.size != changesByRef.size ||
+            mutation.events.map { it.aggregate }.toSet() != changesByRef.keys ||
+            mutation.events.groupBy { it.aggregate }.any { (_, events) ->
+                events.map { it.aggregateVersion }.let { versions -> versions.distinct().size != versions.size || versions != versions.sorted() }
+            } ||
             mutation.events.any {
-                it.payload.size() > MAX_EVENT_BYTES || it.aggregateVersion <= (mutation.beforeVersion ?: -1) ||
-                    it.aggregateVersion > mutation.afterVersion || it.schemaVersion < 1 || !ACTION.matches(it.eventType) ||
+                val change = changesByRef[it.aggregate]
+                it.payload.size() > MAX_EVENT_BYTES || change == null || it.aggregateVersion != change.afterVersion ||
+                    it.schemaVersion < 1 || !ACTION.matches(it.eventType) ||
                     (!descriptor.changesAuthorizationFacts && authorizationNamespace(it.eventType))
-            }
+            } || mutation.notifications.size > 128
         ) throw InvalidCommandRequestException()
     }
 
@@ -149,11 +191,15 @@ class CommandExecutor(
         return CanonicalJsonObject.from(envelope, MAX_REQUEST_BYTES + 4096).digest
     }
 
-    private fun validateDataMinimization(mutation: CommandMutation, requestSensitiveValues: Set<String>) {
+    private fun validateDataMinimization(
+        mutation: CommandMutation,
+        auditDetail: CanonicalJsonObject,
+        requestSensitiveValues: Set<String>,
+    ) {
         mutation.auditReason?.let { validatePersistedString(it, requestSensitiveValues) }
-        validatePersistedString(mutation.aggregateType, requestSensitiveValues)
+        mutation.changes.forEach { validatePersistedString(it.ref.type, requestSensitiveValues) }
         validateSafePersistenceJson(mutation.body.toJsonNode(), requestSensitiveValues, MAX_RESPONSE_BYTES)
-        validateSafePersistenceJson(mutation.auditDetail.toJsonNode(), requestSensitiveValues, MAX_AUDIT_BYTES)
+        validateSafePersistenceJson(auditDetail.toJsonNode(), requestSensitiveValues, MAX_AUDIT_BYTES)
         mutation.events.forEach {
             validatePersistedString(it.eventType, requestSensitiveValues)
             validateSafePersistenceJson(it.payload.toJsonNode(), requestSensitiveValues, MAX_EVENT_BYTES)
@@ -169,6 +215,9 @@ class CommandExecutor(
         validatePersistedString(descriptor.commandKey, requestSensitiveValues)
         validatePersistedString(descriptor.action, requestSensitiveValues)
         validatePersistedString(descriptor.aggregateType, requestSensitiveValues)
+        descriptor.lockPlan?.let { plan ->
+            (plan.existing + plan.created).forEach { validatePersistedString(it.type, requestSensitiveValues) }
+        }
     }
 
     private fun sensitiveValues(request: CanonicalJsonObject): Set<String> {
