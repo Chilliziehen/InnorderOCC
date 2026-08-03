@@ -21,7 +21,8 @@
 | 项目 | 内容 | 是否包含敏感值 |
 |---|---|---|
 | 发布来源 | `source-revision.txt`、`source-status.txt` | 否；不复制仓库工作区作为备份 |
-| 配置恢复 | `configuration-paths-only.txt`、`compose-env-paths-only.txt`、`compose-env-nonsecret.txt` | 保存 Compose/env 位置、八个 secret 源路径和十二个非秘密配置；路径按敏感元数据保护，不保存 secret 值 |
+| 配置恢复 | `configuration-paths-only.txt`、`compose-env-paths-only.txt`、`compose-env-nonsecret.txt` | 保存 Compose/env 位置、九个 secret 源路径和十二个非秘密配置；路径按敏感元数据保护，不保存 secret 值 |
+| 配置恢复 | `configuration-paths-only.txt`、`compose-env-paths-only.txt`、`compose-env-nonsecret.txt` | 保存 Compose/env 位置、十个 secret 源路径、JWT issuer 和十二个可选非秘密配置；路径按敏感元数据保护，不保存 secret 值 |
 | 密钥托管 | `secret-escrow-receipt.txt` | 只保存外部托管版本/取回收据，不含 secret 值或值散列 |
 | 镜像 | `compose-images.txt`、`image-identifiers.txt` | Compose 镜像清单、实际 image ID、RepoTag/RepoDigest 和本地构建 revision 关联 |
 | PostgreSQL | 精确一个 `occ-*.dump` 与非空 `postgresql-restore-list.txt` | 自定义格式逻辑备份与独立 `pg_restore --list` 结果 |
@@ -31,7 +32,8 @@
 | 策略与工具 | `backup-policy-metadata.txt`、`backup-trust-status.txt`、`tool-versions.txt`、开始/结束 UTC | 记录 source/deployed revision、change ID、政策、保留类别、故障域、信任模式和工具版本 |
 | 完整性 | `backup-artifacts.inventory`、`backup-manifest.sha256`、`COMPLETE` | inventory 与 checksum 只能检测意外损坏；外部模式另由批准验证工具输出 `external-trust-evidence.txt` 控制证据 |
 
-`.env` 不整文件归档：八个 secret **路径**写入 `compose-env-paths-only.txt`，十二个非敏感覆盖写入 `compose-env-nonsecret.txt`。两者合并后必须精确覆盖 `.env.example` 的允许 key；不得把 secret escrow 内容放入同一目录。恢复负责人必须能从独立托管取回与备份时点匹配的凭据，且取回操作有双人审批和审计。
+`.env` 不整文件归档：九个 secret **路径**写入 `compose-env-paths-only.txt`，十二个非敏感覆盖写入 `compose-env-nonsecret.txt`。两者合并后必须精确覆盖 `.env.example` 的允许 key；不得把 secret escrow 内容放入同一目录。cursor HMAC key 与其他 secret 一样只进入独立 escrow，不进入备份包。恢复负责人必须能从独立托管取回与备份时点匹配的凭据，且取回操作有双人审批和审计。
+`.env` 不整文件归档：十个 secret **路径**写入 `compose-env-paths-only.txt`，JWT issuer 和十二个可选非敏感覆盖写入 `compose-env-nonsecret.txt`。两者合并后必须精确覆盖 `.env.example` 的允许 key；不得把 secret escrow 内容放入同一目录。恢复负责人必须能从独立托管取回与备份时点匹配的凭据，且取回操作有双人审批和审计。
 
 ## 备份会话与安全目标
 
@@ -439,12 +441,14 @@ $revision | Out-File (Join-Path $BackupSet 'source-revision.txt') -Encoding asci
 $status | Out-File (Join-Path $BackupSet 'source-status.txt') -Encoding utf8
 $images | Out-File (Join-Path $BackupSet 'compose-images.txt') -Encoding utf8
 @('compose=infra/compose/compose.yml','env=infra/compose/.env') | Out-File (Join-Path $BackupSet 'configuration-paths-only.txt') -Encoding ascii
-$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=' })
-if ($pathOnlyEnv.Count -ne 8) { throw 'Compose env 必须精确提供八个 secret 路径行' }
+$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(CURSOR_HMAC_KEY_FILE|POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|AI_DATABASE_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=' })
+if ($pathOnlyEnv.Count -ne 9) { throw 'Compose env 必须精确提供九个 secret 路径行' }
+$pathOnlyEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { $_ -match '^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|AI_DATABASE_PASSWORD_FILE|CURSOR_HMAC_KEY_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE|OCC_JWT_PRIVATE_KEY_FILE|OCC_JWT_PUBLIC_KEY_FILE|OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE)=' })
+if ($pathOnlyEnv.Count -ne 11) { throw 'Compose env 必须精确提供十一个文件路径行' }
 [IO.File]::WriteAllLines((Join-Path $BackupSet 'compose-env-paths-only.txt'),$pathOnlyEnv,(New-Object Text.UTF8Encoding($false)))
-$nonSecretKeys = @('POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$nonSecretKeys = @('OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 $nonSecretEnv = @(Get-Content -LiteralPath $ComposeEnv | Where-Object { ($_ -split '=',2)[0] -in $nonSecretKeys })
-if ($nonSecretEnv.Count -ne 12 -or (Compare-Object $nonSecretKeys @($nonSecretEnv | ForEach-Object { ($_ -split '=',2)[0] }))) { throw 'Compose env 必须精确提供十二个非秘密配置行' }
+if ($nonSecretEnv.Count -ne 13 -or (Compare-Object $nonSecretKeys @($nonSecretEnv | ForEach-Object { ($_ -split '=',2)[0] }))) { throw 'Compose env 必须精确提供十三个非秘密配置行' }
 [IO.File]::WriteAllLines((Join-Path $BackupSet 'compose-env-nonsecret.txt'),$nonSecretEnv,(New-Object Text.UTF8Encoding($false)))
 $escrowReceipt = (Resolve-Path -LiteralPath $env:OCC_SECRET_ESCROW_RECEIPT).Path
 if ((Get-Item -LiteralPath $escrowReceipt).Length -eq 0) { throw 'secret escrow 收据为空' }
@@ -467,7 +471,7 @@ Add-ToolVersion 'docker' ($ComposeArgs + @('exec','-T','kafka','/opt/kafka/bin/k
 $containerIdOutput = & docker @ComposeArgs ps -a -q
 $containerIdExit = $LASTEXITCODE
 $containerIds = @($containerIdOutput | Where-Object { $_ })
-if ($containerIdExit -ne 0 -or $containerIds.Count -ne 10) { throw '镜像身份收集要求精确十个 Compose 容器' }
+if ($containerIdExit -ne 0 -or $containerIds.Count -ne 11) { throw '镜像身份收集要求精确十一个 Compose 容器' }
 $imageLines = New-Object System.Collections.Generic.List[string]
 foreach ($containerId in $containerIds) {
   $containerLine = & docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }} container={{.Id}} image={{.Image}}' $containerId
@@ -592,11 +596,16 @@ revision=$(tr -d '\r\n' <"$backup_set/source-revision.txt")
 [ "$revision" = "${OCC_DEPLOYED_REVISION,,}" ]
 "${compose[@]}" images >"$backup_set/compose-images.txt"
 printf '%s\n' 'compose=infra/compose/compose.yml' 'env=infra/compose/.env' >"$backup_set/configuration-paths-only.txt"
-awk -F= '/^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=/ { print }' infra/compose/.env >"$backup_set/compose-env-paths-only.txt"
-[ "$(wc -l <"$backup_set/compose-env-paths-only.txt")" -eq 8 ]
+awk -F= '/^(CURSOR_HMAC_KEY_FILE|POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|AI_DATABASE_PASSWORD_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE)=/ { print }' infra/compose/.env >"$backup_set/compose-env-paths-only.txt"
+[ "$(wc -l <"$backup_set/compose-env-paths-only.txt")" -eq 9 ]
 awk -F= '/^(POSTGRES_DB|POSTGRES_PORT|KAFKA_PORT|REDIS_PORT|MINIO_API_PORT|MINIO_CONSOLE_PORT|OPA_PORT|AI_PORT|CORE_PORT|AI_LOG_LEVEL|APP_VERSION|OBJECT_STORAGE_BUCKET)=/ { print }' infra/compose/.env >"$backup_set/compose-env-nonsecret.txt"
 [ "$(wc -l <"$backup_set/compose-env-nonsecret.txt")" -eq 12 ]
 expected_nonsecret_keys=$'AI_LOG_LEVEL\nAI_PORT\nAPP_VERSION\nCORE_PORT\nKAFKA_PORT\nMINIO_API_PORT\nMINIO_CONSOLE_PORT\nOBJECT_STORAGE_BUCKET\nOPA_PORT\nPOSTGRES_DB\nPOSTGRES_PORT\nREDIS_PORT'
+awk -F= '/^(POSTGRES_ADMIN_PASSWORD_FILE|POSTGRES_FLYWAY_PASSWORD_FILE|POSTGRES_RUNTIME_PASSWORD_FILE|AI_DATABASE_PASSWORD_FILE|CURSOR_HMAC_KEY_FILE|REDIS_PASSWORD_FILE|MINIO_ROOT_USER_FILE|MINIO_ROOT_PASSWORD_FILE|MINIO_APP_USER_FILE|MINIO_APP_PASSWORD_FILE|OCC_JWT_PRIVATE_KEY_FILE|OCC_JWT_PUBLIC_KEY_FILE)=/ { print }' infra/compose/.env >"$backup_set/compose-env-paths-only.txt"
+[ "$(wc -l <"$backup_set/compose-env-paths-only.txt")" -eq 10 ]
+awk -F= '/^(OCC_JWT_ISSUER|POSTGRES_DB|POSTGRES_PORT|KAFKA_PORT|REDIS_PORT|MINIO_API_PORT|MINIO_CONSOLE_PORT|OPA_PORT|AI_PORT|CORE_PORT|AI_LOG_LEVEL|APP_VERSION|OBJECT_STORAGE_BUCKET)=/ { print }' infra/compose/.env >"$backup_set/compose-env-nonsecret.txt"
+[ "$(wc -l <"$backup_set/compose-env-nonsecret.txt")" -eq 13 ]
+expected_nonsecret_keys=$'AI_LOG_LEVEL\nAI_PORT\nAPP_VERSION\nCORE_PORT\nKAFKA_PORT\nMINIO_API_PORT\nMINIO_CONSOLE_PORT\nOBJECT_STORAGE_BUCKET\nOCC_JWT_ISSUER\nOPA_PORT\nPOSTGRES_DB\nPOSTGRES_PORT\nREDIS_PORT'
 [ "$(cut -d= -f1 "$backup_set/compose-env-nonsecret.txt" | sort)" = "$expected_nonsecret_keys" ]
 escrow_receipt=$(realpath "$OCC_SECRET_ESCROW_RECEIPT")
 test -s "$escrow_receipt"
@@ -611,7 +620,7 @@ cp -- "$escrow_receipt" "$backup_set/secret-escrow-receipt.txt"
   "${compose[@]}" exec -T kafka /opt/kafka/bin/kafka-topics.sh --version
 } >"$backup_set/tool-versions.txt"
 mapfile -t container_ids < <("${compose[@]}" ps -a -q)
-[ "${#container_ids[@]}" -eq 10 ]
+[ "${#container_ids[@]}" -eq 11 ]
 : >"$backup_set/image-identifiers.txt"
 for container_id in "${container_ids[@]}"; do
   container_line=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }} container={{.Id}} image={{.Image}}' "$container_id")
@@ -732,7 +741,7 @@ unset OCC_CONFIRM_BACKUP_QUIESCE
 test -f "$backup_set/COMPLETE"
 ```
 
-随后执行[日常运维检查](06-daily-operations-and-monitoring.md)中的八服务/两 one-shot、HTTP、TCP 和协议验收。`INCOMPLETE` 集合保留供故障分析但不得进入正常保留轮换或作为恢复点。
+随后执行[日常运维检查](06-daily-operations-and-monitoring.md)中的八服务/三 one-shot、HTTP、TCP 和协议验收。`INCOMPLETE` 集合保留供故障分析但不得进入正常保留轮换或作为恢复点。
 
 ## 保留、加密、异地与访问
 
@@ -759,7 +768,8 @@ test -f "$backup_set/COMPLETE"
 
 ## 隔离恢复准备
 
-恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 只含指向独立 secret escrow 副本的八个路径和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。
+恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 只含指向独立 secret escrow 副本的九个路径和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。恢复的 `cursor-hmac-key` 必须是 escrow 中与恢复点匹配的 64 字符 ASCII hex；使用新 key 会安全地使备份时点前的 cursor 失效，但必须作为恢复决策记录。
+恢复必须先到独立主机或同主机独立 Compose project、独立端口、独立四卷和独立密钥副本。不要让旧/新环境共享命名卷或写同一 MinIO bucket。由批准会话设置 `OCC_RESTORE_ROOT`、`OCC_RESTORE_SECRET_ROOT`、`OCC_RESTORE_ENV_FILE`、`OCC_RESTORE_BACKUP_SET` 和唯一 `OCC_RESTORE_PROJECT`；restore env 包含指向独立 secret escrow 副本的十个长期路径、一个按第 03 章创建的独立管理员引导路径、JWT issuer 和不会冲突的端口，按[密钥与配置](03-secrets-and-configuration.md)完整验证。恢复到空数据库时该引导文件必须是非空的受限新密码；恢复已有用户数据库时只能使用零字节墓碑。
 
 Windows 初始化后先验证所选 `$RestoreSet`，再验证 secret、project 和端口隔离。以下块不启动容器：
 
@@ -867,7 +877,8 @@ $kafkaDisposition = [IO.File]::ReadAllText((Join-Path $RestoreSet 'kafka-disposi
 if ($kafkaDisposition -eq 'cold-archive') { if ($inventory -notcontains 'kafka-data-cold.tar.gz') { throw 'Kafka cold-archive disposition 缺少归档' } } elseif ($kafkaDisposition -eq 'metadata-only') { if ($inventory -contains 'kafka-data-cold.tar.gz') { throw 'Kafka metadata-only disposition 含归档' } } else { throw 'Kafka disposition 无效' }
 
 function Read-OccEnv([string]$Path) {
-  $allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+  $allowed = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+  $allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','CURSOR_HMAC_KEY_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
   $result = @{}
   Get-Content -LiteralPath $Path | ForEach-Object {
     if ($_ -and -not $_.StartsWith('#')) {
@@ -881,12 +892,13 @@ function Read-OccEnv([string]$Path) {
 $ProductionConfig = Read-OccEnv $ProductionEnv
 $RestoreConfig = Read-OccEnv $RestoreEnv
 $BackupNonSecretConfig = Read-OccEnv (Join-Path $RestoreSet 'compose-env-nonsecret.txt')
-$nonSecretKeys = @('POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
-if (@($BackupNonSecretConfig.Keys).Count -ne 12) { throw '备份非秘密配置集不完整' }
-foreach ($key in 'POSTGRES_DB','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET') {
+$nonSecretKeys = @('OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+if (@($BackupNonSecretConfig.Keys).Count -ne 13) { throw '备份非秘密配置集不完整' }
+foreach ($key in 'OCC_JWT_ISSUER','POSTGRES_DB','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET') {
   if (-not $BackupNonSecretConfig.ContainsKey($key) -or $RestoreConfig[$key] -ne $BackupNonSecretConfig[$key]) { throw "恢复配置与备份时点不一致：$key" }
 }
-$secretKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$secretKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$secretKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','CURSOR_HMAC_KEY_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE')
 $rootItem = Get-Item -LiteralPath $RestoreSecretRoot -Force
 if ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '恢复 secret root 不能是 reparse point' }
 $rootPrefix = $RestoreSecretRoot.TrimEnd('\') + '\'
@@ -904,7 +916,7 @@ foreach ($key in $secretKeys) {
     if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$key 的父路径含 reparse point" }
     $cursor = $cursor.Parent
   }
-  if ($seenSecretPaths.ContainsKey($resolved.ToLowerInvariant())) { throw '八个恢复 secret 必须使用不同文件' }
+  if ($seenSecretPaths.ContainsKey($resolved.ToLowerInvariant())) { throw '九个恢复 secret 必须使用不同文件并包含 cursor key' }
   $seenSecretPaths[$resolved.ToLowerInvariant()] = $true
 }
 $portDefaults = [ordered]@{ POSTGRES_PORT=5432; KAFKA_PORT=9092; REDIS_PORT=6379; MINIO_API_PORT=9000; MINIO_CONSOLE_PORT=9001; OPA_PORT=8181; AI_PORT=3100; CORE_PORT=8080 }
@@ -1035,7 +1047,8 @@ kafka_disposition=$(tr -d '\r\n' <"$restore_set/kafka-disposition.txt")
 case "$kafka_disposition" in cold-archive) printf '%s\n' "${inventory[@]}" | grep -Fqx kafka-data-cold.tar.gz;; metadata-only) ! printf '%s\n' "${inventory[@]}" | grep -Fqx kafka-data-cold.tar.gz;; *) exit 1;; esac
 
 declare -A allowed=() production_config=() restore_config=() seen_secret_paths=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE CURSOR_HMAC_KEY_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 read_occ_env() {
   local path=$1 target_name=$2 key value
   local -n target=$target_name
@@ -1049,17 +1062,18 @@ read_occ_env "$repository_root/infra/compose/.env" production_config
 read_occ_env "$restore_env" restore_config
 declare -A backup_nonsecret_config=()
 read_occ_env "$restore_set/compose-env-nonsecret.txt" backup_nonsecret_config
-nonsecret_keys=(POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET)
-[ "${#backup_nonsecret_config[@]}" -eq 12 ]
+nonsecret_keys=(OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET)
+[ "${#backup_nonsecret_config[@]}" -eq 13 ]
 for key in "${nonsecret_keys[@]}"; do [ -n "${backup_nonsecret_config[$key]+present}" ] || { printf '备份非秘密配置缺少：%s\n' "$key" >&2; exit 1; }; done
-for key in POSTGRES_DB AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do [ "${restore_config[$key]:-}" = "${backup_nonsecret_config[$key]}" ] || { printf '恢复配置与备份时点不一致：%s\n' "$key" >&2; exit 1; }; done
+for key in OCC_JWT_ISSUER POSTGRES_DB AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do [ "${restore_config[$key]:-}" = "${backup_nonsecret_config[$key]}" ] || { printf '恢复配置与备份时点不一致：%s\n' "$key" >&2; exit 1; }; done
 test ! -L "$restore_secret_root"
 set +e
 secret_link_output=$(find "$restore_secret_root" -type l -print -quit 2>&1); secret_link_exit=$?
 set -e
 [ "$secret_link_exit" -eq 0 ]
 [ -z "$secret_link_output" ] || { printf '恢复 secret root 下存在符号链接：%s\n' "$secret_link_output" >&2; exit 1; }
-secret_keys=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+secret_keys=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+secret_keys=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE CURSOR_HMAC_KEY_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
 for key in "${secret_keys[@]}"; do
   raw=${restore_config[$key]:-}; case "$raw" in /*) ;; *) exit 1;; esac
   case "$raw" in */../*|*/..) printf '%s 原始路径含 traversal 段\n' "$key" >&2; exit 1;; esac
@@ -1113,7 +1127,7 @@ done
 "${restore_compose[@]}" config --quiet
 ```
 
-**验证：** 此时尚未启动任何恢复状态服务。只有每个 artifact checksum、精确 inventory、信任分类（外部模式还必须由外部工具实时重验）、PostgreSQL/MinIO 必需恢复材料、Redis/Kafka disposition、八个 canonical secret 路径、实际 Compose project 名和八个空闲非生产端口全部通过，`config --quiet` 才作为附加结构检查。本流程不提供 resume：project label 清单是补充检查；按已验证规范名派生的四个精确卷名必须逐一由 `docker volume inspect` 返回明确的 `no such volume`。Windows PowerShell 5.1 会把重定向后的 native stderr 包装为 error record，因此每次 inspect 只在紧邻的 `try` 中临时使用 `Continue` 捕获输出和退出码，并在 `finally` 中恢复原始 `ErrorActionPreference`；随后以每个对象的 `ToString()` 值还原原始诊断文本，避免 `Out-String` 注入 PowerShell 显示元数据，再进行分类。任何卷存在、daemon/权限/上下文错误或其他非预期响应都立即停止，不用 `down --volumes` 清除未知环境。
+**验证：** 此时尚未启动任何恢复状态服务。只有每个 artifact checksum、精确 inventory、信任分类（外部模式还必须由外部工具实时重验）、PostgreSQL/MinIO 必需恢复材料、Redis/Kafka disposition、包含 cursor key 的九个 canonical secret 路径、实际 Compose project 名和八个空闲非生产端口全部通过，`config --quiet` 才作为附加结构检查。本流程不提供 resume：project label 清单是补充检查；按已验证规范名派生的四个精确卷名必须逐一由 `docker volume inspect` 返回明确的 `no such volume`。Windows PowerShell 5.1 会把重定向后的 native stderr 包装为 error record，因此每次 inspect 只在紧邻的 `try` 中临时使用 `Continue` 捕获输出和退出码，并在 `finally` 中恢复原始 `ErrorActionPreference`；随后以每个对象的 `ToString()` 值还原原始诊断文本，避免 `Out-String` 注入 PowerShell 显示元数据，再进行分类。任何卷存在、daemon/权限/上下文错误或其他非预期响应都立即停止，不用 `down --volumes` 清除未知环境。
 
 ## 隔离恢复顺序
 
@@ -1269,7 +1283,7 @@ set -euo pipefail
 
 验收使用 restore env 的独立有效端口，至少包括：
 
-- 两个 one-shot 精确 `exited 0`，八个长运行服务 `running healthy`，restart count 可解释。
+- 三个 one-shot 精确 `exited 0`，八个长运行服务 `running healthy`，restart count 可解释。
 - Core readiness HTTP 200 且仅代表 `ping`/`db`；Core/AI status、OPA、MinIO readiness 成功。
 - PostgreSQL 角色连接、备份中的完整 Flyway 历史全成功、八 schema owner、Flowable 表状态与 dump 一致。
 - MinIO 桶名精确、对象键和大小清单一致，选定范围内容 checksum 通过，应用账号仅有桶级访问。

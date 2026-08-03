@@ -111,6 +111,77 @@ test ! -e "$release_evidence"
 install -d -m 0700 "$release_evidence"
 ```
 
+## 已初始化旧部署的引导路径过渡
+
+本节必须在上述项目全局生命周期锁仍由当前发布会话独占时完成，并且必须早于目标 release 的第一次 `docker compose config`、其他 Compose 命令或任何目标 Compose 插值。适用条件必须同时满足：当前实例已由旧 release 初始化并有现存用户数据、批准的数据库证据确认它不是空实例、受保护的 `infra/compose/.env` 缺少可用的 `OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE` 路径。Windows 发布协调端不能构造或证明所需 POSIX 文件；它必须等待 Linux 部署主机在同一受管变更和生命周期锁下完成本节并返回无敏感内容的验证结论，才能执行后续目标 release 命令。
+
+真正未初始化的 clean instance 不得执行本过渡，也不得创建或使用零字节墓碑。它必须按[第 03 章管理员引导密码生命周期](03-secrets-and-configuration.md)创建专用父目录和非空、全新、受限的真实引导密码文件，完成首次引导后再原子替换为墓碑。实例是否已初始化未知时停止；不能用墓碑绕过首次管理员创建。
+
+已初始化旧部署在 Linux 主机执行以下命令。`OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE` 必须是批准的持久本地文件系统上的新专用路径；其父目录不能预先存在，从而避免接管未知目录。脚本不读取、复制或输出任何凭据，只把绝对 tombstone 路径写入 `.env`：
+
+```bash
+set -euo pipefail
+set +x
+: "${lifecycle_lock_fd:?必须先持有项目全局生命周期锁}"
+flock -n "$lifecycle_lock_fd"
+: "${OCC_LEGACY_INSTANCE_STATE:?必须设置旧实例状态}"
+[ "$OCC_LEGACY_INSTANCE_STATE" = initialized-with-existing-users ]
+: "${OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE:?必须设置旧部署墓碑绝对路径}"
+case "$OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE" in /*) ;; *) printf '墓碑路径必须是绝对路径\n' >&2; exit 1;; esac
+
+compose_env="$repository_root/infra/compose/.env"
+[ -f "$compose_env" ] && [ ! -L "$compose_env" ]
+[ "$(stat -c '%u:%g' "$compose_env")" = "$(id -u):$(id -g)" ]
+[ "$(stat -c '%a' "$compose_env")" = 600 ]
+bootstrap_key_count=$(grep -c '^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=' "$compose_env" || true)
+[ "$bootstrap_key_count" -le 1 ]
+
+bootstrap_tombstone="$OCC_LEGACY_BOOTSTRAP_TOMBSTONE_FILE"
+bootstrap_parent=$(dirname -- "$bootstrap_tombstone")
+bootstrap_parent_parent=$(dirname -- "$bootstrap_parent")
+[ -d "$bootstrap_parent_parent" ] && [ ! -L "$bootstrap_parent_parent" ]
+[ ! -e "$bootstrap_parent" ] && [ ! -L "$bootstrap_parent" ]
+sudo install -d -o 10001 -g 10001 -m 0700 "$bootstrap_parent"
+[ "$(realpath -e -- "$bootstrap_parent")" = "$bootstrap_parent" ]
+[ "$(stat -c '%u:%g %a' "$bootstrap_parent")" = '10001:10001 700' ]
+[ ! -e "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+sudo install -o 10001 -g 10001 -m 0400 /dev/null "$bootstrap_tombstone"
+[ "$(realpath -e -- "$bootstrap_tombstone")" = "$bootstrap_tombstone" ]
+[ -f "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+[ "$(stat -c '%u:%g %a %s' "$bootstrap_tombstone")" = '10001:10001 400 0' ]
+
+env_tmp=$(mktemp --tmpdir="$(dirname -- "$compose_env")" .env.bootstrap-transition.XXXXXX)
+cleanup_bootstrap_transition() { rm -f -- "$env_tmp"; }
+trap cleanup_bootstrap_transition EXIT
+awk -v bootstrap_path="$bootstrap_tombstone" '
+  BEGIN { written=0 }
+  /^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/ {
+    if (!written) printf "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s\n", bootstrap_path
+    written=1
+    next
+  }
+  { print }
+  END {
+    if (!written) printf "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s\n", bootstrap_path
+  }
+' "$compose_env" >"$env_tmp"
+chmod --reference="$compose_env" "$env_tmp"
+chown --reference="$compose_env" "$env_tmp"
+[ -f "$env_tmp" ] && [ ! -L "$env_tmp" ]
+[ "$(stat -c '%u:%g %a' "$env_tmp")" = "$(stat -c '%u:%g %a' "$compose_env")" ]
+[ "$(grep -c '^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=' "$env_tmp")" -eq 1 ]
+[ "$(awk -F= '/^OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/{sub(/^[^=]*=/, ""); print}' "$env_tmp")" = "$bootstrap_tombstone" ]
+mv -fT -- "$env_tmp" "$compose_env"
+trap - EXIT
+[ -f "$compose_env" ] && [ ! -L "$compose_env" ]
+[ "$(stat -c '%u:%g %a' "$compose_env")" = "$(id -u):$(id -g) 600" ]
+[ "$(realpath -e -- "$bootstrap_tombstone")" = "$bootstrap_tombstone" ]
+[ -f "$bootstrap_tombstone" ] && [ ! -L "$bootstrap_tombstone" ]
+[ "$(stat -c '%u:%g %a %s' "$bootstrap_tombstone")" = '10001:10001 400 0' ]
+```
+
+把“旧实例状态证据、父目录/文件 realpath、类型、numeric owner、mode、零大小、`.env` 原子替换成功”作为布尔结论写入发布证据；不得收集 `.env` 内容或文件内容。墓碑和 `.env` 项必须保留整个升级及回滚窗口。旧 release 不引用该变量，会忽略 `.env` 中这个额外 key，因此应用/镜像回滚不得删除或改成真实密码。只有全部受支持的目标 release 都不再要求该 bind 路径、回滚窗口已关闭且清理另获批准后，才能在项目全局生命周期锁内清理 `.env` 项和专用墓碑目录；当前支持的目标 release 仍要求它，所以本流程不提供清理命令。
+
 ## Revision、干净状态与发布来源
 
 运行目录必须已经由批准发布机制定位到目标 commit。本流程不执行 `git reset`、`git clean` 或隐式拉取；未知变更必须评审，而不是删除。
@@ -458,7 +529,7 @@ rollback tag 是主机本地证据，不是异地镜像供应链。批准 regist
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-Invoke-ReleaseNative 'docker' ($ComposeArgs + @('pull','postgres','kafka','redis','minio-volume-init','minio','minio-init')) 'compose-pull-external.txt' '固定外部镜像拉取失败' | Out-Null
+Invoke-ReleaseNative 'docker' ($ComposeArgs + @('pull','postgres','postgres-init','kafka','redis','minio','minio-init')) 'compose-pull-external.txt' '固定外部镜像拉取失败' | Out-Null
 Invoke-ReleaseNative 'docker' ($ComposeArgs + @('build','--pull','opa','ai','core','host-gateway')) 'compose-build.txt' '四个本地服务构建失败' | Out-Null
 Invoke-ReleaseNative 'docker' ($ComposeArgs + @('images')) 'compose-images-built.txt' '构建后镜像清单失败' | Out-Null
 foreach ($service in 'opa','ai','core','host-gateway') {
@@ -469,7 +540,7 @@ foreach ($service in 'opa','ai','core','host-gateway') {
 $configJson = & docker @ComposeArgs config --format json
 if ($LASTEXITCODE -ne 0) { throw '无法读取 Compose 服务镜像配置' }
 $rendered = $configJson | ConvertFrom-Json
-$externalImages = foreach ($service in 'postgres','kafka','redis','minio-volume-init','minio','minio-init') { $rendered.services.$service.image }
+$externalImages = foreach ($service in 'postgres','postgres-init','kafka','redis','minio','minio-init') { $rendered.services.$service.image }
 if (@($externalImages).Count -ne 6 -or @($externalImages | Where-Object { $_ -notmatch '@sha256:[0-9a-f]{64}$' }).Count -ne 0) { throw '六个外部服务的固定 digest 镜像清单无效' }
 foreach ($image in @($externalImages | Sort-Object -Unique)) {
   & docker image inspect $image *> $null
@@ -479,7 +550,7 @@ foreach ($image in @($externalImages | Sort-Object -Unique)) {
 
 ```bash
 set -euo pipefail
-"${compose[@]}" pull postgres kafka redis minio-volume-init minio minio-init >"$release_evidence/compose-pull-external.txt" 2>&1
+"${compose[@]}" pull postgres postgres-init kafka redis minio minio-init >"$release_evidence/compose-pull-external.txt" 2>&1
 "${compose[@]}" build --pull opa ai core host-gateway >"$release_evidence/compose-build.txt" 2>&1
 "${compose[@]}" images >"$release_evidence/compose-images-built.txt"
 : >"$release_evidence/images-built-ids.txt"
@@ -489,7 +560,7 @@ for service in opa ai core host-gateway; do
   printf '%s %s\n' "$service" "$image_id" >>"$release_evidence/images-built-ids.txt"
 done
 config_json=$("${compose[@]}" config --format json)
-mapfile -t external_images < <(printf '%s' "$config_json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=JSON.parse(s);for(const n of ["postgres","kafka","redis","minio-volume-init","minio","minio-init"])console.log(c.services[n].image)})')
+mapfile -t external_images < <(printf '%s' "$config_json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=JSON.parse(s);for(const n of ["postgres","postgres-init","kafka","redis","minio","minio-init"])console.log(c.services[n].image)})')
 [ "${#external_images[@]}" -eq 6 ]
 for image in "${external_images[@]}"; do [[ $image =~ @sha256:[0-9a-f]{64}$ ]]; done
 for image in "${external_images[@]}"; do docker image inspect "$image" >/dev/null; done
@@ -526,7 +597,7 @@ date -u --iso-8601=seconds >"$release_evidence/rollout-start-utc.txt"
 
 ## 受控 Compose 发布
 
-先协调不运行 Flyway 的基础/边界服务，再启动 Core。`minio` 通过正常 `depends_on` 处理 `minio-volume-init`；MinIO healthy 后必须强制重建当前 release 的 `minio-init`，并以新 container ID 的精确 `exited 0` 作为 Core 门禁。`--no-build` 保证使用已记录构建产物；不能把旧 one-shot 或 `up --wait` 的结果作为最终结论。
+先协调不运行 Flyway 的基础/边界服务，再启动 Core。`minio` 通过正常 `depends_on` 处理 `postgres-init`；MinIO healthy 后必须强制重建当前 release 的 `minio-init`，并以新 container ID 的精确 `exited 0` 作为 Core 门禁。`--no-build` 保证使用已记录构建产物；不能把旧 one-shot 或 `up --wait` 的结果作为最终结论。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -544,10 +615,10 @@ foreach ($service in 'postgres','kafka','redis','minio','opa','ai','host-gateway
   } while ((Get-Date) -lt $deadline)
   if ($state -ne 'running healthy') { throw "$service 未达到 running healthy：$state" }
 }
-$volumeInitId = & docker @ComposeArgs ps -a -q minio-volume-init
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($volumeInitId)) { throw '正常 MinIO 依赖未产生 minio-volume-init 容器' }
+$volumeInitId = & docker @ComposeArgs ps -a -q postgres-init
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($volumeInitId)) { throw '正常依赖未产生 postgres-init 容器' }
 $volumeInitState = & docker inspect --format '{{.State.Status}} {{.State.ExitCode}} created={{.Created}}' $volumeInitId
-if ($LASTEXITCODE -ne 0 -or $volumeInitState -notmatch '^exited 0 created=') { throw "minio-volume-init 未成功完成：$volumeInitState" }
+if ($LASTEXITCODE -ne 0 -or $volumeInitState -notmatch '^exited 0 created=') { throw "postgres-init 未成功完成：$volumeInitState" }
 $oldMinioInitId = & docker @ComposeArgs ps -a -q minio-init
 if ($LASTEXITCODE -ne 0) { throw '旧 minio-init ID 查询失败' }
 & docker @ComposeArgs up -d --no-build --no-deps --force-recreate minio-init
@@ -563,7 +634,7 @@ do {
   Start-Sleep -Seconds 2
 } while ((Get-Date) -lt $minioInitDeadline)
 if ($minioInitState -notmatch '^exited 0 created=') { throw "新 minio-init 未精确 exited 0：$minioInitState" }
-@("minio-volume-init $volumeInitId $volumeInitState","minio-init-old $oldMinioInitId","minio-init-current $CurrentMinioInitId $minioInitState") | Out-File (Join-Path $ReleaseEvidence 'minio-init-rollout.txt') -Encoding ascii
+@("postgres-init $volumeInitId $volumeInitState","minio-init-old $oldMinioInitId","minio-init-current $CurrentMinioInitId $minioInitState") | Out-File (Join-Path $ReleaseEvidence 'minio-init-rollout.txt') -Encoding ascii
 & docker @ComposeArgs up -d --no-build core
 if ($LASTEXITCODE -ne 0) { throw 'Core 启动或迁移失败；保持窗口并进入迁移失败路径' }
 ```
@@ -582,7 +653,7 @@ for service in postgres kafka redis minio opa ai host-gateway; do
     sleep 5
   done
 done
-volume_init_id=$("${compose[@]}" ps -a -q minio-volume-init)
+volume_init_id=$("${compose[@]}" ps -a -q postgres-init)
 [ -n "$volume_init_id" ]
 volume_init_state=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}} created={{.Created}}' "$volume_init_id")
 case "$volume_init_state" in 'exited 0 created='*) ;; *) printf '%s\n' "$volume_init_state" >&2; exit 1;; esac
@@ -599,11 +670,11 @@ while :; do
   sleep 2
 done
 case "$minio_init_state" in 'exited 0 created='*) ;; *) printf '%s\n' "$minio_init_state" >&2; exit 1;; esac
-printf 'minio-volume-init %s %s\nminio-init-old %s\nminio-init-current %s %s\n' "$volume_init_id" "$volume_init_state" "$old_minio_init_id" "$current_minio_init_id" "$minio_init_state" >"$release_evidence/minio-init-rollout.txt"
+printf 'postgres-init %s %s\nminio-init-old %s\nminio-init-current %s %s\n' "$volume_init_id" "$volume_init_state" "$old_minio_init_id" "$current_minio_init_id" "$minio_init_state" >"$release_evidence/minio-init-rollout.txt"
 "${compose[@]}" up -d --no-build core
 ```
 
-`minio-volume-init` 由当前 MinIO 的正常依赖图执行/协调，并记录其 ID、创建时间和 `exited 0`；`minio-init` 无条件 force-recreate，旧 ID 不得复用。任何非零都先保存新容器日志，检查权限、桶和凭据，不改 restart policy 或无限重跑。
+`postgres-init` 由当前依赖图执行/协调，并记录其 ID、创建时间和 `exited 0`；`minio-init` 无条件 force-recreate，旧 ID 不得复用。任何非零都先保存新容器日志，检查 PostgreSQL、权限、桶和凭据，不改 restart policy 或无限重跑。
 
 ## 一次性任务、健康与发布后验收
 
@@ -615,10 +686,10 @@ $acceptedMinioInitId = & docker @ComposeArgs ps -a -q minio-init
 if ($LASTEXITCODE -ne 0 -or $acceptedMinioInitId -ne $CurrentMinioInitId) { throw '验收时 minio-init 不是发布阶段记录的新容器' }
 $acceptedMinioInitState = & docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' $acceptedMinioInitId
 if ($LASTEXITCODE -ne 0 -or $acceptedMinioInitState -ne 'exited 0') { throw '新 minio-init 验收状态不是 exited 0' }
-$acceptedVolumeInitId = & docker @ComposeArgs ps -a -q minio-volume-init
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acceptedVolumeInitId)) { throw 'minio-volume-init 不存在' }
+$acceptedVolumeInitId = & docker @ComposeArgs ps -a -q postgres-init
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acceptedVolumeInitId)) { throw 'postgres-init 不存在' }
 $acceptedVolumeInitState = & docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' $acceptedVolumeInitId
-if ($LASTEXITCODE -ne 0 -or $acceptedVolumeInitState -ne 'exited 0') { throw 'minio-volume-init 不是 exited 0' }
+if ($LASTEXITCODE -ne 0 -or $acceptedVolumeInitState -ne 'exited 0') { throw 'postgres-init 不是 exited 0' }
 foreach ($service in 'postgres','kafka','redis','minio','opa','ai','core','host-gateway') {
   $id = & docker @ComposeArgs ps -q $service
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($id)) { throw "$service 不存在" }
@@ -639,7 +710,7 @@ set -euo pipefail
 accepted_minio_init_id=$("${compose[@]}" ps -a -q minio-init)
 [ "$accepted_minio_init_id" = "$current_minio_init_id" ]
 [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$accepted_minio_init_id")" = 'exited 0' ]
-accepted_volume_init_id=$("${compose[@]}" ps -a -q minio-volume-init)
+accepted_volume_init_id=$("${compose[@]}" ps -a -q postgres-init)
 [ -n "$accepted_volume_init_id" ]
 [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$accepted_volume_init_id")" = 'exited 0' ]
 : >"$release_evidence/container-states-after.txt"
@@ -728,7 +799,7 @@ set -euo pipefail
 
 ## 应用/镜像回滚执行
 
-此路径只适用于：migration 未开始，或 DBA书面确认当前 schema 与 previous app 兼容。**影响：** 替换四个本地服务并中断连接。**备份：** 升级前完整集合和当前故障现场备份均可用。**确认：** `OCC_CONFIRM_IMAGE_ROLLBACK=ROLLBACK_APPROVED_SCHEMA_COMPATIBLE`。**验证：** 旧 image ID、八 healthy、两 one-shot、Flyway history 未被旧应用改变、HTTP/TCP/协议。**恢复：** 回滚失败时保持 Core停止，重新指向新 release 镜像或进入数据库恢复/前向修复决定。
+此路径只适用于：migration 未开始，或 DBA书面确认当前 schema 与 previous app 兼容。**影响：** 替换四个本地服务并中断连接。**备份：** 升级前完整集合和当前故障现场备份均可用。**确认：** `OCC_CONFIRM_IMAGE_ROLLBACK=ROLLBACK_APPROVED_SCHEMA_COMPATIBLE`。**验证：** 旧 image ID、八 healthy、三 one-shot、Flyway history 未被旧应用改变、HTTP/TCP/协议。**恢复：** 回滚失败时保持 Core停止，重新指向新 release 镜像或进入数据库恢复/前向修复决定。
 
 下面把保留 rollback tag 重新指向 Compose 的四个默认本地镜像名；先通过 `docker compose config --images` 在当前主机确认名称精确匹配。当前 project `innorder-occ` 的预期名为 `innorder-occ-opa`、`innorder-occ-ai`、`innorder-occ-core`、`innorder-occ-host-gateway`。
 
@@ -793,7 +864,7 @@ unset OCC_CONFIRM_IMAGE_ROLLBACK
 
 ## 证据、自检与静默失败审查
 
-发布证据至少包括：变更记录、两个 commit、干净状态、安装/provenance、`verify:full`、Compose config、migration diff/Flyway 前后、备份集合与恢复演练、容量、构建日志、旧/新 image ID/digest、rollout 时间、两 one-shot/八健康、HTTP/TCP/协议、日志、停止/继续/回滚决定和通讯。
+发布证据至少包括：变更记录、两个 commit、干净状态、安装/provenance、`verify:full`、Compose config、migration diff/Flyway 前后、备份集合与恢复演练、容量、构建日志、旧/新 image ID/digest、rollout 时间、三 one-shot/八健康、HTTP/TCP/协议、日志、停止/继续/回滚决定和通讯。
 
 对每条原生命令审查：PowerShell 是否紧跟读取 `$LASTEXITCODE`，是否在管道/`Out-File` 后错误读取了另一个命令状态；Bash 是否使用 `set -euo pipefail`，预期无匹配是否显式处理；命令替换是否会把失败吞掉；空容器 ID/空镜像清单是否被检查；支持包是否只有所有收集成功才标记完成。任何“输出为空但退出零”的路径都要有数量/格式断言。
 
@@ -803,6 +874,6 @@ unset OCC_CONFIRM_IMAGE_ROLLBACK
 
 发布成功后在变更单定义的观察期按[第 06 章初始阈值](06-daily-operations-and-monitoring.md)跟踪健康、restart、日志、CPU/内存、磁盘/inode、卷增长和备份。阈值需要按工作负载调优，不是 SLA。观察期内不要删除 rollback tag、旧 release镜像或升级前备份。
 
-关闭条件：目标 commit/image ID一致；全部历史及新增 migration 均 success且 owner正确；两 one-shot/八服务、HTTP/TCP/协议通过；配置/凭据状态一致；新备份完成；告警无未解释异常；用户/值班沟通完成；风险、证据和保留到期已记录。写入 `COMPLETE` 前由另一名操作员复核证据；`COMPLETE` 不替代脱敏。
+关闭条件：目标 commit/image ID一致；全部历史及新增 migration 均 success且 owner正确；三 one-shot/八服务、HTTP/TCP/协议通过；配置/凭据状态一致；新备份完成；告警无未解释异常；用户/值班沟通完成；风险、证据和保留到期已记录。写入 `COMPLETE` 前由另一名操作员复核证据；`COMPLETE` 不替代脱敏。
 
 每次失败、回滚、migration超时或阈值越界都做无责事实复盘：时间线、检测来源、影响、决策依据、停止条件是否有效、恢复点和实际RPO/RTO、根因/促成因素、哪些检查静默失败、为何预演未发现、改进责任人/期限。回滚成功也不等于事件关闭；必须确认数据、凭据、schema、镜像、备份和监控均处于一个可支持基线。

@@ -7,7 +7,8 @@
 ### 管理员与日常操作员边界
 
 - Windows 管理员负责安装/升级 Docker Desktop、启用 WSL2、配置开机或登录启动、主机防火墙、磁盘、时间同步、受保护目录 ACL 和批准 Docker Desktop 文件共享。管理员权限也等价于能控制 Docker Engine、读取挂载文件和替换容器，必须按高权限账号管理。
-- 部署操作员负责经过审批的源码 revision、`npm run install:verified`、OPA 来源、严格验证、Compose 构建/启动和验收。账号必须能访问 Docker Desktop Engine、仓库、证据目录及八个密钥文件，但不应因此获得其他业务目录权限。
+- 部署操作员负责经过审批的源码 revision、`npm run install:verified`、OPA 来源、严格验证、Compose 构建/启动和验收。账号必须能访问 Docker Desktop Engine、仓库、证据目录及九个密钥文件，但不应因此获得其他业务目录权限。
+- 部署操作员负责经过审批的源码 revision、`npm run install:verified`、OPA 来源、严格验证、Compose 构建/启动和验收。账号必须能访问 Docker Desktop Engine、仓库、证据目录及十个密钥文件，但不应因此获得其他业务目录权限。
 - 日常值班人员只执行状态、HTTP/TCP 探测和经批准的日志收集。停止、重启、镜像重建和数据删除会影响可用性，不能仅因拥有 Docker 权限就自行执行。
 - 需要提升权限时，关闭普通窗口后显式启动批准的管理员 PowerShell；不要在同一窗口临时混用身份。记录执行身份和变更单，不记录环境转储或密钥路径清单。
 
@@ -82,7 +83,10 @@ Invoke-CheckedNative -FilePath './gradlew.bat' -ArgumentList @('--version') -Fai
 
 ## 密钥准备与第 03 章门禁
 
-严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建八个互异文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建只保存八个绝对文件路径和十二个非敏感覆盖项的 `infra/compose/.env`。
+严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建九个互异文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建只保存九个绝对文件路径和十二个非敏感覆盖项的 `infra/compose/.env`。
+严格执行[第 03 章 Windows 密钥和配置步骤](03-secrets-and-configuration.md)：在仓库外持久目录创建八个互异标量文件和一对 JWT PEM 文件，关闭 ACL 继承，仅授权部署身份、`SYSTEM`、本机 Administrators 以及经批准的 Docker 服务身份；然后创建保存十一个绝对文件路径、必填 issuer 和十二个可选非敏感覆盖项的 `infra/compose/.env`。
+
+**安全：** clean deployment 的管理员引导读取要求主机文件 numeric `10001:10001`、父目录 `0700`、文件 `0400` 且不是符号链接。原生 Windows/NTFS bind 不能提供该 POSIX 证明，因此本章不能执行首次管理员引导；必须在批准的 Linux 部署主机按第 03/05 章完成。不得改用 root/`0444` Docker file secret 或放宽 Core 读取器。已有数据库只能绑定第 03 章规定的零字节墓碑文件，并仍需由支持平台验证 Compose 语义。
 
 **安全：** 不在命令、工单、截图、PowerShell history、进程参数、`.env`、Compose YAML 或日志中放置密钥值。三个 PostgreSQL 密码必须互异，MinIO root 与应用用户名/密码必须不同。密钥生成与内容/ACL 检验直接使用第 03 章脚本，不另造较弱版本。
 
@@ -92,14 +96,18 @@ if (-not (Test-Path -LiteralPath $SecretRoot -PathType Container)) { throw '密�
 if ($SecretRoot.StartsWith($RepositoryRoot, [StringComparison]::OrdinalIgnoreCase)) { throw '密钥目录不能位于仓库内' }
 $ignored = git check-ignore infra/compose/.env
 if ($LASTEXITCODE -ne 0 -or $ignored -notcontains 'infra/compose/.env') { throw '.env 未被 Git 忽略' }
-$expected = 'postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password'
+$expected = 'cursor-hmac-key','postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password'
 $actual = @(Get-ChildItem -LiteralPath $SecretRoot -Force)
-if ($actual.Count -ne 8 -or (Compare-Object $expected @($actual.Name))) { throw '密钥目录内容不符合第 03 章要求' }
+if ($actual.Count -ne 9 -or (Compare-Object $expected @($actual.Name))) { throw '密钥目录内容不符合第 03 章要求' }
+$expected = 'postgres-admin-password','postgres-flyway-password','postgres-runtime-password','redis-password','minio-root-user','minio-root-password','minio-app-user','minio-app-password','occ-jwt-private-key.pem','occ-jwt-public-key.pem'
+$actual = @(Get-ChildItem -LiteralPath $SecretRoot -Force)
+if ($actual.Count -ne 10 -or (Compare-Object $expected @($actual.Name))) { throw '密钥目录内容不符合第 03 章要求' }
 if (-not (Test-Path -LiteralPath $ComposeEnv -PathType Leaf)) { throw 'infra/compose/.env 不存在' }
 Write-Output '密钥目录文件名、外部位置和 .env 忽略规则门禁通过；继续运行第 03 章完整内容与 ACL 验证'
 ```
 
-**验证：** 第 03 章完整验证器必须只输出通过结论，不输出值或散列；八个 `.env` 路径必须分别指向预期普通文件。Compose 插值成功不能替代文件内容、唯一性和 ACL 检查。
+**验证：** 第 03 章完整验证器必须只输出通过结论，不输出值或散列；九个 `.env` 路径必须分别指向预期普通文件。Compose 插值成功不能替代文件内容、唯一性和 ACL 检查。
+**验证：** 第 03 章完整验证器必须只输出通过结论，不输出值或散列；十个 `.env` 路径必须分别指向预期普通文件。Compose 插值成功不能替代文件内容、唯一性、JWT 配对和 ACL 检查。
 
 ## 配置解析、依赖安装与严格验证
 
@@ -110,7 +118,8 @@ Write-Output '密钥目录文件名、外部位置和 .env 忽略规则门禁通
 ```powershell
 $ErrorActionPreference = 'Stop'
 $Config = @{}
-$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$AllowedKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','CURSOR_HMAC_KEY_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
     $parts = $_ -split '=', 2
@@ -176,6 +185,18 @@ if ($LASTEXITCODE -ne 0) { throw '无法列出 Compose 服务' }
 
 **验证：** `verify:full` 必须以零退出，Docker/PostgreSQL 集成和真实 OPA 测试不得 skipped；`config --quiet` 必须以零退出。失败时保留脱敏日志、修复根因并从失败门禁重跑，不得以 `verify`、`verify:local` 或删除测试结果替代。
 
+### 桌面部署 CA 信任边界
+
+桌面安装包资源包含受限的部署 CA 登记和移除 helper。登记只接受绝对 payload 根目录、该目录内的严格证书/release manifest、预先核对的 manifest SHA-256 与 CA SHA-256 指纹，并且只操作当前用户的 Root store。release manifest 严格绑定 `com.innorder.occ`、产品版本、`InnorderOCC`/`Innorder OCC` PE 身份、installer 以及登记/移除 helper 的精确 basename 和 SHA-256、证书 manifest 内容 SHA-256，以及批准发布者的 subject/thumbprint。证书 manifest 反向绑定 release manifest 文件 SHA-256，并携带对该摘要的 RSA-SHA256 签名；helper 使用内嵌的只读生产 RSA 公钥验证签名，不接受生产 key override。两个 manifest 均不得包含私钥。
+
+发布流水线在 `make` 前把完整且已签名的 `release-manifest.json`、`certificate-manifest.json`、公开 CA 文件和严格 `deployment-ca.confirmed.json` 放入 `apps/desktop/assets/deployment-ca`；Forge 仅在该目录存在时把它复制为 `resources/deployment-ca`。确认文件固定包含 `version: 1`、`productId: com.innorder.occ`、UUID v4 `deploymentId`、`confirmed: true`、证书 manifest SHA-256 和 CA 指纹。四项任一缺失时 Squirrel install/update/uninstall 是 no-op；helper 失败（包括 unsigned-dev 的 `AUTHENTICODE_REQUIRED`）不得阻止安装或卸载。不要在普通开发构建中创建该目录。
+
+产品状态保存在桌面 `userData/state` 下。登记、profile 引用同步和移除使用同一个 `.deployment-ca.lifecycle.lock`，移除在持锁后重新严格读取状态。只有本次实际导入或已有有效 ownership 状态才能令 `importedByProduct=true`；预先存在的精确证书可以被管理和引用，但卸载不得移除。所有 deployment/profile ID 和状态文件名只接受 UUID v4。
+
+release bundle 验证必须声明用途。`enroll` 要求 CA 在当前时间有效；`remove` 仍验证 release 签名、全部文件哈希、CA 结构/身份/指纹和 Authenticode，受信任的移除 helper 仍严格验证 ownership，但仅为清理已拥有状态而允许 CA 已过期或尚未生效。该时间例外不得用于登记、profile 连接或服务器证书验证。
+
+当前 `unsigned-dev` 安装包不是生产登记入口。`-PlanOnly` 可返回不访问真实证书 store 的确定性 JSON 计划；`-TestStoreRoot` 和测试发布公钥只允许 Development 测试路径，Production 会拒绝重定向。受信任的 ASAR main 必须先完成 release RSA 和全部文件哈希验证，再用固定 `-NoProfile -NonInteractive -Command` 逻辑验证目标 helper/installer 的 Authenticode、同一批准发布者 subject/thumbprint 和 PE 产品身份，最后才用精确 `-File` 路径执行 helper；不得使用 execution-policy bypass。任一门禁失败不得启动 helper 或写入 enrolled 状态。签名证书、RSA 私钥和时间戳凭据保持在仓库外。发布候选先执行 `npm run cert:verify`，再执行完整 type/package/make/smoke 门禁。
+
 ## 镜像构建
 
 标准构建与启动分开执行，便于把构建失败和运行失败分离。构建会拉取固定 digest 的外部镜像并生成 `opa`、`ai`、`core`、`host-gateway` 本地镜像；不使用 `--no-verify`、自定义 Electron 镜像或未审批代理绕过来源控制。
@@ -201,15 +222,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Compose up -d 创建或启动失败；立即�
 & docker @ComposeArgs ps -a
 ```
 
-**注意：** Compose v5 的 `up -d --wait` 可能因为成功完成的 `minio-volume-init` 或 `minio-init` 已退出而返回非零，即使八个长运行服务全部健康。这是一次性容器与 wait 判定的交互，不能把非零直接改写为部署失败，也不能忽略。标准流程使用 `up -d`，随后按下一节分别验证两个精确退出码和八个健康状态；即使使用了 `--wait`，最终结论也只能来自这两组检查。
+**注意：** Compose v5 的 `up -d --wait` 可能因为成功完成的 `postgres-init`、`flowable-init` 或 `minio-init` 已退出而返回非零，即使八个长运行服务全部健康。这是一次性容器与 wait 判定的交互，不能把非零直接改写为部署失败，也不能忽略。标准流程使用 `up -d`，随后按下一节分别验证三个精确退出码和八个健康状态；即使使用了 `--wait`，最终结论也只能来自这两组检查。
 
 ## 状态与一次性任务验收
 
-### 两个一次性服务的精确退出码
+### 三个一次性服务的精确退出码
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$OneShots = 'minio-volume-init','minio-init'
+$OneShots = 'postgres-init','flowable-init','minio-init'
 foreach ($service in $OneShots) {
   $containerId = (& docker @ComposeArgs ps -a -q $service | Select-Object -First 1)
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($containerId)) { throw "$service 容器不存在" }
@@ -221,7 +242,7 @@ foreach ($service in $OneShots) {
 }
 ```
 
-`minio-volume-init` 的零退出证明 `minio-data` 所有权准备命令完成；`minio-init` 的零退出证明建桶、应用用户和策略命令完成。非零时不得反复重跑掩盖原因：先保存对应日志，检查卷权限、MinIO readiness、桶名和密钥差异，修复后再用 `up -d` 协调。
+`postgres-init` 的零退出证明 PostgreSQL 可连接且 `minio-data` 所有权准备完成；`flowable-init` 的零退出证明 Flowable 私有表初始化完成；`minio-init` 的零退出证明建桶、应用用户和策略命令完成。非零时不得反复重跑掩盖原因：先保存对应日志并修复根因，再用 `up -d` 协调。
 
 ### 八个长运行服务的健康状态
 
@@ -242,10 +263,10 @@ do {
 } while ((Get-Date) -lt $Deadline)
 if ($notReady.Count -gt 0) { $notReady | ForEach-Object { [Console]::Error.WriteLine($_) }; throw '八个长运行服务未在时限内全部达到 running healthy' }
 & docker @ComposeArgs ps -a
-Write-Output '八个长运行服务均为 running healthy；两个一次性服务仍需保持 exited 0'
+Write-Output '八个长运行服务均为 running healthy；三个一次性服务仍需保持 exited 0'
 ```
 
-**验证：** 总体期望是八个 `running healthy` 加两个 `exited 0`。网关 healthy 只证明八个监听器存在，不证明上游；Core readiness 只证明 `ping` 和数据库，不证明 Kafka、Redis、MinIO、OPA、AI 全部可用。
+**验证：** 总体期望是八个 `running healthy` 加三个 `exited 0`。网关 healthy 只证明八个监听器存在，不证明上游；Core readiness 只证明 `ping` 和数据库，不证明 Kafka、Redis、MinIO、OPA、AI 全部可用。
 
 ## HTTP 探测与有效端口
 
@@ -339,7 +360,7 @@ if ($LASTEXITCODE -ne 0) { throw '容器内 Kafka 替代检查失败' }
 
 ## 可选的网关上游隔离验证
 
-此步骤只允许在非生产、无业务流量的受控验收环境执行。它会停止 AI，造成 AI HTTP/TCP 路径短时不可用，但不改变持久数据；前提是八长运行/两一次性检查已通过、日志已留存、维护窗口和恢复责任人已确认。生产环境跳过并依赖仓库网关契约测试。
+此步骤只允许在非生产、无业务流量的受控验收环境执行。它会停止 AI，造成 AI HTTP/TCP 路径短时不可用，但不改变持久数据；前提是八个长运行服务/三个一次性服务检查已通过、日志已留存、维护窗口和恢复责任人已确认。生产环境跳过并依赖仓库网关契约测试。
 
 **注意：** 执行前由审批流程在当前会话设置 `OCC_CONFIRM_GATEWAY_ISOLATION=NON_PRODUCTION_APPROVED`。以下命令不会接受其他值。
 
@@ -411,7 +432,7 @@ Core 重建可能运行 Flyway；镜像回退不等于数据库迁移回退。�
 
 ### Windows 或 Docker Desktop 重启
 
-八个长运行服务配置 `restart: unless-stopped`。Docker Desktop Engine 正常重启后，未被显式停止的容器通常自动恢复；`docker compose down` 删除的容器不会恢复，曾被手工 stop 的容器也不能假定自动启动。两个一次性服务为 `restart: "no"`，正常保持 `exited 0`。
+八个长运行服务配置 `restart: unless-stopped`。Docker Desktop Engine 正常重启后，未被显式停止的容器通常自动恢复；`docker compose down` 删除的容器不会恢复，曾被手工 stop 的容器也不能假定自动启动。三个一次性服务为 `restart: "no"`，正常保持 `exited 0`。
 
 主机重启影响全部本机 OCC 连接。前提是维护窗口、应用静默、数据库/对象备份状态、Docker Desktop 登录启动策略和恢复值班人已确认；在操作系统界面确认重启，不在文档提供可误执行的强制重启命令。系统回来后登录批准的部署账号，等待 Docker Desktop Engine 可响应，重新初始化会话，然后执行：
 
@@ -431,7 +452,7 @@ if ($LASTEXITCODE -ne 0) { throw '重启后 Compose 协调失败' }
 & docker @ComposeArgs ps -a
 ```
 
-重新执行两个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议验收。恢复失败时不要删除卷；保留 Docker Desktop/WSL2 状态和容器日志，修复 Engine、磁盘、挂载或服务根因后再次 `up -d`。
+重新执行三个 `exited 0`、八个 `running healthy`、HTTP、TCP 和协议验收。恢复失败时不要删除卷；保留 Docker Desktop/WSL2 状态和容器日志，修复 Engine、磁盘、挂载或服务根因后再次 `up -d`。
 
 ## 日志与无密钥支持包
 

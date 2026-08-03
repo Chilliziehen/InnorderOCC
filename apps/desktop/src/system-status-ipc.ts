@@ -12,6 +12,7 @@ interface StatusEndpoints {
   coreBaseUrl: string;
   aiBaseUrl: string;
   timeoutMs: number;
+  coreFetch?: typeof fetch;
 }
 
 interface ServiceEndpoint {
@@ -32,13 +33,14 @@ function unreachable(service: ServiceEndpoint["service"]): SystemStatus {
 async function fetchStatus(
   endpoint: ServiceEndpoint,
   timeoutMs: number,
+  fetchImpl: typeof fetch,
 ): Promise<SystemStatus> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const url = new URL("/api/v1/system/status", endpoint.baseUrl);
-    const response = await fetch(url, {
+    const response = await fetchImpl(url, {
       headers: { accept: "application/json" },
       redirect: "error",
       signal: controller.signal,
@@ -67,10 +69,12 @@ export async function fetchSystemStatuses(
     fetchStatus(
       { service: "occ-core", baseUrl: endpoints.coreBaseUrl },
       endpoints.timeoutMs,
+      endpoints.coreFetch ?? fetch,
     ),
     fetchStatus(
       { service: "occ-ai", baseUrl: endpoints.aiBaseUrl },
       endpoints.timeoutMs,
+      fetch,
     ),
   ]);
 }

@@ -1,0 +1,521 @@
+{
+  "baseInput": {
+    "contractVersion": 2,
+    "opaRevision": "platform-authz-v2",
+    "requestId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "authorizationRevision": 17,
+    "releases": {
+      "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+      "DOMAIN": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+      "CUSTOMER": "123e4567-e89b-42d3-a456-426614174000"
+    },
+    "principal": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "enabled": true},
+    "entity": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+    "action": "resource.read",
+    "resource": {"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "active": true},
+    "context": {"correlationId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"},
+    "forbiddenActions": [],
+    "grants": [],
+    "relationships": []
+  },
+  "valid": [
+    {
+      "name": "all layers abstain",
+      "overrides": {}
+    },
+    {
+      "name": "candidate relationship with exact task claim grant",
+      "overrides": {
+        "action": "task.claim",
+        "relationships": [{
+          "relation": "TASK_CANDIDATE",
+          "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }],
+        "grants": [{
+          "id": "candidate-task-claim",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "task.claim",
+          "principalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "resourceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }]
+      }
+    },
+    {
+      "name": "platform allow with optional layers absent",
+      "overrides": {
+        "releases": {"PLATFORM": "550e8400-e29b-41d4-a716-446655440000"},
+        "grants": [{
+          "id": "platform-allow",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "resourceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }]
+      }
+    },
+    {
+      "name": "domain allow",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "DOMAIN": "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+        },
+        "grants": [{
+          "id": "domain-allow",
+          "layer": "DOMAIN",
+          "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "customer allow",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "CUSTOMER": "123e4567-e89b-42d3-a456-426614174000"
+        },
+        "grants": [{
+          "id": "customer-allow",
+          "layer": "CUSTOMER",
+          "releaseId": "123e4567-e89b-42d3-a456-426614174000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          "resourceId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        }]
+      }
+    },
+    {
+      "name": "platform deny overrides customer allow",
+      "overrides": {
+        "grants": [
+          {
+            "id": "platform-deny",
+            "layer": "PLATFORM",
+            "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+            "effect": "DENY",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          },
+          {
+            "id": "customer-allow",
+            "layer": "CUSTOMER",
+            "releaseId": "123e4567-e89b-42d3-a456-426614174000",
+            "effect": "ALLOW",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          }
+        ]
+      }
+    },
+    {
+      "name": "200-codepoint emoji grant ID",
+      "grantIdRepeat": {"value": "😀", "count": 200},
+      "overrides": {
+        "grants": [{
+          "id": "replaced-by-fixture",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "mixed-case equivalent UUID matching",
+      "overrides": {
+        "releases": {"PLATFORM": "550E8400-E29B-41D4-A716-446655440000"},
+        "grants": [{
+          "id": "mixed-case-match",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+          "entityId": "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+          "resourceId": "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC"
+        }]
+      }
+    },
+    {
+      "name": "baseline denial with matching allow grant",
+      "overrides": {
+        "principal": {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "enabled": false},
+        "grants": [{
+          "id": "baseline-matched-allow",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "baseline and explicit denial with matched grants",
+      "overrides": {
+        "resource": {"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "active": false},
+        "grants": [
+          {
+            "id": "baseline-allow",
+            "layer": "DOMAIN",
+            "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+            "effect": "ALLOW",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          },
+          {
+            "id": "baseline-deny",
+            "layer": "CUSTOMER",
+            "releaseId": "123e4567-e89b-42d3-a456-426614174000",
+            "effect": "DENY",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid astral grant and context strings",
+      "overrides": {
+        "context": {"key-😀": {"value": "safe-🚀"}},
+        "grants": [{
+          "id": "safe-😀-grant",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "maximum context nesting depth",
+      "overrides": {
+        "context": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": "safe"}}}}}}}}
+      }
+    },
+    {
+      "name": "escaped controls and astral context strings",
+      "overrides": {
+        "context": {"escaped\nkey": "tab\tquote\"slash\\nul\u0000 astral😀"}
+      }
+    },
+    {
+      "name": "4096-codepoint astral serialized context",
+      "contextRepeat": {"value": "🚀", "count": 4084, "target": "value"},
+      "overrides": {}
+    }
+  ],
+  "invalid": [
+    {"name": "contract version one", "overrides": {"contractVersion": 1}},
+    {
+      "name": "unknown relationship",
+      "overrides": {"relationships": [{
+        "relation": "UNKNOWN",
+        "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }]}
+    },
+    {
+      "name": "duplicate relationships",
+      "overrides": {"relationships": [
+        {"relation": "TASK_CANDIDATE", "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"},
+        {"relation": "TASK_CANDIDATE", "subjectId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"}
+      ]}
+    },
+    {
+      "name": "malformed relationship UUID",
+      "overrides": {"relationships": [{
+        "relation": "TASK_ASSIGNEE",
+        "subjectId": "not-a-uuid",
+        "objectId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+      }]}
+    },
+    {
+      "name": "null DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": null},
+      "overrides": {}
+    },
+    {
+      "name": "numeric DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": 42},
+      "overrides": {}
+    },
+    {
+      "name": "boolean DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": true},
+      "overrides": {}
+    },
+    {
+      "name": "array DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": []},
+      "overrides": {}
+    },
+    {
+      "name": "object DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": {}},
+      "overrides": {}
+    },
+    {
+      "name": "empty DOMAIN release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "DOMAIN", "value": ""},
+      "overrides": {}
+    },
+    {
+      "name": "null CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": null},
+      "overrides": {}
+    },
+    {
+      "name": "numeric CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": 42},
+      "overrides": {}
+    },
+    {
+      "name": "boolean CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": false},
+      "overrides": {}
+    },
+    {
+      "name": "array CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": []},
+      "overrides": {}
+    },
+    {
+      "name": "object CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": {}},
+      "overrides": {}
+    },
+    {
+      "name": "empty CUSTOMER release with matching platform allow",
+      "malformedOptionalRelease": {"layer": "CUSTOMER", "value": ""},
+      "overrides": {}
+    },
+    {"name": "unknown input field", "overrides": {"unknown": true}},
+    {"name": "nil request UUID", "overrides": {"requestId": "00000000-0000-0000-0000-000000000000"}},
+    {"name": "UUID version zero", "overrides": {"requestId": "dddddddd-dddd-0ddd-8ddd-dddddddddddd"}},
+    {"name": "non-RFC UUID variant", "overrides": {"requestId": "dddddddd-dddd-4ddd-7ddd-dddddddddddd"}},
+    {
+      "name": "release mismatch",
+      "overrides": {
+        "grants": [{
+          "id": "mismatch",
+          "layer": "PLATFORM",
+          "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "grant for missing optional layer",
+      "overrides": {
+        "releases": {"PLATFORM": "550e8400-e29b-41d4-a716-446655440000"},
+        "grants": [{
+          "id": "domain-without-release",
+          "layer": "DOMAIN",
+          "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "partial wildcard",
+      "overrides": {
+        "grants": [{
+          "id": "partial",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.*",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "duplicate grant IDs",
+      "overrides": {
+        "grants": [
+          {
+            "id": "duplicate",
+            "layer": "PLATFORM",
+            "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+            "effect": "ALLOW",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          },
+          {
+            "id": "duplicate",
+            "layer": "DOMAIN",
+            "releaseId": "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+            "effect": "DENY",
+            "action": "resource.read",
+            "principalId": "*",
+            "entityId": "*",
+            "resourceId": "*"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate release IDs",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "DOMAIN": "550e8400-e29b-41d4-a716-446655440000"
+        }
+      }
+    },
+    {
+      "name": "case-insensitive duplicate release IDs",
+      "overrides": {
+        "releases": {
+          "PLATFORM": "550e8400-e29b-41d4-a716-446655440000",
+          "DOMAIN": "550E8400-E29B-41D4-A716-446655440000"
+        }
+      }
+    },
+    {
+      "name": "257-codepoint emoji grant ID",
+      "grantIdRepeat": {"value": "😀", "count": 257},
+      "overrides": {
+        "grants": [{
+          "id": "replaced-by-fixture",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "raw lone-surrogate grant ID",
+      "overrides": {
+        "grants": [{
+          "id": "\ud800",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {
+      "name": "replacement-character grant ID collision",
+      "overrides": {
+        "grants": [{
+          "id": "\ufffd",
+          "layer": "PLATFORM",
+          "releaseId": "550e8400-e29b-41d4-a716-446655440000",
+          "effect": "ALLOW",
+          "action": "resource.read",
+          "principalId": "*",
+          "entityId": "*",
+          "resourceId": "*"
+        }]
+      }
+    },
+    {"name": "raw lone-surrogate context value", "overrides": {"context": {"value": "\ud800"}}},
+    {"name": "raw lone-surrogate context key", "overrides": {"context": {"\ud800": "value"}}},
+    {"name": "replacement-character context value", "overrides": {"context": {"value": "\ufffd"}}},
+    {"name": "replacement-character context key", "overrides": {"context": {"\ufffd": "value"}}},
+    {
+      "name": "700 less-than characters in context",
+      "contextRepeat": {"value": "<", "count": 700, "target": "value"},
+      "overrides": {}
+    },
+    {
+      "name": "700 greater-than characters in context",
+      "contextRepeat": {"value": ">", "count": 700, "target": "value"},
+      "overrides": {}
+    },
+    {
+      "name": "700 ampersands in context key",
+      "contextRepeat": {"value": "&", "count": 700, "target": "key"},
+      "overrides": {}
+    },
+    {
+      "name": "700 line-separator characters in context",
+      "contextRepeat": {"value": "\u2028", "count": 700, "target": "value"},
+      "overrides": {}
+    },
+    {
+      "name": "700 paragraph-separator characters in context key",
+      "contextRepeat": {"value": "\u2029", "count": 700, "target": "key"},
+      "overrides": {}
+    },
+    {
+      "name": "context nesting exceeds maximum depth",
+      "overrides": {
+        "context": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": "unsafe"}}}}}}}}}
+      }
+    },
+    {
+      "name": "oversized action bound",
+      "overrides": {"action": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    {
+      "name": "oversized context",
+      "overrides": {
+        "context": {
+          "k00": 0, "k01": 1, "k02": 2, "k03": 3, "k04": 4, "k05": 5, "k06": 6, "k07": 7,
+          "k08": 8, "k09": 9, "k10": 10, "k11": 11, "k12": 12, "k13": 13, "k14": 14, "k15": 15,
+          "k16": 16, "k17": 17, "k18": 18, "k19": 19, "k20": 20, "k21": 21, "k22": 22, "k23": 23,
+          "k24": 24, "k25": 25, "k26": 26, "k27": 27, "k28": 28, "k29": 29, "k30": 30, "k31": 31,
+          "k32": 32
+        }
+      }
+    },
+    {
+      "name": "4097-codepoint astral serialized context",
+      "contextRepeat": {"value": "🚀", "count": 4085, "target": "value"},
+      "overrides": {}
+    }
+  ]
+}

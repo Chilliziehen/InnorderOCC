@@ -8,5 +8,6 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: path.resolve(__dirname, ".vite/renderer/main_window"),
+    sourcemap: false,
   },
 });

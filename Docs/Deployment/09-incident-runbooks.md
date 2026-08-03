@@ -8,10 +8,11 @@
 - 先读后写，先单服务后全栈，先恢复受支持配置后考虑恢复数据。不要循环重启、删除容器/卷、修剪镜像或 cache、编辑迁移历史。
 - 不得关闭 TLS/证书验证、认证、健康检查、OPA、Flyway、Gradle dependency verification、Electron 来源守卫或文件型密钥控制。授权依赖异常时失败关闭。
 - 日志、状态响应和支持包可能含客户数据、用户名、对象键或绝对密钥路径。只放入受限证据目录，人工不可逆脱敏并二次复核后再移交；不收集 `.env` 内容、密钥、认证头、完整环境、主机/容器进程命令行或 `docker inspect` 的环境/挂载详情。当前 Redis 密码存在于长运行进程 argv，进程命令行尤其不得进入支持包。
-- `host-gateway` healthy 只证明八个监听器存在；Core readiness 只证明 `ping` 和数据库。两个 one-shot 的正常终态是 `exited 0`。
+- `host-gateway` healthy 只证明八个监听器存在；Core readiness 只证明 `ping` 和数据库。三个 one-shot 的正常终态是 `exited 0`。
 - `Stop-CoreForIncident`/`stop_core_for_incident` 首次写操作取得全局锁后会持续持有，直到事件指挥明确解除冻结并执行本章释放命令。后续调查、恢复决定和交接都在该所有权下进行；不能只锁住单条 stop。
 
-Windows PowerShell 5.1 初始化、有效配置和检查函数。该块验证 `.env` 的精确允许集合、八个预期密钥路径、端口、数据库名、桶名、日志级别和版本；运行态不要求端口空闲：
+Windows PowerShell 5.1 初始化、有效配置和检查函数。该块验证 `.env` 的精确允许集合、九个预期密钥路径、端口、数据库名、桶名、日志级别和版本；运行态不要求端口空闲：
+Windows PowerShell 5.1 初始化、有效配置和检查函数。该块验证 `.env` 的精确允许集合、十个预期密钥路径、JWT issuer、端口、数据库名、桶名、日志级别和版本；运行态不要求端口空闲：
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -41,8 +42,10 @@ function Stop-CoreForIncident {
     Invoke-CheckedNative 'docker' ($ComposeArgs + @('stop','core')) '停止 Core 失败'
   } catch { $script:IncidentLifecycleLock.Dispose(); $script:IncidentLifecycleLock=$null; throw }
 }
-$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
-$RequiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$AllowedKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$RequiredPathKeys = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE')
+$AllowedKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','CURSOR_HMAC_KEY_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$RequiredPathKeys = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','CURSOR_HMAC_KEY_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE')
 $Config = @{}
 Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
@@ -55,7 +58,9 @@ Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   }
 }
 foreach ($key in $RequiredPathKeys) { if (-not $Config.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($Config[$key])) { throw "缺少必填路径 key: $key" } }
-$SecretPathNames = [ordered]@{ POSTGRES_ADMIN_PASSWORD_FILE='postgres-admin-password'; POSTGRES_FLYWAY_PASSWORD_FILE='postgres-flyway-password'; POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; REDIS_PASSWORD_FILE='redis-password'; MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'; MINIO_APP_USER_FILE='minio-app-user'; MINIO_APP_PASSWORD_FILE='minio-app-password' }
+$SecretPathNames = [ordered]@{ CURSOR_HMAC_KEY_FILE='cursor-hmac-key'; POSTGRES_ADMIN_PASSWORD_FILE='postgres-admin-password'; POSTGRES_FLYWAY_PASSWORD_FILE='postgres-flyway-password'; POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; AI_DATABASE_PASSWORD_FILE='postgres-ai-runtime-password'; REDIS_PASSWORD_FILE='redis-password'; MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'; MINIO_APP_USER_FILE='minio-app-user'; MINIO_APP_PASSWORD_FILE='minio-app-password' }
+if (-not $Config.ContainsKey('OCC_JWT_ISSUER') -or $Config.OCC_JWT_ISSUER -notmatch '^https://') { throw '缺少有效 OCC_JWT_ISSUER' }
+$SecretPathNames = [ordered]@{ POSTGRES_ADMIN_PASSWORD_FILE='postgres-admin-password'; POSTGRES_FLYWAY_PASSWORD_FILE='postgres-flyway-password'; POSTGRES_RUNTIME_PASSWORD_FILE='postgres-runtime-password'; AI_DATABASE_PASSWORD_FILE='postgres-ai-runtime-password'; CURSOR_HMAC_KEY_FILE='cursor-hmac-key'; REDIS_PASSWORD_FILE='redis-password'; MINIO_ROOT_USER_FILE='minio-root-user'; MINIO_ROOT_PASSWORD_FILE='minio-root-password'; MINIO_APP_USER_FILE='minio-app-user'; MINIO_APP_PASSWORD_FILE='minio-app-password'; OCC_JWT_PRIVATE_KEY_FILE='occ-jwt-private-key.pem'; OCC_JWT_PUBLIC_KEY_FILE='occ-jwt-public-key.pem' }
 foreach ($entry in $SecretPathNames.GetEnumerator()) {
   if ($Config[$entry.Key] -ne (Join-Path $SecretRoot $entry.Value)) { throw "$($entry.Key) 未指向 OCC_SECRET_ROOT 下的预期文件" }
   $source = Get-Item -LiteralPath $Config[$entry.Key] -Force
@@ -98,8 +103,10 @@ stop_core_for_incident() {
   "${compose[@]}" stop core || { local status=$?; flock -u "$lifecycle_lock_fd"; exec {lifecycle_lock_fd}>&-; lifecycle_lock_fd=; return "$status"; }
 }
 declare -A config=() allowed=() seen=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
-required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE CURSOR_HMAC_KEY_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+required_paths=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE CURSOR_HMAC_KEY_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}; [ -z "$key" ] && continue; case "$key" in \#*) continue;; esac
   [[ $key =~ (PASSWORD|SECRET|ACCESS_KEY|TOKEN)$ ]] && exit 1
@@ -108,8 +115,11 @@ while IFS='=' read -r key value || [ -n "$key" ]; do
   config[$key]=$value
 done <infra/compose/.env
 for key in "${required_paths[@]}"; do [ -n "${config[$key]:-}" ] || exit 1; done
-path_names=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
-file_names=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+path_names=(CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE)
+file_names=(cursor-hmac-key postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password)
+[[ ${config[OCC_JWT_ISSUER]:-} == https://* ]] || exit 1
+path_names=(POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE CURSOR_HMAC_KEY_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE)
+file_names=(postgres-admin-password postgres-flyway-password postgres-runtime-password redis-password minio-root-user minio-root-password minio-app-user minio-app-password occ-jwt-private-key.pem occ-jwt-public-key.pem)
 for index in "${!path_names[@]}"; do name=${path_names[$index]}; [ "${config[$name]}" = "$secret_root/${file_names[$index]}" ] && [ -f "${config[$name]}" ] && [ ! -L "${config[$name]}" ] || exit 1; done
 names=(POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT); defaults=(5432 9092 6379 9000 9001 8181 3100 8080)
 for index in "${!names[@]}"; do name=${names[$index]}; port=${config[$name]:-${defaults[$index]}}; [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && [ -z "${seen[$port]:-}" ] || exit 1; seen[$port]=1; done
@@ -203,7 +213,7 @@ df -ih
 
 ### 4. 主机到容器到依赖决策树
 
-主机磁盘/时间/虚拟化异常，先修主机；主机正常但 daemon inactive，检查服务日志；daemon active 但客户端失败，核对批准 context、socket 权限和服务身份；Engine 响应后才检查十个容器，再检查 PostgreSQL、Core 和其他依赖。不要在 Engine 不可观察时操作卷文件。
+主机磁盘/时间/虚拟化异常，先修主机；主机正常但 daemon inactive，检查服务日志；daemon active 但客户端失败，核对批准 context、socket 权限和服务身份；Engine 响应后才检查十一个容器，再检查 PostgreSQL、Core 和其他依赖。不要在 Engine 不可观察时操作卷文件。
 
 ### 5. 从最小到最大修正
 
@@ -211,7 +221,7 @@ df -ih
 
 ### 6. 验证与恢复服务
 
-要求 Client/Server 均响应、Linux containers/AMD64 正确、原 context 不变、四卷仍精确存在；再验证八个 `running healthy`、两个 `exited 0`、HTTP/TCP/协议和备份新鲜度。仅 daemon 恢复不代表 OCC 恢复。
+要求 Client/Server 均响应、Linux containers/AMD64 正确、原 context 不变、四卷仍精确存在；再验证八个 `running healthy`、三个 `exited 0`、HTTP/TCP/协议和备份新鲜度。仅 daemon 恢复不代表 OCC 恢复。
 
 ### 7. 升级与预防
 
@@ -558,7 +568,7 @@ stop_core_for_incident
 
 ### 4. 主机到容器到依赖决策树
 
-先确认 PostgreSQL 健康；再确认 Flyway 已完成 V001-V009；再检查 `flowable` owner 应为 `innorder_flyway`、runtime 的 `USAGE,CREATE` 及已有对象权限；最后对照异常链和 `ACT_*` 版本状态。owner 漂移不一定单独导致当前启动失败，但必须修复。
+先确认 PostgreSQL 健康；再确认 Flyway 已完成 V001-V011；再检查 `flowable` owner 应为 `innorder_flyway`、runtime 的 `USAGE,CREATE` 及已有对象权限；最后对照异常链和 `ACT_*` 版本状态。owner 漂移不一定单独导致当前启动失败，但必须修复。
 
 ### 5. 从最小到最大修正
 
@@ -660,7 +670,7 @@ AOF 损坏、部分轮换或缓存可丢失性不明时升级组件/数据所有
 
 ### 1. 症状与影响范围
 
-`minio-volume-init` 非 `exited 0`、MinIO 不 ready、`minio-init` 非 `exited 0`，或桶级应用账号不能列桶。Core readiness 仍可能 UP；对象能力、桶或 IAM 不可用。
+`postgres-init` 非 `exited 0`、MinIO 不 ready、`minio-init` 非 `exited 0`，或桶级应用账号不能列桶。Core readiness 仍可能 UP；对象能力、桶或 IAM 不可用。
 
 ### 2. 立即安全动作
 
@@ -669,21 +679,21 @@ AOF 损坏、部分轮换或缓存可丢失性不明时升级组件/数据所有
 ### 3. 证据命令
 
 ```powershell
-& docker @ComposeArgs ps -a minio-volume-init minio minio-init; if ($LASTEXITCODE -ne 0) { throw 'MinIO 状态失败' }
-& docker @ComposeArgs logs --no-color --timestamps --tail 1000 minio-volume-init minio minio-init; if ($LASTEXITCODE -ne 0) { throw 'MinIO 日志失败' }
+& docker @ComposeArgs ps -a postgres-init minio minio-init; if ($LASTEXITCODE -ne 0) { throw 'MinIO 状态失败' }
+& docker @ComposeArgs logs --no-color --timestamps --tail 1000 postgres-init minio minio-init; if ($LASTEXITCODE -ne 0) { throw 'MinIO 日志失败' }
 Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($Ports.MinioApi)/minio/health/ready" -TimeoutSec 15 | Out-Null
 ```
 
 ```bash
 set -euo pipefail
-"${compose[@]}" ps -a minio-volume-init minio minio-init
-"${compose[@]}" logs --no-color --timestamps --tail 1000 minio-volume-init minio minio-init
+"${compose[@]}" ps -a postgres-init minio minio-init
+"${compose[@]}" logs --no-color --timestamps --tail 1000 postgres-init minio minio-init
 curl --fail --silent --show-error --max-time 15 "http://127.0.0.1:$MINIO_API_PORT/minio/health/ready" >/dev/null
 ```
 
 ### 4. 主机到容器到依赖决策树
 
-先查主机磁盘/inode与网关；再按 `minio-volume-init` 的 UID/GID `10001` 所有权、MinIO server readiness、`minio-init` 桶名/四个密钥顺序检查；最后用桶级应用身份验证目标桶。server ready 不证明 IAM 完成，one-shot 旧 `exited 0` 不证明本次发布已初始化。
+先查主机磁盘/inode与网关；再按 `postgres-init` 的 PostgreSQL 检查与 UID/GID `10001` 所有权、MinIO server readiness、`minio-init` 桶名/四个密钥顺序检查；最后用桶级应用身份验证目标桶。server ready 不证明 IAM 完成，one-shot 旧 `exited 0` 不证明本次发布已初始化。
 
 ### 5. 从最小到最大修正
 
@@ -992,7 +1002,7 @@ git rev-parse HEAD
 
 ### 6. 验证与恢复服务
 
-从隔离验收开始：manifest/checksum、角色/owner、Flyway、Flowable、对象计数/IAM、可选 Redis/Kafka disposition、八健康/两 one-shot、HTTP/TCP/协议全部通过；数据所有者签字后才切换。记录实际 RPO/RTO 和不可恢复数据。
+从隔离验收开始：manifest/checksum、角色/owner、Flyway、Flowable、对象计数/IAM、可选 Redis/Kafka disposition、八健康/三 one-shot、HTTP/TCP/协议全部通过；数据所有者签字后才切换。记录实际 RPO/RTO 和不可恢复数据。
 
 ### 7. 升级与预防
 
@@ -1001,7 +1011,7 @@ git rev-parse HEAD
 ## 事件关闭门禁
 
 - [ ] 根因与触发变更有证据，不以“重启后正常”作为根因。
-- [ ] 八个长运行服务、两个 one-shot、有效端口 HTTP/TCP/协议和有限健康语义均已复核。
+- [ ] 八个长运行服务、三个 one-shot、有效端口 HTTP/TCP/协议和有限健康语义均已复核。
 - [ ] 数据一致性、迁移历史、Flowable、对象/IAM和备份状态由相应所有者签字。
 - [ ] 未降低 TLS、认证、OPA、health、secret或供应链控制；临时批准变更已撤销并验证。
 - [ ] 原始证据受限，移交副本已脱敏；时间线、命令退出码、image ID、revision和恢复决定完整。

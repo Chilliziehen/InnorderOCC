@@ -54,6 +54,14 @@ describe("main-process status fetching", () => {
     result.forEach((row) => expect(SystemStatusSchema.safeParse(row).success).toBe(true));
   });
 
+  it("uses the injected profile transport for Core status", async () => {
+    const coreFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(validStatus("occ-core")), { status: 200 }));
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(validStatus("occ-ai")), { status: 200 }));
+    await fetchSystemStatuses({ coreBaseUrl: "https://occ.example", aiBaseUrl: "http://127.0.0.1:3100", timeoutMs: 100, coreFetch });
+    expect(coreFetch).toHaveBeenCalledWith(new URL("https://occ.example/api/v1/system/status"), expect.any(Object));
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("rejects a valid response with the wrong service identity", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(

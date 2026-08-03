@@ -1,0 +1,806 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  authorizationDecisionSchema,
+  authorizationInputSchema,
+  currentUserSchema,
+  eventEnvelopeSchema,
+  loginRequestSchema,
+  problemDetailsSchema,
+  refreshRequestSchema,
+  tokenResponseSchema,
+} from "../src/index.js";
+import {
+  ACTION_KEY_MAX_LENGTH,
+  CONTEXT_MAX_PROPERTIES,
+  CONTEXT_MAX_SERIALIZED_LENGTH,
+  FORBIDDEN_ACTIONS_MAX_LENGTH,
+  GRANT_ID_MAX_LENGTH,
+  GRANTS_MAX_LENGTH,
+} from "../src/authorization.js";
+import {
+  ACCESS_TOKEN_MAX_LENGTH,
+  ACCESS_TOKEN_MIN_LENGTH,
+  CAPABILITY_MAX_LENGTH,
+  CAPABILITY_MIN_LENGTH,
+  CURRENT_USER_DISPLAY_NAME_MAX_LENGTH,
+  CURRENT_USER_DISPLAY_NAME_MIN_LENGTH,
+  CURRENT_USER_USERNAME_MAX_LENGTH,
+  CURRENT_USER_USERNAME_MIN_LENGTH,
+  EXPIRES_IN_MAX_SECONDS,
+  EXPIRES_IN_MIN_SECONDS,
+  LOGIN_PASSWORD_MAX_CODE_POINTS,
+  LOGIN_PASSWORD_MIN_CODE_POINTS,
+  LOGIN_USERNAME_MAX_LENGTH,
+  LOGIN_USERNAME_MIN_LENGTH,
+  REFRESH_TOKEN_LENGTH,
+} from "../src/auth.js";
+import {
+  EVENT_AGGREGATE_TYPE_MAX_LENGTH,
+  EVENT_AGGREGATE_TYPE_MIN_LENGTH,
+  EVENT_AGGREGATE_VERSION_MAX,
+  EVENT_AGGREGATE_VERSION_MIN,
+  EVENT_SCHEMA_VERSION_MAX,
+  EVENT_SCHEMA_VERSION_MIN,
+  EVENT_TYPE_MAX_LENGTH,
+  EVENT_TYPE_MIN_LENGTH,
+} from "../src/events.js";
+import {
+  PROBLEM_DETAIL_MAX_LENGTH,
+  PROBLEM_STATUS_MAX,
+  PROBLEM_STATUS_MIN,
+  PROBLEM_TITLE_MAX_LENGTH,
+  PROBLEM_TITLE_MIN_LENGTH,
+} from "../src/problem-details.js";
+
+const id = "550e8400-e29b-41d4-a716-446655440000";
+const anotherId = "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
+const occurredAt = "2026-07-30T14:15:16.000+02:00";
+const refreshToken = `${"A".repeat(REFRESH_TOKEN_LENGTH - 2)}_-`;
+const grantHash = `grant:${"a".repeat(64)}`;
+const otherGrantHash = `grant:${"b".repeat(64)}`;
+const invalidInputPolicyHash = "policy:318efe2bf46c41026f67dbd60026ad3a8056a0a70c468cd38210021dee7de176";
+const principalDisabledPolicyHash = "policy:8941407440a3ec32c44afbc4ab1fb183748dbf7388cf926f594486cc1f8386a3";
+const resourceInactivePolicyHash = "policy:78a11476cd4e8cb5ba4afa073e8195510016228408013d8f27bfaafafad47876";
+const actionForbiddenPolicyHash = "policy:105106f1faa19167cdeb0d067dd88443f361b15f20e14424553e14b7ea7e1a5f";
+const noMatchingAllowPolicyHash = "policy:7ec3d68be5ac070a6d48cb53daaf85bf7b4d76d09985923af422194f7735ab7b";
+
+const authorizationInput = {
+  contractVersion: 2,
+  opaRevision: "platform-authz-v2",
+  requestId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  authorizationRevision: 17,
+  releases: {
+    PLATFORM: id,
+    DOMAIN: anotherId,
+    CUSTOMER: "123e4567-e89b-42d3-a456-426614174000",
+  },
+  principal: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", enabled: true },
+  entity: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+  action: "resource.read",
+  resource: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", active: true },
+  context: { correlationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+  forbiddenActions: ["resource.delete"],
+  grants: [
+    {
+      id: "platform-allow",
+      layer: "PLATFORM",
+      releaseId: id,
+      effect: "ALLOW",
+      action: "resource.read",
+      principalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      entityId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      resourceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    },
+  ],
+  relationships: [],
+} as const;
+
+describe("authorization contracts", () => {
+  it("parses the exact version-2 input and decision envelopes", () => {
+    expect(authorizationInputSchema.parse(authorizationInput)).toEqual(authorizationInput);
+    const decision = {
+      contractVersion: 2,
+      opaRevision: authorizationInput.opaRevision,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: authorizationInput.authorizationRevision,
+      releases: authorizationInput.releases,
+      decision: "ALLOW",
+      allow: true,
+      reasonCodes: ["ALLOW_GRANT_MATCH"],
+      reasonIds: [grantHash],
+      matchedPolicyIds: [grantHash],
+    } as const;
+    expect(authorizationDecisionSchema.parse(decision)).toEqual(decision);
+  });
+
+  it("rejects unknown fields throughout the input", () => {
+    for (const invalid of [
+      { ...authorizationInput, secret: true },
+      { ...authorizationInput, releases: { ...authorizationInput.releases, OTHER: id } },
+      { ...authorizationInput, principal: { ...authorizationInput.principal, secret: true } },
+      { ...authorizationInput, entity: { ...authorizationInput.entity, secret: true } },
+      { ...authorizationInput, resource: { ...authorizationInput.resource, secret: true } },
+      { ...authorizationInput, grants: [{ ...authorizationInput.grants[0], secret: true }] },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+  });
+
+  it("rejects malformed versions, UUIDs, revisions, and context", () => {
+    for (const invalid of [
+      { ...authorizationInput, contractVersion: 1 },
+      { ...authorizationInput, opaRevision: "" },
+      { ...authorizationInput, opaRevision: "platform authz v1" },
+      { ...authorizationInput, opaRevision: "x".repeat(257) },
+      { ...authorizationInput, requestId: "not-a-uuid" },
+      { ...authorizationInput, requestId: "00000000-0000-0000-0000-000000000000" },
+      { ...authorizationInput, requestId: "dddddddd-dddd-0ddd-8ddd-dddddddddddd" },
+      { ...authorizationInput, requestId: "dddddddd-dddd-4ddd-7ddd-dddddddddddd" },
+      { ...authorizationInput, authorizationRevision: -1 },
+      { ...authorizationInput, authorizationRevision: 1.5 },
+      { ...authorizationInput, authorizationRevision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...authorizationInput, principal: { ...authorizationInput.principal, id: "bad" } },
+      { ...authorizationInput, entity: { id: "bad" } },
+      { ...authorizationInput, resource: { ...authorizationInput.resource, id: "bad" } },
+      { ...authorizationInput, context: [] },
+      { ...authorizationInput, context: { invalid: undefined } },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+  });
+
+  it("enforces stable action and collection bounds", () => {
+    const grant = authorizationInput.grants[0];
+    const tooManyForbidden = Array.from(
+      { length: FORBIDDEN_ACTIONS_MAX_LENGTH + 1 },
+      (_, index) => `action.${index}`,
+    );
+    const tooManyGrants = Array.from({ length: GRANTS_MAX_LENGTH + 1 }, (_, index) => ({
+      ...grant,
+      id: `grant-${index}`,
+    }));
+    const tooLargeContext = Object.fromEntries(
+      Array.from({ length: CONTEXT_MAX_PROPERTIES + 1 }, (_, index) => [`k${index}`, index]),
+    );
+    for (const invalid of [
+      { ...authorizationInput, action: "" },
+      { ...authorizationInput, action: "resource.*" },
+      { ...authorizationInput, action: "a".repeat(ACTION_KEY_MAX_LENGTH + 1) },
+      { ...authorizationInput, forbiddenActions: ["resource.read", "resource.read"] },
+      { ...authorizationInput, forbiddenActions: tooManyForbidden },
+      { ...authorizationInput, grants: tooManyGrants },
+      { ...authorizationInput, context: tooLargeContext },
+      { ...authorizationInput, context: { value: "x".repeat(CONTEXT_MAX_SERIALIZED_LENGTH) } },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+  });
+
+  it("counts opaque grant IDs in Unicode code points", () => {
+    const grant = authorizationInput.grants[0];
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      grants: [{ ...grant, id: "😀".repeat(200) }],
+    })).toBeDefined();
+    expect(() => authorizationInputSchema.parse({
+      ...authorizationInput,
+      grants: [{ ...grant, id: "😀".repeat(257) }],
+    })).toThrow();
+  });
+
+  it("bounds canonical context serialization in Unicode code points", () => {
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      context: { value: "🚀".repeat(4084) },
+    })).toBeDefined();
+    expect(() => authorizationInputSchema.parse({
+      ...authorizationInput,
+      context: { value: "🚀".repeat(4085) },
+    })).toThrow();
+  });
+
+  it("rejects ambiguous authorization Unicode and accepts valid astral strings", () => {
+    const grant = authorizationInput.grants[0];
+    for (const invalid of [
+      { ...authorizationInput, grants: [{ ...grant, id: "\ud800" }] },
+      { ...authorizationInput, grants: [{ ...grant, id: "\udc00" }] },
+      { ...authorizationInput, grants: [{ ...grant, id: "bad\ufffdvalue" }] },
+      { ...authorizationInput, context: { value: "\ud800" } },
+      { ...authorizationInput, context: { "\udc00": "value" } },
+      { ...authorizationInput, context: { nested: { value: "\ufffd" } } },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      grants: [{ ...grant, id: "safe-😀-id" }],
+      context: { "key-😀": { value: "safe-🚀" } },
+    })).toBeDefined();
+  });
+
+  it("enforces the bounded context nesting depth", () => {
+    const nested = (depth: number): Record<string, unknown> => {
+      let value: unknown = "leaf";
+      for (let index = 0; index < depth; index += 1) value = { nested: value };
+      return value as Record<string, unknown>;
+    };
+    expect(authorizationInputSchema.parse({ ...authorizationInput, context: nested(8) })).toBeDefined();
+    expect(() => authorizationInputSchema.parse({ ...authorizationInput, context: nested(9) })).toThrow();
+  });
+
+  it("rejects context characters with divergent JSON serialization", () => {
+    for (const character of ["<", ">", "&", "\u2028", "\u2029"]) {
+      expect(() => authorizationInputSchema.parse({
+        ...authorizationInput,
+        context: { nested: { value: character } },
+      })).toThrow();
+      expect(() => authorizationInputSchema.parse({
+        ...authorizationInput,
+        context: { [character]: "value" },
+      })).toThrow();
+    }
+
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      context: { "escaped\nkey": "tab\tquote\"slash\\nul\u0000 astral😀" },
+    })).toBeDefined();
+  });
+
+  it("rejects duplicate releases, duplicate grants, release mismatches, absent layers, and partial wildcards", () => {
+    const grant = authorizationInput.grants[0];
+    for (const invalid of [
+      { ...authorizationInput, releases: { PLATFORM: id, DOMAIN: id } },
+      { ...authorizationInput, releases: { PLATFORM: id, DOMAIN: id.toUpperCase() } },
+      { ...authorizationInput, grants: [grant, { ...grant, effect: "DENY" }] },
+      {
+        ...authorizationInput,
+        releases: { PLATFORM: id },
+        grants: [{ ...grant, layer: "DOMAIN", releaseId: anotherId }],
+      },
+      { ...authorizationInput, grants: [{ ...grant, releaseId: anotherId }] },
+      { ...authorizationInput, grants: [{ ...grant, layer: "DOMAIN", releaseId: id }] },
+      {
+        ...authorizationInput,
+        grants: [
+          grant,
+          { ...grant, id: "platform-cross-release", releaseId: anotherId },
+        ],
+      },
+      { ...authorizationInput, grants: [{ ...grant, action: "resource.*" }] },
+      { ...authorizationInput, grants: [{ ...grant, principalId: "aaaa*" }] },
+      { ...authorizationInput, grants: [{ ...grant, id: "x".repeat(GRANT_ID_MAX_LENGTH + 1) }] },
+    ]) expect(() => authorizationInputSchema.parse(invalid)).toThrow();
+
+    expect(
+      authorizationInputSchema.parse({
+        ...authorizationInput,
+        grants: [{ ...grant, action: "*", principalId: "*", entityId: "*", resourceId: "*" }],
+      }),
+    ).toBeDefined();
+
+    expect(authorizationInputSchema.parse({
+      ...authorizationInput,
+      releases: { ...authorizationInput.releases, PLATFORM: id.toUpperCase() },
+      grants: [{
+        ...grant,
+        releaseId: id,
+        principalId: authorizationInput.principal.id.toUpperCase(),
+        entityId: authorizationInput.entity.id.toUpperCase(),
+        resourceId: authorizationInput.resource.id.toUpperCase(),
+      }],
+    })).toBeDefined();
+  });
+
+  it("rejects inconsistent, unsorted, duplicate, or unknown decision fields", () => {
+    const baseDecision = {
+      contractVersion: 2,
+      opaRevision: authorizationInput.opaRevision,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: 17,
+      releases: authorizationInput.releases,
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["EXPLICIT_DENY", "PRINCIPAL_DISABLED"],
+      reasonIds: [grantHash, principalDisabledPolicyHash],
+      matchedPolicyIds: [grantHash],
+    } as const;
+    expect(authorizationDecisionSchema.parse(baseDecision)).toEqual(baseDecision);
+    for (const invalid of [
+      { ...baseDecision, allow: true },
+      { ...baseDecision, reasonCodes: [...baseDecision.reasonCodes].reverse() },
+      { ...baseDecision, reasonCodes: ["EXPLICIT_DENY", "EXPLICIT_DENY"] },
+      { ...baseDecision, reasonCodes: ["UNKNOWN_REASON"] },
+      { ...baseDecision, reasonIds: [...baseDecision.reasonIds].reverse() },
+      { ...baseDecision, matchedPolicyIds: [grantHash, grantHash] },
+      { ...baseDecision, reasonIds: ["grant:not-a-hash"] },
+      { ...baseDecision, matchedPolicyIds: [principalDisabledPolicyHash] },
+      { ...baseDecision, releases: { ...baseDecision.releases, OTHER: id } },
+      { ...baseDecision, secret: true },
+    ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
+  });
+
+  it("accepts only the canonical invalid-input decision envelope", () => {
+    const invalidEnvelope = {
+      contractVersion: 2,
+      opaRevision: "",
+      requestId: "00000000-0000-0000-0000-000000000000",
+      authorizationRevision: 0,
+      releases: {},
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["INVALID_INPUT"],
+      reasonIds: [invalidInputPolicyHash],
+      matchedPolicyIds: [],
+    } as const;
+    expect(authorizationDecisionSchema.parse(invalidEnvelope)).toEqual(invalidEnvelope);
+    for (const invalid of [
+      { ...invalidEnvelope, requestId: authorizationInput.requestId },
+      { ...invalidEnvelope, opaRevision: authorizationInput.opaRevision },
+      { ...invalidEnvelope, authorizationRevision: 1 },
+      { ...invalidEnvelope, releases: { PLATFORM: id } },
+      { ...invalidEnvelope, reasonIds: [] },
+      { ...invalidEnvelope, reasonIds: [principalDisabledPolicyHash] },
+    ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
+  });
+
+  it("accepts exactly possible allow and deny reason semantics", () => {
+    const allowDecision = {
+      contractVersion: 2,
+      opaRevision: authorizationInput.opaRevision,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: 17,
+      releases: authorizationInput.releases,
+      decision: "ALLOW",
+      allow: true,
+      reasonCodes: ["ALLOW_GRANT_MATCH"],
+      reasonIds: [grantHash],
+      matchedPolicyIds: [grantHash],
+    } as const;
+    const denyDecision = {
+      ...allowDecision,
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["EXPLICIT_DENY"],
+    } as const;
+    const noMatchingDecision = {
+      ...denyDecision,
+      reasonCodes: ["NO_MATCHING_ALLOW"],
+      reasonIds: [noMatchingAllowPolicyHash],
+      matchedPolicyIds: [],
+    } as const;
+    const baselineDecision = {
+      ...denyDecision,
+      reasonCodes: ["ACTION_FORBIDDEN", "PRINCIPAL_DISABLED", "RESOURCE_INACTIVE"],
+      reasonIds: [
+        grantHash,
+        actionForbiddenPolicyHash,
+        resourceInactivePolicyHash,
+        principalDisabledPolicyHash,
+      ],
+      matchedPolicyIds: [grantHash],
+    } as const;
+    expect(authorizationDecisionSchema.parse(allowDecision)).toEqual(allowDecision);
+    expect(authorizationDecisionSchema.parse(denyDecision)).toEqual(denyDecision);
+    expect(authorizationDecisionSchema.parse(noMatchingDecision)).toEqual(noMatchingDecision);
+    expect(authorizationDecisionSchema.parse(baselineDecision)).toEqual(baselineDecision);
+    expect(authorizationDecisionSchema.parse({
+      ...denyDecision,
+      reasonCodes: ["PRINCIPAL_DISABLED"],
+      reasonIds: [principalDisabledPolicyHash],
+      matchedPolicyIds: [],
+    })).toBeDefined();
+
+    for (const invalid of [
+      { ...allowDecision, reasonCodes: [] },
+      { ...allowDecision, reasonCodes: ["ALLOW_GRANT_MATCH", "EXPLICIT_DENY"] },
+      { ...allowDecision, matchedPolicyIds: [] },
+      { ...allowDecision, reasonIds: [] },
+      { ...allowDecision, reasonIds: [grantHash, principalDisabledPolicyHash] },
+      { ...allowDecision, reasonIds: [otherGrantHash], matchedPolicyIds: [grantHash] },
+      { ...denyDecision, reasonCodes: [] },
+      { ...denyDecision, matchedPolicyIds: [] },
+      { ...denyDecision, reasonIds: [grantHash, otherGrantHash] },
+      { ...denyDecision, reasonIds: [otherGrantHash], matchedPolicyIds: [grantHash] },
+      { ...denyDecision, reasonIds: [grantHash, principalDisabledPolicyHash] },
+      { ...noMatchingDecision, reasonCodes: ["NO_MATCHING_ALLOW", "PRINCIPAL_DISABLED"] },
+      { ...noMatchingDecision, reasonCodes: ["EXPLICIT_DENY", "NO_MATCHING_ALLOW"] },
+      { ...noMatchingDecision, decision: "ALLOW", allow: true },
+      { ...noMatchingDecision, reasonIds: [] },
+      { ...noMatchingDecision, reasonIds: [principalDisabledPolicyHash] },
+      { ...noMatchingDecision, reasonIds: [grantHash, noMatchingAllowPolicyHash], matchedPolicyIds: [grantHash] },
+      {
+        ...denyDecision,
+        reasonCodes: ["PRINCIPAL_DISABLED"],
+        reasonIds: [grantHash],
+      },
+      {
+        ...denyDecision,
+        reasonCodes: ["PRINCIPAL_DISABLED"],
+        reasonIds: [principalDisabledPolicyHash, resourceInactivePolicyHash],
+        matchedPolicyIds: [],
+      },
+      {
+        ...denyDecision,
+        reasonCodes: ["PRINCIPAL_DISABLED", "RESOURCE_INACTIVE"],
+        reasonIds: [principalDisabledPolicyHash],
+        matchedPolicyIds: [],
+      },
+      { ...denyDecision, reasonCodes: ["ALLOW_GRANT_MATCH"] },
+      { ...denyDecision, matchedPolicyIds: [otherGrantHash], reasonIds: [grantHash] },
+    ]) expect(() => authorizationDecisionSchema.parse(invalid)).toThrow();
+  });
+
+  it("rejects case-insensitive duplicate release IDs in decisions", () => {
+    const decision = {
+      contractVersion: 2,
+      opaRevision: authorizationInput.opaRevision,
+      requestId: authorizationInput.requestId,
+      authorizationRevision: 17,
+      releases: { PLATFORM: id, DOMAIN: id.toUpperCase() },
+      decision: "DENY",
+      allow: false,
+      reasonCodes: ["NO_MATCHING_ALLOW"],
+      reasonIds: [noMatchingAllowPolicyHash],
+      matchedPolicyIds: [],
+    } as const;
+    expect(() => authorizationDecisionSchema.parse(decision)).toThrow();
+  });
+});
+
+const currentUser = {
+  id,
+  username: "pilot.user",
+  displayName: "Pilot User",
+  status: "ACTIVE",
+  capabilities: ["tasks:read", "evidence:submit"],
+} as const;
+
+describe("problemDetailsSchema", () => {
+  it("parses valid problem details", () => {
+    const problem = {
+      type: "https://innorder.example/problems/invalid-credentials",
+      title: "Invalid credentials",
+      status: 401,
+      code: "OCC-AUTH-INVALID-CREDENTIALS",
+      correlationId: id,
+      detail: "The supplied username or password was not accepted.",
+    };
+
+    expect(problemDetailsSchema.parse(problem)).toEqual(problem);
+  });
+
+  it("enforces all ProblemDetails boundaries", () => {
+    const boundaryProblem = {
+      type: "https://innorder.example/problems/boundary",
+      title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH),
+      status: PROBLEM_STATUS_MAX,
+      code: "OCC-API-INTERNAL",
+      correlationId: id,
+      detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH),
+    };
+
+    expect(problemDetailsSchema.parse(boundaryProblem)).toEqual(boundaryProblem);
+    for (const invalid of [
+      { ...boundaryProblem, title: "T".repeat(PROBLEM_TITLE_MIN_LENGTH - 1) },
+      { ...boundaryProblem, title: "T".repeat(PROBLEM_TITLE_MAX_LENGTH + 1) },
+      { ...boundaryProblem, status: PROBLEM_STATUS_MIN - 1 },
+      { ...boundaryProblem, status: PROBLEM_STATUS_MAX + 1 },
+      { ...boundaryProblem, code: "OCC-UNKNOWN-CODE" },
+      { ...boundaryProblem, code: "UNKNOWN_PROBLEM_CODE" },
+      { ...boundaryProblem, detail: "D".repeat(PROBLEM_DETAIL_MAX_LENGTH + 1) },
+      { ...boundaryProblem, currentVersion: -1 },
+      { ...boundaryProblem, currentVersion: 1.5 },
+    ]) {
+      expect(() => problemDetailsSchema.parse(invalid)).toThrow();
+    }
+  });
+
+  it("counts ProblemDetails user-visible text in Unicode code points", () => {
+    const problem = {
+      type: "https://innorder.example/problems/unicode",
+      title: "😀".repeat(PROBLEM_TITLE_MAX_LENGTH),
+      status: PROBLEM_STATUS_MIN,
+      code: "OCC-API-REQUEST",
+      correlationId: id,
+      detail: "😀".repeat(PROBLEM_DETAIL_MAX_LENGTH),
+    };
+
+    expect(problemDetailsSchema.parse(problem)).toEqual(problem);
+  });
+});
+
+describe("auth contracts", () => {
+  const validPassword = "p".repeat(LOGIN_PASSWORD_MIN_CODE_POINTS);
+
+  it.each([
+    "A".repeat(LOGIN_USERNAME_MIN_LENGTH),
+    "  Pilot.User  ",
+    "user+alias@example.test",
+    "A".repeat(LOGIN_USERNAME_MAX_LENGTH),
+  ])(
+    "accepts printable username input %j without transforming it",
+    (username) => {
+      expect(loginRequestSchema.parse({ username, password: validPassword })).toEqual({
+        username,
+        password: validPassword,
+      });
+    },
+  );
+
+  it.each([
+    "A".repeat(LOGIN_USERNAME_MIN_LENGTH - 1),
+    " ",
+    "\t",
+    "pilot\nuser",
+    "pilot\u0000user",
+    "A".repeat(LOGIN_USERNAME_MAX_LENGTH + 1),
+  ])(
+    "rejects invalid username input %j",
+    (username) => {
+      expect(() =>
+        loginRequestSchema.parse({ username, password: validPassword }),
+      ).toThrow();
+    },
+  );
+
+  it.each([
+    "p".repeat(LOGIN_PASSWORD_MIN_CODE_POINTS),
+    "😀".repeat(LOGIN_PASSWORD_MIN_CODE_POINTS),
+    "😀".repeat(65),
+    "p".repeat(LOGIN_PASSWORD_MAX_CODE_POINTS),
+  ])(
+    "accepts a password containing 12 to 128 Unicode code points",
+    (password) => {
+      expect(loginRequestSchema.parse({ username: "pilot.user", password })).toEqual({
+        username: "pilot.user",
+        password,
+      });
+    },
+  );
+
+  it.each([
+    "p".repeat(LOGIN_PASSWORD_MIN_CODE_POINTS - 1),
+    "😀".repeat(6),
+    "p".repeat(LOGIN_PASSWORD_MAX_CODE_POINTS + 1),
+  ])(
+    "rejects a password outside the Unicode code-point boundaries",
+    (password) => {
+      expect(() =>
+        loginRequestSchema.parse({ username: "pilot.user", password }),
+      ).toThrow();
+    },
+  );
+
+  it("accepts a 43-character base64url refresh token in request and response", () => {
+    expect(refreshRequestSchema.parse({ refreshToken })).toEqual({ refreshToken });
+    expect(
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "access-token",
+        refreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }),
+    ).toMatchObject({ refreshToken });
+  });
+
+  it.each([
+    "A".repeat(REFRESH_TOKEN_LENGTH - 1),
+    "A".repeat(REFRESH_TOKEN_LENGTH + 1),
+    `${"A".repeat(REFRESH_TOKEN_LENGTH - 1)}+`,
+    `${"A".repeat(REFRESH_TOKEN_LENGTH - 1)}/`,
+    `${"A".repeat(REFRESH_TOKEN_LENGTH - 1)}=`,
+  ])("rejects invalid refresh token %j", (invalidRefreshToken) => {
+    expect(() =>
+      refreshRequestSchema.parse({ refreshToken: invalidRefreshToken }),
+    ).toThrow();
+    expect(() =>
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "access-token",
+        refreshToken: invalidRefreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }),
+    ).toThrow();
+  });
+
+  it("enforces access-token boundaries", () => {
+    expect(
+      tokenResponseSchema.parse({
+        tokenType: "Bearer",
+        accessToken: "A".repeat(ACCESS_TOKEN_MAX_LENGTH),
+        refreshToken,
+        expiresIn: 900,
+        user: currentUser,
+      }).accessToken,
+    ).toHaveLength(ACCESS_TOKEN_MAX_LENGTH);
+    for (const length of [ACCESS_TOKEN_MIN_LENGTH - 1, ACCESS_TOKEN_MAX_LENGTH + 1]) {
+      expect(() =>
+        tokenResponseSchema.parse({
+          tokenType: "Bearer",
+          accessToken: "A".repeat(length),
+          refreshToken,
+          expiresIn: 900,
+          user: currentUser,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("enforces expiresIn boundaries", () => {
+    const token = {
+      tokenType: "Bearer",
+      accessToken: "access-token",
+      refreshToken,
+      user: currentUser,
+    } as const;
+
+    expect(
+      tokenResponseSchema.parse({ ...token, expiresIn: EXPIRES_IN_MAX_SECONDS }),
+    ).toMatchObject({ expiresIn: EXPIRES_IN_MAX_SECONDS });
+    for (const expiresIn of [EXPIRES_IN_MIN_SECONDS - 1, EXPIRES_IN_MAX_SECONDS + 1]) {
+      expect(() => tokenResponseSchema.parse({ ...token, expiresIn })).toThrow();
+    }
+  });
+
+  it("enforces CurrentUser string boundaries", () => {
+    const boundaryUser = {
+      ...currentUser,
+      username: "u".repeat(CURRENT_USER_USERNAME_MAX_LENGTH),
+      displayName: "D".repeat(CURRENT_USER_DISPLAY_NAME_MAX_LENGTH),
+      capabilities: ["C".repeat(CAPABILITY_MAX_LENGTH)],
+    };
+
+    expect(currentUserSchema.parse(boundaryUser)).toEqual(boundaryUser);
+    for (const invalid of [
+      {
+        ...boundaryUser,
+        username: "u".repeat(CURRENT_USER_USERNAME_MIN_LENGTH - 1),
+      },
+      {
+        ...boundaryUser,
+        username: "u".repeat(CURRENT_USER_USERNAME_MAX_LENGTH + 1),
+      },
+      {
+        ...boundaryUser,
+        displayName: "D".repeat(CURRENT_USER_DISPLAY_NAME_MIN_LENGTH - 1),
+      },
+      {
+        ...boundaryUser,
+        displayName: "D".repeat(CURRENT_USER_DISPLAY_NAME_MAX_LENGTH + 1),
+      },
+      {
+        ...boundaryUser,
+        capabilities: ["C".repeat(CAPABILITY_MIN_LENGTH - 1)],
+      },
+      {
+        ...boundaryUser,
+        capabilities: ["C".repeat(CAPABILITY_MAX_LENGTH + 1)],
+      },
+    ]) {
+      expect(() => currentUserSchema.parse(invalid)).toThrow();
+    }
+  });
+
+  it("counts displayName in Unicode code points", () => {
+    const user = {
+      ...currentUser,
+      displayName: "😀".repeat(CURRENT_USER_DISPLAY_NAME_MAX_LENGTH),
+    };
+
+    expect(currentUserSchema.parse(user)).toEqual(user);
+  });
+
+  it.each([
+    [
+      loginRequestSchema,
+      { username: "pilot.user", password: validPassword, otp: "123456" },
+    ],
+    [refreshRequestSchema, { refreshToken, accessToken: "secret" }],
+    [currentUserSchema, { ...currentUser, passwordHash: "secret" }],
+    [
+      tokenResponseSchema,
+      {
+        tokenType: "Bearer",
+        accessToken: "access-token",
+        refreshToken,
+        expiresIn: 900,
+        user: currentUser,
+        clientSecret: "secret",
+      },
+    ],
+  ])("rejects unknown fields in auth contract %#", (schema, value) => {
+    expect(schema).toBeDefined();
+    expect(() => schema.parse(value)).toThrow();
+  });
+});
+
+describe("eventEnvelopeSchema", () => {
+  const event = {
+    id,
+    customerInstanceId: anotherId,
+    type: "TaskClaimed",
+    schemaVersion: 1,
+    aggregateType: "Task",
+    aggregateId: id,
+    aggregateVersion: 0,
+    occurredAt,
+    actorId: anotherId,
+    correlationId: id,
+    causationId: anotherId,
+    payload: { taskId: id },
+  };
+
+  it.each([
+    "2026-07-30T12:00:00Z",
+    "2026-07-30T12:00:00.123Z",
+    "2026-07-30T12:00:00+08:00",
+  ])("parses an RFC 3339 instant with seconds: %s", (validOccurredAt) => {
+    expect(
+      eventEnvelopeSchema.parse({ ...event, occurredAt: validOccurredAt }),
+    ).toMatchObject({ occurredAt: validOccurredAt });
+  });
+
+  it("rejects an RFC 3339-like timestamp without seconds", () => {
+    expect(() =>
+      eventEnvelopeSchema.parse({ ...event, occurredAt: "2026-07-30T12:00Z" }),
+    ).toThrow();
+  });
+
+  it("rejects unknown envelope fields", () => {
+    expect(eventEnvelopeSchema).toBeDefined();
+    expect(() =>
+      eventEnvelopeSchema.parse({ ...event, password: "must-not-leak" }),
+    ).toThrow();
+  });
+
+  it("enforces event string and version boundaries", () => {
+    expect(
+      eventEnvelopeSchema.parse({
+        ...event,
+        type: "T".repeat(EVENT_TYPE_MAX_LENGTH),
+        schemaVersion: EVENT_SCHEMA_VERSION_MAX,
+        aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
+        aggregateVersion: EVENT_AGGREGATE_VERSION_MAX,
+      }),
+    ).toMatchObject({
+      schemaVersion: EVENT_SCHEMA_VERSION_MAX,
+      aggregateVersion: EVENT_AGGREGATE_VERSION_MAX,
+    });
+    for (const invalid of [
+      { ...event, type: "T".repeat(EVENT_TYPE_MIN_LENGTH - 1) },
+      { ...event, type: "T".repeat(EVENT_TYPE_MAX_LENGTH + 1) },
+      { ...event, type: "bad type" },
+      { ...event, type: "_bad" },
+      { ...event, schemaVersion: EVENT_SCHEMA_VERSION_MIN - 1 },
+      { ...event, schemaVersion: EVENT_SCHEMA_VERSION_MAX + 1 },
+      {
+        ...event,
+        aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MIN_LENGTH - 1),
+      },
+      {
+        ...event,
+        aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
+      },
+      { ...event, aggregateType: "bad type" },
+      { ...event, aggregateType: ":bad" },
+      { ...event, aggregateVersion: EVENT_AGGREGATE_VERSION_MIN - 1 },
+      { ...event, aggregateVersion: EVENT_AGGREGATE_VERSION_MAX + 1 },
+    ]) {
+      expect(() => eventEnvelopeSchema.parse(invalid)).toThrow();
+    }
+  });
+
+  it("bounds event identifiers and restricts them to the stable type pattern", () => {
+    expect(eventEnvelopeSchema.parse({
+      ...event,
+      type: "a".repeat(EVENT_TYPE_MAX_LENGTH),
+      aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH),
+    })).toBeDefined();
+    expect(() => eventEnvelopeSchema.parse({
+      ...event, type: "a".repeat(EVENT_TYPE_MAX_LENGTH + 1),
+    })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({
+      ...event, aggregateType: "A".repeat(EVENT_AGGREGATE_TYPE_MAX_LENGTH + 1),
+    })).toThrow();
+    // Event identifiers are stable routing keys, so non-ASCII is rejected.
+    expect(() => eventEnvelopeSchema.parse({ ...event, type: "😀" })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({ ...event, aggregateType: "🚀" })).toThrow();
+    expect(() => eventEnvelopeSchema.parse({ ...event, type: ".leading-dot" })).toThrow();
+  });
+});

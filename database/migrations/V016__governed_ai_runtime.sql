@@ -1,0 +1,2907 @@
+ALTER TABLE ai.model_profile
+    ADD COLUMN row_version bigint NOT NULL DEFAULT 0 CHECK (row_version >= 0),
+    ADD COLUMN updated_at timestamptz NOT NULL DEFAULT statement_timestamp();
+
+CREATE TRIGGER trg_model_profile_touch
+BEFORE UPDATE ON ai.model_profile
+FOR EACH ROW EXECUTE FUNCTION platform.touch_updated_at();
+
+CREATE TABLE authz.ai_authorization_grant (
+    id uuid PRIMARY KEY,
+    token_hash text NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+    signer_kid text NOT NULL CHECK (signer_kid ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'),
+    claim_idempotency_key_hash text CHECK (claim_idempotency_key_hash IS NULL OR claim_idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+    operation text NOT NULL CHECK (operation <> ''),
+    jti text NOT NULL UNIQUE CHECK (octet_length(jti) BETWEEN 1 AND 256),
+    principal_id uuid NOT NULL REFERENCES authz.entity(id),
+    target_entity_id uuid NOT NULL REFERENCES authz.entity(id),
+    purpose text NOT NULL CHECK (octet_length(purpose) BETWEEN 1 AND 256),
+    authorization_revision bigint NOT NULL CHECK (authorization_revision >= 0),
+    policy_release_id uuid NOT NULL REFERENCES authz.policy_release(id),
+    policy_release_digest text NOT NULL CHECK (policy_release_digest ~ '^[0-9a-f]{64}$'),
+    authorized_set_digest text NOT NULL CHECK (authorized_set_digest ~ '^[0-9a-f]{64}$'),
+    context_digest text NOT NULL CHECK (context_digest ~ '^[0-9a-f]{64}$'),
+    bounded_context jsonb NOT NULL CHECK (
+        platform.is_json_object(bounded_context)
+        AND octet_length(bounded_context::text) <= 32768
+    ),
+    classification_ceiling text NOT NULL
+        CHECK (classification_ceiling IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
+    agent_version_id uuid NOT NULL REFERENCES ai.agent_definition_version(id),
+    model_profile_id uuid NOT NULL REFERENCES ai.model_profile(id),
+    prompt_version_id uuid NOT NULL REFERENCES ai.prompt_template_version(id),
+    package_version_id uuid NOT NULL REFERENCES catalog.package_version(id),
+    embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    issued_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    event_id uuid NOT NULL,
+    intended_run_id uuid NOT NULL UNIQUE,
+    run_id uuid UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    CHECK (issued_at <= created_at + interval '1 minute'),
+    CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '5 minutes'),
+    CHECK ((consumed_at IS NULL AND run_id IS NULL) OR (consumed_at IS NOT NULL AND run_id IS NOT NULL)),
+    CHECK (consumed_at IS NULL OR (consumed_at >= issued_at AND consumed_at < expires_at)),
+    UNIQUE (id, run_id),
+    UNIQUE (id, agent_version_id, model_profile_id, prompt_version_id,
+            package_version_id, policy_release_id, embedding_space_id)
+);
+
+CREATE TABLE authz.ai_authorized_document (
+    grant_id uuid NOT NULL REFERENCES authz.ai_authorization_grant(id) ON DELETE CASCADE,
+    document_version_id uuid NOT NULL REFERENCES ai.knowledge_document_version(id),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    PRIMARY KEY (grant_id, document_version_id)
+);
+
+ALTER TABLE ai.ai_run
+    ADD COLUMN authorization_grant_id uuid UNIQUE REFERENCES authz.ai_authorization_grant(id),
+    ADD COLUMN embedding_space_id uuid REFERENCES ai.embedding_space(id),
+    ADD COLUMN recommendation_id uuid,
+    ADD CONSTRAINT uq_ai_run_grant UNIQUE (id, authorization_grant_id);
+ALTER TABLE ai.ai_run
+    ADD CONSTRAINT fk_ai_run_grant_configuration
+    FOREIGN KEY (authorization_grant_id, agent_version_id, model_profile_id, prompt_version_id,
+                 package_version_id, policy_release_id, embedding_space_id)
+    REFERENCES authz.ai_authorization_grant
+        (id, agent_version_id, model_profile_id, prompt_version_id,
+         package_version_id, policy_release_id, embedding_space_id);
+ALTER TABLE authz.ai_authorization_grant
+    ADD CONSTRAINT fk_ai_authorization_grant_run
+    FOREIGN KEY (run_id) REFERENCES ai.ai_run(id) DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION authz.enforce_ai_authorization_grant_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI authorization grant cannot be deleted';
+    END IF;
+    IF current_setting('innorder.ai_grant_claim_bind', true) = 'on'
+       AND OLD.claim_idempotency_key_hash IS NULL
+       AND NEW.claim_idempotency_key_hash ~ '^[0-9a-f]{64}$'
+       AND (to_jsonb(NEW) - 'claim_idempotency_key_hash') = (to_jsonb(OLD) - 'claim_idempotency_key_hash') THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.consumed_at IS NOT NULL
+       OR (to_jsonb(NEW) - ARRAY['consumed_at', 'run_id'])
+          IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['consumed_at', 'run_id'])
+       OR OLD.run_id IS NOT NULL OR OLD.consumed_at IS NOT NULL
+       OR NEW.run_id IS NULL OR NEW.consumed_at IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI authorization grant lifecycle is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_authorization_grant_lifecycle
+BEFORE UPDATE OR DELETE ON authz.ai_authorization_grant
+FOR EACH ROW EXECUTE FUNCTION authz.enforce_ai_authorization_grant_lifecycle();
+
+CREATE FUNCTION authz.bind_ai_grant_claim_idempotency(p_operation_id uuid, p_key_hash text)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+BEGIN
+    IF p_operation_id IS NULL OR p_key_hash IS NULL OR p_key_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid AI grant claim idempotency binding';
+    END IF;
+    SELECT * INTO grant_row FROM authz.ai_authorization_grant
+    WHERE intended_run_id = p_operation_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant is invalid';
+    END IF;
+    IF grant_row.claim_idempotency_key_hash IS NULL THEN
+        PERFORM set_config('innorder.ai_grant_claim_bind', 'on', true);
+        UPDATE authz.ai_authorization_grant
+        SET claim_idempotency_key_hash = p_key_hash
+        WHERE id = grant_row.id;
+        PERFORM set_config('innorder.ai_grant_claim_bind', 'off', true);
+    ELSIF grant_row.claim_idempotency_key_hash <> p_key_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'AI grant claim idempotency key conflict';
+    END IF;
+    RETURN grant_row.id;
+END;
+$$;
+
+CREATE FUNCTION authz.enforce_ai_authorized_document_limit()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    PERFORM 1 FROM authz.ai_authorization_grant WHERE id = NEW.grant_id FOR UPDATE;
+    IF (SELECT count(*) FROM authz.ai_authorized_document WHERE grant_id = NEW.grant_id) >= 500 THEN
+        RAISE EXCEPTION USING ERRCODE = '54000', MESSAGE = 'authorized document limit of 500 exceeded';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_authorized_document_limit
+BEFORE INSERT ON authz.ai_authorized_document
+FOR EACH ROW EXECUTE FUNCTION authz.enforce_ai_authorized_document_limit();
+CREATE TRIGGER trg_ai_authorized_document_immutable
+BEFORE UPDATE OR DELETE ON authz.ai_authorized_document
+FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+
+CREATE TABLE ai.ingestion_job (
+    id uuid PRIMARY KEY,
+    source_id uuid NOT NULL REFERENCES ai.knowledge_source(id),
+    document_id uuid REFERENCES ai.knowledge_document(id),
+    produced_document_version_id uuid REFERENCES ai.knowledge_document_version(id),
+    source_version text NOT NULL,
+    source_object_hash text NOT NULL CHECK (source_object_hash ~ '^[0-9a-f]{64}$'),
+    normalized_content_hash text NOT NULL CHECK (normalized_content_hash ~ '^[0-9a-f]{64}$'),
+    parser_version text NOT NULL CHECK (octet_length(parser_version) BETWEEN 1 AND 128 AND parser_version !~ '[[:cntrl:]]'),
+    chunker_version text NOT NULL CHECK (octet_length(chunker_version) BETWEEN 1 AND 128 AND chunker_version !~ '[[:cntrl:]]'),
+    candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(checkpoint)),
+    stage text NOT NULL CHECK (stage IN ('DISCOVER', 'FETCH', 'PARSE', 'CHUNK', 'EMBED', 'COMPLETE')),
+    status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'FAILED')),
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    max_attempts integer NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 100),
+    next_attempt_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    lease_owner text,
+    lease_expires_at timestamptz,
+    sanitized_error text CHECK (sanitized_error IS NULL OR (
+        octet_length(sanitized_error) BETWEEN 1 AND 2048 AND sanitized_error !~ '[[:cntrl:]]'
+    )),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    completed_at timestamptz,
+    UNIQUE (source_id, source_version, source_object_hash, normalized_content_hash,
+            parser_version, chunker_version, candidate_embedding_space_id),
+    CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CHECK (lease_expires_at IS NULL OR lease_expires_at > created_at),
+    CHECK (status <> 'FAILED' OR (sanitized_error IS NOT NULL AND completed_at IS NOT NULL)),
+    CHECK (status <> 'COMPLETED' OR (produced_document_version_id IS NOT NULL AND completed_at IS NOT NULL)),
+    CHECK (status IN ('COMPLETED', 'FAILED') OR completed_at IS NULL)
+);
+
+CREATE TABLE ai.ingestion_attempt (
+    id uuid PRIMARY KEY,
+    job_id uuid NOT NULL REFERENCES ai.ingestion_job(id),
+    attempt_number integer NOT NULL CHECK (attempt_number > 0),
+    worker_id text NOT NULL,
+    stage text NOT NULL CHECK (stage IN ('DISCOVER', 'FETCH', 'PARSE', 'CHUNK', 'EMBED', 'COMPLETE')),
+    checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (platform.is_json_object(checkpoint)),
+    status text NOT NULL CHECK (status IN ('RUNNING', 'SUCCEEDED', 'FAILED')),
+    sanitized_error text CHECK (sanitized_error IS NULL OR octet_length(sanitized_error) BETWEEN 1 AND 2048),
+    lease_expires_at timestamptz NOT NULL,
+    started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    completed_at timestamptz,
+    UNIQUE (job_id, attempt_number),
+    CHECK ((status = 'RUNNING') = (completed_at IS NULL)),
+    CHECK (status <> 'FAILED' OR sanitized_error IS NOT NULL)
+);
+
+CREATE TABLE ai.event_consumption (
+    id uuid PRIMARY KEY,
+    consumer_key text NOT NULL,
+    event_id uuid NOT NULL,
+    event_type text NOT NULL,
+    schema_version integer NOT NULL CHECK (schema_version > 0),
+    aggregate_type text NOT NULL,
+    aggregate_id uuid NOT NULL,
+    aggregate_version bigint NOT NULL CHECK (aggregate_version >= 0),
+    status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'RETRY', 'COMPLETED', 'DEAD')),
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    max_attempts integer NOT NULL DEFAULT 10 CHECK (max_attempts BETWEEN 1 AND 100),
+    next_attempt_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    lease_owner text,
+    lease_expires_at timestamptz,
+    sanitized_terminal_error text CHECK (sanitized_terminal_error IS NULL OR (
+        octet_length(sanitized_terminal_error) BETWEEN 1 AND 2048
+        AND sanitized_terminal_error !~ '[[:cntrl:]]'
+    )),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    completed_at timestamptz,
+    dead_at timestamptz,
+    UNIQUE (consumer_key, event_id),
+    CHECK ((status = 'PROCESSING') = (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)),
+    CHECK (status <> 'DEAD' OR (sanitized_terminal_error IS NOT NULL AND dead_at IS NOT NULL)),
+    CHECK (status <> 'COMPLETED' OR completed_at IS NOT NULL),
+    CHECK (status = 'DEAD' OR dead_at IS NULL)
+);
+
+CREATE TABLE ai.retention_policy (
+    object_kind text PRIMARY KEY CHECK (object_kind IN ('TRACE', 'RETRIEVAL_HIT', 'INVOCATION', 'RECOMMENDATION_SUBMISSION', 'GATE_RESULT', 'GATE_EVIDENCE', 'ARTIFACT')),
+    retention_interval interval NOT NULL DEFAULT interval '1 year'
+        CHECK (retention_interval >= interval '1 year'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp()
+);
+
+INSERT INTO ai.retention_policy (object_kind)
+VALUES ('TRACE'), ('RETRIEVAL_HIT'), ('INVOCATION'), ('RECOMMENDATION_SUBMISSION'), ('GATE_RESULT'), ('GATE_EVIDENCE'), ('ARTIFACT');
+
+CREATE TABLE ai.model_invocation (
+    id uuid PRIMARY KEY,
+    run_id uuid NOT NULL REFERENCES ai.ai_run(id),
+    model_profile_id uuid NOT NULL REFERENCES ai.model_profile(id),
+    operation text NOT NULL,
+    request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+    response_hash text CHECK (response_hash IS NULL OR response_hash ~ '^[0-9a-f]{64}$'),
+    provider_request_id_hash text CHECK (provider_request_id_hash IS NULL OR provider_request_id_hash ~ '^[0-9a-f]{64}$'),
+    capability_hash text NOT NULL CHECK (capability_hash ~ '^[0-9a-f]{64}$'),
+    input_tokens bigint NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+    output_tokens bigint NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    cost numeric NOT NULL DEFAULT 0 CHECK (cost >= 0),
+    started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    completed_at timestamptz,
+    latency_ms integer CHECK (latency_ms IS NULL OR latency_ms >= 0),
+    status text NOT NULL CHECK (status IN ('STARTED', 'COMPLETED', 'FAILED', 'CANCELLED')),
+    sanitized_error text CHECK (sanitized_error IS NULL OR octet_length(sanitized_error) BETWEEN 1 AND 2048),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    CHECK (status <> 'FAILED' OR sanitized_error IS NOT NULL),
+    CHECK (completed_at IS NULL OR completed_at >= started_at),
+    CHECK (retention_until >= started_at + interval '1 year')
+);
+
+CREATE TABLE ai.recommendation_submission (
+    run_id uuid PRIMARY KEY REFERENCES ai.ai_run(id),
+    operation_id uuid NOT NULL,
+    invocation_id uuid NOT NULL UNIQUE REFERENCES ai.model_invocation(id),
+    idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
+    payload_hash text NOT NULL CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
+    payload jsonb NOT NULL CHECK (platform.is_json_object(payload) AND octet_length(payload::text) BETWEEN 2 AND 262144),
+    artifact_id uuid NOT NULL,
+    artifact_object_key text NOT NULL CHECK (octet_length(artifact_object_key) BETWEEN 1 AND 1024 AND artifact_object_key !~ '[[:cntrl:]]'),
+    artifact_hash text NOT NULL CHECK (artifact_hash ~ '^[0-9a-f]{64}$'),
+    status text NOT NULL CHECK (status IN ('PREPARED', 'ACKNOWLEDGED', 'FAILED')),
+    core_recommendation_id uuid,
+    core_receipt_hash text CHECK (core_receipt_hash IS NULL OR core_receipt_hash ~ '^[0-9a-f]{64}$'),
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 100),
+    prepared_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    last_attempt_at timestamptz,
+    acknowledged_at timestamptz,
+    failed_at timestamptz,
+    sanitized_error text CHECK (sanitized_error IS NULL OR (
+        octet_length(sanitized_error) BETWEEN 1 AND 2048 AND sanitized_error !~ '[[:cntrl:]]'
+    )),
+    data_classification text NOT NULL CHECK (data_classification IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    UNIQUE (run_id, operation_id, idempotency_key, payload_hash),
+    CHECK (operation_id = run_id),
+    CHECK ((status = 'ACKNOWLEDGED') = (core_recommendation_id IS NOT NULL AND core_receipt_hash IS NOT NULL AND acknowledged_at IS NOT NULL)),
+    CHECK ((status = 'FAILED') = (failed_at IS NOT NULL AND sanitized_error IS NOT NULL)),
+    CHECK (status = 'PREPARED' OR last_attempt_at IS NOT NULL),
+    CHECK (retention_until >= prepared_at + interval '1 year')
+);
+
+CREATE TABLE ai.retrieval_trace (
+    id uuid PRIMARY KEY,
+    run_id uuid NOT NULL REFERENCES ai.ai_run(id),
+    grant_id uuid NOT NULL REFERENCES authz.ai_authorization_grant(id),
+    embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    query_hash text NOT NULL CHECK (query_hash ~ '^[0-9a-f]{64}$'),
+    authorized_set_digest text NOT NULL CHECK (authorized_set_digest ~ '^[0-9a-f]{64}$'),
+    authorized_document_count integer NOT NULL CHECK (authorized_document_count BETWEEN 0 AND 500),
+    classification_ceiling text NOT NULL CHECK (classification_ceiling IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')),
+    lexical_candidate_count integer NOT NULL CHECK (lexical_candidate_count >= 0),
+    vector_candidate_count integer NOT NULL CHECK (vector_candidate_count >= 0),
+    result_count integer NOT NULL CHECK (result_count >= 0),
+    ranking_config jsonb NOT NULL CHECK (platform.is_json_object(ranking_config)),
+    bundle_digest text CHECK (bundle_digest IS NULL OR bundle_digest ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    CHECK (retention_until >= created_at + interval '1 year'),
+    CONSTRAINT fk_retrieval_trace_grant_run FOREIGN KEY (grant_id, run_id)
+        REFERENCES authz.ai_authorization_grant(id, run_id),
+    CONSTRAINT fk_retrieval_trace_run_grant FOREIGN KEY (run_id, grant_id)
+        REFERENCES ai.ai_run(id, authorization_grant_id)
+);
+
+CREATE TABLE ai.retrieval_hit (
+    trace_id uuid NOT NULL REFERENCES ai.retrieval_trace(id) ON DELETE CASCADE,
+    document_version_id uuid NOT NULL REFERENCES ai.knowledge_document_version(id),
+    chunk_id uuid NOT NULL,
+    lexical_score double precision,
+    vector_score double precision,
+    fused_score double precision NOT NULL,
+    rank integer NOT NULL CHECK (rank > 0),
+    excerpt_hash text NOT NULL CHECK (excerpt_hash ~ '^[0-9a-f]{64}$'),
+    injection_detected boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    PRIMARY KEY (trace_id, rank),
+    UNIQUE (trace_id, chunk_id),
+    FOREIGN KEY (chunk_id, document_version_id) REFERENCES ai.knowledge_chunk(id, document_version_id),
+    CHECK (retention_until >= created_at + interval '1 year')
+);
+
+CREATE TABLE ai.embedding_space_gate_evaluation (
+    id uuid PRIMARY KEY,
+    dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
+    dataset_content_hash text NOT NULL CHECK (dataset_content_hash ~ '^[0-9a-f]{64}$'),
+    corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    document_manifest text NOT NULL CHECK (octet_length(document_manifest) > 0),
+    candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    eligible_count bigint NOT NULL CHECK (eligible_count > 0),
+    embedded_count bigint NOT NULL CHECK (embedded_count >= 0 AND embedded_count <= eligible_count),
+    leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
+    evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    CHECK (retention_until >= created_at + interval '1 year'),
+    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id),
+    UNIQUE (id, dataset_version_id, dataset_content_hash, document_manifest)
+);
+
+CREATE TABLE ai.embedding_space_gate_case_evidence (
+    evaluation_id uuid NOT NULL REFERENCES ai.embedding_space_gate_evaluation(id),
+    case_id uuid NOT NULL REFERENCES ai.evaluation_case(id),
+    citation_numerator bigint NOT NULL CHECK (citation_numerator >= 0),
+    citation_denominator bigint NOT NULL CHECK (citation_denominator > 0 AND citation_denominator >= citation_numerator),
+    recall_numerator bigint NOT NULL CHECK (recall_numerator >= 0),
+    recall_denominator bigint NOT NULL CHECK (recall_denominator > 0 AND recall_denominator >= recall_numerator),
+    leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
+    expected_outcome_hash text NOT NULL CHECK (expected_outcome_hash ~ '^[0-9a-f]{64}$'),
+    actual_outcome_hash text NOT NULL CHECK (actual_outcome_hash ~ '^[0-9a-f]{64}$'),
+    outcome_status text NOT NULL CHECK (outcome_status IN ('MATCH', 'MISMATCH')),
+    evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    PRIMARY KEY (evaluation_id, case_id),
+    CHECK (retention_until >= created_at + interval '1 year')
+);
+
+CREATE TABLE ai.embedding_space_gate_result (
+    id uuid PRIMARY KEY REFERENCES ai.embedding_space_gate_evaluation(id),
+    dataset_version_id uuid NOT NULL REFERENCES ai.evaluation_dataset_version(id),
+    dataset_content_hash text NOT NULL CHECK (dataset_content_hash ~ '^[0-9a-f]{64}$'),
+    corpus_manifest_digest text NOT NULL CHECK (corpus_manifest_digest ~ '^[0-9a-f]{64}$'),
+    document_manifest text NOT NULL CHECK (octet_length(document_manifest) > 0),
+    candidate_embedding_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    expected_active_space_id uuid NOT NULL REFERENCES ai.embedding_space(id),
+    eligible_count bigint NOT NULL CHECK (eligible_count > 0),
+    embedded_count bigint NOT NULL CHECK (embedded_count >= 0 AND embedded_count <= eligible_count),
+    leakage_count bigint NOT NULL CHECK (leakage_count >= 0),
+    outcome_mismatch_count bigint NOT NULL DEFAULT 0 CHECK (outcome_mismatch_count >= 0),
+    citation_numerator bigint NOT NULL CHECK (citation_numerator >= 0),
+    citation_denominator bigint NOT NULL CHECK (citation_denominator > 0 AND citation_denominator >= citation_numerator),
+    citation_precision numeric GENERATED ALWAYS AS (citation_numerator::numeric / citation_denominator) STORED,
+    recall_sum numeric NOT NULL CHECK (recall_sum >= 0),
+    recall_count bigint NOT NULL CHECK (recall_count > 0),
+    recall_mean numeric GENERATED ALWAYS AS (recall_sum / recall_count) STORED,
+    minimum_coverage numeric NOT NULL DEFAULT 1.0 CHECK (minimum_coverage = 1.0),
+    maximum_leakage bigint NOT NULL DEFAULT 0 CHECK (maximum_leakage = 0),
+    minimum_citation_precision numeric NOT NULL DEFAULT 0.95 CHECK (minimum_citation_precision = 0.95),
+    minimum_recall_at_10 numeric NOT NULL DEFAULT 0.85 CHECK (minimum_recall_at_10 = 0.85),
+    decision text NOT NULL CHECK (decision IN ('PASS', 'FAIL')),
+    evidence_hash text NOT NULL CHECK (evidence_hash ~ '^[0-9a-f]{64}$'),
+    evaluated_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    retention_until timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '1 year'),
+    legal_hold_id uuid,
+    CHECK (retention_until >= evaluated_at + interval '1 year'),
+    CHECK ((decision = 'PASS') = (
+        embedded_count::numeric / eligible_count >= minimum_coverage
+        AND leakage_count <= maximum_leakage
+        AND outcome_mismatch_count = 0
+        AND citation_numerator::numeric / citation_denominator >= minimum_citation_precision
+        AND recall_sum / recall_count >= minimum_recall_at_10
+    )),
+    UNIQUE (dataset_version_id, corpus_manifest_digest, candidate_embedding_space_id),
+    FOREIGN KEY (id, dataset_version_id, dataset_content_hash, document_manifest)
+        REFERENCES ai.embedding_space_gate_evaluation(id, dataset_version_id, dataset_content_hash, document_manifest)
+);
+
+CREATE TABLE ai.legal_hold (
+    id uuid PRIMARY KEY,
+    hold_key text NOT NULL UNIQUE,
+    reason text NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 1024),
+    placed_by uuid NOT NULL REFERENCES iam.principal(id),
+    placed_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    released_by uuid REFERENCES iam.principal(id),
+    released_at timestamptz,
+    CHECK ((released_by IS NULL) = (released_at IS NULL)),
+    CHECK (released_at IS NULL OR released_at >= placed_at)
+);
+
+CREATE TABLE ai.legal_hold_object (
+    hold_id uuid NOT NULL REFERENCES ai.legal_hold(id),
+    object_kind text NOT NULL CHECK (object_kind IN ('RUN', 'TRACE', 'INVOCATION', 'RECOMMENDATION_SUBMISSION', 'ARTIFACT', 'GATE_RESULT', 'AUTHORIZATION_GRANT')),
+    object_id uuid NOT NULL,
+    fact_key text NOT NULL DEFAULT '',
+    held_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    PRIMARY KEY (hold_id, object_kind, object_id, fact_key)
+);
+
+CREATE FUNCTION ai.validate_legal_hold_object_target()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    target_run_id uuid;
+BEGIN
+    IF NEW.object_kind = 'RUN' THEN
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'ARTIFACT' THEN
+        SELECT run_id INTO target_run_id FROM ai.ai_run_artifact WHERE id = NEW.object_id;
+        IF target_run_id IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
+        END IF;
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = target_run_id FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
+        END IF;
+        PERFORM 1 FROM ai.ai_run_artifact artifact
+        WHERE artifact.id = NEW.object_id AND artifact.run_id = target_run_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'TRACE' THEN
+        PERFORM 1 FROM ai.retrieval_trace WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'INVOCATION' THEN
+        PERFORM 1 FROM ai.model_invocation WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'RECOMMENDATION_SUBMISSION' THEN
+        PERFORM 1 FROM ai.recommendation_submission WHERE run_id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'GATE_RESULT' THEN
+        PERFORM 1 FROM ai.embedding_space_gate_result WHERE id = NEW.object_id FOR UPDATE;
+    ELSIF NEW.object_kind = 'AUTHORIZATION_GRANT' THEN
+        PERFORM 1 FROM authz.ai_authorization_grant WHERE id = NEW.object_id FOR UPDATE;
+    END IF;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '23503', MESSAGE = 'legal hold target does not exist';
+    END IF;
+    PERFORM 1 FROM ai.legal_hold hold_row
+    WHERE hold_row.id = NEW.hold_id AND hold_row.released_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is not active';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION ai.heartbeat_ingestion_job(p_job_id uuid, p_worker_id text, p_lease interval)
+RETURNS timestamptz
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_id uuid;
+    extended_until timestamptz;
+BEGIN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = '' OR p_lease IS NULL
+       OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion heartbeat bounds';
+    END IF;
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    UPDATE ai.ingestion_job
+    SET lease_expires_at = transaction_timestamp() + p_lease, updated_at = statement_timestamp()
+    WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp()
+    RETURNING lease_expires_at INTO extended_until;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_attempt attempt
+    SET lease_expires_at = extended_until
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    RETURN extended_until;
+END;
+$$;
+
+CREATE TRIGGER trg_legal_hold_object_target
+BEFORE INSERT ON ai.legal_hold_object
+FOR EACH ROW EXECUTE FUNCTION ai.validate_legal_hold_object_target();
+
+CREATE FUNCTION ai.enforce_legal_hold_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    table_owner text;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.released_by IS NOT NULL OR NEW.released_at IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold must be inserted active';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' OR OLD.released_at IS NOT NULL
+       OR (to_jsonb(NEW) - ARRAY['released_by', 'released_at'])
+          IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['released_by', 'released_at']) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is append-only';
+    END IF;
+    SELECT pg_get_userbyid(relowner) INTO STRICT table_owner
+    FROM pg_class WHERE oid = TG_RELID;
+    IF current_setting('innorder.legal_hold_release', true) IS DISTINCT FROM 'on'
+       OR current_user IS DISTINCT FROM table_owner THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold release requires bounded function';
+    END IF;
+    IF NEW.released_by IS NULL OR NEW.released_at IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is append-only';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_legal_hold_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON ai.legal_hold
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_legal_hold_lifecycle();
+
+ALTER TABLE ai.model_invocation
+    ADD CONSTRAINT fk_model_invocation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.recommendation_submission
+    ADD CONSTRAINT fk_recommendation_submission_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.retrieval_trace
+    ADD CONSTRAINT fk_retrieval_trace_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.retrieval_hit
+    ADD CONSTRAINT fk_retrieval_hit_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.embedding_space_gate_evaluation
+    ADD CONSTRAINT fk_gate_evaluation_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.embedding_space_gate_case_evidence
+    ADD CONSTRAINT fk_gate_case_evidence_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+ALTER TABLE ai.embedding_space_gate_result
+    ADD CONSTRAINT fk_gate_result_legal_hold FOREIGN KEY (legal_hold_id) REFERENCES ai.legal_hold(id);
+UPDATE ai.ai_run_artifact
+SET retention_until = created_at + interval '1 year'
+WHERE retention_until < created_at + interval '1 year';
+ALTER TABLE ai.ai_run_artifact
+    ALTER COLUMN retention_until SET DEFAULT (statement_timestamp() + interval '1 year'),
+    ADD COLUMN legal_hold_id uuid REFERENCES ai.legal_hold(id),
+    ADD CONSTRAINT ck_ai_run_artifact_one_year_retention
+        CHECK (retention_until >= created_at + interval '1 year');
+
+CREATE FUNCTION ai.enforce_run_artifact_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    table_owner text;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI run artifact is immutable';
+    END IF;
+    SELECT pg_get_userbyid(relowner) INTO STRICT table_owner
+    FROM pg_class WHERE oid = TG_RELID;
+    IF current_setting('innorder.artifact_cleanup', true) IS DISTINCT FROM 'on'
+       OR current_user IS DISTINCT FROM table_owner THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact deletion requires bounded retention cleanup';
+    END IF;
+    IF OLD.retention_until > statement_timestamp() THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact retention period has not elapsed';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM ai.legal_hold hold_row
+        WHERE hold_row.id = OLD.legal_hold_id AND hold_row.released_at IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM ai.legal_hold_object held
+        JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+        WHERE held.object_kind = 'ARTIFACT' AND held.object_id = OLD.id
+          AND hold_row.released_at IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM ai.legal_hold_object held
+        JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+        WHERE held.object_kind = 'RUN' AND held.object_id = OLD.run_id
+          AND hold_row.released_at IS NULL
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'artifact is under an active legal hold';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER trg_ai_run_artifact_lifecycle
+BEFORE UPDATE OR DELETE ON ai.ai_run_artifact
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_run_artifact_lifecycle();
+
+CREATE FUNCTION ai.release_legal_hold(p_hold_id uuid, p_released_by uuid)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    target_run_id uuid;
+    target_artifact_id uuid;
+    hold_released_at timestamptz;
+BEGIN
+    IF p_hold_id IS NULL OR p_released_by IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'legal hold release identifiers cannot be NULL';
+    END IF;
+    FOR target_run_id IN
+        SELECT target.id
+        FROM (
+            SELECT run.id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run run ON held.object_kind = 'RUN' AND run.id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.run_id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run_artifact artifact
+              ON held.object_kind = 'ARTIFACT' AND artifact.id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.run_id
+            FROM ai.ai_run_artifact artifact
+            WHERE artifact.legal_hold_id = p_hold_id
+        ) target
+        ORDER BY target.id
+    LOOP
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = target_run_id FOR UPDATE;
+    END LOOP;
+    FOR target_artifact_id IN
+        SELECT target.id
+        FROM (
+            SELECT artifact.id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run_artifact artifact
+              ON held.object_kind = 'ARTIFACT' AND artifact.id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.id
+            FROM ai.legal_hold_object held
+            JOIN ai.ai_run_artifact artifact
+              ON held.object_kind = 'RUN' AND artifact.run_id = held.object_id
+            WHERE held.hold_id = p_hold_id
+            UNION
+            SELECT artifact.id
+            FROM ai.ai_run_artifact artifact
+            WHERE artifact.legal_hold_id = p_hold_id
+        ) target
+        ORDER BY target.id
+    LOOP
+        PERFORM 1 FROM ai.ai_run_artifact artifact
+        WHERE artifact.id = target_artifact_id FOR UPDATE;
+    END LOOP;
+    SELECT released_at INTO STRICT hold_released_at
+    FROM ai.legal_hold hold_row WHERE hold_row.id = p_hold_id FOR UPDATE;
+    IF hold_released_at IS NOT NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'legal hold is already released';
+    END IF;
+    PERFORM set_config('innorder.legal_hold_release', 'on', true);
+    UPDATE ai.legal_hold
+    SET released_by = p_released_by, released_at = statement_timestamp()
+    WHERE id = p_hold_id;
+    PERFORM set_config('innorder.legal_hold_release', 'off', true);
+    RETURN p_hold_id;
+END;
+$$;
+
+CREATE FUNCTION ai.cleanup_expired_run_artifacts(p_before timestamptz, p_limit integer)
+RETURNS TABLE (artifact_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate record;
+    artifact_row ai.ai_run_artifact%ROWTYPE;
+    target_run_id uuid;
+BEGIN
+    IF p_before IS NULL OR p_before > statement_timestamp()
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid artifact cleanup bounds';
+    END IF;
+    FOR candidate IN
+        SELECT candidate_artifact.id
+        FROM ai.ai_run_artifact candidate_artifact
+        WHERE candidate_artifact.retention_until <= p_before
+          AND candidate_artifact.retention_until <= statement_timestamp()
+          AND NOT EXISTS (
+              SELECT 1 FROM ai.legal_hold hold_row
+              WHERE hold_row.id = candidate_artifact.legal_hold_id AND hold_row.released_at IS NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM ai.legal_hold_object held
+              JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+              WHERE held.object_kind = 'ARTIFACT' AND held.object_id = candidate_artifact.id
+                AND hold_row.released_at IS NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM ai.legal_hold_object held
+              JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+              WHERE held.object_kind = 'RUN' AND held.object_id = candidate_artifact.run_id
+                AND hold_row.released_at IS NULL
+          )
+        ORDER BY candidate_artifact.run_id, candidate_artifact.id
+        LIMIT p_limit
+    LOOP
+        SELECT run_id INTO target_run_id FROM ai.ai_run_artifact WHERE id = candidate.id;
+        CONTINUE WHEN target_run_id IS NULL;
+        PERFORM 1 FROM ai.ai_run run WHERE run.id = target_run_id FOR UPDATE;
+        CONTINUE WHEN NOT FOUND;
+        SELECT * INTO artifact_row FROM ai.ai_run_artifact artifact
+        WHERE artifact.id = candidate.id AND artifact.run_id = target_run_id FOR UPDATE;
+        CONTINUE WHEN NOT FOUND;
+        PERFORM 1 FROM ai.legal_hold hold_row
+        WHERE hold_row.id IN (
+            SELECT artifact_row.legal_hold_id WHERE artifact_row.legal_hold_id IS NOT NULL
+            UNION
+            SELECT held.hold_id FROM ai.legal_hold_object held
+            WHERE (held.object_kind = 'ARTIFACT' AND held.object_id = artifact_row.id)
+               OR (held.object_kind = 'RUN' AND held.object_id = target_run_id)
+        )
+        ORDER BY hold_row.id
+        FOR UPDATE;
+        CONTINUE WHEN artifact_row.retention_until > p_before
+                   OR artifact_row.retention_until > statement_timestamp();
+        CONTINUE WHEN EXISTS (
+            SELECT 1 FROM ai.legal_hold hold_row
+            WHERE hold_row.id = artifact_row.legal_hold_id AND hold_row.released_at IS NULL
+        ) OR EXISTS (
+            SELECT 1 FROM ai.legal_hold_object held
+            JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+            WHERE held.object_kind = 'ARTIFACT' AND held.object_id = artifact_row.id
+              AND hold_row.released_at IS NULL
+        ) OR EXISTS (
+            SELECT 1 FROM ai.legal_hold_object held
+            JOIN ai.legal_hold hold_row ON hold_row.id = held.hold_id
+            WHERE held.object_kind = 'RUN' AND held.object_id = target_run_id
+              AND hold_row.released_at IS NULL
+        );
+        PERFORM set_config('innorder.artifact_cleanup', 'on', true);
+        DELETE FROM ai.ai_run_artifact WHERE id = artifact_row.id;
+        PERFORM set_config('innorder.artifact_cleanup', 'off', true);
+        artifact_id := artifact_row.id;
+        RETURN NEXT;
+    END LOOP;
+END;
+$$;
+
+CREATE FUNCTION ai.enforce_evaluation_dataset_version_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'DRAFT' THEN
+            RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation dataset versions must be inserted in DRAFT state';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.status IN ('PUBLISHED', 'RETIRED') THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'published evaluation dataset version is immutable';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF OLD.status = 'RETIRED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retired evaluation dataset version is immutable';
+    END IF;
+    IF OLD.status = 'PUBLISHED' THEN
+        IF NEW.status = 'RETIRED' AND (to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status') THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'published evaluation dataset version is immutable';
+    END IF;
+    IF NEW.status = 'RETIRED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version must be published before retirement';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_evaluation_dataset_version_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON ai.evaluation_dataset_version
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_evaluation_dataset_version_lifecycle();
+
+CREATE FUNCTION ai.enforce_evaluation_case_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    old_dataset_status text;
+    new_dataset_status text;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        SELECT status INTO STRICT old_dataset_status
+        FROM ai.evaluation_dataset_version WHERE id = OLD.dataset_version_id FOR SHARE;
+        IF old_dataset_status IN ('PUBLISHED', 'RETIRED') THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation cases for published or retired datasets are immutable';
+        END IF;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        SELECT status INTO STRICT new_dataset_status
+        FROM ai.evaluation_dataset_version WHERE id = NEW.dataset_version_id FOR SHARE;
+        IF new_dataset_status <> 'DRAFT' THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation cases for published or retired datasets are immutable';
+        END IF;
+    END IF;
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+CREATE TRIGGER trg_evaluation_case_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON ai.evaluation_case
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_evaluation_case_lifecycle();
+
+CREATE FUNCTION ai.enforce_ingestion_job_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion job cannot be deleted';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id OR NEW.source_id IS DISTINCT FROM OLD.source_id
+       OR NEW.document_id IS DISTINCT FROM OLD.document_id
+       OR NEW.source_version IS DISTINCT FROM OLD.source_version
+       OR NEW.source_object_hash IS DISTINCT FROM OLD.source_object_hash
+       OR NEW.normalized_content_hash IS DISTINCT FROM OLD.normalized_content_hash
+       OR NEW.parser_version IS DISTINCT FROM OLD.parser_version
+       OR NEW.chunker_version IS DISTINCT FROM OLD.chunker_version
+       OR NEW.candidate_embedding_space_id IS DISTINCT FROM OLD.candidate_embedding_space_id
+       OR NEW.corpus_manifest_digest IS DISTINCT FROM OLD.corpus_manifest_digest
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion job deterministic identity is immutable';
+    END IF;
+    IF OLD.produced_document_version_id IS NOT NULL
+       AND NEW.produced_document_version_id IS DISTINCT FROM OLD.produced_document_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'produced ingestion document version is immutable';
+    END IF;
+    IF OLD.status IN ('COMPLETED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal ingestion job is immutable';
+    END IF;
+    IF NEW.attempts < OLD.attempts OR NEW.attempts > NEW.max_attempts THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempts cannot decrease or exceed the retry bound';
+    END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+        (OLD.status IN ('PENDING', 'RETRY') AND NEW.status IN ('PROCESSING', 'FAILED'))
+        OR (OLD.status = 'PROCESSING' AND NEW.status IN ('RETRY', 'COMPLETED', 'FAILED'))
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid ingestion job lifecycle transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ingestion_job_lifecycle
+BEFORE UPDATE OR DELETE ON ai.ingestion_job
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_ingestion_job_lifecycle();
+
+CREATE FUNCTION ai.enforce_ingestion_attempt_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt cannot be deleted';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id OR NEW.job_id IS DISTINCT FROM OLD.job_id
+       OR NEW.attempt_number IS DISTINCT FROM OLD.attempt_number
+       OR NEW.worker_id IS DISTINCT FROM OLD.worker_id OR NEW.started_at IS DISTINCT FROM OLD.started_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt identity is immutable';
+    END IF;
+    IF OLD.status IN ('SUCCEEDED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal ingestion attempt is immutable';
+    END IF;
+    IF NEW.status NOT IN ('RUNNING', 'SUCCEEDED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid ingestion attempt transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_ingestion_attempt_lifecycle
+BEFORE UPDATE OR DELETE ON ai.ingestion_attempt
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_ingestion_attempt_lifecycle();
+
+CREATE FUNCTION ai.enforce_event_consumption_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event consumption cannot be deleted';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id OR NEW.consumer_key IS DISTINCT FROM OLD.consumer_key
+       OR NEW.event_id IS DISTINCT FROM OLD.event_id OR NEW.event_type IS DISTINCT FROM OLD.event_type
+       OR NEW.schema_version IS DISTINCT FROM OLD.schema_version
+       OR NEW.aggregate_type IS DISTINCT FROM OLD.aggregate_type
+       OR NEW.aggregate_id IS DISTINCT FROM OLD.aggregate_id
+       OR NEW.aggregate_version IS DISTINCT FROM OLD.aggregate_version
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event consumption identity is immutable';
+    END IF;
+    IF OLD.status IN ('COMPLETED', 'DEAD') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal event consumption is immutable';
+    END IF;
+    IF NEW.attempts < OLD.attempts OR NEW.attempts > NEW.max_attempts THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event attempts cannot decrease or exceed the retry bound';
+    END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+        (OLD.status IN ('PENDING', 'RETRY') AND NEW.status IN ('PROCESSING', 'DEAD'))
+        OR (OLD.status = 'PROCESSING' AND NEW.status IN ('RETRY', 'COMPLETED', 'DEAD'))
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid event consumption lifecycle transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_event_consumption_lifecycle
+BEFORE UPDATE OR DELETE ON ai.event_consumption
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_event_consumption_lifecycle();
+
+CREATE FUNCTION ai.enforce_model_invocation_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'model invocation cannot be deleted';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id OR NEW.run_id IS DISTINCT FROM OLD.run_id
+       OR NEW.model_profile_id IS DISTINCT FROM OLD.model_profile_id
+       OR NEW.operation IS DISTINCT FROM OLD.operation
+       OR NEW.request_hash IS DISTINCT FROM OLD.request_hash
+       OR NEW.capability_hash IS DISTINCT FROM OLD.capability_hash
+       OR NEW.started_at IS DISTINCT FROM OLD.started_at THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'model invocation request identity is immutable';
+    END IF;
+    IF OLD.status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal model invocation is immutable';
+    END IF;
+    IF NEW.status NOT IN ('STARTED', 'COMPLETED', 'FAILED', 'CANCELLED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid model invocation transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_model_invocation_lifecycle
+BEFORE UPDATE OR DELETE ON ai.model_invocation
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_model_invocation_lifecycle();
+
+CREATE FUNCTION ai.enforce_recommendation_submission_lifecycle()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission cannot be deleted';
+    END IF;
+    IF NEW.run_id IS DISTINCT FROM OLD.run_id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+       OR NEW.invocation_id IS DISTINCT FROM OLD.invocation_id OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+       OR NEW.payload_hash IS DISTINCT FROM OLD.payload_hash OR NEW.payload IS DISTINCT FROM OLD.payload
+       OR NEW.prepared_at IS DISTINCT FROM OLD.prepared_at OR NEW.data_classification IS DISTINCT FROM OLD.data_classification
+       OR NEW.retention_until IS DISTINCT FROM OLD.retention_until OR NEW.legal_hold_id IS DISTINCT FROM OLD.legal_hold_id THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission identity is immutable';
+    END IF;
+    IF OLD.status IN ('ACKNOWLEDGED', 'FAILED') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'terminal recommendation submission is immutable';
+    END IF;
+    IF current_setting('innorder.recommendation_submission_transition', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission transition requires bounded function';
+    END IF;
+    IF NEW.attempts < OLD.attempts OR NEW.attempts > OLD.attempts + 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission attempts are invalid';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_recommendation_submission_lifecycle
+BEFORE UPDATE OR DELETE ON ai.recommendation_submission
+FOR EACH ROW EXECUTE FUNCTION ai.enforce_recommendation_submission_lifecycle();
+
+CREATE FUNCTION ai.validate_retrieval_hit_authorized()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM ai.retrieval_trace trace
+        JOIN authz.ai_authorized_document allowed
+          ON allowed.grant_id = trace.grant_id
+         AND allowed.document_version_id = NEW.document_version_id
+        WHERE trace.id = NEW.trace_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'retrieval hit document is not authorized by grant';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_retrieval_hit_authorized
+BEFORE INSERT ON ai.retrieval_hit
+FOR EACH ROW EXECUTE FUNCTION ai.validate_retrieval_hit_authorized();
+
+CREATE TRIGGER trg_retrieval_trace_immutable
+BEFORE UPDATE OR DELETE ON ai.retrieval_trace FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_retrieval_hit_immutable
+BEFORE UPDATE OR DELETE ON ai.retrieval_hit FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_embedding_space_gate_result_immutable
+BEFORE UPDATE OR DELETE ON ai.embedding_space_gate_result FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_embedding_space_gate_evaluation_immutable
+BEFORE UPDATE OR DELETE ON ai.embedding_space_gate_evaluation FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_embedding_space_gate_case_evidence_immutable
+BEFORE UPDATE OR DELETE ON ai.embedding_space_gate_case_evidence FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+CREATE TRIGGER trg_legal_hold_object_immutable
+BEFORE UPDATE OR DELETE ON ai.legal_hold_object FOR EACH ROW EXECUTE FUNCTION platform.reject_immutable_row();
+
+CREATE INDEX ix_ai_authorization_grant_expiry ON authz.ai_authorization_grant (expires_at) WHERE consumed_at IS NULL;
+CREATE INDEX ix_ai_authorized_document_version ON authz.ai_authorized_document (document_version_id, grant_id);
+CREATE INDEX ix_ingestion_job_claim ON ai.ingestion_job (next_attempt_at, created_at) WHERE status IN ('PENDING', 'RETRY');
+CREATE INDEX ix_ingestion_job_stale_lease ON ai.ingestion_job (lease_expires_at) WHERE status = 'PROCESSING';
+CREATE INDEX ix_ingestion_attempt_job ON ai.ingestion_attempt (job_id, attempt_number DESC);
+CREATE INDEX ix_event_consumption_claim ON ai.event_consumption (next_attempt_at, created_at) WHERE status IN ('PENDING', 'RETRY');
+CREATE INDEX ix_event_consumption_stale_lease ON ai.event_consumption (lease_expires_at) WHERE status = 'PROCESSING';
+CREATE INDEX ix_event_consumption_dead ON ai.event_consumption (created_at) WHERE status = 'DEAD';
+CREATE INDEX ix_model_invocation_run ON ai.model_invocation (run_id, started_at);
+CREATE INDEX ix_model_invocation_provider_request_hash ON ai.model_invocation (provider_request_id_hash)
+WHERE provider_request_id_hash IS NOT NULL;
+CREATE INDEX ix_retrieval_trace_run ON ai.retrieval_trace (run_id, created_at);
+CREATE INDEX ix_retrieval_hit_document ON ai.retrieval_hit (document_version_id, chunk_id);
+CREATE INDEX ix_legal_hold_object_lookup ON ai.legal_hold_object (object_kind, object_id) INCLUDE (fact_key);
+
+CREATE FUNCTION authz.consume_ai_authorization_grant(
+    p_token_hash text,
+    p_event_id uuid,
+    p_operation text,
+    p_authorization_revision bigint,
+    p_policy_release_digest text,
+    p_authorized_set_digest text,
+    p_context_digest text,
+    p_run_id uuid,
+    p_agent_version_id uuid,
+    p_model_profile_id uuid,
+    p_prompt_version_id uuid,
+    p_package_version_id uuid,
+    p_embedding_space_id uuid
+)
+RETURNS TABLE (run_id uuid, authorized_document_version_ids uuid[], bounded_context jsonb, replayed boolean)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+    current_auth_revision bigint;
+    current_release_digest text;
+    authorized_ids uuid[];
+BEGIN
+    IF p_token_hash IS NULL OR p_event_id IS NULL OR p_operation IS NULL
+       OR p_authorization_revision IS NULL OR p_policy_release_digest IS NULL
+       OR p_authorized_set_digest IS NULL OR p_context_digest IS NULL OR p_run_id IS NULL
+       OR p_agent_version_id IS NULL OR p_model_profile_id IS NULL
+       OR p_prompt_version_id IS NULL OR p_package_version_id IS NULL
+       OR p_embedding_space_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'signed AI grant claims cannot be NULL';
+    END IF;
+    SELECT * INTO grant_row
+    FROM authz.ai_authorization_grant
+    WHERE token_hash = p_token_hash
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant is invalid';
+    END IF;
+    IF grant_row.event_id IS DISTINCT FROM p_event_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token event mismatch';
+    END IF;
+    IF grant_row.operation IS DISTINCT FROM p_operation THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token operation mismatch';
+    END IF;
+    IF grant_row.intended_run_id IS DISTINCT FROM p_run_id
+       OR (grant_row.run_id IS NOT NULL AND grant_row.run_id IS DISTINCT FROM p_run_id) THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token run mismatch';
+    END IF;
+    IF grant_row.authorized_set_digest IS DISTINCT FROM p_authorized_set_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token authorized-set digest mismatch';
+    END IF;
+    IF grant_row.context_digest IS DISTINCT FROM p_context_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token context digest mismatch';
+    END IF;
+    IF grant_row.policy_release_digest IS DISTINCT FROM p_policy_release_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token release digest mismatch';
+    END IF;
+    IF grant_row.authorization_revision IS DISTINCT FROM p_authorization_revision THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token authorization revision mismatch';
+    END IF;
+    IF grant_row.agent_version_id IS DISTINCT FROM p_agent_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token agent version mismatch';
+    END IF;
+    IF grant_row.model_profile_id IS DISTINCT FROM p_model_profile_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token model profile mismatch';
+    END IF;
+    IF grant_row.prompt_version_id IS DISTINCT FROM p_prompt_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token prompt version mismatch';
+    END IF;
+    IF grant_row.package_version_id IS DISTINCT FROM p_package_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token package version mismatch';
+    END IF;
+    IF grant_row.embedding_space_id IS DISTINCT FROM p_embedding_space_id THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'grant token embedding space mismatch';
+    END IF;
+    SELECT coalesce(array_agg(document_version_id ORDER BY document_version_id), ARRAY[]::uuid[])
+    INTO authorized_ids
+    FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
+    IF grant_row.consumed_at IS NOT NULL THEN
+        IF grant_row.run_id IS DISTINCT FROM p_run_id OR NOT EXISTS (
+            SELECT 1 FROM ai.ai_run run
+            WHERE run.id = p_run_id AND run.authorization_grant_id = grant_row.id
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'AI authorization grant replay binding is invalid';
+        END IF;
+        RETURN QUERY SELECT p_run_id, authorized_ids, grant_row.bounded_context, true;
+        RETURN;
+    END IF;
+    IF transaction_timestamp() < grant_row.issued_at OR transaction_timestamp() >= grant_row.expires_at THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant expired';
+    END IF;
+    SELECT current_revision INTO STRICT current_auth_revision
+    FROM authz.authorization_state WHERE singleton FOR SHARE;
+    IF current_auth_revision <> grant_row.authorization_revision THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant has stale authorization revision';
+    END IF;
+    SELECT content_hash INTO STRICT current_release_digest
+    FROM authz.policy_release WHERE id = grant_row.policy_release_id;
+    IF current_release_digest <> grant_row.policy_release_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI authorization grant has stale policy release';
+    END IF;
+    INSERT INTO ai.ai_run (
+        id, agent_version_id, model_profile_id, prompt_version_id, package_version_id,
+        policy_release_id, triggered_by, target_entity_id, status, authorization_grant_id,
+        embedding_space_id
+    ) VALUES (
+        grant_row.intended_run_id, grant_row.agent_version_id, grant_row.model_profile_id,
+        grant_row.prompt_version_id, grant_row.package_version_id, grant_row.policy_release_id,
+        grant_row.principal_id, grant_row.target_entity_id, 'QUEUED', grant_row.id,
+        grant_row.embedding_space_id
+    );
+    UPDATE authz.ai_authorization_grant
+    SET consumed_at = transaction_timestamp(), run_id = p_run_id
+    WHERE id = grant_row.id;
+    RETURN QUERY SELECT p_run_id, authorized_ids, grant_row.bounded_context, false;
+END;
+$$;
+
+CREATE FUNCTION ai.claim_ingestion_jobs(p_worker_id text, p_limit integer, p_lease interval)
+RETURNS SETOF ai.ingestion_job
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    target_job_ids uuid[];
+    target_space_id uuid;
+BEGIN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = ''
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
+       OR p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion claim bounds';
+    END IF;
+    SELECT array_agg(selected.id ORDER BY selected.id) INTO target_job_ids
+    FROM (
+        SELECT job.id
+        FROM ai.ingestion_job job
+        WHERE (job.status IN ('PENDING', 'RETRY')
+               AND job.next_attempt_at <= transaction_timestamp()
+               AND job.attempts < job.max_attempts)
+           OR (job.status = 'PROCESSING' AND job.lease_expires_at <= transaction_timestamp())
+        ORDER BY job.id
+        LIMIT p_limit
+    ) selected;
+    IF target_job_ids IS NULL THEN
+        RETURN;
+    END IF;
+    FOR target_space_id IN
+        SELECT DISTINCT job.candidate_embedding_space_id
+        FROM ai.ingestion_job job WHERE job.id = ANY(target_job_ids)
+        ORDER BY job.candidate_embedding_space_id
+    LOOP
+        PERFORM 1 FROM ai.embedding_space space
+        WHERE space.id = target_space_id FOR UPDATE;
+    END LOOP;
+    PERFORM 1 FROM ai.ingestion_job job
+    WHERE job.id = ANY(target_job_ids)
+    ORDER BY job.id
+    FOR UPDATE;
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+        completed_at = statement_timestamp()
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.status = 'PROCESSING'
+      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts >= job.max_attempts
+      AND job.id = ANY(target_job_ids);
+
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_RETRY',
+        completed_at = statement_timestamp()
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.status = 'PROCESSING'
+      AND job.lease_expires_at <= transaction_timestamp() AND job.attempts < job.max_attempts
+      AND job.id = ANY(target_job_ids);
+
+    UPDATE ai.ingestion_job
+    SET status = 'FAILED', sanitized_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+        completed_at = statement_timestamp(), lease_owner = NULL, lease_expires_at = NULL,
+        updated_at = statement_timestamp()
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts >= max_attempts AND id = ANY(target_job_ids);
+
+    UPDATE ai.ingestion_job
+    SET status = 'RETRY', sanitized_error = 'LEASE_EXPIRED_RETRY',
+        lease_owner = NULL, lease_expires_at = NULL, updated_at = statement_timestamp()
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts < max_attempts AND id = ANY(target_job_ids);
+
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT id FROM ai.ingestion_job
+        WHERE id = ANY(target_job_ids)
+          AND status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp()
+          AND attempts < max_attempts
+        ORDER BY id
+        FOR UPDATE SKIP LOCKED
+        LIMIT p_limit
+    ), claimed AS (
+    UPDATE ai.ingestion_job job
+    SET status = 'PROCESSING', lease_owner = p_worker_id,
+        lease_expires_at = transaction_timestamp() + p_lease,
+        attempts = job.attempts + 1, sanitized_error = NULL,
+        updated_at = statement_timestamp()
+    FROM candidates WHERE job.id = candidates.id RETURNING job.*
+    ), attempts AS (
+        INSERT INTO ai.ingestion_attempt
+            (id, job_id, attempt_number, worker_id, stage, checkpoint, status,
+             lease_expires_at, started_at)
+        SELECT md5(claimed.id::text || ':' || claimed.attempts::text)::uuid,
+               claimed.id, claimed.attempts, p_worker_id, claimed.stage, claimed.checkpoint,
+               'RUNNING', claimed.lease_expires_at, statement_timestamp()
+        FROM claimed
+        RETURNING job_id
+    )
+    SELECT claimed.* FROM claimed JOIN attempts ON attempts.job_id = claimed.id;
+END;
+$$;
+
+CREATE FUNCTION ai.claim_event_consumptions(p_worker_id text, p_limit integer, p_lease interval)
+RETURNS SETOF ai.event_consumption
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = ''
+       OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100
+       OR p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '15 minutes' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid event claim bounds';
+    END IF;
+    UPDATE ai.event_consumption
+    SET status = 'DEAD', sanitized_terminal_error = 'LEASE_EXPIRED_MAX_ATTEMPTS',
+        completed_at = statement_timestamp(), dead_at = statement_timestamp(),
+        lease_owner = NULL, lease_expires_at = NULL
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts >= max_attempts;
+
+    UPDATE ai.event_consumption
+    SET status = 'RETRY', sanitized_terminal_error = NULL,
+        lease_owner = NULL, lease_expires_at = NULL
+    WHERE status = 'PROCESSING' AND lease_expires_at <= transaction_timestamp()
+      AND attempts < max_attempts;
+
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT id FROM ai.event_consumption
+        WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at <= transaction_timestamp()
+          AND attempts < max_attempts
+        ORDER BY next_attempt_at, created_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT p_limit
+    )
+    UPDATE ai.event_consumption event
+    SET status = 'PROCESSING', lease_owner = p_worker_id,
+        lease_expires_at = transaction_timestamp() + p_lease,
+        attempts = event.attempts + 1
+    FROM candidates WHERE event.id = candidates.id RETURNING event.*;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_ingestion_document_version(
+    p_job_id uuid, p_worker_id text, p_document_version_id uuid, p_version integer,
+    p_object_key text, p_normalized_content_hash text, p_mime_type text, p_data_classification text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    job ai.ingestion_job%ROWTYPE;
+    candidate_id uuid;
+    existing ai.knowledge_document_version%ROWTYPE;
+BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
+    IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
+       OR job.lease_expires_at <= transaction_timestamp() OR job.document_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    IF p_normalized_content_hash <> job.normalized_content_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'normalized ingestion content hash does not match claimed job';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM ai.embedding_space_gate_result gate_result
+        WHERE gate_result.candidate_embedding_space_id = candidate_id
+          AND gate_result.corpus_manifest_digest = job.corpus_manifest_digest
+          AND gate_result.decision = 'PASS'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion mutation is blocked by finalized gate';
+    END IF;
+    SELECT version.* INTO existing
+    FROM ai.knowledge_document_version version
+    WHERE version.id = p_document_version_id
+       OR (version.document_id = job.document_id AND version.version = p_version)
+       OR version.object_key = p_object_key
+    ORDER BY CASE WHEN version.id = p_document_version_id THEN 0 ELSE 1 END
+    LIMIT 1;
+    IF FOUND THEN
+        IF existing.id <> p_document_version_id OR existing.document_id <> job.document_id
+           OR existing.version <> p_version OR existing.object_key <> p_object_key
+           OR existing.content_hash <> p_normalized_content_hash OR existing.mime_type <> p_mime_type
+           OR existing.parser_version <> job.parser_version OR existing.data_classification <> p_data_classification
+           OR (job.produced_document_version_id IS NOT NULL AND job.produced_document_version_id <> p_document_version_id) THEN
+            RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion document replay';
+        END IF;
+        UPDATE ai.ingestion_job SET produced_document_version_id = p_document_version_id WHERE id = p_job_id;
+        RETURN p_document_version_id;
+    END IF;
+    IF job.produced_document_version_id IS NOT NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion document replay';
+    END IF;
+    INSERT INTO ai.knowledge_document_version
+        (id, document_id, version, object_key, content_hash, mime_type, parser_version, data_classification)
+    VALUES (p_document_version_id, job.document_id, p_version, p_object_key, p_normalized_content_hash,
+            p_mime_type, job.parser_version, p_data_classification);
+    UPDATE ai.ingestion_job SET produced_document_version_id = p_document_version_id
+    WHERE id = p_job_id;
+    RETURN p_document_version_id;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_ingestion_chunk_embedding(
+    p_job_id uuid, p_worker_id text, p_document_version_id uuid, p_chunk_id uuid,
+    p_ordinal integer, p_content text, p_content_hash text, p_token_count integer,
+    p_metadata jsonb, p_embedding_space_id uuid, p_embedding public.vector
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    job ai.ingestion_job%ROWTYPE;
+    version_document_id uuid;
+    space_manifest text;
+    space_status text;
+    candidate_id uuid;
+    existing_chunk ai.knowledge_chunk%ROWTYPE;
+    existing_embedding public.vector;
+BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    SELECT * INTO STRICT job FROM ai.ingestion_job WHERE id = p_job_id FOR UPDATE;
+    IF job.status <> 'PROCESSING' OR job.lease_owner <> p_worker_id
+       OR job.lease_expires_at <= transaction_timestamp() THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    IF p_document_version_id <> job.produced_document_version_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'chunk must use the produced document version for the claimed job';
+    END IF;
+    IF p_embedding_space_id IS DISTINCT FROM candidate_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match claimed ingestion job';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM ai.embedding_space_gate_result gate_result
+        WHERE gate_result.candidate_embedding_space_id = candidate_id
+          AND gate_result.corpus_manifest_digest = job.corpus_manifest_digest
+          AND gate_result.decision = 'PASS'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion mutation is blocked by finalized gate';
+    END IF;
+    SELECT document_id INTO STRICT version_document_id
+    FROM ai.knowledge_document_version WHERE id = p_document_version_id;
+    IF version_document_id <> job.document_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'ingestion document version does not belong to claimed job';
+    END IF;
+    SELECT corpus_version, status INTO STRICT space_manifest, space_status
+    FROM ai.embedding_space WHERE id = p_embedding_space_id;
+    IF space_status <> 'BUILDING' THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space is not BUILDING';
+    END IF;
+    IF space_manifest <> job.corpus_manifest_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space corpus manifest does not match claimed job';
+    END IF;
+    INSERT INTO ai.knowledge_chunk
+        (id, document_version_id, ordinal, content, content_hash, token_count, metadata)
+    VALUES (p_chunk_id, p_document_version_id, p_ordinal, p_content, p_content_hash, p_token_count, p_metadata)
+    ON CONFLICT DO NOTHING;
+    SELECT chunk.* INTO STRICT existing_chunk FROM ai.knowledge_chunk chunk
+    WHERE chunk.id = p_chunk_id OR (chunk.document_version_id = p_document_version_id AND chunk.ordinal = p_ordinal)
+    ORDER BY CASE WHEN chunk.id = p_chunk_id THEN 0 ELSE 1 END LIMIT 1;
+    IF existing_chunk.id <> p_chunk_id OR existing_chunk.document_version_id <> p_document_version_id
+       OR existing_chunk.ordinal <> p_ordinal OR existing_chunk.content <> p_content
+       OR existing_chunk.content_hash <> p_content_hash OR existing_chunk.token_count <> p_token_count
+       OR existing_chunk.metadata <> p_metadata THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion chunk replay';
+    END IF;
+    INSERT INTO ai.chunk_embedding (embedding_space_id, chunk_id, embedding)
+    VALUES (p_embedding_space_id, p_chunk_id, p_embedding)
+    ON CONFLICT DO NOTHING;
+    SELECT embedding.embedding INTO STRICT existing_embedding FROM ai.chunk_embedding embedding
+    WHERE embedding.embedding_space_id = p_embedding_space_id AND embedding.chunk_id = p_chunk_id;
+    IF existing_embedding::text <> p_embedding::text THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'conflicting ingestion embedding replay';
+    END IF;
+    RETURN p_chunk_id;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_ingestion_embedding_batch(
+    p_job_id uuid, p_worker_id text, p_document_version_id uuid,
+    p_embedding_space_id uuid, p_chunks jsonb, p_checkpoint jsonb
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_id uuid;
+    item jsonb;
+BEGIN
+    IF jsonb_typeof(p_chunks) <> 'array' OR jsonb_array_length(p_chunks) NOT BETWEEN 1 AND 100
+       OR jsonb_typeof(p_checkpoint) <> 'object' OR octet_length(p_checkpoint::text) > 1048576 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion embedding batch';
+    END IF;
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    FOR item IN SELECT value FROM jsonb_array_elements(p_chunks)
+    LOOP
+        IF jsonb_typeof(item) <> 'object' OR jsonb_typeof(item->'embedding') <> 'array' THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion embedding batch';
+        END IF;
+        PERFORM ai.persist_ingestion_chunk_embedding(
+            p_job_id, p_worker_id, p_document_version_id, (item->>'id')::uuid,
+            (item->>'ordinal')::integer, item->>'content', item->>'contentHash',
+            (item->>'tokenCount')::integer, item->'metadata', p_embedding_space_id,
+            (item->'embedding')::text::public.vector
+        );
+    END LOOP;
+    UPDATE ai.ingestion_attempt attempt
+    SET stage = 'EMBED', checkpoint = p_checkpoint
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_job SET stage = 'EMBED', checkpoint = p_checkpoint,
+        updated_at = statement_timestamp() WHERE id = p_job_id;
+    RETURN jsonb_array_length(p_chunks);
+END;
+$$;
+
+CREATE FUNCTION ai.checkpoint_ingestion_attempt(
+    p_job_id uuid, p_worker_id text, p_stage text, p_checkpoint jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_id uuid;
+BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    UPDATE ai.ingestion_attempt attempt
+    SET stage = p_stage, checkpoint = p_checkpoint
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_job SET stage = p_stage, checkpoint = p_checkpoint,
+        updated_at = statement_timestamp() WHERE id = p_job_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_ingestion_job(p_job_id uuid, p_worker_id text, p_checkpoint jsonb)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_id uuid;
+    job_manifest text;
+BEGIN
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    SELECT corpus_manifest_digest INTO STRICT job_manifest
+    FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    IF EXISTS (
+        SELECT 1 FROM ai.embedding_space_gate_result gate_result
+        WHERE gate_result.candidate_embedding_space_id = candidate_id
+          AND gate_result.corpus_manifest_digest = job_manifest
+          AND gate_result.decision = 'PASS'
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion completion is blocked by finalized gate';
+    END IF;
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'SUCCEEDED', stage = 'COMPLETE', checkpoint = p_checkpoint,
+        completed_at = statement_timestamp(), sanitized_error = NULL
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_job
+    SET status = 'COMPLETED', stage = 'COMPLETE', checkpoint = p_checkpoint,
+        lease_owner = NULL, lease_expires_at = NULL, sanitized_error = NULL,
+        updated_at = statement_timestamp(), completed_at = statement_timestamp()
+    WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.fail_ingestion_job(
+    p_job_id uuid, p_worker_id text, p_sanitized_error text, p_retry_after interval
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    next_status text;
+    candidate_id uuid;
+BEGIN
+    IF p_retry_after IS NULL OR p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid ingestion retry bound';
+    END IF;
+    SELECT candidate_embedding_space_id INTO STRICT candidate_id
+    FROM ai.ingestion_job WHERE id = p_job_id;
+    PERFORM 1 FROM ai.embedding_space space WHERE space.id = candidate_id FOR UPDATE;
+    PERFORM 1 FROM ai.ingestion_job job WHERE job.id = p_job_id FOR UPDATE;
+    UPDATE ai.ingestion_attempt attempt
+    SET status = 'FAILED', sanitized_error = p_sanitized_error,
+        completed_at = statement_timestamp()
+    FROM ai.ingestion_job job
+    WHERE attempt.job_id = job.id AND attempt.attempt_number = job.attempts
+      AND attempt.status = 'RUNNING' AND job.id = p_job_id
+      AND job.status = 'PROCESSING' AND job.lease_owner = p_worker_id
+      AND job.lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion attempt lease is not owned or has expired';
+    END IF;
+    UPDATE ai.ingestion_job
+    SET status = CASE WHEN attempts >= max_attempts THEN 'FAILED' ELSE 'RETRY' END,
+        next_attempt_at = transaction_timestamp() + p_retry_after,
+        lease_owner = NULL, lease_expires_at = NULL, sanitized_error = p_sanitized_error,
+        updated_at = statement_timestamp(),
+        completed_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END
+    WHERE id = p_job_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp()
+    RETURNING status INTO next_status;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'ingestion lease is not owned or has expired';
+    END IF;
+    RETURN next_status;
+END;
+$$;
+
+CREATE FUNCTION ai.register_event_consumption(
+    p_id uuid, p_consumer_key text, p_event_id uuid, p_event_type text,
+    p_schema_version integer, p_aggregate_type text, p_aggregate_id uuid, p_aggregate_version bigint
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    registered_id uuid;
+    existing ai.event_consumption%ROWTYPE;
+BEGIN
+    INSERT INTO ai.event_consumption
+        (id, consumer_key, event_id, event_type, schema_version, aggregate_type, aggregate_id, aggregate_version)
+    VALUES (p_id, p_consumer_key, p_event_id, p_event_type, p_schema_version,
+            p_aggregate_type, p_aggregate_id, p_aggregate_version)
+    ON CONFLICT (consumer_key, event_id) DO NOTHING
+    RETURNING id INTO registered_id;
+    IF registered_id IS NULL THEN
+        SELECT * INTO STRICT existing FROM ai.event_consumption
+        WHERE consumer_key = p_consumer_key AND event_id = p_event_id;
+        IF existing.event_type <> p_event_type OR existing.schema_version <> p_schema_version
+           OR existing.aggregate_type <> p_aggregate_type OR existing.aggregate_id <> p_aggregate_id
+           OR existing.aggregate_version <> p_aggregate_version THEN
+            RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'event dedup key reused with different immutable envelope';
+        END IF;
+        registered_id := existing.id;
+    END IF;
+    RETURN registered_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_event_consumption(p_id uuid, p_worker_id text)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    UPDATE ai.event_consumption
+    SET status = 'COMPLETED', completed_at = statement_timestamp(),
+        lease_owner = NULL, lease_expires_at = NULL, sanitized_terminal_error = NULL
+    WHERE id = p_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp();
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event lease is not owned or has expired';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.fail_event_consumption(
+    p_id uuid, p_worker_id text, p_sanitized_error text, p_retry_after interval
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    next_status text;
+BEGIN
+    IF p_retry_after < interval '0' OR p_retry_after > interval '1 day' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid event retry bound';
+    END IF;
+    UPDATE ai.event_consumption
+    SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'RETRY' END,
+        next_attempt_at = transaction_timestamp() + p_retry_after,
+        lease_owner = NULL, lease_expires_at = NULL,
+        sanitized_terminal_error = CASE WHEN attempts >= max_attempts THEN p_sanitized_error ELSE NULL END,
+        completed_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END,
+        dead_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END
+    WHERE id = p_id AND status = 'PROCESSING' AND lease_owner = p_worker_id
+      AND lease_expires_at > transaction_timestamp()
+    RETURNING status INTO next_status;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'event lease is not owned or has expired';
+    END IF;
+    RETURN next_status;
+END;
+$$;
+
+CREATE FUNCTION ai.transition_ai_run(p_run_id uuid, p_status text)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    old_status text;
+BEGIN
+    SELECT status INTO STRICT old_status FROM ai.ai_run
+    WHERE id = p_run_id AND authorization_grant_id IS NOT NULL FOR UPDATE;
+    IF NOT ((old_status = 'QUEUED' AND p_status IN ('RUNNING', 'CANCELLED'))
+        OR (old_status = 'RUNNING' AND p_status IN ('COMPLETED', 'FAILED', 'CANCELLED'))) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid governed AI run transition';
+    END IF;
+    UPDATE ai.ai_run
+    SET status = p_status,
+        started_at = CASE WHEN p_status = 'RUNNING' THEN statement_timestamp() ELSE started_at END,
+        completed_at = CASE WHEN p_status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN statement_timestamp() ELSE NULL END
+    WHERE id = p_run_id;
+    RETURN p_status;
+END;
+$$;
+
+CREATE FUNCTION ai.get_ai_operation_status(p_operation_id uuid)
+RETURNS TABLE (operation_id uuid, status text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_operation_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '22004', MESSAGE = 'AI operation identifier cannot be NULL';
+    END IF;
+    RETURN QUERY
+    SELECT run.id, run.status
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row
+      ON grant_row.id = run.authorization_grant_id
+     AND grant_row.run_id = run.id
+     AND grant_row.intended_run_id = p_operation_id
+     AND grant_row.consumed_at IS NOT NULL
+    WHERE run.id = p_operation_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'AI operation is invalid';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.get_guidance_run_configuration(
+    p_run_id uuid, p_agent_version_id uuid, p_model_profile_id uuid,
+    p_prompt_version_id uuid, p_package_version_id uuid, p_embedding_space_id uuid,
+    p_policy_release_digest text
+)
+RETURNS TABLE (
+    run_id uuid, run_status text, operation text, target_entity_id uuid,
+    agent_version_id uuid, model_profile_id uuid, prompt_version_id uuid,
+    package_version_id uuid, policy_release_digest text, embedding_space_id uuid,
+    prompt_status text, prompt_template text, prompt_hash text,
+    input_schema jsonb, output_schema jsonb, input_schema_hash text,
+    output_schema_hash text, agent_hash text, package_status text, package_manifest jsonb, package_hash text,
+    provider_state text, profile_state text, max_classification text,
+    max_input_bytes integer, capability_hash text, capability_snapshot jsonb, space_status text,
+    dimensions integer, manifest_digest text, embedding_profile_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_run_id IS NULL OR p_agent_version_id IS NULL OR p_model_profile_id IS NULL
+       OR p_prompt_version_id IS NULL OR p_package_version_id IS NULL
+       OR p_embedding_space_id IS NULL OR p_policy_release_digest !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid guidance configuration binding';
+    END IF;
+    RETURN QUERY
+    SELECT run.id, run.status, grant_row.purpose, run.target_entity_id,
+           run.agent_version_id, run.model_profile_id, run.prompt_version_id,
+           run.package_version_id, grant_row.policy_release_digest, run.embedding_space_id,
+           prompt.status, prompt.template, prompt.content_hash,
+           agent.input_schema, agent.output_schema,
+            package.manifest #>> '{aiGuidance,inputSchemaHash}',
+            package.manifest #>> '{aiGuidance,outputSchemaHash}',
+            agent.content_hash, package.status, package.manifest, package.content_hash, provider.state, profile.state,
+           provider.data_policy ->> 'maxClassification',
+           (profile.capability_snapshot ->> 'maxInputTokens')::integer,
+           profile.capability_snapshot ->> 'snapshotHash', profile.capability_snapshot, space.status,
+           space.dimensions, space.corpus_version, space.model_profile_id
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row
+      ON grant_row.id = run.authorization_grant_id AND grant_row.run_id = run.id
+    JOIN ai.agent_definition_version agent ON agent.id = run.agent_version_id
+    JOIN ai.prompt_template_version prompt ON prompt.id = run.prompt_version_id
+    JOIN catalog.package_version package ON package.id = run.package_version_id
+    JOIN authz.policy_release release ON release.id = run.policy_release_id
+    JOIN ai.model_profile profile ON profile.id = run.model_profile_id
+    JOIN ai.model_provider provider ON provider.id = profile.provider_id
+    JOIN ai.embedding_space space ON space.id = run.embedding_space_id
+    WHERE run.id = p_run_id AND run.agent_version_id = p_agent_version_id
+      AND run.model_profile_id = p_model_profile_id AND run.prompt_version_id = p_prompt_version_id
+      AND run.package_version_id = p_package_version_id AND run.embedding_space_id = p_embedding_space_id
+      AND grant_row.policy_release_digest = p_policy_release_digest
+      AND release.content_hash = p_policy_release_digest
+      AND agent.prompt_version_id = run.prompt_version_id
+      AND agent.package_version_id = run.package_version_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'guidance configuration binding is stale';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.get_guidance_terminal_result(p_run_id uuid)
+RETURNS TABLE (operation_id uuid, run_status text, error_code text, recommendation_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN QUERY SELECT run.id, run.status, run.error_code, run.recommendation_id
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row
+      ON grant_row.id = run.authorization_grant_id AND grant_row.run_id = run.id
+    WHERE run.id = p_run_id AND grant_row.consumed_at IS NOT NULL
+      AND run.status IN ('RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED');
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_guidance_run(p_run_id uuid, p_status text, p_error_code text, p_recommendation_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    old_status text;
+BEGIN
+    SELECT status INTO STRICT old_status FROM ai.ai_run
+    WHERE id = p_run_id AND authorization_grant_id IS NOT NULL FOR UPDATE;
+    IF p_status = 'RUNNING' THEN
+        IF old_status <> 'QUEUED' OR p_error_code IS NOT NULL OR p_recommendation_id IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid guidance run start';
+        END IF;
+    ELSIF p_status = 'COMPLETED' THEN
+        IF old_status <> 'RUNNING' OR p_error_code IS NOT NULL OR p_recommendation_id IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid successful guidance outcome';
+        END IF;
+    ELSIF p_status IN ('FAILED', 'CANCELLED') THEN
+        IF old_status NOT IN ('QUEUED', 'RUNNING') OR p_error_code !~ '^OCC-AI-[A-Z0-9-]{1,112}$' OR p_recommendation_id IS NOT NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'invalid unsuccessful guidance outcome';
+        END IF;
+    ELSE
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid guidance run status';
+    END IF;
+    UPDATE ai.ai_run SET status = p_status, error_code = p_error_code,
+        recommendation_id = p_recommendation_id,
+        started_at = CASE WHEN p_status = 'RUNNING' THEN statement_timestamp() ELSE started_at END,
+        completed_at = CASE WHEN p_status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN statement_timestamp() ELSE NULL END
+    WHERE id = p_run_id;
+    RETURN p_status;
+END;
+$$;
+
+CREATE FUNCTION ai.start_model_invocation(
+    p_id uuid, p_run_id uuid, p_model_profile_id uuid, p_operation text,
+    p_request_hash text, p_capability_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_operation text;
+    run_model_profile_id uuid;
+BEGIN
+    SELECT grant_row.operation, run.model_profile_id INTO grant_operation, run_model_profile_id
+    FROM ai.ai_run run
+    JOIN authz.ai_authorization_grant grant_row ON grant_row.id = run.authorization_grant_id
+    WHERE run.id = p_run_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'model invocation requires a governed run';
+    END IF;
+    IF run_model_profile_id IS DISTINCT FROM p_model_profile_id THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'model profile does not match governed run';
+    END IF;
+    IF grant_operation <> p_operation THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'invocation operation does not match grant';
+    END IF;
+    INSERT INTO ai.model_invocation
+        (id, run_id, model_profile_id, operation, request_hash, capability_hash, status)
+    VALUES (p_id, p_run_id, p_model_profile_id, p_operation, p_request_hash, p_capability_hash, 'STARTED');
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_model_invocation(
+    p_id uuid, p_status text, p_response_hash text, p_provider_request_id_hash text,
+    p_input_tokens bigint, p_output_tokens bigint, p_cost numeric,
+    p_latency_ms integer, p_sanitized_error text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    invocation_row ai.model_invocation%ROWTYPE;
+BEGIN
+    IF p_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid terminal invocation status';
+    END IF;
+    IF p_provider_request_id_hash IS NOT NULL AND p_provider_request_id_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'provider request id hash must be lowercase SHA-256';
+    END IF;
+    SELECT * INTO STRICT invocation_row FROM ai.model_invocation WHERE id = p_id FOR UPDATE;
+    IF invocation_row.status <> 'STARTED' THEN
+        IF invocation_row.status = p_status
+           AND invocation_row.response_hash IS NOT DISTINCT FROM p_response_hash
+           AND invocation_row.provider_request_id_hash IS NOT DISTINCT FROM p_provider_request_id_hash
+           AND invocation_row.input_tokens = p_input_tokens AND invocation_row.output_tokens = p_output_tokens
+           AND invocation_row.cost = p_cost AND invocation_row.latency_ms = p_latency_ms
+           AND invocation_row.sanitized_error IS NOT DISTINCT FROM p_sanitized_error THEN
+            RETURN;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'model invocation terminal replay conflicts with retained accounting';
+    END IF;
+    UPDATE ai.model_invocation
+    SET status = p_status, response_hash = p_response_hash, provider_request_id_hash = p_provider_request_id_hash,
+        input_tokens = p_input_tokens, output_tokens = p_output_tokens, cost = p_cost,
+        latency_ms = p_latency_ms, sanitized_error = p_sanitized_error,
+        completed_at = statement_timestamp()
+    WHERE id = p_id AND status = 'STARTED';
+END;
+$$;
+
+CREATE FUNCTION ai.prepare_guidance_recommendation_submission(
+    p_run_id uuid, p_operation_id uuid, p_invocation_id uuid,
+    p_payload jsonb,
+    p_response_hash text, p_provider_request_id_hash text,
+    p_input_tokens bigint, p_output_tokens bigint, p_cost numeric,
+    p_latency_ms integer, p_data_classification text,
+    p_artifact_id uuid, p_artifact_object_key text, p_artifact_hash text
+)
+RETURNS TABLE (
+    run_id uuid, operation_id uuid, invocation_id uuid, status text,
+    idempotency_key text, payload_hash text, payload jsonb, attempts integer,
+    artifact_id uuid, artifact_object_key text, artifact_hash text, data_classification text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    submission_row ai.recommendation_submission%ROWTYPE;
+    calculated_payload_hash text;
+    calculated_idempotency_key text;
+    run_target_entity_id uuid;
+    output_payload jsonb;
+    item jsonb;
+BEGIN
+    IF p_run_id IS NULL OR p_operation_id <> p_run_id OR p_invocation_id IS NULL
+       OR jsonb_typeof(p_payload) <> 'object' OR octet_length(p_payload::text) NOT BETWEEN 2 AND 262144
+       OR p_response_hash !~ '^[0-9a-f]{64}$'
+       OR (p_provider_request_id_hash IS NOT NULL AND p_provider_request_id_hash !~ '^[0-9a-f]{64}$')
+       OR p_input_tokens < 0 OR p_output_tokens < 0 OR p_cost < 0 OR p_latency_ms < 0
+       OR p_data_classification NOT IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')
+       OR p_artifact_id IS NULL OR p_artifact_hash !~ '^[0-9a-f]{64}$'
+       OR p_artifact_object_key <> 'trace/' || p_run_id::text || '/' || p_artifact_id::text || '.json' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation submission preparation';
+    END IF;
+    SELECT run.target_entity_id INTO run_target_entity_id FROM ai.ai_run run
+    WHERE run.id = p_run_id AND run.status = 'RUNNING' AND run.authorization_grant_id IS NOT NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission requires a running governed run';
+    END IF;
+    output_payload := p_payload->'output';
+    IF p_payload - ARRAY['operationId','runId','targetEntityId','expectedTargetVersion','output'] <> '{}'::jsonb
+       OR NOT (p_payload ?& ARRAY['operationId','runId','targetEntityId','expectedTargetVersion','output'])
+       OR jsonb_typeof(p_payload->'operationId') <> 'string' OR p_payload->>'operationId' <> p_operation_id::text
+       OR jsonb_typeof(p_payload->'runId') <> 'string' OR p_payload->>'runId' <> p_run_id::text
+       OR jsonb_typeof(p_payload->'targetEntityId') <> 'string' OR p_payload->>'targetEntityId' <> run_target_entity_id::text
+       OR jsonb_typeof(p_payload->'expectedTargetVersion') <> 'number'
+       OR p_payload->>'expectedTargetVersion' !~ '^(0|[1-9][0-9]{0,15})$'
+       OR (p_payload->>'expectedTargetVersion')::numeric > 9007199254740991
+       OR jsonb_typeof(output_payload) <> 'object'
+       OR output_payload - ARRAY['generatedContent','summary','steps','confidence','citations'] <> '{}'::jsonb
+       OR NOT (output_payload ?& ARRAY['generatedContent','summary','steps','confidence','citations'])
+       OR output_payload->'generatedContent' <> 'true'::jsonb
+       OR jsonb_typeof(output_payload->'summary') <> 'string'
+       OR length(output_payload->>'summary') NOT BETWEEN 1 AND 2000
+       OR jsonb_typeof(output_payload->'confidence') <> 'number'
+       OR (output_payload->>'confidence')::numeric NOT BETWEEN 0 AND 1
+       OR jsonb_typeof(output_payload->'steps') <> 'array'
+       OR jsonb_array_length(output_payload->'steps') NOT BETWEEN 1 AND 20
+       OR jsonb_typeof(output_payload->'citations') <> 'array'
+       OR jsonb_array_length(output_payload->'citations') NOT BETWEEN 1 AND 50
+       OR (SELECT count(*) FROM jsonb_array_elements(output_payload->'citations')) <>
+          (SELECT count(DISTINCT value) FROM jsonb_array_elements(output_payload->'citations')) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'strict recommendation submission payload is invalid';
+    END IF;
+    FOR item IN SELECT value FROM jsonb_array_elements(output_payload->'steps') LOOP
+        IF jsonb_typeof(item) <> 'object' OR item - ARRAY['text','citationRanks'] <> '{}'::jsonb
+           OR NOT (item ?& ARRAY['text','citationRanks']) OR jsonb_typeof(item->'text') <> 'string'
+           OR length(item->>'text') NOT BETWEEN 1 AND 2000 OR jsonb_typeof(item->'citationRanks') <> 'array'
+           OR jsonb_array_length(item->'citationRanks') NOT BETWEEN 1 AND 10
+           OR (SELECT count(*) FROM jsonb_array_elements(item->'citationRanks')) <>
+              (SELECT count(DISTINCT value) FROM jsonb_array_elements(item->'citationRanks'))
+           OR EXISTS (SELECT 1 FROM jsonb_array_elements(item->'citationRanks') AS ranks(rank_json)
+                      WHERE jsonb_typeof(rank_json) <> 'number' OR rank_json::text !~ '^[1-9][0-9]*$'
+                        OR rank_json::text::numeric NOT BETWEEN 1 AND 50) THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'strict recommendation submission payload is invalid';
+        END IF;
+    END LOOP;
+    FOR item IN SELECT value FROM jsonb_array_elements(output_payload->'citations') LOOP
+        IF jsonb_typeof(item) <> 'object' OR item - ARRAY['rank','retrievalHitId','excerptHash'] <> '{}'::jsonb
+           OR NOT (item ?& ARRAY['rank','retrievalHitId','excerptHash']) OR jsonb_typeof(item->'rank') <> 'number'
+           OR item->>'rank' !~ '^[1-9][0-9]*$' OR (item->>'rank')::numeric NOT BETWEEN 1 AND 50
+           OR jsonb_typeof(item->'retrievalHitId') <> 'string'
+           OR item->>'retrievalHitId' !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+           OR jsonb_typeof(item->'excerptHash') <> 'string' OR item->>'excerptHash' !~ '^[0-9a-f]{64}$' THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'strict recommendation submission payload is invalid';
+        END IF;
+    END LOOP;
+    calculated_payload_hash := encode(pg_catalog.sha256(convert_to(p_payload::text, 'UTF8')), 'hex');
+    calculated_idempotency_key := encode(pg_catalog.sha256(convert_to(
+        p_run_id::text || ':' || p_operation_id::text || ':' || calculated_payload_hash, 'UTF8')), 'hex');
+    PERFORM ai.finalize_model_invocation(p_invocation_id, 'COMPLETED', p_response_hash,
+        p_provider_request_id_hash, p_input_tokens, p_output_tokens, p_cost, p_latency_ms, NULL);
+    IF NOT EXISTS (SELECT 1 FROM ai.model_invocation invocation
+                   WHERE invocation.id = p_invocation_id AND invocation.run_id = p_run_id) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'recommendation submission invocation does not match run';
+    END IF;
+    INSERT INTO ai.recommendation_submission
+        (run_id, operation_id, invocation_id, idempotency_key, payload_hash, payload, artifact_id,
+         artifact_object_key, artifact_hash, status, data_classification)
+    VALUES (p_run_id, p_operation_id, p_invocation_id, calculated_idempotency_key, calculated_payload_hash,
+            p_payload, p_artifact_id, p_artifact_object_key, p_artifact_hash, 'PREPARED', p_data_classification)
+    ON CONFLICT ON CONSTRAINT recommendation_submission_pkey DO NOTHING;
+    SELECT * INTO STRICT submission_row FROM ai.recommendation_submission
+    WHERE recommendation_submission.run_id = p_run_id FOR UPDATE;
+    IF submission_row.operation_id <> p_operation_id OR submission_row.invocation_id <> p_invocation_id
+       OR submission_row.idempotency_key <> calculated_idempotency_key OR submission_row.payload_hash <> calculated_payload_hash
+       OR submission_row.payload <> p_payload OR submission_row.data_classification <> p_data_classification
+       OR submission_row.artifact_id <> p_artifact_id OR submission_row.artifact_object_key <> p_artifact_object_key
+       OR submission_row.artifact_hash <> p_artifact_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'recommendation submission replay conflicts with prepared identity';
+    END IF;
+    RETURN QUERY SELECT submission_row.run_id, submission_row.operation_id, submission_row.invocation_id,
+        submission_row.status, submission_row.idempotency_key, submission_row.payload_hash,
+        submission_row.payload, submission_row.attempts, submission_row.artifact_id,
+        submission_row.artifact_object_key, submission_row.artifact_hash, submission_row.data_classification;
+END;
+$$;
+
+CREATE FUNCTION ai.get_guidance_recommendation_submission(p_run_id uuid)
+RETURNS TABLE (
+    run_id uuid, operation_id uuid, invocation_id uuid, status text,
+    idempotency_key text, payload_hash text, payload jsonb, attempts integer,
+    artifact_id uuid, artifact_object_key text, artifact_hash text, data_classification text,
+    core_recommendation_id uuid, core_receipt_hash text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    RETURN QUERY SELECT submission.run_id, submission.operation_id, submission.invocation_id,
+        submission.status, submission.idempotency_key, submission.payload_hash, submission.payload,
+        submission.attempts, submission.artifact_id, submission.artifact_object_key, submission.artifact_hash,
+        submission.data_classification, submission.core_recommendation_id, submission.core_receipt_hash
+    FROM ai.recommendation_submission submission
+    JOIN ai.ai_run run ON run.id = submission.run_id
+    JOIN authz.ai_authorization_grant grant_row ON grant_row.id = run.authorization_grant_id
+    WHERE submission.run_id = p_run_id AND grant_row.consumed_at IS NOT NULL;
+END;
+$$;
+
+CREATE FUNCTION ai.mark_guidance_recommendation_dispatched(
+    p_run_id uuid, p_idempotency_key text, p_payload_hash text
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    next_attempt integer;
+BEGIN
+    PERFORM 1 FROM ai.ai_run run WHERE run.id = p_run_id AND run.status = 'RUNNING' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation dispatch requires a running run';
+    END IF;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'on', true);
+    UPDATE ai.recommendation_submission submission
+    SET attempts = attempts + 1, last_attempt_at = statement_timestamp()
+    WHERE submission.run_id = p_run_id AND submission.status = 'PREPARED'
+      AND submission.idempotency_key = p_idempotency_key AND submission.payload_hash = p_payload_hash
+      AND submission.attempts < 100
+    RETURNING attempts INTO next_attempt;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'off', true);
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission is not dispatchable';
+    END IF;
+    RETURN next_attempt;
+END;
+$$;
+
+CREATE FUNCTION ai.acknowledge_guidance_recommendation(
+    p_run_id uuid, p_idempotency_key text, p_payload_hash text,
+    p_recommendation_id uuid, p_receipt_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    run_status text;
+    submission_row ai.recommendation_submission%ROWTYPE;
+BEGIN
+    IF p_recommendation_id IS NULL OR p_receipt_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation acknowledgement';
+    END IF;
+    SELECT status INTO STRICT run_status FROM ai.ai_run WHERE id = p_run_id FOR UPDATE;
+    SELECT * INTO STRICT submission_row FROM ai.recommendation_submission submission
+    WHERE submission.run_id = p_run_id AND submission.idempotency_key = p_idempotency_key
+      AND submission.payload_hash = p_payload_hash FOR UPDATE;
+    IF submission_row.status = 'ACKNOWLEDGED' THEN
+        IF run_status = 'COMPLETED' AND submission_row.core_recommendation_id = p_recommendation_id
+           AND submission_row.core_receipt_hash = p_receipt_hash THEN
+            RETURN p_recommendation_id;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation acknowledgement replay conflicts';
+    END IF;
+    IF run_status <> 'RUNNING' OR submission_row.status <> 'PREPARED' OR submission_row.attempts < 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation submission is not acknowledgeable';
+    END IF;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'on', true);
+    UPDATE ai.recommendation_submission
+    SET status = 'ACKNOWLEDGED', core_recommendation_id = p_recommendation_id,
+        core_receipt_hash = p_receipt_hash, acknowledged_at = statement_timestamp()
+    WHERE recommendation_submission.run_id = p_run_id;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'off', true);
+    UPDATE ai.ai_run
+    SET status = 'COMPLETED', recommendation_id = p_recommendation_id,
+        error_code = NULL, completed_at = statement_timestamp()
+    WHERE id = p_run_id AND status = 'RUNNING';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation acknowledgement lost run ownership';
+    END IF;
+    RETURN p_recommendation_id;
+END;
+$$;
+
+CREATE FUNCTION ai.fail_guidance_recommendation_submission(
+    p_run_id uuid, p_idempotency_key text, p_payload_hash text, p_error_code text
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_error_code !~ '^OCC-AI-[A-Z0-9-]{1,112}$' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation submission failure';
+    END IF;
+    PERFORM 1 FROM ai.ai_run run WHERE run.id = p_run_id AND run.status = 'RUNNING' FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recommendation failure requires a running run';
+    END IF;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'on', true);
+    UPDATE ai.recommendation_submission submission
+    SET status = 'FAILED', failed_at = statement_timestamp(), last_attempt_at = statement_timestamp(),
+        sanitized_error = p_error_code
+    WHERE submission.run_id = p_run_id AND submission.status = 'PREPARED'
+      AND submission.idempotency_key = p_idempotency_key AND submission.payload_hash = p_payload_hash
+      AND submission.attempts = 0;
+    PERFORM set_config('innorder.recommendation_submission_transition', 'off', true);
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'possibly dispatched recommendation cannot be failed';
+    END IF;
+    UPDATE ai.ai_run SET status = 'FAILED', error_code = p_error_code,
+        recommendation_id = NULL, completed_at = statement_timestamp()
+    WHERE id = p_run_id AND status = 'RUNNING';
+    RETURN 'FAILED';
+END;
+$$;
+
+CREATE FUNCTION ai.persist_run_artifact(
+    p_id uuid, p_run_id uuid, p_artifact_kind text, p_object_key text,
+    p_sha256 text, p_data_classification text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    artifact_row ai.ai_run_artifact%ROWTYPE;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM ai.ai_run WHERE id = p_run_id AND authorization_grant_id IS NOT NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'artifact requires a governed run';
+    END IF;
+    INSERT INTO ai.ai_run_artifact
+        (id, run_id, artifact_kind, object_key, sha256, data_classification, retention_until)
+    VALUES (p_id, p_run_id, p_artifact_kind, p_object_key, p_sha256,
+            p_data_classification, statement_timestamp() + interval '1 year')
+    ON CONFLICT (id) DO NOTHING;
+    SELECT * INTO STRICT artifact_row FROM ai.ai_run_artifact WHERE id = p_id;
+    IF artifact_row.run_id <> p_run_id OR artifact_row.artifact_kind <> p_artifact_kind
+       OR artifact_row.object_key <> p_object_key OR artifact_row.sha256 <> p_sha256
+       OR artifact_row.data_classification <> p_data_classification THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'artifact replay conflicts with retained identity';
+    END IF;
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.record_retrieval_trace(
+    p_id uuid, p_run_id uuid, p_embedding_space_id uuid, p_query_hash text,
+    p_lexical_candidate_count integer, p_vector_candidate_count integer,
+    p_result_count integer, p_ranking_config jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+    document_count integer;
+BEGIN
+    SELECT * INTO STRICT grant_row FROM authz.ai_authorization_grant
+    WHERE run_id = p_run_id AND consumed_at IS NOT NULL;
+    IF NOT EXISTS (
+        SELECT 1 FROM ai.ai_run run
+        WHERE run.id = p_run_id AND run.embedding_space_id = p_embedding_space_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match governed run';
+    END IF;
+    SELECT count(*) INTO document_count FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
+    INSERT INTO ai.retrieval_trace
+        (id, run_id, grant_id, embedding_space_id, query_hash, authorized_set_digest,
+         authorized_document_count, classification_ceiling, lexical_candidate_count,
+         vector_candidate_count, result_count, ranking_config)
+    VALUES (p_id, p_run_id, grant_row.id, p_embedding_space_id, p_query_hash,
+            grant_row.authorized_set_digest, document_count, grant_row.classification_ceiling,
+            p_lexical_candidate_count, p_vector_candidate_count, p_result_count, p_ranking_config);
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.record_retrieval_hit(
+    p_trace_id uuid, p_document_version_id uuid, p_chunk_id uuid,
+    p_lexical_score double precision, p_vector_score double precision,
+    p_fused_score double precision, p_rank integer, p_excerpt_hash text, p_injection_detected boolean
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    INSERT INTO ai.retrieval_hit
+        (trace_id, document_version_id, chunk_id, lexical_score, vector_score,
+         fused_score, rank, excerpt_hash, injection_detected)
+    VALUES (p_trace_id, p_document_version_id, p_chunk_id, p_lexical_score, p_vector_score,
+            p_fused_score, p_rank, p_excerpt_hash, p_injection_detected);
+    RETURN p_chunk_id;
+END;
+$$;
+
+CREATE FUNCTION ai.persist_retrieval_bundle(
+    p_id uuid, p_run_id uuid, p_embedding_space_id uuid, p_query_hash text,
+    p_lexical_candidate_count integer, p_vector_candidate_count integer,
+    p_ranking_config jsonb, p_hits jsonb
+)
+RETURNS TABLE (trace_id uuid, retrieval_hit_id uuid, rank integer)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    grant_row authz.ai_authorization_grant%ROWTYPE;
+    existing_trace ai.retrieval_trace%ROWTYPE;
+    bundle_digest text;
+    bundle_payload jsonb;
+    document_count integer;
+    hit_count integer;
+    inserted_count integer;
+    item jsonb;
+    item_ordinal bigint;
+    item_document_version_id uuid;
+    item_chunk_id uuid;
+    item_rank integer;
+    item_excerpt_hash text;
+    chunk_content text;
+    chunk_content_hash text;
+    chunk_document_version integer;
+    chunk_classification text;
+BEGIN
+    IF p_id IS NULL OR p_run_id IS NULL OR p_embedding_space_id IS NULL
+       OR p_query_hash !~ '^[0-9a-f]{64}$'
+       OR p_lexical_candidate_count NOT BETWEEN 0 AND 200
+       OR p_vector_candidate_count NOT BETWEEN 0 AND 200
+       OR jsonb_typeof(p_ranking_config) <> 'object' OR octet_length(p_ranking_config::text) > 4096
+       OR jsonb_typeof(p_hits) <> 'array' OR jsonb_array_length(p_hits) > 100
+       OR octet_length(p_hits::text) > 262144 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bundle bounds';
+    END IF;
+    hit_count := jsonb_array_length(p_hits);
+    bundle_payload := jsonb_build_object(
+        'embeddingSpaceId', p_embedding_space_id,
+        'hits', p_hits,
+        'lexicalCandidateCount', p_lexical_candidate_count,
+        'queryHash', p_query_hash,
+        'rankingConfig', p_ranking_config,
+        'runId', p_run_id,
+        'traceId', p_id,
+        'vectorCandidateCount', p_vector_candidate_count
+    );
+    bundle_digest := encode(pg_catalog.sha256(convert_to(bundle_payload::text, 'UTF8')), 'hex');
+
+    SELECT * INTO STRICT grant_row FROM authz.ai_authorization_grant
+    WHERE run_id = p_run_id AND consumed_at IS NOT NULL FOR SHARE;
+    IF NOT EXISTS (SELECT 1 FROM ai.ai_run run
+                   WHERE run.id = p_run_id AND run.embedding_space_id = p_embedding_space_id) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match governed run';
+    END IF;
+    SELECT count(*) INTO document_count FROM authz.ai_authorized_document WHERE grant_id = grant_row.id;
+
+    INSERT INTO ai.retrieval_trace
+        (id, run_id, grant_id, embedding_space_id, query_hash, authorized_set_digest,
+         authorized_document_count, classification_ceiling, lexical_candidate_count,
+         vector_candidate_count, result_count, ranking_config, bundle_digest)
+    VALUES (p_id, p_run_id, grant_row.id, p_embedding_space_id, p_query_hash,
+            grant_row.authorized_set_digest, document_count, grant_row.classification_ceiling,
+            p_lexical_candidate_count, p_vector_candidate_count, hit_count, p_ranking_config, bundle_digest)
+    ON CONFLICT (id) DO NOTHING;
+    GET DIAGNOSTICS inserted_count = ROW_COUNT;
+    SELECT * INTO STRICT existing_trace FROM ai.retrieval_trace WHERE id = p_id FOR UPDATE;
+    IF existing_trace.bundle_digest IS DISTINCT FROM bundle_digest THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'retrieval bundle replay conflicts with immutable digest';
+    END IF;
+
+    IF inserted_count = 1 THEN
+        FOR item, item_ordinal IN SELECT value, ordinality FROM jsonb_array_elements(p_hits) WITH ORDINALITY LOOP
+            IF jsonb_typeof(item) <> 'object'
+               OR item - ARRAY['chunkId','documentVersionId','documentVersion','contentHash','classification',
+                    'lexicalScore','vectorScore','fusedScore','rank','excerptHash','injectionDetected'] <> '{}'::jsonb
+               OR NOT (item ?& ARRAY['chunkId','documentVersionId','documentVersion','contentHash','classification',
+                    'lexicalScore','vectorScore','fusedScore','rank','excerptHash','injectionDetected'])
+               OR jsonb_typeof(item->'chunkId') <> 'string'
+               OR jsonb_typeof(item->'documentVersionId') <> 'string'
+               OR jsonb_typeof(item->'documentVersion') <> 'number'
+               OR jsonb_typeof(item->'contentHash') <> 'string'
+               OR jsonb_typeof(item->'classification') <> 'string'
+               OR jsonb_typeof(item->'fusedScore') <> 'number'
+               OR jsonb_typeof(item->'rank') <> 'number'
+               OR jsonb_typeof(item->'excerptHash') <> 'string'
+               OR jsonb_typeof(item->'injectionDetected') <> 'boolean'
+               OR (item->'lexicalScore' <> 'null'::jsonb AND jsonb_typeof(item->'lexicalScore') <> 'number')
+               OR (item->'vectorScore' <> 'null'::jsonb AND jsonb_typeof(item->'vectorScore') <> 'number') THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bundle hit';
+            END IF;
+            item_document_version_id := (item->>'documentVersionId')::uuid;
+            item_chunk_id := (item->>'chunkId')::uuid;
+            item_rank := (item->>'rank')::integer;
+            item_excerpt_hash := item->>'excerptHash';
+            IF item_rank <> item_ordinal OR item_excerpt_hash !~ '^[0-9a-f]{64}$'
+               OR item->>'contentHash' !~ '^[0-9a-f]{64}$'
+               OR item->>'classification' NOT IN ('PUBLIC','INTERNAL','CONFIDENTIAL','RESTRICTED') THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bundle hit order or digest';
+            END IF;
+            SELECT chunk.content, chunk.content_hash, document.version, document.data_classification
+            INTO STRICT chunk_content, chunk_content_hash, chunk_document_version, chunk_classification
+            FROM authz.ai_authorized_document allowed
+            JOIN ai.knowledge_document_version document ON document.id = allowed.document_version_id
+            JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = document.id
+            WHERE allowed.grant_id = grant_row.id AND document.id = item_document_version_id
+              AND chunk.id = item_chunk_id;
+            IF chunk_content_hash <> item->>'contentHash'
+               OR chunk_document_version <> (item->>'documentVersion')::integer
+               OR chunk_classification <> item->>'classification'
+               OR encode(pg_catalog.sha256(convert_to(chunk_content, 'UTF8')), 'hex') <> item_excerpt_hash THEN
+                RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'retrieval bundle hit does not match authorized chunk evidence';
+            END IF;
+            INSERT INTO ai.retrieval_hit
+                (trace_id, document_version_id, chunk_id, lexical_score, vector_score,
+                 fused_score, rank, excerpt_hash, injection_detected)
+            VALUES (p_id, item_document_version_id, item_chunk_id,
+                    CASE WHEN item->'lexicalScore' = 'null'::jsonb THEN NULL ELSE (item->>'lexicalScore')::double precision END,
+                    CASE WHEN item->'vectorScore' = 'null'::jsonb THEN NULL ELSE (item->>'vectorScore')::double precision END,
+                    (item->>'fusedScore')::double precision, item_rank, item_excerpt_hash,
+                    (item->>'injectionDetected')::boolean);
+        END LOOP;
+    ELSIF (SELECT count(*) FROM ai.retrieval_hit hit WHERE hit.trace_id = p_id) <> hit_count THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retrieval bundle replay found partial persisted evidence';
+    END IF;
+
+    IF hit_count = 0 THEN
+        RETURN QUERY SELECT p_id, NULL::uuid, NULL::integer;
+    ELSE
+        RETURN QUERY SELECT p_id, hit.chunk_id, hit.rank
+        FROM ai.retrieval_hit hit WHERE hit.trace_id = p_id ORDER BY hit.rank;
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION ai.begin_embedding_space_gate(
+    p_id uuid, p_dataset_version_id uuid, p_candidate_embedding_space_id uuid,
+    p_corpus_manifest_digest text, p_expected_active_space_id uuid, p_evidence_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    candidate_manifest text;
+    candidate_status text;
+    active_status text;
+    dataset_content_hash text;
+    dataset_status text;
+    eligible bigint;
+    embedded bigint;
+    leakage bigint;
+    document_manifest text;
+BEGIN
+    SELECT content_hash, status INTO STRICT dataset_content_hash, dataset_status
+    FROM ai.evaluation_dataset_version WHERE id = p_dataset_version_id FOR SHARE;
+    IF dataset_status <> 'PUBLISHED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version is not PUBLISHED';
+    END IF;
+    SELECT corpus_version, status INTO STRICT candidate_manifest, candidate_status
+    FROM ai.embedding_space WHERE id = p_candidate_embedding_space_id FOR UPDATE;
+    SELECT status INTO STRICT active_status FROM ai.embedding_space WHERE id = p_expected_active_space_id FOR SHARE;
+    IF candidate_manifest <> p_corpus_manifest_digest OR candidate_status <> 'BUILDING' OR active_status <> 'ACTIVE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
+    END IF;
+    PERFORM 1 FROM ai.ingestion_job job
+    WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
+      AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY job.id
+    FOR UPDATE;
+    PERFORM 1
+    FROM ai.knowledge_document document
+    JOIN ai.ingestion_job job ON job.document_id = document.id
+    WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
+      AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY document.id
+    FOR UPDATE OF document;
+    WITH eligible_versions AS MATERIALIZED (
+        SELECT DISTINCT version.id, version.document_id, version.version AS version_number,
+               version.content_hash, document.current_version AS expected_head
+        FROM ai.ingestion_job job
+        JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+        JOIN ai.knowledge_document document ON document.id = version.document_id
+        WHERE job.candidate_embedding_space_id = p_candidate_embedding_space_id
+          AND job.corpus_manifest_digest = p_corpus_manifest_digest AND job.status = 'COMPLETED'
+    ), eligible_chunks AS (
+        SELECT DISTINCT chunk.id
+        FROM eligible_versions version
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
+    )
+    SELECT count(*), count(embedding.chunk_id),
+           (SELECT count(*) FROM ai.chunk_embedding all_embedding
+            LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
+            WHERE all_embedding.embedding_space_id = p_candidate_embedding_space_id AND allowed.id IS NULL),
+           (SELECT string_agg(
+                version.document_id::text || ':' || coalesce(version.expected_head::text, 'null') || '>' ||
+                version.id::text || ':' || version.version_number::text || ':' || version.content_hash || '[' ||
+                coalesce((SELECT string_agg(chunk.id::text || ':' || chunk.ordinal::text || ':' || chunk.content_hash,
+                                            ';' ORDER BY chunk.ordinal, chunk.id)
+                          FROM ai.knowledge_chunk chunk WHERE chunk.document_version_id = version.id), '') || ']',
+                ',' ORDER BY version.document_id, version.id)
+            FROM eligible_versions version)
+    INTO eligible, embedded, leakage, document_manifest
+    FROM eligible_chunks eligible_chunk
+    LEFT JOIN ai.chunk_embedding embedding
+      ON embedding.chunk_id = eligible_chunk.id AND embedding.embedding_space_id = p_candidate_embedding_space_id;
+    IF eligible = 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: eligible corpus is empty';
+    END IF;
+    INSERT INTO ai.embedding_space_gate_evaluation
+        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, document_manifest, candidate_embedding_space_id,
+         expected_active_space_id, eligible_count, embedded_count, leakage_count, evidence_hash)
+    VALUES (p_id, p_dataset_version_id, dataset_content_hash, p_corpus_manifest_digest, document_manifest, p_candidate_embedding_space_id,
+            p_expected_active_space_id, eligible, embedded, leakage, p_evidence_hash);
+    RETURN p_id;
+END;
+$$;
+
+CREATE FUNCTION ai.record_embedding_gate_case(
+    p_evaluation_id uuid, p_case_id uuid, p_citation_numerator bigint,
+    p_citation_denominator bigint, p_recall_numerator bigint, p_recall_denominator bigint,
+    p_leakage_count bigint, p_expected_outcome_hash text, p_actual_outcome_hash text,
+    p_outcome_status text, p_evidence_hash text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    expected_dataset uuid;
+    case_dataset uuid;
+    case_input jsonb;
+    case_expected_properties jsonb;
+BEGIN
+    SELECT dataset_version_id INTO STRICT expected_dataset
+    FROM ai.embedding_space_gate_evaluation WHERE id = p_evaluation_id;
+    SELECT dataset_version_id, input, expected_properties
+    INTO STRICT case_dataset, case_input, case_expected_properties
+    FROM ai.evaluation_case WHERE id = p_case_id;
+    IF case_dataset <> expected_dataset THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'gate case is outside evaluation dataset';
+    END IF;
+    IF NOT (jsonb_typeof(case_input) = 'object' AND case_input <> '{}'::jsonb)
+       OR NOT (jsonb_typeof(case_expected_properties) = 'object' AND case_expected_properties <> '{}'::jsonb) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation case must contain non-empty input and expected properties';
+    END IF;
+    IF (p_expected_outcome_hash = p_actual_outcome_hash) IS DISTINCT FROM (p_outcome_status = 'MATCH') THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'gate outcome status does not match evidence hashes';
+    END IF;
+    INSERT INTO ai.embedding_space_gate_case_evidence
+        (evaluation_id, case_id, citation_numerator, citation_denominator,
+         recall_numerator, recall_denominator, leakage_count, expected_outcome_hash,
+         actual_outcome_hash, outcome_status, evidence_hash)
+    VALUES (p_evaluation_id, p_case_id, p_citation_numerator, p_citation_denominator,
+            p_recall_numerator, p_recall_denominator, p_leakage_count, p_expected_outcome_hash,
+            p_actual_outcome_hash, p_outcome_status, p_evidence_hash);
+    RETURN p_case_id;
+END;
+$$;
+
+CREATE FUNCTION ai.finalize_embedding_space_gate(p_evaluation_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+    evaluation ai.embedding_space_gate_evaluation%ROWTYPE;
+    current_manifest text;
+    candidate_status text;
+    active_status text;
+    current_document_manifest text;
+    current_eligible bigint;
+    current_embedded bigint;
+    current_leakage bigint;
+    dataset_content_hash text;
+    dataset_status text;
+    citation_num bigint;
+    citation_den bigint;
+    recall_total numeric;
+    case_leakage bigint;
+    outcome_mismatches bigint;
+    cases bigint;
+    dataset_cases bigint;
+    evidence_cases bigint;
+    foreign_cases bigint;
+    empty_cases bigint;
+    gate_decision text;
+BEGIN
+    SELECT * INTO STRICT evaluation FROM ai.embedding_space_gate_evaluation
+    WHERE id = p_evaluation_id FOR SHARE;
+    SELECT content_hash, status INTO STRICT dataset_content_hash, dataset_status
+    FROM ai.evaluation_dataset_version WHERE id = evaluation.dataset_version_id FOR SHARE;
+    IF dataset_status <> 'PUBLISHED' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version is not PUBLISHED';
+    END IF;
+    IF dataset_content_hash <> evaluation.dataset_content_hash THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'evaluation dataset version content hash changed';
+    END IF;
+    SELECT corpus_version, status INTO STRICT current_manifest, candidate_status FROM ai.embedding_space
+    WHERE id = evaluation.candidate_embedding_space_id FOR UPDATE;
+    SELECT status INTO STRICT active_status FROM ai.embedding_space
+    WHERE id = evaluation.expected_active_space_id FOR SHARE;
+    IF candidate_status <> 'BUILDING' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'candidate embedding space is not BUILDING';
+    END IF;
+    IF current_manifest IS DISTINCT FROM evaluation.corpus_manifest_digest OR active_status <> 'ACTIVE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'stale corpus manifest or expected active space';
+    END IF;
+    PERFORM 1 FROM ai.ingestion_job job
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY job.id
+    FOR UPDATE;
+    PERFORM 1
+    FROM ai.knowledge_document document
+    JOIN ai.ingestion_job job ON job.document_id = document.id
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    ORDER BY document.id
+    FOR UPDATE OF document;
+    PERFORM 1
+    FROM ai.ingestion_job job
+    JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    FOR UPDATE OF version;
+    PERFORM 1
+    FROM ai.ingestion_job job
+    JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+    JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
+    WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+      AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    FOR SHARE OF chunk;
+    WITH eligible_versions AS MATERIALIZED (
+        SELECT DISTINCT version.id, version.document_id, version.version AS version_number,
+               version.content_hash, document.current_version AS expected_head
+        FROM ai.ingestion_job job
+        JOIN ai.knowledge_document_version version ON version.id = job.produced_document_version_id
+        JOIN ai.knowledge_document document ON document.id = version.document_id
+        WHERE job.candidate_embedding_space_id = evaluation.candidate_embedding_space_id
+          AND job.corpus_manifest_digest = evaluation.corpus_manifest_digest AND job.status = 'COMPLETED'
+    ), eligible_chunks AS (
+        SELECT DISTINCT chunk.id
+        FROM eligible_versions version
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = version.id
+    )
+    SELECT count(*), count(embedding.chunk_id),
+           (SELECT count(*) FROM ai.chunk_embedding all_embedding
+            LEFT JOIN eligible_chunks allowed ON allowed.id = all_embedding.chunk_id
+            WHERE all_embedding.embedding_space_id = evaluation.candidate_embedding_space_id AND allowed.id IS NULL),
+           (SELECT string_agg(
+                version.document_id::text || ':' || coalesce(version.expected_head::text, 'null') || '>' ||
+                version.id::text || ':' || version.version_number::text || ':' || version.content_hash || '[' ||
+                coalesce((SELECT string_agg(chunk.id::text || ':' || chunk.ordinal::text || ':' || chunk.content_hash,
+                                            ';' ORDER BY chunk.ordinal, chunk.id)
+                          FROM ai.knowledge_chunk chunk WHERE chunk.document_version_id = version.id), '') || ']',
+                ',' ORDER BY version.document_id, version.id)
+            FROM eligible_versions version)
+    INTO current_eligible, current_embedded, current_leakage, current_document_manifest
+    FROM eligible_chunks eligible_chunk
+    LEFT JOIN ai.chunk_embedding embedding
+      ON embedding.chunk_id = eligible_chunk.id
+     AND embedding.embedding_space_id = evaluation.candidate_embedding_space_id;
+    IF current_eligible <> evaluation.eligible_count
+       OR current_embedded <> evaluation.embedded_count
+       OR current_leakage <> evaluation.leakage_count
+       OR current_document_manifest IS DISTINCT FROM evaluation.document_manifest THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'gate corpus snapshot changed';
+    END IF;
+    SELECT count(*), count(*) FILTER (WHERE input = '{}'::jsonb OR expected_properties = '{}'::jsonb)
+    INTO dataset_cases, empty_cases
+    FROM ai.evaluation_case WHERE dataset_version_id = evaluation.dataset_version_id;
+    IF empty_cases > 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'evaluation dataset contains empty cases';
+    END IF;
+    SELECT count(*) INTO evidence_cases
+    FROM ai.embedding_space_gate_case_evidence
+    WHERE evaluation_id = p_evaluation_id;
+    SELECT count(*) INTO foreign_cases
+    FROM ai.embedding_space_gate_case_evidence evidence
+    LEFT JOIN ai.evaluation_case evaluation_case
+      ON evaluation_case.id = evidence.case_id
+     AND evaluation_case.dataset_version_id = evaluation.dataset_version_id
+    WHERE evidence.evaluation_id = p_evaluation_id AND evaluation_case.id IS NULL;
+    IF dataset_cases < 20 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'at least 20 meaningful evaluation cases are required';
+    END IF;
+    IF evidence_cases <> dataset_cases OR foreign_cases <> 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'partial evidence cannot finalize a complete evaluation dataset';
+    END IF;
+    SELECT coalesce(sum(evidence.citation_numerator), 0), coalesce(sum(evidence.citation_denominator), 0),
+           coalesce(sum(evidence.recall_numerator::numeric / evidence.recall_denominator), 0), count(*),
+           coalesce(sum(evidence.leakage_count), 0), count(*) FILTER (WHERE evidence.outcome_status = 'MISMATCH')
+    INTO citation_num, citation_den, recall_total, cases, case_leakage, outcome_mismatches
+    FROM ai.embedding_space_gate_case_evidence evidence
+    JOIN ai.evaluation_case evaluation_case ON evaluation_case.id = evidence.case_id
+    WHERE evidence.evaluation_id = p_evaluation_id;
+    IF citation_den = 0 THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'empty gate evidence: citation evidence is required';
+    END IF;
+    gate_decision := CASE WHEN evaluation.embedded_count = evaluation.eligible_count
+        AND evaluation.leakage_count + case_leakage = 0
+        AND outcome_mismatches = 0
+        AND citation_num::numeric / citation_den >= 0.95
+        AND recall_total / cases >= 0.85 THEN 'PASS' ELSE 'FAIL' END;
+    INSERT INTO ai.embedding_space_gate_result
+        (id, dataset_version_id, dataset_content_hash, corpus_manifest_digest, document_manifest, candidate_embedding_space_id,
+         expected_active_space_id, eligible_count, embedded_count, leakage_count, outcome_mismatch_count,
+         citation_numerator, citation_denominator, recall_sum, recall_count,
+         decision, evidence_hash)
+    VALUES (evaluation.id, evaluation.dataset_version_id, evaluation.dataset_content_hash, evaluation.corpus_manifest_digest,
+            evaluation.document_manifest,
+            evaluation.candidate_embedding_space_id, evaluation.expected_active_space_id,
+                evaluation.eligible_count, evaluation.embedded_count, evaluation.leakage_count + case_leakage, outcome_mismatches,
+            citation_num, citation_den, recall_total, cases, gate_decision, evaluation.evidence_hash);
+    RETURN gate_decision;
+END;
+$$;
+
+CREATE FUNCTION ai.authorized_hybrid_retrieval(
+    p_run_id uuid,
+    p_space_id uuid,
+    p_query text,
+    p_query_embedding public.vector,
+    p_lexical_limit integer,
+    p_vector_limit integer,
+    p_result_limit integer
+)
+RETURNS TABLE (
+    chunk_id uuid, document_version_id uuid, content text,
+    data_classification text, document_version integer, content_hash text,
+    lexical_score double precision, vector_score double precision,
+    fused_score double precision, rank bigint
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+    IF p_lexical_limit IS NULL OR p_vector_limit IS NULL OR p_result_limit IS NULL
+       OR p_lexical_limit NOT BETWEEN 1 AND 200 OR p_vector_limit NOT BETWEEN 1 AND 200
+       OR p_result_limit NOT BETWEEN 1 AND 100 OR p_query IS NULL OR octet_length(p_query) > 8192 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid retrieval bounds';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM authz.ai_authorization_grant grant_row
+        WHERE grant_row.run_id = p_run_id AND grant_row.consumed_at IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'run has no consumed AI authorization grant';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM ai.ai_run run
+        WHERE run.id = p_run_id AND run.embedding_space_id = p_space_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding space does not match governed run';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM ai.embedding_space WHERE id = p_space_id AND status = 'ACTIVE') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'retrieval embedding space is not active';
+    END IF;
+    RETURN QUERY
+    WITH grant_scope AS (
+        SELECT grant_row.id, grant_row.classification_ceiling
+        FROM authz.ai_authorization_grant grant_row WHERE grant_row.run_id = p_run_id
+    ), lexical AS (
+        SELECT chunk.id, chunk.document_version_id,
+               ts_rank_cd(chunk.search_vector, plainto_tsquery('simple', p_query))::double precision AS score,
+               row_number() OVER (ORDER BY ts_rank_cd(chunk.search_vector, plainto_tsquery('simple', p_query)) DESC, chunk.id) AS position
+        FROM grant_scope scope
+        JOIN authz.ai_authorized_document allowed ON allowed.grant_id = scope.id
+        JOIN ai.knowledge_document_version document ON document.id = allowed.document_version_id
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = allowed.document_version_id
+        WHERE chunk.search_vector @@ plainto_tsquery('simple', p_query)
+          AND CASE document.data_classification WHEN 'PUBLIC' THEN 1 WHEN 'INTERNAL' THEN 2 WHEN 'CONFIDENTIAL' THEN 3 ELSE 4 END
+              <= CASE scope.classification_ceiling WHEN 'PUBLIC' THEN 1 WHEN 'INTERNAL' THEN 2 WHEN 'CONFIDENTIAL' THEN 3 ELSE 4 END
+        ORDER BY score DESC, chunk.id LIMIT p_lexical_limit
+    ), vector_candidates AS (
+        SELECT chunk.id, chunk.document_version_id,
+               (1 - (embedding.embedding OPERATOR(public.<=>) p_query_embedding))::double precision AS score,
+               row_number() OVER (ORDER BY embedding.embedding OPERATOR(public.<=>) p_query_embedding, chunk.id) AS position
+        FROM grant_scope scope
+        JOIN authz.ai_authorized_document allowed ON allowed.grant_id = scope.id
+        JOIN ai.knowledge_document_version document ON document.id = allowed.document_version_id
+        JOIN ai.knowledge_chunk chunk ON chunk.document_version_id = allowed.document_version_id
+        JOIN ai.chunk_embedding embedding ON embedding.chunk_id = chunk.id AND embedding.embedding_space_id = p_space_id
+        WHERE CASE document.data_classification WHEN 'PUBLIC' THEN 1 WHEN 'INTERNAL' THEN 2 WHEN 'CONFIDENTIAL' THEN 3 ELSE 4 END
+              <= CASE scope.classification_ceiling WHEN 'PUBLIC' THEN 1 WHEN 'INTERNAL' THEN 2 WHEN 'CONFIDENTIAL' THEN 3 ELSE 4 END
+        ORDER BY embedding.embedding OPERATOR(public.<=>) p_query_embedding, chunk.id LIMIT p_vector_limit
+    ), fused AS (
+        SELECT coalesce(lexical.id, vector_candidates.id) AS id,
+               coalesce(lexical.document_version_id, vector_candidates.document_version_id) AS document_version_id,
+               lexical.score AS lexical_score, vector_candidates.score AS vector_score,
+               (coalesce(1.0 / (60 + lexical.position), 0)
+                + coalesce(1.0 / (60 + vector_candidates.position), 0))::double precision AS fused_score
+        FROM lexical FULL JOIN vector_candidates USING (id, document_version_id)
+    ), ranked AS (
+        SELECT fused.*, row_number() OVER (ORDER BY fused.fused_score DESC, fused.id) AS final_rank
+        FROM fused
+    )
+    SELECT ranked.id, ranked.document_version_id, chunk.content,
+           document.data_classification, document.version, chunk.content_hash,
+           ranked.lexical_score, ranked.vector_score, ranked.fused_score, ranked.final_rank
+    FROM ranked JOIN ai.knowledge_chunk chunk ON chunk.id = ranked.id
+    JOIN ai.knowledge_document_version document ON document.id = ranked.document_version_id
+    ORDER BY ranked.final_rank LIMIT p_result_limit;
+END;
+$$;
+
+REVOKE ALL ON SCHEMA platform FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA catalog FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA iam FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA authz FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA occ FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA audit FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA ai FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA flowable FROM innorder_ai_runtime;
+REVOKE ALL ON SCHEMA public FROM innorder_ai_runtime;
+GRANT USAGE ON SCHEMA ai, public TO innorder_ai_runtime;
+GRANT USAGE ON SCHEMA authz TO innorder_ai_runtime;
+
+GRANT SELECT ON ai.model_provider, ai.model_profile, ai.prompt_template_version, ai.agent_definition_version,
+    ai.embedding_space, ai.evaluation_dataset_version, ai.evaluation_case,
+    ai.ingestion_job, ai.ingestion_attempt,
+    ai.event_consumption, ai.model_invocation, ai.retrieval_trace, ai.retrieval_hit,
+    ai.embedding_space_gate_evaluation, ai.embedding_space_gate_case_evidence,
+    ai.embedding_space_gate_result, ai.ai_run_artifact, ai.retention_policy
+TO innorder_ai_runtime;
+REVOKE SELECT ON ai.knowledge_document_version FROM innorder_ai_runtime;
+REVOKE SELECT ON ai.knowledge_chunk FROM innorder_ai_runtime;
+REVOKE SELECT ON ai.chunk_embedding FROM innorder_ai_runtime;
+
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai FROM PUBLIC;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz, ai TO innorder_runtime;
+REVOKE UPDATE, DELETE ON authz.ai_authorization_grant FROM innorder_runtime;
+REVOKE ALL ON FUNCTION authz.bind_ai_grant_claim_idempotency(uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION authz.bind_ai_grant_claim_idempotency(uuid, text) TO innorder_runtime;
+REVOKE ALL ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.get_ai_operation_status(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text, uuid, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.get_guidance_recommendation_submission(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.mark_guidance_recommendation_dispatched(uuid, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.acknowledge_guidance_recommendation(uuid, text, text, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.fail_guidance_recommendation_submission(uuid, text, text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.record_retrieval_trace(uuid, uuid, uuid, text, integer, integer, integer, jsonb) FROM PUBLIC, innorder_ai_runtime;
+REVOKE ALL ON FUNCTION ai.record_retrieval_hit(uuid, uuid, uuid, double precision, double precision, double precision, integer, text, boolean) FROM PUBLIC, innorder_ai_runtime;
+REVOKE ALL ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) FROM PUBLIC, innorder_runtime;
+REVOKE ALL ON FUNCTION ai.release_legal_hold(uuid, uuid) FROM PUBLIC, innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION authz.consume_ai_authorization_grant(text, uuid, text, bigint, text, text, text, uuid, uuid, uuid, uuid, uuid, uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_ai_operation_status(uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_guidance_run_configuration(uuid, uuid, uuid, uuid, uuid, uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_guidance_terminal_result(uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_guidance_run(uuid, text, text, uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.heartbeat_ingestion_job(uuid, text, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text, uuid, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.get_guidance_recommendation_submission(uuid) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.mark_guidance_recommendation_dispatched(uuid, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.acknowledge_guidance_recommendation(uuid, text, text, uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.fail_guidance_recommendation_submission(uuid, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.cleanup_expired_run_artifacts(timestamptz, integer) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.release_legal_hold(uuid, uuid) TO innorder_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_ingestion_document_version(uuid, text, uuid, integer, text, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_ingestion_chunk_embedding(uuid, text, uuid, uuid, integer, text, text, integer, jsonb, uuid, public.vector) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_ingestion_embedding_batch(uuid, text, uuid, uuid, jsonb, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.checkpoint_ingestion_attempt(uuid, text, text, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_ingestion_job(uuid, text, jsonb) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.fail_ingestion_job(uuid, text, text, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.register_event_consumption(uuid, text, uuid, text, integer, text, uuid, bigint) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_event_consumption(uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.fail_event_consumption(uuid, text, text, interval) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.transition_ai_run(uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.start_model_invocation(uuid, uuid, uuid, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_model_invocation(uuid, text, text, text, bigint, bigint, numeric, integer, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.persist_run_artifact(uuid, uuid, text, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.begin_embedding_space_gate(uuid, uuid, uuid, text, uuid, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.record_embedding_gate_case(uuid, uuid, bigint, bigint, bigint, bigint, bigint, text, text, text, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.finalize_embedding_space_gate(uuid) TO innorder_ai_runtime;

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { DockerfileParser } from "dockerfile-ast";
 import { parse } from "yaml";
@@ -81,6 +83,8 @@ const expectedImages = {
   minio: "minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
   "minio-init": "minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3",
   "minio-volume-init": "alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+  "parser-volume-init": "alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+  "postgres-init": "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9",
   postgres: "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9",
   redis: "redis:7.4.2-alpine3.21@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952",
 };
@@ -99,8 +103,8 @@ function assertCoreBootJarUsesGradleCache(ast) {
     ["mount", "type=cache,target=/root/.gradle,sharing=locked"],
   ], "core bootJar RUN must use the locked Gradle cache mount");
   assert.match(bootJarRuns[0].getArgumentsContent(),
-    /^chmod \+x gradlew\s+&& \.\/gradlew :services:core:bootJar --no-daemon\b/u,
-    "core bootJar RUN must chmod and invoke Gradle in the mounted instruction");
+    /^sed -i 's\/\\r\$\/\/' gradlew\s+&& chmod \+x gradlew\s+&& \.\/gradlew :services:core:bootJar --no-daemon\b/u,
+    "core bootJar RUN must normalize, chmod, and invoke Gradle in the mounted instruction");
 }
 
 function assertPinnedFroms(ast, path) {
@@ -117,47 +121,65 @@ function secretTargets(service) {
 test("structurally checks OPA policy fail-closed and opaque-reference constructs", () => {
   const policy = read("policies/opa/platform/authz.rego");
   const tests = read("policies/opa/platform/authz_test.rego");
+  const documentation = read("policies/opa/README.md");
 
   assert.match(policy, /^package innorder\.platform\.authz/m);
   assert.match(policy, /^import rego\.v1$/m);
   assert.match(policy, /default decision :=/);
-  assert.match(policy, /every grant in input\.grants\s*\{\s*valid_grant\(grant\)/u);
-  assert.match(policy, /count\(matching_deny_refs\) == 0/u);
+  assert.match(policy, /"requestId": "00000000-0000-0000-0000-000000000000"/u);
+  assert.match(policy, /object\.keys\(input\) ==/u);
+  assert.match(policy, /every grant in grants\s*\{\s*valid_grant\(grant, releases\)/u);
+  assert.match(policy, /grant\.layer in object\.keys\(releases\)/u);
+  assert.match(policy, /count\(denial_reason_codes\) == 0/u);
   assert.match(policy, /crypto\.sha256\(grant\.id\)/u);
+  assert.match(policy, /"reasonCodes": sort\(reason_codes\)/u);
+  assert.match(policy, /"matchedPolicyIds": sort\(matched_policy_ids\)/u);
+  assert.match(policy, /data\.innorder\.platform\.authz\.decision|package innorder\.platform\.authz/u);
   for (const token of [
+    "contractVersion",
+    "authorizationRevision",
+    "PLATFORM",
+    "DOMAIN",
+    "CUSTOMER",
     "PRINCIPAL_DISABLED",
     "RESOURCE_INACTIVE",
     "ACTION_FORBIDDEN",
     "EXPLICIT_DENY",
     "NO_MATCHING_ALLOW",
     "INVALID_INPUT",
-    "reason_codes",
-    "reason_ids",
+    "reasonCodes",
+    "reasonIds",
+    "matchedPolicyIds",
   ]) {
     assert.ok(policy.includes(token), `policy must include ${token}`);
   }
 
   for (const testName of [
-    "test_default_deny",
-    "test_matching_allow",
-    "test_explicit_deny_overrides_allow",
-    "test_nonmatching_grant_denies",
-    "test_disabled_principal_is_non_overridable",
-    "test_inactive_resource_is_non_overridable",
-    "test_forbidden_action_is_non_overridable",
-    "test_wildcards_match_all_supported_dimensions",
-    "test_malformed_input_denies",
-    "test_malformed_deny_grant_fails_closed",
-    "test_nonmatching_deny_does_not_override_matching_allow",
-    "test_reason_output_is_sorted_and_non_secret",
+    "test_all_layers_can_allow",
+    "test_allow_and_abstain_allows",
+    "test_all_abstain_denies",
+    "test_absent_optional_layers_are_not_applicable",
+    "test_grant_for_absent_layer_invalidates_request",
+    "test_each_layer_explicit_deny_overrides_allows",
+    "test_baseline_denials_are_non_overridable",
+    "test_exact_wildcard_matches_all_dimensions",
+    "test_partial_wildcard_is_invalid",
+    "test_unknown_and_malformed_fields_deny_deterministically",
+    "test_duplicate_release_and_grant_ids_deny",
+    "test_oversized_values_deny",
+    "test_reason_and_policy_ids_are_sorted_distinct_and_opaque",
   ]) {
     assert.match(tests, new RegExp(`\\b${testName}\\b`));
   }
-  assert.match(tests, /"effect": "DENY"[\s\S]*object\.remove\([^)]*, \{"action"\}\)/u);
-  assert.match(tests, /"resource_id": "another-resource"[\s\S]*"allow": true/u);
   assert.match(tests, /SENSITIVE_CONTEXT_TOKEN/u);
-  assert.match(tests, /"id": "SENSITIVE_GRANT_ID_Z"/u);
+  assert.match(tests, /SENSITIVE_GRANT_ID_Z/u);
   assert.match(tests, /json\.marshal\(result\)/u);
+  assert.match(documentation, /data\.innorder\.platform\.authz\.decision/u);
+  assert.match(documentation, /"contractVersion": 1/u);
+  assert.match(documentation, /"releaseId":/u);
+  assert.match(documentation, /DOMAIN.*CUSTOMER.*optional/is);
+  assert.match(documentation, /Core.*active.*grants/is);
+  assert.doesNotMatch(documentation, /reason_codes|reason_ids|forbidden_actions|principal_id|entity_id|resource_id/u);
 });
 
 test("Compose defines digest-pinned, healthy services on an internal network", () => {
@@ -166,24 +188,34 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.deepEqual(Object.keys(compose.services).sort(), [
     "ai",
     "core",
+    "flowable-init",
     "host-gateway",
     "kafka",
     "minio",
     "minio-init",
-    "minio-volume-init",
     "opa",
+    "parser",
+    "parser-volume-init",
     "postgres",
+    "postgres-init",
     "redis",
   ]);
   assert.equal(compose.networks.backend.internal, true);
   assert.equal(compose.networks["host-access"].internal, undefined);
+  assert.deepEqual(
+    Object.entries(compose.services).filter(([, service]) => service.restart === "no").map(([name]) => name).sort(),
+    ["flowable-init", "minio-init", "parser-volume-init", "postgres-init"],
+  );
 
   for (const [name, service] of Object.entries(compose.services)) {
-    if (!["minio-init", "minio-volume-init"].includes(name)) {
+    if (!["flowable-init", "minio-init", "parser-volume-init", "postgres-init"].includes(name)) {
       assert.ok(service.healthcheck?.test, `${name} must have a healthcheck`);
     }
     if (name === "host-gateway") {
       assert.deepEqual(service.networks, ["backend", "host-access"]);
+    } else if (name === "parser") {
+      assert.equal(service.network_mode, "none");
+      assert.equal(service.networks, undefined);
     } else {
       assert.deepEqual(service.networks, ["backend"], `${name} must remain backend-only`);
       assert.equal(service.ports, undefined, `${name} must not publish ports directly`);
@@ -223,6 +255,9 @@ test("Compose defines digest-pinned, healthy services on an internal network", (
   assert.deepEqual(Object.keys(compose.volumes).sort(), [
     "kafka-data",
     "minio-data",
+    "parser-input",
+    "parser-output",
+    "parser-requests",
     "postgres-data",
     "redis-data",
   ]);
@@ -240,17 +275,42 @@ test("Compose wiring follows application config and completion gates", () => {
     "APP_VERSION",
     "DATABASE_JDBC_URL",
     "DATABASE_USERNAME",
+    "FLOWABLE_DATABASE_SCHEMA_UPDATE",
     "FLYWAY_USERNAME",
     "KAFKA_BOOTSTRAP_SERVERS",
     "OBJECT_STORAGE_BUCKET",
     "OBJECT_STORAGE_ENDPOINT",
+    "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
+    "OCC_BOOTSTRAP_DELETE_SECRET",
+    "OCC_BOOTSTRAP_SECRET_OWNER",
+    "OCC_EVIDENCE_CLEANUP_ENABLED",
+    "OCC_EVIDENCE_PRODUCTION_ENABLED",
+    "OCC_JWT_ISSUER",
+    "OCC_JWT_PRIVATE_KEY_FILE",
+    "OCC_JWT_PUBLIC_KEY_FILE",
+    "OCC_RISK_DUE_ENABLED",
+    "OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID",
+    "OCC_RISK_METRICS_ENABLED",
+    "OCC_RISK_METRICS_REPORT_RESOURCE_ID",
     "OPA_BASE_URL",
     "REDIS_HOST",
     "REDIS_PORT",
     "SERVER_PORT",
     "SPRING_CONFIG_IMPORT",
+    "SPRING_KAFKA_PRODUCER_ACKS",
+    "SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS",
+    "SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE",
+    "SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS",
+    "SPRING_KAFKA_PRODUCER_RETRIES",
   ]);
   assert.deepEqual(Object.keys(ai.environment).sort(), [
+    "AI_INGESTION_ENABLED",
+    "AI_PARSER_HEARTBEAT_MAX_AGE_MS",
+    "AI_PARSER_INPUT_ROOT",
+    "AI_PARSER_OUTPUT_ROOT",
+    "AI_PARSER_POLL_MS",
+    "AI_PARSER_REQUEST_ROOT",
+    "AI_PARSER_TIMEOUT_MS",
     "HOST",
     "LOG_LEVEL",
     "NODE_ENV",
@@ -258,10 +318,32 @@ test("Compose wiring follows application config and completion gates", () => {
     "npm_package_version",
   ]);
   assert.equal(core.environment.APP_VERSION, "${APP_VERSION:-0.1.0}");
+  assert.equal(core.environment.OCC_EVIDENCE_PRODUCTION_ENABLED, "true");
+  assert.equal(core.environment.OCC_EVIDENCE_CLEANUP_ENABLED, "true");
   assert.equal(ai.environment.npm_package_version, "${APP_VERSION:-0.1.0}");
   assert.deepEqual(core.depends_on, {
+    "flowable-init": { condition: "service_completed_successfully" },
     postgres: { condition: "service_healthy" },
   });
+  assert.equal(core.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "false");
+  assert.equal(core.environment.OCC_RISK_DUE_ENABLED, "true");
+  assert.equal(core.environment.OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID,
+    "${OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:-00000000-0000-7000-8000-000000000040}");
+  assert.equal(core.environment.OCC_RISK_METRICS_ENABLED, "true");
+  assert.equal(core.environment.OCC_RISK_METRICS_REPORT_RESOURCE_ID,
+    "${OCC_RISK_METRICS_REPORT_RESOURCE_ID:-00000000-0000-7000-8000-000000000041}");
+  const application = read("services/core/src/main/resources/application.yml");
+  assert.match(application, /system-principal-id: \$\{OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:\}/u);
+  assert.match(application, /report-resource-id: \$\{OCC_RISK_METRICS_REPORT_RESOURCE_ID:\}/u);
+  const envExample = read("infra/compose/.env.example");
+  assert.match(envExample, /^OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID=00000000-0000-7000-8000-000000000040$/mu);
+  assert.match(envExample, /^OCC_RISK_METRICS_REPORT_RESOURCE_ID=00000000-0000-7000-8000-000000000041$/mu);
+  const flowableInit = compose.services["flowable-init"];
+  assert.equal(flowableInit.environment.SPRING_PROFILES_ACTIVE, "flowable-init");
+  assert.equal(flowableInit.environment.FLOWABLE_DATABASE_SCHEMA_UPDATE, "true");
+  assert.equal(flowableInit.environment.SPRING_MAIN_WEB_APPLICATION_TYPE, "none");
+  assert.equal(flowableInit.restart, "no");
+  assert.deepEqual(flowableInit.depends_on, { "postgres-init": { condition: "service_completed_successfully" } });
   assert.ok(core.healthcheck.test.includes("http://localhost:8080/actuator/health/readiness"));
 
   const opa = compose.services.opa;
@@ -279,14 +361,45 @@ test("Compose wiring follows application config and completion gates", () => {
   assert.match(opaEntrypoint, /exec opa "\$@"/u);
 });
 
+test("Compose deploys the parser sidecar with shared queues and hard sandbox limits", () => {
+  const compose = parse(read(composePath));
+  const parser = compose.services.parser;
+  const ai = compose.services.ai;
+  assert.equal(parser.build.dockerfile, "services/ai/parser.Dockerfile");
+  assert.equal(parser.network_mode, "none");
+  assert.equal(parser.read_only, true);
+  assert.equal(parser.user, "node");
+  assert.deepEqual(parser.cap_drop, ["ALL"]);
+  assert.ok(parser.security_opt.includes("no-new-privileges:true"));
+  assert.ok(parser.security_opt.some((value) => String(value).includes("parser-seccomp.json")));
+  assert.equal(parser.cpus, 1);
+  assert.equal(parser.mem_limit, "512m");
+  assert.ok(parser.pids_limit <= 64);
+  assert.deepEqual(parser.tmpfs, ["/tmp:rw,noexec,nosuid,nodev,size=16m"]);
+  assert.ok(parser.volumes.includes("parser-input:/parser/input:ro"));
+  assert.ok(parser.volumes.includes("parser-requests:/parser/requests"));
+  assert.ok(parser.volumes.includes("parser-output:/parser/output"));
+  assert.ok(ai.volumes.includes("parser-input:/parser/input"));
+  assert.ok(ai.volumes.includes("parser-requests:/parser/requests"));
+  assert.ok(ai.volumes.includes("parser-output:/parser/output"));
+  assert.equal(ai.environment.AI_INGESTION_ENABLED, "true");
+  assert.equal(ai.environment.AI_PARSER_INPUT_ROOT, "/parser/input");
+  assert.equal(ai.depends_on.parser.condition, "service_healthy");
+  assert.deepEqual(Object.keys(compose.volumes).filter((name) => name.startsWith("parser-")).sort(), ["parser-input", "parser-output", "parser-requests"]);
+});
+
 test("Compose enforces least-privilege file-backed secret boundaries", () => {
   const compose = parse(read(composePath));
   const secretNames = [
+    "cursor_hmac_key",
+    "jwt_private_key",
+    "jwt_public_key",
     "minio_app_password",
     "minio_app_user",
     "minio_root_password",
     "minio_root_user",
     "postgres_admin_password",
+    "postgres_ai_runtime_password",
     "postgres_flyway_password",
     "postgres_runtime_password",
     "redis_password",
@@ -297,6 +410,9 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   }
 
   assert.deepEqual(secretTargets(compose.services.core), {
+    cursor_hmac_key: "occ.cursor.secret",
+    jwt_private_key: "occ-jwt-private-key.pem",
+    jwt_public_key: "occ-jwt-public-key.pem",
     minio_app_password: "occ.object-storage.secret-key",
     minio_app_user: "occ.object-storage.access-key",
     postgres_flyway_password: "spring.flyway.password",
@@ -305,6 +421,7 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   });
   assert.deepEqual(secretTargets(compose.services.postgres), {
     postgres_admin_password: "postgres_admin_password",
+    postgres_ai_runtime_password: "postgres_ai_runtime_password",
     postgres_flyway_password: "postgres_flyway_password",
     postgres_runtime_password: "postgres_runtime_password",
   });
@@ -321,6 +438,15 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.deepEqual(secretTargets(compose.services.redis), {
     redis_password: "redis_password",
   });
+  assert.deepEqual(secretTargets(compose.services["flowable-init"]), {
+    jwt_private_key: "occ-jwt-private-key.pem",
+    jwt_public_key: "occ-jwt-public-key.pem",
+    postgres_flyway_password: "spring.flyway.password",
+    postgres_runtime_password: "spring.datasource.password",
+  });
+  assert.deepEqual(secretTargets(compose.services["postgres-init"]), {
+    postgres_admin_password: "postgres_admin_password",
+  });
 
   const consumers = Object.fromEntries(secretNames.map((secret) => [secret, []]));
   for (const [serviceName, service] of Object.entries(compose.services)) {
@@ -328,13 +454,18 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   }
   for (const names of Object.values(consumers)) names.sort();
   assert.deepEqual(consumers, {
+    cursor_hmac_key: ["core"],
+    jwt_private_key: ["core", "flowable-init"],
+    jwt_public_key: ["core", "flowable-init"],
     minio_app_password: ["core", "minio-init"],
     minio_app_user: ["core", "minio-init"],
     minio_root_password: ["minio", "minio-init"],
     minio_root_user: ["minio", "minio-init"],
     postgres_admin_password: ["postgres"],
-    postgres_flyway_password: ["core", "postgres"],
-    postgres_runtime_password: ["core", "postgres"],
+    postgres_ai_runtime_password: ["postgres"],
+    postgres_admin_password: ["postgres", "postgres-init"],
+    postgres_flyway_password: ["core", "flowable-init", "postgres"],
+    postgres_runtime_password: ["core", "flowable-init", "postgres"],
     redis_password: ["core", "redis"],
   });
 
@@ -342,17 +473,47 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.equal(compose.services.minio.environment.MINIO_ROOT_USER_FILE, "/run/secrets/minio_root_user");
   assert.equal(compose.services.minio.environment.MINIO_ROOT_PASSWORD_FILE, "/run/secrets/minio_root_password");
   assert.equal(compose.services.core.environment.SPRING_CONFIG_IMPORT, "configtree:/run/secrets/");
+  const coreConfig = read("services/core/src/main/resources/application.yml");
+  assert.match(coreConfig, /delete-secret: \$\{OCC_BOOTSTRAP_DELETE_SECRET:false\}/u);
+  assert.match(coreConfig, /secret-owner: \$\{OCC_BOOTSTRAP_SECRET_OWNER:\$\{user\.name\}\}/u);
+  assert.equal(
+    compose.services.core.environment.OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE,
+    "/run/innorder-bootstrap/admin-password",
+  );
+  assert.equal(compose.services.core.environment.OCC_BOOTSTRAP_SECRET_OWNER, "innorder");
+  assert.equal(compose.services.core.environment.OCC_BOOTSTRAP_DELETE_SECRET, "false");
+  assert.deepEqual(compose.services.core.volumes, [{
+    type: "bind",
+    source: "${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:?Set OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE}",
+    target: "/run/innorder-bootstrap/admin-password",
+    read_only: true,
+    bind: { create_host_path: false },
+  }]);
+  assert.equal(compose.services["flowable-init"].volumes, undefined);
+  assert.equal(compose.secrets.bootstrap_admin_password, undefined);
+  for (const name of ["core", "flowable-init"]) {
+    assert.equal(compose.services[name].environment.OCC_JWT_ISSUER, "${OCC_JWT_ISSUER:?Set OCC_JWT_ISSUER}");
+    assert.equal(compose.services[name].environment.OCC_JWT_PRIVATE_KEY_FILE, "/run/secrets/occ-jwt-private-key.pem");
+    assert.equal(compose.services[name].environment.OCC_JWT_PUBLIC_KEY_FILE, "/run/secrets/occ-jwt-public-key.pem");
+  }
   assert.equal(compose.services.core.environment.DATABASE_USERNAME, "innorder_runtime");
   assert.equal(compose.services.core.environment.FLYWAY_USERNAME, "innorder_flyway");
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_RETRIES, 0);
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_ACKS, "all");
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_ENABLE_IDEMPOTENCE, false);
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_DELIVERY_TIMEOUT_MS, 4000);
+  assert.equal(compose.services.core.environment.SPRING_KAFKA_PRODUCER_PROPERTIES_REQUEST_TIMEOUT_MS, 3000);
   assert.equal(compose.services.minio.user, "10001:10001");
   assert.ok(compose.services.minio.healthcheck.test.includes("http://localhost:9000/minio/health/ready"));
-  assert.equal(compose.services.minio.depends_on["minio-volume-init"].condition, "service_completed_successfully");
+  assert.equal(compose.services.minio.depends_on["postgres-init"].condition, "service_completed_successfully");
   assert.ok(compose.services.postgres.volumes.includes("./postgres/010-create-roles.sh:/docker-entrypoint-initdb.d/010-create-roles.sh:ro"));
   assert.ok(compose.services["minio-init"].volumes.includes("./minio/init.sh:/config/init.sh:ro"));
 
   const postgresInit = read("infra/compose/postgres/010-create-roles.sh");
-  assert.match(postgresInit, /--set=flyway_password=/u);
-  assert.match(postgresInit, /--set=runtime_password=/u);
+  assert.doesNotMatch(postgresInit, /--set=(?:flyway|runtime|ai_runtime)_password=/u);
+  assert.match(postgresInit, /\\getenv flyway_password FLYWAY_PASSWORD/u);
+  assert.match(postgresInit, /\\getenv runtime_password RUNTIME_PASSWORD/u);
+  assert.match(postgresInit, /\\getenv ai_runtime_password AI_RUNTIME_PASSWORD/u);
   assert.match(postgresInit, /:'flyway_password'/u);
   assert.match(postgresInit, /:'runtime_password'/u);
   assert.doesNotMatch(postgresInit, /PASSWORD\s+['"]?\$\{/u);
@@ -362,26 +523,79 @@ test("Compose enforces least-privilege file-backed secret boundaries", () => {
   assert.match(minioInit, /read_secret \/run\/secrets\/minio_app_password/u);
   assert.match(minioInit, /root_user" = "\$app_user/u);
   assert.match(minioInit, /root_password" = "\$app_password/u);
+  assert.match(minioInit, /mc mb --with-lock --ignore-existing/u);
+  assert.match(minioInit, /s3:PutObjectRetention/u);
+  assert.match(minioInit, /s3:GetObjectRetention/u);
+  assert.doesNotMatch(minioInit, /s3:BypassGovernanceRetention/u);
   assert.match(minioInit, /mc admin policy attach/u);
 
   const example = read("infra/compose/.env.example");
   const expectedSecretPaths = [
+    "CURSOR_HMAC_KEY_FILE",
+    "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE",
+    "OCC_JWT_PRIVATE_KEY_FILE",
+    "OCC_JWT_PUBLIC_KEY_FILE",
     "MINIO_APP_PASSWORD_FILE",
     "MINIO_APP_USER_FILE",
     "MINIO_ROOT_PASSWORD_FILE",
     "MINIO_ROOT_USER_FILE",
     "POSTGRES_ADMIN_PASSWORD_FILE",
+    "AI_DATABASE_PASSWORD_FILE",
     "POSTGRES_FLYWAY_PASSWORD_FILE",
     "POSTGRES_RUNTIME_PASSWORD_FILE",
     "REDIS_PASSWORD_FILE",
   ];
+  const nonSecretDefaults = new Set([
+    "OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID",
+    "OCC_RISK_METRICS_REPORT_RESOURCE_ID",
+  ]);
   for (const line of example.split(/\r?\n/u)) {
     if (!line || line.startsWith("#")) continue;
+    if (nonSecretDefaults.has(line.split("=", 1)[0])) continue;
     assert.match(line, /^[A-Z][A-Z0-9_]*=$/u, `environment value must be blank: ${line}`);
   }
   for (const name of expectedSecretPaths) assert.match(example, new RegExp(`^${name}=$`, "mu"));
+  assert.match(example, /^OCC_JWT_ISSUER=$/mu);
   assert.doesNotMatch(example, /^(?:POSTGRES_PASSWORD|REDIS_PASSWORD|MINIO_ROOT_USER|MINIO_ROOT_PASSWORD)=$/mu);
   assert.doesNotMatch(example, /changeme|example123|replace[-_ ]me|dummy/iu);
+});
+
+test("rendered Compose gives only Core runtimes readable production JWT paths", { skip: spawnSync("docker", ["compose", "version"], { encoding: "utf8" }).status !== 0 }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "innorder-compose-jwt-"));
+  try {
+    const secretFiles = Object.fromEntries([
+      "POSTGRES_ADMIN_PASSWORD_FILE", "POSTGRES_FLYWAY_PASSWORD_FILE", "POSTGRES_RUNTIME_PASSWORD_FILE",
+      "REDIS_PASSWORD_FILE", "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE",
+      "MINIO_APP_USER_FILE", "MINIO_APP_PASSWORD_FILE", "OCC_JWT_PRIVATE_KEY_FILE", "OCC_JWT_PUBLIC_KEY_FILE",
+      "OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE", "CURSOR_HMAC_KEY_FILE", "AI_DATABASE_PASSWORD_FILE",
+    ].map((name) => {
+      const path = join(directory, name.toLowerCase()).replaceAll("\\", "/");
+      writeFileSync(path, name.startsWith("OCC_JWT") ? "-----BEGIN TEST KEY-----\nproduction-compose-only\n-----END TEST KEY-----\n" : `${name}-value\n`, "utf8");
+      return [name, path];
+    }));
+    const result = spawnSync("docker", ["compose", "-f", composePath, "config", "--format", "json"], {
+      encoding: "utf8",
+      env: { ...process.env, ...secretFiles, OCC_JWT_ISSUER: "https://issuer.production.example" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const rendered = JSON.parse(result.stdout);
+    for (const name of ["core", "flowable-init"]) {
+      assert.equal(rendered.services[name].environment.OCC_JWT_ISSUER, "https://issuer.production.example");
+      assert.equal(rendered.services[name].environment.OCC_JWT_PRIVATE_KEY_FILE, "/run/secrets/occ-jwt-private-key.pem");
+      assert.equal(rendered.services[name].environment.OCC_JWT_PUBLIC_KEY_FILE, "/run/secrets/occ-jwt-public-key.pem");
+    }
+    assert.equal(rendered.secrets.jwt_private_key.file, secretFiles.OCC_JWT_PRIVATE_KEY_FILE);
+    assert.equal(rendered.secrets.jwt_public_key.file, secretFiles.OCC_JWT_PUBLIC_KEY_FILE);
+    assert.equal(readFileSync(rendered.secrets.jwt_private_key.file, "utf8").includes("production-compose-only"), true);
+    for (const [name, service] of Object.entries(rendered.services)) {
+      if (!["core", "flowable-init"].includes(name)) {
+        assert.equal((service.secrets ?? []).some((secret) => ["jwt_private_key", "jwt_public_key"].includes(secret.source)), false);
+      }
+    }
+    assert.doesNotMatch(JSON.stringify(rendered), /test-only-jwt|src[\\/]test|classpath:/iu);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Dockerfile AST enforces pinned stages, lifecycle ordering, users, and entrypoints", () => {
@@ -434,6 +648,14 @@ RUN ./gradlew :services:core:bootJar --no-daemon
 `);
   assert.throws(() => assertCoreBootJarUsesGradleCache(splitCoreBuild), /core bootJar RUN must use the locked Gradle cache mount/u);
   assertCoreBootJarUsesGradleCache(core);
+  const coreInstructions = core.getInstructions();
+  const bootstrapDirectoryIndex = coreInstructions.findIndex((instruction) =>
+    instruction.getKeyword() === "RUN" &&
+    /install -d -o 10001 -g 10001 -m 0700 \/run\/innorder-bootstrap/u.test(instruction.getArgumentsContent() ?? ""));
+  const coreUserIndex = coreInstructions.findIndex((instruction) =>
+    instruction.getKeyword() === "USER" && instruction.getArgumentsContent() === "10001");
+  assert.ok(bootstrapDirectoryIndex >= 0, "Core runtime must create the bootstrap mount parent securely");
+  assert.ok(bootstrapDirectoryIndex < coreUserIndex, "Core runtime must create the bootstrap mount parent before USER");
   assert.equal(core.getInstructions().filter((instruction) => instruction.getKeyword() === "USER").at(-1).getArgumentsContent(), "10001");
   assert.deepEqual(core.getENTRYPOINTs().at(-1).getJSONStrings().map((arg) => arg.getJSONValue()), ["java", "-jar", "/app/app.jar"]);
   assert.ok(core.getHEALTHCHECKs().at(-1).getArgumentsContent().includes("http://localhost:8080/actuator/health/readiness"));
@@ -461,11 +683,33 @@ test("Compose documentation provides exact prerequisite and startup commands", (
   assert.match(readme, /POSTGRES_FLYWAY_PASSWORD_FILE/u);
   assert.match(readme, /POSTGRES_RUNTIME_PASSWORD_FILE/u);
   assert.match(readme, /MINIO_APP_PASSWORD_FILE/u);
+  assert.match(readme, /CURSOR_HMAC_KEY_FILE/u);
+  assert.match(readme, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
+  assert.match(readme, /UID\/GID `10001`[\s\S]*`0700`[\s\S]*`0400`/u);
+  assert.match(readme, /zero-byte[\s\S]*tombstone/iu);
+  assert.match(readme, /symbolic link/iu);
+  assert.match(readme, /flowable-init[\s\S]*does not receive[\s\S]*bootstrap/iu);
   assert.match(readme, /Flyway/u);
   assert.match(readme, /Docker Hub\s+Registry API/u);
   assert.match(readme, /Docker-Content-Digest/u);
   assert.match(readme, /linux\/amd64/u);
   assert.match(readme, /Core startup gate is PostgreSQL only/u);
   assert.match(readme, /MinIO\s+initialization and readiness are independent/u);
+  assert.match(readme, /risk runtime identities/iu);
+  assert.match(readme, /non-secret/u);
+  assert.match(readme, /collision/u);
+  assert.match(readme, /risk\.escalate/u);
+  assert.match(readme, /risk\.sla_breach/u);
+  assert.match(readme, /administrator bootstrap is optional and one-shot/iu);
+  assert.match(readme, /without an administrator password/iu);
+  // The bootstrap password is a one-shot bind mount, so it must never appear as
+  // a Compose file secret even though the bind source interpolates its path.
+  assert.ok(!Object.keys(parse(read(composePath)).secrets ?? {}).some((name) => /bootstrap/u.test(name)));
+  assert.deepEqual(
+    (parse(read(composePath)).services.core.secrets ?? []).filter((secret) => /bootstrap/u.test(secret.source ?? secret)),
+    [],
+  );
+  assert.match(readme, /Flowable initialization completes after the\s+`postgres-init` gate and before Core/u);
+  assert.match(readme, /MinIO bucket initialization remains\s+independent of Core readiness/u);
   assert.doesNotMatch(readme, /Core waits for both MinIO readiness/u);
 });

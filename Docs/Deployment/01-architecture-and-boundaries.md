@@ -4,36 +4,41 @@
 
 ## 部署拓扑
 
-Compose 项目名为 `innorder-occ`，包含十个服务、四个命名卷和两个网络。除 `host-gateway` 外，所有服务只连接内部网络 `backend`，且不直接发布主机端口。`host-gateway` 同时连接 `backend` 与普通 bridge 网络 `host-access`，是唯一端口发布者。
+Compose 项目名为 `innorder-occ`，包含十三个服务、七个命名卷和两个网络。除使用 `network_mode: none` 的 `parser` 外，后端服务只连接内部网络 `backend`，且不直接发布主机端口。`host-gateway` 同时连接 `backend` 与普通 bridge 网络 `host-access`，是唯一端口发布者。
 
 **安全：** `backend` 设置为 `internal: true`，用于容器间通信。`host-access` 只给网关提供主机端口发布能力，不应被其他服务加入。
 
-### 十个 Compose 服务
+### 十三个 Compose 服务
 
 | 服务 | 类型 | 当前职责 | 持久状态 | 启动门禁 |
 |---|---|---|---|---|
 | `postgres` | 长运行 | PostgreSQL 16、pgvector、业务与 Flowable 数据 | `postgres-data` | 自身 `pg_isready` |
 | `kafka` | 长运行 | 单节点 KRaft broker/controller | `kafka-data` | 自身 topic-list 探测 |
 | `redis` | 长运行 | 带密码的 AOF Redis | `redis-data` | 认证后 `PING` |
-| `minio-volume-init` | 一次性 | 把对象卷所有者改为 UID/GID `10001` | 修改 `minio-data` | 无健康检查，成功退出 |
+| `postgres-init` | 一次性 | 验证 PostgreSQL 可用并把对象卷所有者改为 UID/GID `10001` | PostgreSQL、`minio-data` | 等待 PostgreSQL 健康，成功退出 |
 | `minio` | 长运行 | S3 兼容对象存储与控制台 | `minio-data` | 等待卷初始化成功 |
 | `minio-init` | 一次性 | 建桶、创建桶级应用账号并附加策略 | MinIO 内部状态 | 等待 MinIO 健康 |
 | `opa` | 长运行 | 加载只读策略并提供无状态决策 | 无命名卷 | 自身 `/health` |
-| `ai` | 长运行 | AI 边界、状态和静态能力注册表 | 当前无持久挂载 | 自身 `/health` |
-| `core` | 长运行 | 应用事实、迁移、Flowable 和状态聚合边界 | PostgreSQL | 只等待 PostgreSQL 健康 |
+| `parser-volume-init` | 一次性 | 把三个解析队列卷所有者改为非 root Node UID/GID | 修改 `parser-input`、`parser-requests`、`parser-output` | 无健康检查，成功退出 |
+| `parser` | 长运行 | 在无网络、只读根文件系统和资源上限内解析隔离文档 | 三个可丢弃解析队列卷 | 等待卷初始化；心跳文件健康检查 |
+| `ai` | 长运行 | AI 边界、状态、静态能力注册表和解析 sidecar 客户端所有权 | 三个可丢弃解析队列卷 | 等待 parser 健康；自身 `/health` |
+| `flowable-init` | 一次性 | 在显式初始化 profile 中维护 Flowable 私有表 | PostgreSQL | 等待 PostgreSQL 健康，成功退出 |
+| `core` | 长运行 | 应用事实、迁移、Flowable 和状态聚合边界 | PostgreSQL | 等待 PostgreSQL 健康和 `flowable-init` 成功 |
 | `host-gateway` | 长运行 | 八路 TCP 回环转发 | 无卷、无密钥 | 只验证自身监听器 |
 
-两个一次性服务的正常终态是 `Exited (0)`。将它们强行设为持续重启会改变初始化语义。
+四个一次性服务的正常终态是 `Exited (0)`。将它们强行设为持续重启会改变初始化语义。
 
 ## 启动依赖图
 
-Compose 中只有三条显式条件依赖：
+Compose 的显式条件依赖包括：
 
 ```text
-minio-volume-init --成功完成--> minio --健康--> minio-init
-postgres --健康--> core
+parser-volume-init --成功完成--> parser --健康--> ai
+postgres --健康--> flowable-init --成功完成--> core
+postgres --健康--> postgres-init --成功完成--> minio --健康--> minio-init
+postgres-init --成功完成--> flowable-init --成功完成--> core
 host-gateway --无 depends_on，独立启动并建立本地监听器
-kafka、redis、opa、ai --无显式依赖，彼此并行启动
+kafka、redis、opa --无显式依赖，彼此并行启动
 ```
 
 Core 启动时通过 Flyway 应用迁移，因此没有第二个并发迁移容器。Kafka、Redis、MinIO、OPA 和 AI 已配置为集成地址，但当前不是 Core 的 Compose 启动门禁。MinIO 初始化也不阻塞 Core。
@@ -75,24 +80,30 @@ Kafka 使用单节点 KRaft：
 
 ## 持久化边界
 
-精确的四个命名卷为：
+精确的七个命名卷为：
 
 | 卷 | 挂载服务 | 内容与恢复含义 |
 |---|---|---|
 | `postgres-data` | `postgres` | 数据库、迁移历史、角色和 Flowable 表，是核心事实存储 |
 | `kafka-data` | `kafka` | broker 日志和 KRaft 元数据，不是权威业务主存储 |
 | `redis-data` | `redis` | AOF 缓存状态；设计上应可丢失和重建，但当前降级仍需验证 |
-| `minio-data` | `minio-volume-init`、`minio` | 对象、桶和 MinIO 内部配置 |
+| `minio-data` | `postgres-init`、`minio` | 对象、桶和 MinIO 内部配置 |
+| `parser-input` | `parser-volume-init`、`parser`、`ai` | AI 写入、parser 只读的短期隔离输入；不是权威存储 |
+| `parser-requests` | `parser-volume-init`、`parser`、`ai` | 哈希绑定的解析请求和处理中声明；可在停机后清理 |
+| `parser-output` | `parser-volume-init`、`parser`、`ai` | 有界解析结果和 parser 心跳；可丢弃并重建 |
+| `minio-data` | `postgres-init`、`minio` | 对象、桶和 MinIO 内部配置 |
 
-**危险：** `docker compose --env-file infra/compose/.env -f infra/compose/compose.yml down --volumes` 会删除以上四个卷。仅有容器镜像、数据库 SQL 或 `.env` 都不能替代完整恢复点。
+**危险：** `docker compose --env-file infra/compose/.env -f infra/compose/compose.yml down --volumes` 会删除以上七个卷。前四个卷包含运行状态；三个 parser 卷是可丢弃队列。仅有容器镜像、数据库 SQL 或 `.env` 都不能替代完整恢复点。
 
 ## 密钥消费矩阵
 
 | Compose secret | 消费服务 | 容器目标 |
 |---|---|---|
+| `cursor_hmac_key` | `core` | `/run/secrets/occ.cursor.secret` |
 | `postgres_admin_password` | `postgres` | `/run/secrets/postgres_admin_password` |
 | `postgres_flyway_password` | `postgres`、`core` | PostgreSQL 初始化文件；Core 的 `/run/secrets/spring.flyway.password` |
 | `postgres_runtime_password` | `postgres`、`core` | PostgreSQL 初始化文件；Core 的 `/run/secrets/spring.datasource.password` |
+| `postgres_ai_runtime_password` | `postgres` | PostgreSQL 初始化文件；主机路径由 `AI_DATABASE_PASSWORD_FILE` 提供 |
 | `redis_password` | `redis`、`core` | Redis 文件；Core 的 `/run/secrets/spring.data.redis.password` |
 | `minio_root_user` | `minio`、`minio-init` | `/run/secrets/minio_root_user` |
 | `minio_root_password` | `minio`、`minio-init` | `/run/secrets/minio_root_password` |
@@ -106,7 +117,7 @@ Spring 通过 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/` 把目标文件名
 ### 角色边界
 
 - `innorder_admin`：由 PostgreSQL 官方入口创建的 bootstrap superuser；密码来自管理员文件。
-- `innorder_flyway`：非 superuser、不可建库/建角色/复制的登录角色；拥有应用 schema 并执行 V001-V009。
+- `innorder_flyway`：非 superuser、不可建库/建角色/复制的登录角色；拥有应用 schema 并执行 V001-V011。
 - `innorder_runtime`：非 superuser 的 Core 数据源登录角色；获得限定 DML、序列、函数和 Flowable 建表权限。
 
 三个 PostgreSQL 密码必须互不相同。初始化脚本撤销数据库 `PUBLIC` 权限，给 Flyway `CONNECT, TEMPORARY, CREATE`，给 runtime `CONNECT`，并允许 Flyway 成为 runtime 的成员以正确授予对象权限。
@@ -115,7 +126,7 @@ Spring 通过 `SPRING_CONFIG_IMPORT=configtree:/run/secrets/` 把目标文件名
 
 V001 创建 `platform`、`catalog`、`iam`、`authz`、`occ`、`audit`、`ai` 和 `flowable` 八个 schema。它们由执行迁移的 `innorder_flyway` 所有。V009 给 runtime 在前七个应用 schema 上的使用、表 DML 和序列权限，但撤销 `CREATE`；仅对 `flowable` 授予 `USAGE, CREATE`。
 
-Flowable schema 归 Flyway 所有，固定版本 Flowable 使用 runtime 连接创建并拥有自己的 `ACT_*` 表。应用迁移不复制供应商私有 DDL，其他模块不得直接依赖 Flowable 私有表。
+Flowable schema 归 Flyway 所有；受控 `flowable-init` one-shot 使用 runtime 连接创建或升级固定版本 Flowable 的 `ACT_*` 表，随后 Core 以 `FLOWABLE_DATABASE_SCHEMA_UPDATE=false` 运行。应用迁移不复制供应商私有 DDL，其他模块不得直接依赖 Flowable 私有表。
 
 ### 空卷初始化顺序
 
@@ -123,8 +134,8 @@ Flowable schema 归 Flyway 所有，固定版本 Flowable 使用 runtime 连接�
 2. `010-create-roles.sh` 读取三个密钥，拒绝空值或重复值。
 3. 脚本创建/更新 `innorder_flyway` 与 `innorder_runtime`，收紧权限，并安装 `vector`、`btree_gist`。
 4. PostgreSQL 健康后 Core 启动。
-5. Core 以 Flyway 角色执行 V001-V009；以 runtime 角色运行普通 JDBC 和 Flowable。
-6. Flowable 在 Flyway 创建的 `flowable` schema 中维护其版本相关表。
+5. Core 以 Flyway 角色执行 V001-V011；以 runtime 角色运行普通 JDBC 和 Flowable。
+6. `flowable-init` 在 Flyway 创建的 `flowable` schema 中维护版本相关表并成功退出；Core 只在该完成门禁后启动。
 
 **注意：** PostgreSQL `/docker-entrypoint-initdb.d` 脚本只在空数据目录初始化时执行。修改密钥文件或重建容器不会在已有数据库中重新设置角色密码。
 
@@ -140,19 +151,19 @@ PostgreSQL 的 `pg_isready` 成功只表示数据库接受连接探测。Core �
 
 ### Flyway 迁移失败
 
-Flyway 在 Core 启动期以 `innorder_flyway` 执行 V001-V009。迁移校验、SQL、权限、扩展或连接失败会使 Spring 启动失败，因此 Core 不会提供成功 readiness。Compose 的 `unless-stopped` 可能反复重启 Core；每次尝试仍会在同一根因处失败。
+Flyway 在 Core 启动期以 `innorder_flyway` 执行 V001-V011。迁移校验、SQL、权限、扩展或连接失败会使 Spring 启动失败，因此 Core 不会提供成功 readiness。Compose 的 `unless-stopped` 可能反复重启 Core；每次尝试仍会在同一根因处失败。
 
-Flyway 事务能力取决于具体迁移语句；不能假设一次失败会把已执行的全部迁移自动回滚，也不能手工删除 `flyway_schema_history` 记录。恢复步骤是：停止 Core 重启循环；保全数据库备份；收集 Core/PostgreSQL 日志和 Flyway 历史；确认最后成功版本、失败语句及数据库实际状态；按迁移所有者批准的方法修复根因或执行经评审的修复迁移；再启动 Core 并验证 V001-V009 均成功及 readiness 成功。
+Flyway 事务能力取决于具体迁移语句；不能假设一次失败会把已执行的全部迁移自动回滚，也不能手工删除 `flyway_schema_history` 记录。恢复步骤是：停止 Core 重启循环；保全数据库备份；收集 Core/PostgreSQL 日志和 Flyway 历史；确认最后成功版本、失败语句及数据库实际状态；按迁移所有者批准的方法修复根因或执行经评审的修复迁移；再启动 Core 并验证 V001-V011 均成功及 readiness 成功。
 
 **危险：** 不得通过关闭 Flyway、修改已发布迁移校验和、手工标记成功或删除数据卷使启动表面通过。迁移已经改变 schema 时，应用镜像回退也不等于数据库回滚。
 
 ### Flowable schema、权限或引擎初始化失败
 
-Flowable 引擎被 `FlowableDatabaseInitializationDependencyDetector` 声明为数据库初始化的依赖者，默认在 Flyway 完成后初始化。若 `flowable` schema 不存在、runtime 缺少初始化实际需要的 `USAGE, CREATE`、Flowable 表升级失败或数据库版本不兼容，Core Spring 启动失败，不会提供成功 readiness。schema 所有者不是 `innorder_flyway` 属于必须修复的权限漂移，会导致后续 Flyway 迁移或维护失败；但只要 runtime 仍有足够的 `USAGE, CREATE` 和已有对象权限，所有者漂移本身不一定阻止当前 Core 启动，不能据此断言 readiness 必然失败。
+Flowable 引擎被 `FlowableDatabaseInitializationDependencyDetector` 声明为数据库初始化的依赖者。Compose 先运行 `flowable-init`，其在 Flyway 完成后创建或升级供应商表；Core 的启动校验再确认同一 DataSource、Spring transaction manager 和禁用 schema update。任一步失败都不会提供成功 readiness。schema 所有者不是 `innorder_flyway` 属于必须修复的权限漂移。
 
 恢复时停止 Core；收集 Core 异常链、PostgreSQL 日志、schema 所有者、runtime grants、Flyway 历史和已有 `ACT_*` 表状态；对照 V001/V009 与固定 Flowable `7.1.0` 找到根因；从已验证备份恢复或执行经数据库与应用所有者批准的权限/迁移修复；然后重启 Core，确认 Flowable 初始化成功、system status 中 Flowable 探测正常且 readiness 成功。
 
-**危险：** 不得把 `FLOWABLE_DATABASE_SCHEMA_UPDATE` 强制改为绕过失败的值，不得关闭 `flowable.depends-on-database-initialization-detection`，也不得让 runtime 获得 superuser 或整个应用 schema 的所有权。检测器保证初始化顺序，绕过它会使 Flowable 与 Flyway 竞态或在不完整 schema 上启动。
+**危险：** 只允许 `flowable-init`（以及 development/test profile）启用 `FLOWABLE_DATABASE_SCHEMA_UPDATE`。不得在长运行 Core 上启用，不得关闭 `flowable.depends-on-database-initialization-detection`，也不得让 runtime 获得 superuser 或整个应用 schema 的所有权。
 
 ## 健康语义和路由
 

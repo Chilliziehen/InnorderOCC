@@ -1,0 +1,47 @@
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = Innorder test certificate
+
+[ca]
+basicConstraints = critical,CA:true
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+
+[server_core]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:localhost,IP:127.0.0.1,URI:spiffe://innorder/core
+
+[server_ai]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:localhost,IP:127.0.0.1,URI:spiffe://innorder/ai
+
+[client_ai]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = clientAuth
+subjectAltName = URI:spiffe://innorder/ai
+
+[client_core]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = clientAuth
+subjectAltName = URI:spiffe://innorder/core
+
+[client_wrong_san]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = clientAuth
+subjectAltName = URI:spiffe://innorder/not-ai
+
+[client_wrong_eku]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = URI:spiffe://innorder/ai

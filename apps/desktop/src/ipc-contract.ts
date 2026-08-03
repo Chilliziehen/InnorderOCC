@@ -1,7 +1,21 @@
-import type { SystemStatus } from "@innorder/contracts";
+import { z } from "zod";
 
-export const SYSTEM_STATUSES_CHANNEL = "system-statuses:get";
+export const DESKTOP_CHANNELS = {
+  profiles: {
+    list: "profiles:list", current: "profiles:current", save: "profiles:save", select: "profiles:select", remove: "profiles:remove",
+  },
+  session: { restore: "session:restore", login: "session:login", logout: "session:logout" },
+  runtime: { statuses: "system-statuses:get" },
+  workspaces: { query: "workspaces:query" },
+  commands: { execute: "commands:execute" },
+  uploads: { preflight: "uploads:preflight", begin: "uploads:begin", append: "uploads:append", finish: "uploads:finish", cancel: "uploads:cancel", progress: "uploads:progress" },
+  notifications: { list: "notifications:list", event: "notifications:event", state: "notifications:state" },
+} as const;
 
-export interface OccApi {
-  getSystemStatuses(): Promise<SystemStatus[]>;
-}
+export const SYSTEM_STATUSES_CHANNEL = DESKTOP_CHANNELS.runtime.statuses;
+export const noInputSchema = z.undefined();
+export const idInputSchema = z.string().min(1).max(256);
+export const optionalCursorSchema = z.string().min(1).max(2048).optional();
+export const voidOutputSchema = z.undefined();
+
+export * from "./desktop-contract";

@@ -26,6 +26,7 @@ const chapters = [
   "09-incident-runbooks.md",
   "10-security-hardening.md",
   "11-command-reference-and-checklists.md",
+  "12-release-and-scripted-deployment.md",
 ];
 const credentialPatterns = [
   ["private key", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u],
@@ -500,7 +501,7 @@ test("deployment lifecycle labels come only from visible H2-H6 headings", () => 
   assert.deepEqual(sectionLabels("# Title\n\n<!-- deployment-contract:prerequisites -->\n\n## Build"), ["Build"]);
 });
 
-test("deployment manual contains exactly the required twelve files", () => {
+test("deployment manual contains exactly the required thirteen files", () => {
   const actual = entries.map((entry) => entry.name);
   const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
   assert.deepEqual({
@@ -555,6 +556,7 @@ test("manual records the required Compose and operational facts", () => {
     "POSTGRES_RUNTIME_PASSWORD_FILE", "REDIS_PASSWORD_FILE",
     "MINIO_ROOT_USER_FILE", "MINIO_ROOT_PASSWORD_FILE",
     "MINIO_APP_USER_FILE", "MINIO_APP_PASSWORD_FILE",
+    "CURSOR_HMAC_KEY_FILE", "cursor_hmac_key",
     "postgres-data", "kafka-data", "redis-data", "minio-data",
     "innorder_admin", "innorder_flyway", "innorder_runtime",
     "http://127.0.0.1:8080/actuator/health/readiness",
@@ -601,6 +603,55 @@ test("manual records the required Compose and operational facts", () => {
   assert.doesNotMatch(reference, /^kafka-topics(?:[.]sh)? --bootstrap-server/mu);
 });
 
+test("manual defines the one-shot administrator bootstrap secret lifecycle", () => {
+  const configuration = documents.get("03-secrets-and-configuration.md");
+  const windows = documents.get("04-deploy-windows.md");
+  const linux = documents.get("05-deploy-linux.md");
+  const corpus = `${configuration}\n${windows}\n${linux}`;
+
+  assert.match(corpus, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE/u);
+  assert.match(corpus, /10001:10001/u);
+  assert.match(corpus, /0700/u);
+  assert.match(corpus, /0400/u);
+  assert.match(corpus, /零字节/u);
+  assert.match(corpus, /符号链接/u);
+  assert.match(corpus, /flowable-init/u);
+  assert.match(corpus, /成功[\s\S]*替换/u);
+});
+
+test("upgrade transitions initialized legacy bootstrap paths before target Compose interpolation", () => {
+  const upgrade = documents.get("08-upgrade-and-rollback.md");
+  const reference = documents.get("11-command-reference-and-checklists.md");
+  assert.ok(upgrade && reference);
+
+  const transitionStart = upgrade.indexOf("## 已初始化旧部署的引导路径过渡");
+  const targetComposeConfigIndexes = ["@('config','--quiet')", '"${compose[@]}" config --quiet']
+    .map((command) => upgrade.indexOf(command));
+  assert.ok(targetComposeConfigIndexes.every((index) => index >= 0),
+    "upgrade manual must retain both target-release Compose config gates");
+  const firstTargetComposeConfig = Math.min(...targetComposeConfigIndexes);
+  assert.ok(transitionStart >= 0, "upgrade manual must define the initialized legacy transition");
+
+  const transitionEnd = upgrade.indexOf("\n## ", transitionStart + 4);
+  assert.ok(transitionEnd > transitionStart && transitionEnd < firstTargetComposeConfig,
+    "the complete legacy transition must precede the first target-release Compose config/interpolation");
+  const transition = upgrade.slice(transitionStart, transitionEnd);
+  assert.match(transition, /项目全局生命周期锁/u);
+  assert.match(transition, /install -d -o 10001 -g 10001 -m 0700/u);
+  assert.match(transition, /install -o 10001 -g 10001 -m 0400 \/dev\/null/u);
+  assert.match(transition, /realpath/u);
+  assert.match(transition, /\[ -f "\$bootstrap_tombstone" \]/u);
+  assert.match(transition, /\[ ! -L "\$bootstrap_tombstone" \]/u);
+  assert.match(transition, /10001:10001 400 0/u);
+  assert.match(transition, /mktemp[\s\S]*awk[\s\S]*mv -fT/u);
+  assert.match(transition, /OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE=%s/u);
+  assert.match(transition, /真正未初始化[\s\S]*非空[\s\S]*不得[\s\S]*墓碑/u);
+  assert.match(transition, /回滚窗口[\s\S]*旧 release[\s\S]*忽略[\s\S]*额外/u);
+  assert.match(transition, /全部受支持的目标 release[\s\S]*不再要求[\s\S]*清理/u);
+  assert.match(reference, /升级检查单[\s\S]*已初始化旧部署[\s\S]*第 08 章/u);
+  assert.match(reference, /回滚检查单[\s\S]*引导墓碑[\s\S]*回滚窗口/u);
+});
+
 test("repository sources drive the documented deployment facts", () => {
   const corpus = [...documents.values()].join("\n");
   const architecture = documents.get("01-architecture-and-boundaries.md");
@@ -623,7 +674,13 @@ test("repository sources drive the documented deployment facts", () => {
     ...publishedDefaults,
   ];
   assert.deepEqual(sourceFacts.filter((fact) => !corpus.includes(fact)), []);
-  assert.equal(Object.keys(composeModel.services).length, 10);
+  assert.equal(Object.keys(composeModel.services).length, 13);
+  assert.deepEqual(
+    Object.entries(composeModel.services).filter(([, service]) => service.restart === "no").map(([name]) => name).sort(),
+    ["flowable-init", "minio-init", "parser-volume-init", "postgres-init"],
+  );
+  assert.doesNotMatch(corpus, /十服务|十个服务|十个 Compose 服务|十个容器|两个一次性|两个 one-shot|两个 `exited 0`|两 one-shot|八\s*[\/／]\s*两状态|八长运行\s*[\/／]\s*两一次性/u);
+  assert.doesNotMatch(corpus, /minio-volume-init/u);
   assert.equal(composeModel.services.backend, undefined);
   assert.equal(composeModel.networks.backend.internal, true);
   assert.equal(composeModel.services["host-gateway"].ports.length, 8);
@@ -702,6 +759,49 @@ test("restore and MinIO rotation retain the reviewed safety gates", () => {
   assert.match(configuration, /mc pipe[\s\S]*mc cat[\s\S]*mc rm/u);
   assert.match(security, /MinIO 短时 argv 风险/u);
   assert.match(recovery, /source-object-manifest[.]jsonl/u);
+});
+
+test("cursor HMAC key has complete dual-platform lifecycle coverage", () => {
+  const configuration = documents.get("03-secrets-and-configuration.md");
+  const recovery = documents.get("07-backup-restore-and-dr.md");
+  for (const chapter of [
+    "03-secrets-and-configuration.md",
+    "04-deploy-windows.md",
+    "05-deploy-linux.md",
+    "06-daily-operations-and-monitoring.md",
+    "10-security-hardening.md",
+    "11-command-reference-and-checklists.md",
+  ]) {
+    assert.match(documents.get(chapter), /CURSOR_HMAC_KEY_FILE/u, `${chapter} must allowlist the cursor key path`);
+  }
+  assert.match(configuration, /cursor-hmac-key/u);
+  assert.match(configuration, /openssl rand -hex 32/u);
+  assert.match(configuration, /\^\[0-9a-f\]\{64\}\$/u);
+  assert.match(configuration, /OCC_CURSOR_HMAC_STAGED/u);
+  assert.match(configuration, /Enter-LifecycleLock[\s\S]*OCC_CURSOR_HMAC_STAGED/u);
+  assert.match(configuration, /acquire_lifecycle_lock[\s\S]*OCC_CURSOR_HMAC_STAGED/u);
+  assert.match(configuration, /--force-recreate core/u);
+  assert.match(recovery, /CURSOR_HMAC_KEY_FILE/u);
+  assert.match(recovery, /cursor-hmac-key/u);
+  assert.match(recovery, /九个 secret 路径/u);
+});
+
+test("deployment commands and checklists contain no stale eight-secret contracts", () => {
+  const staleCounts = [];
+  const staleLists = [];
+  for (const [name, markdown] of documents) {
+    for (const [index, line] of markdown.split(/\r?\n/u).entries()) {
+      if (/(?:八个[^，。；\r\n]{0,24}密钥|八个\s+(?:恢复|canonical)\s+secret(?:\s+路径)?|八路径|八密钥)/u.test(line)) {
+        staleCounts.push(`${name}:${index + 1}`);
+      }
+      if (line.includes("POSTGRES_ADMIN_PASSWORD_FILE")
+          && line.includes("MINIO_APP_PASSWORD_FILE")
+          && !line.includes("CURSOR_HMAC_KEY_FILE")) {
+        staleLists.push(`${name}:${index + 1}`);
+      }
+    }
+  }
+  assert.deepEqual({ staleCounts, staleLists }, { staleCounts: [], staleLists: [] });
 });
 
 test("incident and Linux lifecycle writes use the shared lock ownership paths", () => {

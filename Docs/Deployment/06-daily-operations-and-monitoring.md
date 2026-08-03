@@ -35,7 +35,8 @@ function Invoke-CheckedNative {
   if ($exitCode -ne 0) { throw "$FailureMessage，退出码 $exitCode" }
 }
 $Config = @{}
-$Allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$Allowed = @('CURSOR_HMAC_KEY_FILE','POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
+$Allowed = @('POSTGRES_ADMIN_PASSWORD_FILE','POSTGRES_FLYWAY_PASSWORD_FILE','POSTGRES_RUNTIME_PASSWORD_FILE','AI_DATABASE_PASSWORD_FILE','CURSOR_HMAC_KEY_FILE','REDIS_PASSWORD_FILE','MINIO_ROOT_USER_FILE','MINIO_ROOT_PASSWORD_FILE','MINIO_APP_USER_FILE','MINIO_APP_PASSWORD_FILE','OCC_JWT_PRIVATE_KEY_FILE','OCC_JWT_PUBLIC_KEY_FILE','OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE','OCC_JWT_ISSUER','POSTGRES_DB','POSTGRES_PORT','KAFKA_PORT','REDIS_PORT','MINIO_API_PORT','MINIO_CONSOLE_PORT','OPA_PORT','AI_PORT','CORE_PORT','AI_LOG_LEVEL','APP_VERSION','OBJECT_STORAGE_BUCKET')
 Get-Content -LiteralPath $ComposeEnv | ForEach-Object {
   if ($_ -and -not $_.StartsWith('#')) {
     $parts = $_ -split '=',2
@@ -69,7 +70,8 @@ cd -- "$repository_root"
 compose=(docker compose --env-file "$repository_root/infra/compose/.env" -f "$repository_root/infra/compose/compose.yml")
 declare -A config=()
 declare -A allowed=()
-for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in CURSOR_HMAC_KEY_FILE POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
+for key in POSTGRES_ADMIN_PASSWORD_FILE POSTGRES_FLYWAY_PASSWORD_FILE POSTGRES_RUNTIME_PASSWORD_FILE AI_DATABASE_PASSWORD_FILE CURSOR_HMAC_KEY_FILE REDIS_PASSWORD_FILE MINIO_ROOT_USER_FILE MINIO_ROOT_PASSWORD_FILE MINIO_APP_USER_FILE MINIO_APP_PASSWORD_FILE OCC_JWT_PRIVATE_KEY_FILE OCC_JWT_PUBLIC_KEY_FILE OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE OCC_JWT_ISSUER POSTGRES_DB POSTGRES_PORT KAFKA_PORT REDIS_PORT MINIO_API_PORT MINIO_CONSOLE_PORT OPA_PORT AI_PORT CORE_PORT AI_LOG_LEVEL APP_VERSION OBJECT_STORAGE_BUCKET; do allowed[$key]=1; done
 while IFS='=' read -r key value || [ -n "$key" ]; do
   value=${value%$'\r'}
   [ -z "$key" ] && continue
@@ -96,7 +98,7 @@ docker context show
 
 | 周期 | 必做检查 | 记录与通过条件 |
 |---|---|---|
-| 接班后与交班前 | 未关闭事件、变更窗口、十服务状态、HTTP/TCP、备份新鲜度、磁盘、时间 | 八个长运行服务 healthy、两个 one-shot 为 `exited 0`；失败有负责人和事件号 |
+| 接班后与交班前 | 未关闭事件、变更窗口、十一服务状态、HTTP/TCP、备份新鲜度、磁盘、时间 | 八个长运行服务 healthy、三个 one-shot 为 `exited 0`；失败有负责人和事件号 |
 | 每日 | 日志错误趋势、容器资源、主机 CPU/内存、磁盘/inode、卷使用量、备份结果、DNS/TLS | 与基线比较；任何初始阈值越界均记录，不以单个瞬时峰值自动重启 |
 | 每周 | Docker build/cache、镜像身份、源码 revision、日志增长、证据/备份保留、告警投递抽查 | revision 和镜像与发布记录一致；保留任务有可验证结果 |
 | 每月 | 容量增长率、阈值调优、权限抽查、时间源/DNS/证书到期、恢复点抽样校验 | 依据至少四周趋势更新阈值和容量预测并获得审批 |
@@ -119,7 +121,7 @@ Windows 精确状态检查会在原生命令后立即读取 `$LASTEXITCODE`，�
 $ErrorActionPreference = 'Stop'
 & docker @ComposeArgs ps -a
 if ($LASTEXITCODE -ne 0) { throw 'Compose ps -a 失败' }
-foreach ($service in 'minio-volume-init','minio-init') {
+foreach ($service in 'postgres-init','flowable-init','minio-init') {
   $idOutput = & docker @ComposeArgs ps -a -q $service
   $idExit = $LASTEXITCODE
   $ids = @($idOutput | Where-Object { $_ })
@@ -143,7 +145,7 @@ Linux 等价检查：
 ```bash
 set -euo pipefail
 "${compose[@]}" ps -a
-for service in minio-volume-init minio-init; do
+for service in postgres-init flowable-init minio-init; do
   id=$("${compose[@]}" ps -a -q "$service")
   [ -n "$id" ] && [ "$(printf '%s\n' "$id" | wc -l)" -eq 1 ]
   state=$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$id")
@@ -391,7 +393,7 @@ set -e
 [ "$identity_images_exit" -eq 0 ] || { printf '%s\n' "$identity_images_output" >&2; exit "$identity_images_exit"; }
 [ -n "$identity_ids_output" ] && [ -n "$identity_images_output" ]
 mapfile -t ids <<<"$identity_ids_output"
-[ "${#ids[@]}" -eq 10 ]
+[ "${#ids[@]}" -eq 11 ]
 for id in "${ids[@]}"; do docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }} container={{.Id}} image={{.Image}}' "$id"; done
 mapfile -t raw_image_ids <<<"$identity_images_output"
 declare -A seen_image_ids=()
@@ -508,7 +510,7 @@ trap - ERR
 值班人与接班人：
 主机资产标识与 Compose project：
 Git revision / APP_VERSION / 实际 image ID：
-八个长运行服务与两个 one-shot 状态：
+八个长运行服务与三个 one-shot 状态：
 HTTP / TCP / 协议检查时间与结论：
 CPU / 内存 / 磁盘 / inode / 四卷趋势：
 最后完整备份 UTC、年龄、checksum 与异地复制结论：
@@ -526,7 +528,7 @@ CPU / 内存 / 磁盘 / inode / 四卷趋势：
 ## 当班关闭检查
 
 - [ ] 所有检查均记录命令退出状态；空输出和命令失败没有混淆。
-- [ ] 健康结论同时覆盖八个 `running healthy`、两个 `exited 0`、HTTP/TCP/协议和有限健康语义。
+- [ ] 健康结论同时覆盖八个 `running healthy`、三个 `exited 0`、HTTP/TCP/协议和有限健康语义。
 - [ ] 初始阈值越界均有事件、负责人或经批准的期限性风险接受。
 - [ ] 备份新鲜度同时核对时间、checksum、异地复制；未把文件时间当作可恢复证明。
 - [ ] 日志和支持包已脱敏、限制访问并设置保留期。

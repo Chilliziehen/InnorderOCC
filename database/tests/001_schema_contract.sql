@@ -25,6 +25,85 @@ SELECT pg_temp.assert_true(to_regclass('occ.process_instance') IS NOT NULL, 'occ
 SELECT pg_temp.assert_true(to_regclass('audit.outbox_event') IS NOT NULL, 'audit.outbox_event exists');
 SELECT pg_temp.assert_true(to_regclass('ai.knowledge_chunk') IS NOT NULL, 'ai.knowledge_chunk exists');
 SELECT pg_temp.assert_true(to_regclass('ai.chunk_embedding') IS NOT NULL, 'ai.chunk_embedding exists');
+SELECT pg_temp.assert_true(to_regclass('platform.customer_instance') IS NOT NULL, 'platform.customer_instance exists');
+SELECT pg_temp.assert_true(to_regclass('iam.auth_session') IS NOT NULL, 'iam.auth_session exists');
+SELECT pg_temp.assert_true(
+    EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'iam'
+          AND table_name = 'user_account'
+          AND column_name = 'failed_window_started_at'
+          AND data_type = 'timestamp with time zone'
+    ),
+    'user account stores the failed-attempt window start'
+);
+
+SELECT pg_temp.assert_true(
+    (SELECT count(*) = 1
+            AND count(*) FILTER (WHERE id = '00000000-0000-7000-8000-000000000001'::uuid) = 1
+       FROM platform.customer_instance),
+    'one stable default customer instance exists'
+);
+
+SELECT pg_temp.assert_true(
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'authz' AND indexname = 'ix_relationship_active_window'),
+    'relationship active-window index exists'
+);
+
+SELECT pg_temp.assert_true(
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'audit' AND indexname = 'ix_outbox_pending_claim'),
+    'outbox pending claim index exists'
+);
+SELECT pg_temp.assert_true(
+    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'audit' AND indexname = 'ix_outbox_stale_publishing'),
+    'outbox stale publishing recovery index exists'
+);
+SELECT pg_temp.assert_true(
+    to_regprocedure('authz.lock_authorization_state_for_change()') IS NOT NULL
+    AND to_regprocedure('authz.lock_authorization_state_for_snapshot()') IS NOT NULL,
+    'authorization lock-order APIs exist'
+);
+SELECT pg_temp.assert_true(
+    to_regclass('authz.authorization_revision_batch') IS NOT NULL
+    AND to_regprocedure('authz.begin_authorization_revision_batch()') IS NOT NULL
+    AND to_regprocedure('authz.finish_authorization_revision_batch()') IS NOT NULL
+    AND has_function_privilege('innorder_runtime', 'authz.begin_authorization_revision_batch()', 'EXECUTE')
+    AND has_function_privilege('innorder_runtime', 'authz.finish_authorization_revision_batch()', 'EXECUTE')
+    AND NOT has_table_privilege(
+        'innorder_runtime', 'authz.authorization_revision_batch', 'SELECT,INSERT,UPDATE,DELETE'
+    ),
+    'authorization revision batches expose only guarded runtime functions'
+);
+SELECT pg_temp.assert_true(
+    EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'authz.authorization_revision_batch'::regclass
+          AND tgname = 'trg_authorization_revision_batch_closed'
+          AND tgdeferrable AND tginitdeferred AND NOT tgisinternal
+    ),
+    'authorization revision batches cannot remain open at commit'
+);
+SELECT pg_temp.assert_true(
+    (SELECT count(*) = 4
+       FROM pg_trigger
+      WHERE tgname IN (
+          'trg_relationship_authorization_lock',
+          'trg_principal_status_authorization_lock',
+          'trg_entity_authorization_lock',
+          'trg_policy_release_authorization_lock'
+      ) AND NOT tgisinternal),
+    'authorization fact writes acquire the exclusive state lock before mutation'
+);
+
+SELECT pg_temp.assert_true(
+    has_table_privilege('innorder_runtime', 'platform.customer_instance', 'SELECT,INSERT,UPDATE,DELETE')
+    AND has_table_privilege('innorder_runtime', 'iam.auth_session', 'SELECT,INSERT,UPDATE,DELETE'),
+    'V009 default grants cover V010 tables'
+);
+SELECT pg_temp.assert_true(
+    has_column_privilege('innorder_runtime', 'iam.user_account', 'failed_window_started_at', 'SELECT,UPDATE'),
+    'runtime can maintain failed-attempt windows added by V011'
+);
 
 SELECT pg_temp.assert_true(
     EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'authz' AND indexname = 'uq_policy_release_active'),

@@ -1,0 +1,42 @@
+package com.innorder.occ.risk
+
+import java.time.DayOfWeek
+import java.time.DateTimeException
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.util.Collections
+
+class BusinessCalendar(version: String, holidays: Set<LocalDate>) {
+    val version: String = version.requireVersion("calendar version")
+    val holidays: Set<LocalDate> = Collections.unmodifiableSet(holidays.toSet())
+
+    fun thresholdAfter(start: Instant, businessDays: Int, zone: ZoneId): Instant {
+        require(businessDays in 1..RiskRule.MAX_BUSINESS_DAYS) { "businessDays is outside operational bounds" }
+        try {
+            var cursor = start.atZone(zone)
+            var remaining = businessDays
+            while (remaining > 0) {
+                cursor = cursor.plusDays(1)
+                if (cursor.dayOfWeek !in WEEKEND && cursor.toLocalDate() !in holidays) remaining--
+            }
+            return cursor.toInstant()
+        } catch (exception: DateTimeException) {
+            throw IllegalArgumentException("business calendar arithmetic overflow", exception)
+        } catch (exception: ArithmeticException) {
+            throw IllegalArgumentException("business calendar arithmetic overflow", exception)
+        }
+    }
+
+    companion object {
+        private val WEEKEND = setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)
+    }
+}
+
+internal fun String.requireValue(name: String): String = also {
+    require(isNotBlank()) { "$name must not be blank" }
+}
+
+internal fun String.requireVersion(name: String): String = requireValue(name).also {
+    require(it.matches(Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))) { "$name is malformed" }
+}

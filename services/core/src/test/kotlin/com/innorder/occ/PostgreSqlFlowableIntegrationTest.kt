@@ -4,38 +4,217 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.flowable.engine.RepositoryService
 import org.flowable.engine.RuntimeService
+import org.flowable.engine.HistoryService
+import org.flowable.engine.ProcessEngine
+import org.flowable.spring.SpringProcessEngineConfiguration
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.test.context.TestConfiguration
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Import
+import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.dao.DataAccessException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
+import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 import org.springframework.test.annotation.DirtiesContext
+import org.springframework.test.context.ActiveProfiles
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.annotation.Transactional
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.utility.DockerImageName
 import org.testcontainers.utility.MountableFile
 import java.util.UUID
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.function.Supplier
+import javax.sql.DataSource
+import com.innorder.occ.config.FlowableTransactionBoundaryVerifier
 
 @SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+@ActiveProfiles("test")
+@Import(
+    PostgreSqlFlowableIntegrationTest.AtomicityConfiguration::class,
+    PlatformCatalogPrerequisiteTestConfiguration::class,
+)
 class PostgreSqlFlowableIntegrationTest(
     @param:Autowired private val jdbcTemplate: JdbcTemplate,
     @param:Autowired private val repositoryService: RepositoryService,
     @param:Autowired private val runtimeService: RuntimeService,
+    @param:Autowired private val historyService: HistoryService,
+    @param:Autowired private val processEngine: ProcessEngine,
+    @param:Autowired private val processConfiguration: SpringProcessEngineConfiguration,
+    @param:Autowired private val dataSource: DataSource,
+    @param:Autowired private val transactionManager: PlatformTransactionManager,
+    @param:Autowired private val atomicity: FlowableAtomicityFixture,
 ) {
+    @Test
+    fun `Flowable is bound to the application datasource and Spring transaction manager`() {
+        assertThat(processEngine.processEngineConfiguration).isSameAs(processConfiguration)
+        assertThat(processConfiguration.transactionManager).isSameAs(transactionManager)
+        assertThat(processConfiguration.dataSource.connection.use { it.metaData.url })
+            .isEqualTo(dataSource.connection.use { it.metaData.url })
+    }
+
+    @Test
+    fun `Flowable and OCC writes commit and roll back on one real PostgreSQL transaction`() {
+        JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only")).run {
+            execute("CREATE TABLE IF NOT EXISTS occ.flowable_atomicity_test(id uuid PRIMARY KEY, value text NOT NULL)")
+            execute("GRANT SELECT, INSERT, UPDATE, DELETE ON occ.flowable_atomicity_test TO innorder_runtime")
+        }
+        val deployment = repositoryService.createDeployment().addString("atomicity.bpmn20.xml", ATOMICITY_PROCESS).deploy()
+        val rolledBack = UUID.randomUUID()
+        val committed = UUID.randomUUID()
+        try {
+            assertThatThrownBy { atomicity.write(rolledBack, fail = true) }
+                .isInstanceOf(IllegalStateException::class.java)
+            assertAtomicityCounts(rolledBack, 0)
+            atomicity.write(committed, fail = false)
+            assertAtomicityCounts(committed, 1)
+        } finally {
+            runtimeService.createProcessInstanceQuery().processDefinitionKey("atomicityProcess").list()
+                .forEach { runtimeService.deleteProcessInstance(it.id, "test cleanup") }
+            repositoryService.deleteDeployment(deployment.id, true)
+            jdbcTemplate.update("DELETE FROM audit.outbox_event WHERE aggregate_id IN (?, ?)", rolledBack, committed)
+            JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_admin", "admin-test-only")).run {
+                execute("ALTER TABLE audit.audit_record DISABLE TRIGGER trg_audit_record_immutable")
+                update("DELETE FROM audit.audit_record WHERE correlation_id IN (?, ?)", rolledBack, committed)
+                execute("ALTER TABLE audit.audit_record ENABLE TRIGGER trg_audit_record_immutable")
+            }
+            jdbcTemplate.update("DELETE FROM occ.flowable_atomicity_test WHERE id IN (?, ?)", rolledBack, committed)
+        }
+    }
+
+    @Test
+    fun `Flowable boundary verifier rejects a separate datasource with a generic message`() {
+        val separate = DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only")
+        val invalid = SpringProcessEngineConfiguration().apply {
+            setDataSource(separate)
+            transactionManager = DataSourceTransactionManager(separate)
+            databaseSchemaUpdate = "false"
+        }
+        assertThatThrownBy {
+            AnnotationConfigApplicationContext().use { context ->
+                context.registerBean(SpringProcessEngineConfiguration::class.java, Supplier { invalid })
+                context.registerBean(FlowableTransactionBoundaryVerifier::class.java, Supplier {
+                    FlowableTransactionBoundaryVerifier(dataSource, transactionManager, context.environment)
+                })
+                context.refresh()
+            }
+        }.hasRootCauseInstanceOf(IllegalStateException::class.java)
+            .hasRootCauseMessage("Flowable transaction boundary is invalid")
+    }
+
+    private fun assertAtomicityCounts(id: UUID, expected: Long) {
+        assertThat(runtimeService.createProcessInstanceQuery().processInstanceBusinessKey(id.toString()).count()).isEqualTo(expected)
+        assertThat(historyService.createHistoricProcessInstanceQuery().processInstanceBusinessKey(id.toString()).count()).isEqualTo(expected)
+        assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM occ.flowable_atomicity_test WHERE id = ?", Long::class.java, id)).isEqualTo(expected)
+        assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM audit.audit_record WHERE correlation_id = ?", Long::class.java, id)).isEqualTo(expected)
+        assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM audit.outbox_event WHERE aggregate_id = ?", Long::class.java, id)).isEqualTo(expected)
+    }
+    @Test
+    fun `real PostgreSQL executes all schema contract SQL`() {
+        val testDirectory = databaseTestDirectory()
+        listOf(
+            "000_assert.sql",
+            "001_schema_contract.sql",
+            "002_constraints.sql",
+            "003_process_task_workflow.sql",
+            "run_all.sql",
+        ).forEach { name ->
+            postgres.copyFileToContainer(MountableFile.forHostPath(testDirectory.resolve(name)), "/tmp/database-tests/$name")
+        }
+
+        val result = postgres.execInContainer(
+            "sh",
+            "-c",
+            "PGPASSWORD=flyway-test-only psql -h 127.0.0.1 -U innorder_flyway -d innorder_occ -f /tmp/database-tests/run_all.sql",
+        )
+
+        assertThat(result.exitCode).withFailMessage(result.stderr + result.stdout).isZero()
+        assertThat(result.stdout).contains("all single-session schema tests passed")
+    }
+
+    @Test
+    fun `psql full schema entrypoint applies to a fresh PostgreSQL database`() {
+        val databaseDirectory = databaseDirectory()
+        postgres.copyFileToContainer(MountableFile.forHostPath(databaseDirectory), "/tmp/full-schema")
+        val adminJdbc = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_admin", "admin-test-only"))
+        adminJdbc.execute("DROP DATABASE IF EXISTS innorder_full_schema_test WITH (FORCE)")
+        adminJdbc.execute("CREATE DATABASE innorder_full_schema_test")
+        try {
+            val result = postgres.execInContainer(
+                "sh",
+                "-c",
+                "PGPASSWORD=admin-test-only psql -h 127.0.0.1 -U innorder_admin -d innorder_full_schema_test -f /tmp/full-schema/innorder_occ_full_schema.sql",
+            )
+            assertThat(result.exitCode).withFailMessage(result.stderr + result.stdout).isZero()
+            assertThat(result.stdout).contains("COMMIT")
+        } finally {
+            adminJdbc.execute("DROP DATABASE IF EXISTS innorder_full_schema_test WITH (FORCE)")
+        }
+    }
+
     @Test
     fun `migrations runtime privileges Flowable and pgvector match production boundaries`() {
         val flywayJdbc = JdbcTemplate(DriverManagerDataSource(postgres.jdbcUrl, "innorder_flyway", "flyway-test-only"))
         assertThat(jdbcTemplate.queryForObject("SELECT current_user", String::class.java)).isEqualTo("innorder_runtime")
         assertThat(flywayJdbc.queryForList("SELECT DISTINCT installed_by FROM flyway_schema_history", String::class.java))
             .containsExactly("innorder_flyway")
+        // Agent 06 must reconcile this exact list to V001-V015 after merging reserved V013 and V015.
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9)
+            .containsExactlyElementsOf((1..16).toList())
+        assertThat(flywayJdbc.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'user_account' ORDER BY ordinal_position",
+            String::class.java,
+        )).containsExactly(
+            "principal_id",
+            "username",
+            "password_hash",
+            "password_version",
+            "failed_attempts",
+            "locked_until",
+            "last_login_at",
+            "failed_window_started_at",
+        )
+        assertThat(flywayJdbc.queryForObject(
+            "SELECT has_column_privilege('innorder_runtime', 'iam.user_account', 'failed_window_started_at', 'SELECT,UPDATE')",
+            Boolean::class.java,
+        )).isTrue()
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT id::text || ':' || instance_key FROM platform.customer_instance WHERE singleton",
+            String::class.java,
+        )).isEqualTo("00000000-0000-7000-8000-000000000001:default")
+        assertThat(flywayJdbc.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'auth_session' ORDER BY ordinal_position",
+            String::class.java,
+        )).containsExactly(
+            "id",
+            "principal_id",
+            "token_version",
+            "refresh_token_hash",
+            "created_at",
+            "last_used_at",
+            "expires_at",
+            "revoked_at",
+            "replaced_by_session_id",
+            "client_fingerprint",
+        )
+        assertThat(flywayJdbc.queryForList(
+            "SELECT tgname FROM pg_trigger WHERE tgrelid = 'iam.auth_session'::regclass AND NOT tgisinternal",
+            String::class.java,
+        )).containsExactly("trg_auth_session_rotation_integrity")
+        assertThat(flywayJdbc.queryForObject(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'iam' AND indexname = 'ix_auth_session_active_principal_expiry'",
+            String::class.java,
+        )).contains("WHERE (revoked_at IS NULL)")
 
         assertThatThrownBy { jdbcTemplate.execute("CREATE TABLE occ.runtime_must_not_create(id integer)") }
             .isInstanceOf(DataAccessException::class.java)
@@ -175,6 +354,37 @@ class PostgreSqlFlowableIntegrationTest(
         )
     }
 
+    @TestConfiguration(proxyBeanMethods = false)
+    class AtomicityConfiguration {
+        @Bean
+        fun flowableAtomicityFixture(runtimeService: RuntimeService, jdbcTemplate: JdbcTemplate) =
+            FlowableAtomicityFixture(runtimeService, jdbcTemplate)
+    }
+
+    open class FlowableAtomicityFixture(
+        private val runtimeService: RuntimeService,
+        private val jdbc: JdbcTemplate,
+    ) {
+        @Transactional
+        open fun write(id: UUID, fail: Boolean) {
+            runtimeService.startProcessInstanceByKey("atomicityProcess", id.toString())
+            jdbc.update("INSERT INTO occ.flowable_atomicity_test(id, value) VALUES (?, 'committed')", id)
+            jdbc.update(
+                "INSERT INTO audit.audit_record(id, transaction_id, action_key, detail, correlation_id) VALUES (?, ?, 'flowable.atomicity', '{}'::jsonb, ?)",
+                UUID.randomUUID(), UUID.randomUUID(), id,
+            )
+            jdbc.update(
+                """INSERT INTO audit.outbox_event
+                   (id, aggregate_type, aggregate_id, aggregate_version, event_type, schema_version, payload,
+                    correlation_id, available_at, next_attempt_at)
+                   VALUES (?, 'flowable-test', ?, 1, 'flowable.atomicity', 1, '{}'::jsonb, ?,
+                           statement_timestamp(), statement_timestamp())""",
+                UUID.randomUUID(), id, id,
+            )
+            if (fail) throw IllegalStateException("forced rollback")
+        }
+    }
+
     companion object {
         private const val IMAGE = "pgvector/pgvector:0.8.0-pg16@sha256:a132765ec351c65111b5b675928a3a0515a466a40f97277329db8b8209ad8bc9"
 
@@ -196,7 +406,28 @@ class PostgreSqlFlowableIntegrationTest(
             registry.add("spring.flyway.user") { "innorder_flyway" }
             registry.add("spring.flyway.password") { "flyway-test-only" }
             registry.add("flowable.database-schema") { "flowable" }
+            registry.add("flowable.database-schema-update") { "true" }
             registry.add("occ.status-probes.external-enabled") { "false" }
         }
+
+        private const val ATOMICITY_PROCESS = """<?xml version="1.0" encoding="UTF-8"?>
+            <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" targetNamespace="occ-test">
+              <process id="atomicityProcess" isExecutable="true">
+                <startEvent id="start"/><sequenceFlow id="toWait" sourceRef="start" targetRef="wait"/>
+                <userTask id="wait"/><sequenceFlow id="toEnd" sourceRef="wait" targetRef="end"/><endEvent id="end"/>
+              </process>
+            </definitions>"""
+
+        private fun databaseTestDirectory(): Path = listOf(
+            Path.of("database", "tests"),
+            Path.of("..", "..", "database", "tests"),
+        ).firstOrNull(Files::isDirectory)
+            ?: error("database/tests directory is unavailable")
+
+        private fun databaseDirectory(): Path = listOf(
+            Path.of("database"),
+            Path.of("..", "..", "database"),
+        ).firstOrNull(Files::isDirectory)
+            ?: error("database directory is unavailable")
     }
 }

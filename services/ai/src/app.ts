@@ -14,10 +14,18 @@ function correlationId(value: string | string[] | undefined): string {
     : randomUUID();
 }
 
-export function buildApp(config: ServiceConfig = loadConfig()): FastifyInstance {
+export interface AppDependencies {
+  authenticateCore?: (request: import("fastify").FastifyRequest) => boolean;
+  https?: Record<string, unknown>;
+  operationStatus?: (operationId: string) => Promise<unknown>;
+  cancelOperation?: (operationId: string) => Promise<unknown>;
+}
+
+export function buildApp(config: ServiceConfig = loadConfig(), dependencies: AppDependencies = {}): FastifyInstance {
   const app = Fastify({
     logger:
       config.environment === "production" ? { level: config.logLevel } : false,
+    https: dependencies.https as never,
   });
 
   app.addHook("onRequest", async (request, reply) => {
@@ -25,6 +33,15 @@ export function buildApp(config: ServiceConfig = loadConfig()): FastifyInstance 
       "x-correlation-id",
       correlationId(request.headers["x-correlation-id"]),
     );
+    if (config.businessEnabled && request.url.split("?", 1)[0] !== "/health") {
+      if (request.headers.authorization !== undefined) {
+        await reply.status(400).send({ errorCode: "OCC-AI-BEARER-FORBIDDEN" });
+        return;
+      }
+      if (dependencies.authenticateCore?.(request) !== true) {
+        await reply.status(401).send({ errorCode: "OCC-AI-SERVICE-IDENTITY-INVALID" });
+      }
+    }
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -76,6 +93,22 @@ export function buildApp(config: ServiceConfig = loadConfig()): FastifyInstance 
   app.get("/api/v1/providers/capabilities", async () =>
     getProviderCapabilities(),
   );
+
+  const requireCore = async (request: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply): Promise<boolean> => {
+    if (request.headers.authorization !== undefined) { await reply.status(400).send({ errorCode: "OCC-AI-BEARER-FORBIDDEN" }); return false; }
+    if (dependencies.authenticateCore?.(request) !== true) { await reply.status(401).send({ errorCode: "OCC-AI-SERVICE-IDENTITY-INVALID" }); return false; }
+    return true;
+  };
+  app.get<{ Params: { operationId: string } }>("/internal/v1/ai/operations/:operationId/status", async (request, reply) => {
+    if (!(await requireCore(request, reply))) return reply;
+    if (dependencies.operationStatus === undefined) return reply.status(503).send({ errorCode: "OCC-AI-DISABLED" });
+    return dependencies.operationStatus(request.params.operationId);
+  });
+  app.post<{ Params: { operationId: string } }>("/internal/v1/ai/operations/:operationId/cancel", async (request, reply) => {
+    if (!(await requireCore(request, reply))) return reply;
+    if (dependencies.cancelOperation === undefined) return reply.status(503).send({ errorCode: "OCC-AI-DISABLED" });
+    return dependencies.cancelOperation(request.params.operationId);
+  });
 
   return app;
 }

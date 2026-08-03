@@ -1,15 +1,17 @@
-# 创序 OCC 软件基础
+# 创序 OCC
 
-本仓库目前提供可构建、可测试的软件基础：Electron 运营桌面壳、Kotlin/Spring Boot Core、Node.js/Fastify AI 服务、共享 TypeScript/OpenAPI 契约、PostgreSQL/Flyway 既有数据库、OPA 基线策略和私有部署 Compose 定义。当前没有实现业务域流程、真实干预队列或 AI 自动执行；桌面中的流程摘要和队列是基础界面状态。
+创序 OCC 是"确定性流程控制面 + 概率智能面"双轨架构的运营控制中心：标准 BPMN 由 Flowable 执行，业务状态只能由 Kotlin/Spring Boot 的 Core 在 PostgreSQL 事务中推进；Node.js/Fastify 的 AI 服务负责检索、规划与核验，产出待 Core 校验的建议，不直接改变事实。
 
-已工作的运行能力限于 Core/AI 状态接口、AI 静态能力注册表、桌面对 Core/AI 的受限状态轮询、OPA 基线授权决策以及基础设施定义。AI 当前不会调用真实模型或执行工具。
+关掉 AI 服务，流程、任务、证据、审核、风险规则和审计仍完整运行；开启 AI 只提升建议质量，不改变责任边界。
+
+本仓库包含：Electron 运营客户端、Core（身份认证、统一授权内核、命令内核、流程与任务、证据、风险、资源、Outbox 事件）、受治理的 AI 服务、共享 TypeScript/OpenAPI 契约、PostgreSQL/Flyway 迁移 `V001`–`V017`、OPA 授权策略，以及每客户独立私有部署的 Compose 栈与部署脚本。
 
 ## 所有权边界
 
 - Desktop 只能通过受限 preload IPC 访问 Core/AI HTTP 状态接口；不得直连 PostgreSQL、OPA 或 Flowable，也不得直接改变业务状态。
 - Core 是事实和状态转换的唯一应用所有者，并封装 Flowable。只有 Core 可以发起工作流操作、持久化事实和协调授权决策。
 - AI 只生成能力描述、建议或待 Core 验证的结果；不得直接写事实、调用 Flowable 或绕过 Core 执行变更。
-- PostgreSQL 保存事实、版本、审计和投影。`database/` 是本项目开始前已存在的数据库交付物，当前迁移为 `V001` 至 `V009`。
+- PostgreSQL 保存事实、版本、审计和投影，当前迁移为 `V001` 至 `V017`。所有聚合遵循同一乐观版本约定：新建聚合落在版本 1，后续命令按 `locked+1` 推进，由命令内核在事务内回验。
 - OPA 只根据 Core 提供的事实做无状态允许/拒绝决策，不保存或修改业务事实。
 
 ## 目录
@@ -24,9 +26,11 @@ policies/opa/          Rego 平台授权策略和行为测试
 infra/compose/         私有部署 Compose、镜像、初始化和静态契约
 gradle/                 Gradle 8.14.3 wrapper、校验和及 Windows JDK 选择器
 scripts/                根级集成验证编排
+scripts/deploy/         预检、部署、备份与发布脚本
 Docs/Project/           用户提供的项目和架构材料
 Docs/Specification/     用户提供的规格交付物
-Docs/superpowers/       本基础阶段的设计与实施计划
+Docs/Deployment/        私有部署与运维手册（12 章）
+Docs/superpowers/       各阶段设计与实施计划
 ```
 
 根目录的 `package.json`/`package-lock.json` 管理 npm workspaces；`settings.gradle.kts`/`build.gradle.kts` 管理 Core。`node_modules/`、`dist/`、`build/`、`.vite/` 和 `out/` 均为生成物，不是源码所有权边界。
@@ -38,7 +42,7 @@ Docs/superpowers/       本基础阶段的设计与实施计划
 - JDK 21。wrapper 固定 Gradle `8.14.3`，Core 编译目标固定 Java 21。
 - Electron 本地开发/烟测需要图形桌面；当前阶段只打包和烟测 Windows x64。
 - Electron `43.2.0` Windows x64 二进制与校验和只使用 Electron 项目的官方 GitHub Releases 固定版本源；仓库不配置第三方镜像或下载覆盖变量。
-- Core 当前启动时的阻塞依赖是 PostgreSQL 16 + pgvector、`btree_gist`，以及已配置登录凭据和所需数据库权限的 `innorder_flyway`/`innorder_runtime` 角色。启用 Flyway 时，Core 在启动过程中应用 V001-V009。Kafka、Redis、MinIO、OPA 与 AI 是已配置的基础集成，其中并非全部已有活动客户端，因此目前不都阻塞 Core 启动。
+- Core 当前启动时的阻塞依赖是 PostgreSQL 16 + pgvector、`btree_gist`，以及已配置登录凭据和所需数据库权限的 `innorder_flyway`/`innorder_runtime` 角色。启用 Flyway 时，Core 在启动过程中应用 V001-V011。Kafka、Redis、MinIO、OPA 与 AI 是已配置的基础集成，其中并非全部已有活动客户端，因此目前不都阻塞 Core 启动。
 - Compose 启动需要 Docker Engine 和 Compose v2 的 Linux 容器支持。
 - 执行真实 Rego 行为测试需要 `opa` 可执行文件；没有时根测试仍执行静态 Rego 契约。
 
@@ -67,6 +71,17 @@ npm run verify:local      # local verification：扩展本机检查，允许 Doc
 npm run verify:full       # 严格 full：要求 Docker Engine 和 OPA，禁止集成测试 skipped
 ```
 
+部署与发布命令：
+
+```powershell
+npm run deploy:preflight  # 校验主机、十三个密钥文件与 Compose 插值，只读
+npm run deploy:up         # 预检 -> 构建启动 -> 等待一次性任务与健康 -> 探测端点
+npm run deploy:backup -- --out <目录>   # PostgreSQL 集群、MinIO 对象与配置快照
+npm run release           # Core boot jar、AI 产物、桌面包 + SHA256 清单
+```
+
+细节、参数与退出码见 [Docs/Deployment/12-release-and-scripted-deployment.md](Docs/Deployment/12-release-and-scripted-deployment.md)。
+
 分项命令：
 
 ```powershell
@@ -90,7 +105,7 @@ Remove-Item Env:OPA_PATH
 
 `npm run verify` 保持离线友好，运行静态 Rego 契约，并在 OPA 可用时附加真实检查。`npm run verify:local` 增加 PGlite、官方 npm registry high 阈值漏洞审计、registry 签名审计和已打包 Electron 烟测；Docker 或 OPA 不可用时允许对应测试 skipped，成功消息只能是 `local verification passed`。
 
-`npm run verify:full` 是 CI/发布用严格模式。它在任何构建前要求 `docker info` 成功连接 Docker Engine，并要求 `OPA_PATH` 或 `PATH` 中的真实 `opa version` 成功；随后执行真实 OPA 测试、强制重跑 digest-pinned PostgreSQL Testcontainers 测试，并解析 `PostgreSqlFlowableIntegrationTest` JUnit XML。结果文件缺失、测试为零、任何 failures/errors 或任何 skipped 都会失败，绝不输出 full success。Full 同样包含 local 扩展检查。Gradle 始终以 strict dependency verification 校验已签入的 artifact checksum/签名元数据；这是 JVM artifact provenance 控制，不是 JVM 漏洞扫描，可靠且固定版本的 JVM CVE scanner 仍是后续 CI 控制。
+`npm run verify:full` 是 CI/发布用严格模式。它在任何构建前要求 `docker info` 成功连接 Docker Engine，并要求 `OPA_PATH` 或 `PATH` 中的真实 `opa version` 成功；随后执行真实 OPA 测试、强制重跑 digest-pinned PostgreSQL Testcontainers 测试，并解析 `PostgreSqlFlowableIntegrationTest`、`SessionRepositoryIntegrationTest` 和 `AuthControllerIntegrationTest` JUnit XML。结果文件缺失、测试为零、任何 failures/errors 或任何 skipped 都会失败，绝不输出 full success。Full 同样包含 local 扩展检查。Gradle 始终以 strict dependency verification 校验已签入的 artifact checksum/签名元数据；这是 JVM artifact provenance 控制，不是 JVM 漏洞扫描，可靠且固定版本的 JVM CVE scanner 仍是后续 CI 控制。
 
 ## 本地运行
 
@@ -161,4 +176,4 @@ docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up --b
 
 完整变量名、角色权限、停止和清理命令见 `infra/compose/README.md` 与 `infra/compose/.env.example`。外部镜像和 Dockerfile 基础镜像均固定可读 tag 与 `sha256` digest；`V009` 只向运行角色授予所需 DML、序列及 Flowable schema 的 `USAGE, CREATE`。`flowable` schema 仍由 `innorder_flyway` 所有，运行角色只拥有自己创建的 `ACT_*` 表。
 
-Core 的 PostgreSQL 集成测试使用 Compose 中相同 digest 的 pgvector PostgreSQL 镜像并自动执行 V001-V009、Flyway/运行账号隔离、Flowable schema/操作和扩展检查。普通 `npm test` 与 `verify:local` 在 Docker 不可用时允许明确 skip；严格 `verify:full` 要求 Docker 和 OPA 均可用，并拒绝任何 skipped 集成测试。
+Core 的 PostgreSQL 集成测试使用 Compose 中相同 digest 的 pgvector PostgreSQL 镜像并自动执行 V001-V011、Flyway/运行账号隔离、Flowable schema/操作和扩展检查。普通 `npm test` 与 `verify:local` 在 Docker 不可用时允许明确 skip；严格 `verify:full` 要求 Docker 和 OPA 均可用，并拒绝任何 skipped 集成测试。

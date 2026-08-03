@@ -1,6 +1,7 @@
 package com.innorder.occ.system
 
 import org.assertj.core.api.Assertions.assertThat
+import org.awaitility.Awaitility.await
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
@@ -134,7 +135,7 @@ class ConcurrentStatusProbeRunnerTest {
             runner.close()
 
             assertThat(interrupted.await(500, TimeUnit.MILLISECONDS)).isTrue()
-            assertThat(probeThread.get().isAlive).isFalse()
+            await().atMost(1, TimeUnit.SECONDS).untilAsserted { assertThat(probeThread.get().isAlive).isFalse() }
             assertThat(pending.get(1, TimeUnit.SECONDS).single().state).isEqualTo(ServiceState.UNREACHABLE)
         } finally {
             caller.shutdownNow()

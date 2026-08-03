@@ -18,6 +18,13 @@ spring:
       timeout: 1500ms
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      retries: 0
+      properties:
+        enable.idempotence: false
+        delivery.timeout.ms: 4000
+        request.timeout.ms: 3000
   flyway:
     enabled: ${FLYWAY_ENABLED:true}
     locations: ${FLYWAY_LOCATIONS:classpath:db/migration}
@@ -27,6 +34,13 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
+  ssl:
+    enabled: ${OCC_CORE_TLS_ENABLED:false}
+    certificate: file:${OCC_CORE_TLS_CERTIFICATE_FILE:}
+    certificate-private-key: file:${OCC_CORE_TLS_PRIVATE_KEY_FILE:}
+    trust-certificate: file:${OCC_CORE_TLS_TRUST_BUNDLE_FILE:}
+    enabled-protocols: TLSv1.3
+    client-auth: want
   error:
     include-binding-errors: never
     include-exception: false
@@ -45,12 +59,52 @@ management:
       exposure:
         include: health
 
-# Flyway creates the schema; Flowable owns and upgrades its internal tables.
+# Flyway creates the schema. A controlled initializer owns Flowable vendor DDL.
 flowable:
   database-schema: flowable
-  database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:true}
+  database-schema-update: ${FLOWABLE_DATABASE_SCHEMA_UPDATE:false}
 
 occ:
+  evidence:
+    production-enabled: ${OCC_EVIDENCE_PRODUCTION_ENABLED:false}
+    cleanup:
+      enabled: ${OCC_EVIDENCE_CLEANUP_ENABLED:false}
+      poll-interval: ${OCC_EVIDENCE_CLEANUP_POLL_INTERVAL:5m}
+      batch-size: ${OCC_EVIDENCE_CLEANUP_BATCH_SIZE:50}
+  cursor:
+    current-key-id: ${OCC_CURSOR_CURRENT_KEY_ID:current}
+    current-key-file: ${OCC_CURSOR_CURRENT_KEY_FILE:}
+    previous-key-id: ${OCC_CURSOR_PREVIOUS_KEY_ID:}
+    previous-key-file: ${OCC_CURSOR_PREVIOUS_KEY_FILE:}
+    previous-key-not-after: ${OCC_CURSOR_PREVIOUS_KEY_NOT_AFTER:}
+  outbox:
+    enabled: ${OCC_OUTBOX_ENABLED:true}
+    topic: occ.events.v1
+    batch-size: ${OCC_OUTBOX_BATCH_SIZE:50}
+    poll-interval: ${OCC_OUTBOX_POLL_INTERVAL:250ms}
+    ack-timeout: ${OCC_OUTBOX_ACK_TIMEOUT:5s}
+    stale-claim: 5m
+    max-attempts: 10
+  risk-due:
+    enabled: ${OCC_RISK_DUE_ENABLED:false}
+    system-principal-id: ${OCC_RISK_DUE_SYSTEM_PRINCIPAL_ID:}
+    batch-size: ${OCC_RISK_DUE_BATCH_SIZE:50}
+    poll-interval: ${OCC_RISK_DUE_POLL_INTERVAL:1m}
+  risk-metrics:
+    enabled: ${OCC_RISK_METRICS_ENABLED:false}
+    report-resource-id: ${OCC_RISK_METRICS_REPORT_RESOURCE_ID:}
+  bootstrap-administrator:
+    password-file: ${OCC_BOOTSTRAP_ADMIN_PASSWORD_FILE:}
+    username: ${OCC_BOOTSTRAP_ADMIN_USERNAME:admin}
+    display-name: ${OCC_BOOTSTRAP_ADMIN_DISPLAY_NAME:Platform Administrator}
+    delete-secret: ${OCC_BOOTSTRAP_DELETE_SECRET:false}
+    secret-owner: ${OCC_BOOTSTRAP_SECRET_OWNER:${user.name}}
+  jwt:
+    issuer: ${OCC_JWT_ISSUER}
+    private-key-file: file:${OCC_JWT_PRIVATE_KEY_FILE}
+    public-key-file: file:${OCC_JWT_PUBLIC_KEY_FILE}
+    ttl: ${OCC_JWT_TTL:15m}
+    clock-skew: ${OCC_JWT_CLOCK_SKEW:30s}
   database-probe:
     timeout: 1500ms
   status-probes:
@@ -58,10 +112,39 @@ occ:
     external-enabled: ${STATUS_EXTERNAL_PROBES_ENABLED:true}
   opa:
     base-url: ${OPA_BASE_URL:http://localhost:8181}
+    connect-timeout: ${OPA_CONNECT_TIMEOUT:500ms}
+    request-timeout: ${OPA_REQUEST_TIMEOUT:1s}
   ai:
     base-url: ${AI_BASE_URL:http://localhost:3100}
+    grant:
+      enabled: ${OCC_AI_GRANT_ENABLED:false}
+      current:
+        private-key-file: file:${OCC_AI_GRANT_PRIVATE_KEY_FILE:}
+        public-key-file: file:${OCC_AI_GRANT_PUBLIC_KEY_FILE:}
+        key-id: ${OCC_AI_GRANT_KEY_ID:}
+      previous-enabled: ${OCC_AI_GRANT_PREVIOUS_ENABLED:false}
+      previous:
+        - private-key-file: file:${OCC_AI_GRANT_PREVIOUS_PRIVATE_KEY_FILE:}
+          public-key-file: file:${OCC_AI_GRANT_PREVIOUS_PUBLIC_KEY_FILE:}
+          key-id: ${OCC_AI_GRANT_PREVIOUS_KEY_ID:}
+      ttl: ${OCC_AI_GRANT_TTL:5m}
+      clock-skew: ${OCC_AI_GRANT_CLOCK_SKEW:30s}
+    client:
+      enabled: ${OCC_AI_CLIENT_ENABLED:false}
+      origin: ${OCC_AI_INTERNAL_ORIGIN:https://localhost:3100}
+      key-file: file:${OCC_CORE_MTLS_KEY_FILE:}
+      certificate-files: ${OCC_CORE_MTLS_CERTIFICATE_FILES:}
+      trust-files: ${OCC_SERVICE_MTLS_TRUST_FILES:}
+      connect-timeout: ${OCC_AI_CONNECT_TIMEOUT:500ms}
+      request-timeout: ${OCC_AI_REQUEST_TIMEOUT:2s}
+      revoked-serials-file: file:${OCC_SERVICE_MTLS_REVOKED_SERIALS_FILE:}
+    service-security:
+      expected-ai-identity: spiffe://innorder/ai
+      revoked-serials-file: file:${OCC_SERVICE_MTLS_REVOKED_SERIALS_FILE:}
   object-storage:
     endpoint: ${OBJECT_STORAGE_ENDPOINT:http://localhost:9000}
     bucket: ${OBJECT_STORAGE_BUCKET:innorder-occ}
-    access-key: ${OBJECT_STORAGE_ACCESS_KEY:}
-    secret-key: ${OBJECT_STORAGE_SECRET_KEY:}
+  evidence-inspection:
+    docker-executable: ${EVIDENCE_DOCKER_EXECUTABLE}
+    parser-image: ${EVIDENCE_PARSER_IMAGE}
+    scanner-image: ${EVIDENCE_SCANNER_IMAGE}

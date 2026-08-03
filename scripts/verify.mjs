@@ -4,7 +4,13 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { assertJUnitSuiteExecuted, commandForPlatform, runChild, verificationExitCode } from "./verify-process.mjs";
+import {
+  assertCompleteCoreJUnitResults,
+  assertJUnitSuiteExecuted,
+  commandForPlatform,
+  runChild,
+  verificationExitCode,
+} from "./verify-process.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const require = createRequire(import.meta.url);
@@ -33,7 +39,37 @@ async function main() {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   const gradle = process.platform === "win32" ? "gradlew.bat" : "./gradlew";
   const npmAuditCache = join(tmpdir(), "innorder-occ-npm-audit-cache");
-  const integrationResult = join(root, "services", "core", "build", "test-results", "test", "TEST-com.innorder.occ.PostgreSqlFlowableIntegrationTest.xml");
+  const mandatoryIntegrationSuites = [
+    "com.innorder.occ.PlatformSecurityKernelIntegrationTest",
+    "com.innorder.occ.FlowableProductionStartupIntegrationTest",
+    "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
+    "com.innorder.occ.auth.AccessTokenSecurityTest",
+    "com.innorder.occ.auth.AuthControllerIntegrationTest",
+    "com.innorder.occ.auth.AuthServicePasswordWorkTest",
+    "com.innorder.occ.auth.PasswordServiceTest",
+    "com.innorder.occ.auth.SessionRepositoryIntegrationTest",
+    "com.innorder.occ.authz.AuditDataSourceConfigurationTest",
+    "com.innorder.occ.authz.AuthorizationDecisionValidatorTest",
+    "com.innorder.occ.authz.AuthorizationServiceIntegrationTest",
+    "com.innorder.occ.authz.AuthorizationSnapshotIntegrityIntegrationTest",
+    "com.innorder.occ.authz.PolicyReleaseIntegrityTest",
+    "com.innorder.occ.command.CanonicalJsonObjectTest",
+    "com.innorder.occ.command.CommandExecutorIntegrationTest",
+    "com.innorder.occ.config.FlowableDatabaseInitializationDependencyDetectorTest",
+    "com.innorder.occ.events.EventEnvelopeTest",
+    "com.innorder.occ.events.KafkaOutboxEventSenderProtocolIntegrationTest",
+    "com.innorder.occ.events.KafkaOutboxEventSenderTest",
+    "com.innorder.occ.events.OutboxConfigurationTest",
+    "com.innorder.occ.events.OutboxPublisherIntegrationTest",
+    "com.innorder.occ.events.OutboxPropertiesTest",
+    "com.innorder.occ.iam.BootstrapAdministratorIntegrationTest",
+    "com.innorder.occ.iam.BootstrapAdministratorStartupIntegrationTest",
+    "com.innorder.occ.iam.BootstrapSecretReaderTest",
+  ];
+  const coreTestSource = join(root, "services", "core", "src", "test", "kotlin");
+  const coreTestResults = join(root, "services", "core", "build", "test-results", "test");
+  const integrationResults = mandatoryIntegrationSuites.map((suite) =>
+    join(coreTestResults, `TEST-${suite}.xml`));
 
   function printable(command, args) {
     return [command, ...args].join(" ");
@@ -61,9 +97,9 @@ async function main() {
   function findOpa() {
     if (dryRun) return undefined;
     const candidate = process.env.OPA_PATH ?? (process.platform === "win32" ? "opa.exe" : "opa");
-    return probe(candidate, ["version"]).status === 0
-      ? candidate
-      : undefined;
+    const result = probe(candidate, ["version"]);
+    return result.status === 0 && /(?:^|\n)Version:\s+1\.5\.1\s*(?:\r?\n|$)/u.test(`${result.stdout}${result.stderr}`)
+      ? candidate : undefined;
   }
 
   function strictPreflight() {
@@ -71,9 +107,13 @@ async function main() {
     if (probe(docker, ["info", "--format", "{{.ServerVersion}}"]).status !== 0) {
       throw new Error("Docker engine unavailable; strict full verification requires a responding Docker daemon");
     }
-    const opa = findOpa();
-    if (!opa) throw new Error("OPA executable unavailable; strict full verification requires `opa version` to succeed");
-    return opa;
+    const candidate = process.env.OPA_PATH ?? (process.platform === "win32" ? "opa.exe" : "opa");
+    const result = probe(candidate, ["version"]);
+    if (result.status !== 0) throw new Error("OPA executable unavailable; strict full verification requires `opa version` to succeed");
+    if (!/(?:^|\n)Version:\s+1\.5\.1\s*(?:\r?\n|$)/u.test(`${result.stdout}${result.stderr}`)) {
+      throw new Error("OPA 1.5.1 is required for strict full verification");
+    }
+    return candidate;
   }
 
   function pgliteModuleRoot() {
@@ -109,10 +149,18 @@ async function main() {
   await run("Electron provenance contracts", npm, ["run", "test:electron-provenance"]);
   await run("deployment documentation contracts", npm, ["run", "test:deployment-docs"]);
   await run("TypeScript workspace tests", npm, ["run", "test:workspaces"]);
+  if (full) {
+    await run(
+      "authorization Zod/OPA parity",
+      npm,
+      ["run", "test:authz-parity"],
+      dryRun ? process.env : { ...process.env, OPA_PATH: requiredOpa },
+    );
+  }
 
   const opa = requiredOpa ?? findOpa();
   if (opa) {
-    console.log(`[verify] real OPA checks enabled with ${opa}`);
+    console.log("[verify] real OPA checks enabled");
   } else {
     console.log("[verify] OPA binary unavailable; running static Rego contracts");
   }
@@ -125,12 +173,15 @@ async function main() {
   await run("database static contracts", npm, ["run", "test:database"]);
 
   if (testsOnly) {
-    await run("Core Kotlin tests", gradle, [":services:core:test", "--dependency-verification", "strict"]);
+    await run("Core Kotlin tests", gradle, [
+      ":services:core:test", "--dependency-verification", "strict", "-PexcludeStrictAuthz=true",
+    ]);
     return;
   }
 
   if (extended) {
     await runPglite();
+    if (full) await run("real PostgreSQL governed AI integration", process.execPath, ["--test", "database/tests/postgresql-governed-ai.test.mjs"]);
     await run("npm high-severity vulnerability audit", npm, [
       "audit", "--audit-level", "high", "--registry", "https://registry.npmjs.org", "--cache", npmAuditCache,
     ]);
@@ -139,24 +190,39 @@ async function main() {
     ]);
   }
 
-  await run("Core Gradle build and tests", gradle, [":services:core:build", "--dependency-verification", "strict"]);
+  await run("Core Gradle build and tests", gradle, [
+    ":services:core:build", "--dependency-verification", "strict", "-PexcludeStrictAuthz=true",
+  ]);
   await run("TypeScript workspace typechecks", npm, ["run", "typecheck", "--workspaces", "--if-present"]);
   await run("AI service build", npm, ["run", "build", "--workspace", "@innorder/ai-service"]);
+  if (full) {
+    await run("parser sandbox container integration", process.execPath, ["--test", "services/ai/test/parser-container.test.mjs"]);
+    await run("parser Compose runtime integration", process.execPath, ["--test", "services/ai/test/parser-compose-container.test.mjs"]);
+    await run("MinIO and ClamAV ingestion integration", process.execPath, ["--test", "services/ai/test/ingestion-container.test.mjs"]);
+  }
   await run("Electron package build", npm, ["run", "build", "--workspace", "@innorder/desktop"]);
 
-  if (extended) {
+  if (extended && process.platform === "win32") {
     await run("packaged Electron smoke tests", npm, ["run", "smoke", "--workspace", "@innorder/desktop"]);
   }
 
   if (full) {
-    await run("Docker Testcontainers PostgreSQL integration tests", gradle, [
+    if (dryRun) console.log("[verify] strict environment keys: OPA_PATH, INNORDER_STRICT_AUTHZ_TESTS");
+    console.log(`[verify] mandatory Core integration suites: ${mandatoryIntegrationSuites.join(", ")}`);
+    await run("strict complete Core tests with Docker and real OPA", gradle, [
       ":services:core:test",
-      "--tests", "com.innorder.occ.PostgreSqlFlowableIntegrationTest",
       "--rerun-tasks",
       "--dependency-verification", "strict",
-    ]);
-    console.log("\n[verify] enforce Docker integration JUnit results");
-    if (!dryRun) assertJUnitSuiteExecuted(integrationResult);
+    ], dryRun ? process.env : {
+      ...process.env,
+      OPA_PATH: requiredOpa,
+      INNORDER_STRICT_AUTHZ_TESTS: "1",
+    });
+    console.log("\n[verify] enforce complete Core and mandatory integration JUnit results");
+    if (!dryRun) {
+      assertCompleteCoreJUnitResults(coreTestSource, coreTestResults);
+      integrationResults.forEach((result) => assertJUnitSuiteExecuted(result));
+    }
   }
 
   const label = full ? "full" : local ? "local" : "quick";

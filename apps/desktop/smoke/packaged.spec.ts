@@ -1,23 +1,10 @@
-import path from "node:path";
-
 import { _electron as electron, expect, test, type Page } from "playwright/test";
 
-const executablePath = path.resolve(
-  "out/@innorder-desktop-win32-x64/@innorder-desktop.exe",
-);
+import { packagedSmokeLaunchOptions, preflightPackagedExecutable } from "./packaged-app";
 
 const mutedTextSelectors = [
-  ".brand small",
-  ".operator small",
   ".section-kicker",
-  ".metric > small",
-  ".panel-heading p",
-  ".row-count",
-  ".status-table-head",
-  ".status-mark",
-  ".status-detail",
-  ".empty-state strong",
-  ".empty-state span",
+  ".entry-form label",
 ];
 
 interface Rgb {
@@ -51,6 +38,7 @@ function contrastRatio(foreground: string, background: string): number {
 }
 
 test("packaged OCC desktop enforces runtime and visual baselines", async () => {
+  const executablePath = await preflightPackagedExecutable();
   const runtimeErrors: string[] = [];
   const monitoredPages = new WeakSet<Page>();
   const monitor = (page: Page) => {
@@ -64,7 +52,7 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     page.on("pageerror", (error) => runtimeErrors.push(error.message));
   };
 
-  const application = await electron.launch({ executablePath });
+  const application = await electron.launch(packagedSmokeLaunchOptions(executablePath));
   application.on("window", monitor);
   application.windows().forEach(monitor);
 
@@ -79,9 +67,9 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     if (!documentResponse) {
       throw new Error("Packaged reload did not expose its main document response");
     }
-    await expect(page.getByRole("heading", { name: "运行总览" })).toBeVisible();
-    await expect(page.getByRole("row", { name: /Flowable/ })).toBeVisible();
-    expect((await page.locator("body").innerText()).trim().length).toBeGreaterThan(100);
+    await expect(page.getByRole("heading", { name: "连接服务器" })).toBeVisible();
+    await expect(page.locator("form")).toBeVisible();
+    expect((await page.locator("body").innerText()).trim().length).toBeGreaterThan(50);
 
     const responseCsp = (await documentResponse.allHeaders())[
       "content-security-policy"
@@ -101,7 +89,7 @@ test("packaged OCC desktop enforces runtime and visual baselines", async () => {
     expect(rendererBoundary).toEqual({
       requireType: "undefined",
       processType: "undefined",
-      occKeys: ["getSystemStatuses"],
+      occKeys: ["profiles", "session", "runtime", "workspaces", "commands", "uploads", "notifications"],
     });
 
     const metaCsp = await page
