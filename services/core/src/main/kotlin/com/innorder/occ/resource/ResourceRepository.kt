@@ -48,8 +48,8 @@ class ResourceRepository(
 
     fun insertResource(request: CreateResourceRequest): ManagedResource {
         jdbc.update(
-            """INSERT INTO occ.managed_resource(id, resource_type, capacity, state, data)
-               VALUES (?, ?, ?, ?, ?::jsonb)""",
+            """INSERT INTO occ.managed_resource(id, resource_type, capacity, state, data, row_version)
+               VALUES (?, ?, ?, ?, ?::jsonb, 1)""",
             request.id, request.resourceType, request.capacity, request.state.name, mapper.writeValueAsString(request.data),
         )
         return requireNotNull(resource(request.id))
@@ -152,8 +152,8 @@ class ResourceRepository(
         jdbc.update(
             """INSERT INTO occ.resource_reservation
                (id, resource_id, requester_entity_id, process_instance_id, task_id, time_range,
-                capacity, exclusive, state)
-               VALUES (?, ?, ?, ?, ?, tstzrange(?::timestamptz, ?::timestamptz, '[)'), ?, ?, 'PENDING')""",
+                capacity, exclusive, state, row_version)
+               VALUES (?, ?, ?, ?, ?, tstzrange(?::timestamptz, ?::timestamptz, '[)'), ?, ?, 'PENDING', 1)""",
             request.id, resourceId, request.requesterEntityId, request.processInstanceId, request.taskId,
             request.start, request.end, request.capacity, request.exclusive,
         )

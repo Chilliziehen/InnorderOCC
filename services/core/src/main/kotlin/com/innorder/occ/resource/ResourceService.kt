@@ -10,6 +10,9 @@ import com.innorder.occ.authz.AuthorizationAvailabilityException
 import com.innorder.occ.authz.AuthorizationDeniedException
 import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationService
+import com.innorder.occ.command.AggregateChange
+import com.innorder.occ.command.AggregateLockPlan
+import com.innorder.occ.command.AggregateReference
 import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
@@ -307,18 +310,21 @@ class ResourceService(
     }
 
     private fun createCommand(request: CreateResourceRequest) = object : ResourceCommand(request.id, request.id, request.id, false) {
-        override fun lockCurrentVersion(context: CommandContext): Long? {
-            repository.lockResourceEntity(request.id)
-            return null
-        }
-
-        override fun execute(context: CommandContext): CommandMutation = mutation(
-            repository.insertResource(request), null, 0, 201, "resource.created",
+        override val lockPlan = AggregateLockPlan(
+            created = listOf(AggregateReference(MANAGED_RESOURCE_AGGREGATE_TYPE, request.id)),
         )
+
+        override fun execute(context: CommandContext): CommandMutation {
+            repository.lockResourceEntity(request.id)
+            return mutation(repository.insertResource(request), 0, 1, 201, "resource.created")
+        }
     }
 
     private fun updateCommand(id: UUID, request: UpdateResourceRequest) = object : ResourceCommand(id, id, id, true) {
-        override fun lockCurrentVersion(context: CommandContext): Long? = repository.lockResource(id)
+        override val lockPlan = AggregateLockPlan(
+            existing = listOf(AggregateReference(MANAGED_RESOURCE_AGGREGATE_TYPE, id)),
+        )
+
         override fun execute(context: CommandContext): CommandMutation {
             val before = requireNotNull(context.descriptor.expectedVersion)
             return mutation(repository.updateResource(id, request, before + 1), before, before + 1, 200, "resource.updated")
@@ -327,7 +333,10 @@ class ResourceService(
 
     private fun availabilityCommand(resourceId: UUID, request: AddAvailabilityRequest) =
         object : ResourceCommand(resourceId, resourceId, resourceId, true) {
-            override fun lockCurrentVersion(context: CommandContext): Long? = repository.lockResource(resourceId)
+            override val lockPlan = AggregateLockPlan(
+                existing = listOf(AggregateReference(MANAGED_RESOURCE_AGGREGATE_TYPE, resourceId)),
+            )
+
             override fun execute(context: CommandContext): CommandMutation {
                 val before = requireNotNull(context.descriptor.expectedVersion)
                 repository.insertAvailability(resourceId, context.metadata.principalId, request)
@@ -338,8 +347,12 @@ class ResourceService(
 
     private fun reserveCommand(resourceId: UUID, request: ReserveResourceRequest) =
         object : ResourceCommand(resourceId, resourceId, request.id, false, "resource-reservation") {
-            override fun lockCurrentVersion(context: CommandContext): Long? {
-                if (repository.lockResource(resourceId) == null) throw InvalidCommandRequestException()
+            override val lockPlan = AggregateLockPlan(
+                existing = listOf(AggregateReference(MANAGED_RESOURCE_AGGREGATE_TYPE, resourceId)),
+                created = listOf(AggregateReference(RESOURCE_RESERVATION_AGGREGATE_TYPE, request.id)),
+            )
+
+            override fun execute(context: CommandContext): CommandMutation {
                 if (!repository.lockReservationProvenance(request)) throw ResourceReferenceValidationException()
                 authorizeRequired(context.metadata.principalId, context.metadata.correlationId, request.requesterEntityId, resourceId, WRITE_ACTION)
                 request.processInstanceId?.let {
@@ -348,24 +361,24 @@ class ResourceService(
                 request.taskId?.let {
                     authorizeRequired(context.metadata.principalId, context.metadata.correlationId, it, resourceId, WRITE_ACTION)
                 }
-                return null
+                return reservationMutation(
+                    repository.insertReservation(resourceId, request), 0, 1, 201, "resource-reservation.created",
+                )
             }
-
-            override fun execute(context: CommandContext): CommandMutation = reservationMutation(
-                repository.insertReservation(resourceId, request), null, 0, 201, "resource-reservation.created",
-            )
         }
 
     private fun changeCommand(id: UUID, request: ChangeReservationRequest) =
         object : ResourceCommand(request.resourceId, request.resourceId, id, true, "resource-reservation") {
-            override fun lockCurrentVersion(context: CommandContext): Long? {
-                if (repository.lockResource(request.resourceId) == null) throw InvalidCommandRequestException()
-                val reservation = repository.lockReservation(id, request.resourceId) ?: throw ReservationNotFoundException()
-                authorizeRequesterMutation(context, reservation)
-                return reservation.version
-            }
+            override val lockPlan = AggregateLockPlan(
+                existing = listOf(
+                    AggregateReference(MANAGED_RESOURCE_AGGREGATE_TYPE, request.resourceId),
+                    AggregateReference(RESOURCE_RESERVATION_AGGREGATE_TYPE, id),
+                ),
+            )
 
             override fun execute(context: CommandContext): CommandMutation {
+                val reservation = repository.lockReservation(id, request.resourceId) ?: throw ReservationNotFoundException()
+                authorizeRequesterMutation(context, reservation)
                 val before = requireNotNull(context.descriptor.expectedVersion)
                 return reservationMutation(
                     repository.changeReservation(id, request, before + 1), before, before + 1, 200,
@@ -376,14 +389,16 @@ class ResourceService(
 
     private fun cancelCommand(id: UUID, resourceId: UUID) =
         object : ResourceCommand(resourceId, resourceId, id, true, "resource-reservation") {
-            override fun lockCurrentVersion(context: CommandContext): Long? {
-                if (repository.lockResource(resourceId) == null) throw InvalidCommandRequestException()
-                val reservation = repository.lockReservation(id, resourceId) ?: throw ReservationNotFoundException()
-                authorizeRequesterMutation(context, reservation)
-                return reservation.version
-            }
+            override val lockPlan = AggregateLockPlan(
+                existing = listOf(
+                    AggregateReference(MANAGED_RESOURCE_AGGREGATE_TYPE, resourceId),
+                    AggregateReference(RESOURCE_RESERVATION_AGGREGATE_TYPE, id),
+                ),
+            )
 
             override fun execute(context: CommandContext): CommandMutation {
+                val reservation = repository.lockReservation(id, resourceId) ?: throw ReservationNotFoundException()
+                authorizeRequesterMutation(context, reservation)
                 val before = requireNotNull(context.descriptor.expectedVersion)
                 return reservationMutation(
                     repository.cancelReservation(id, before + 1), before, before + 1, 200,
@@ -482,10 +497,13 @@ class ResourceService(
     ): CommandMutation {
         val response = CanonicalJsonObject.from(body)
         val event = CanonicalJsonObject.from(eventBody)
+        val aggregate = AggregateReference(aggregateType, aggregateId)
         return CommandMutation(
-            status, response, resourceId, aggregateId, aggregateType, before, after, null,
+            status, response, resourceId,
+            listOf(AggregateChange(aggregate, before ?: 0, after)),
+            null,
             CanonicalJsonObject.from(mapper.createObjectNode().apply { put("version", after) }),
-            listOf(PendingEventSpec(eventType, 1, event, after)),
+            listOf(PendingEventSpec(eventType, 1, event, aggregate, after)),
         )
     }
 

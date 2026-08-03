@@ -3,6 +3,9 @@ package com.innorder.occ.ai
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.innorder.occ.command.AggregateChange
+import com.innorder.occ.command.AggregateLockPlan
+import com.innorder.occ.command.AggregateReference
 import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
@@ -65,10 +68,13 @@ private data class CorpusMember(
 private abstract class KnowledgeCommand(protected val sourceId: UUID, protected val mapper: ObjectMapper) : AuthorizedCommand {
     override val entityId = sourceId
     override val resourceId = sourceId
-    override val aggregateType = "knowledge-source"
+    override val aggregateType = KNOWLEDGE_SOURCE_AGGREGATE_TYPE
     override val aggregateId = sourceId
     override val expectedVersionRequired = true
     override val changesAuthorizationFacts = false
+    override val lockPlan = AggregateLockPlan(
+        existing = listOf(AggregateReference(KNOWLEDGE_SOURCE_AGGREGATE_TYPE, sourceId)),
+    )
     protected var rowVersion = -1L
     protected fun lockSource(context: CommandContext): Long {
         rowVersion = context.jdbc.queryForObject(
@@ -161,12 +167,15 @@ private abstract class KnowledgeCommand(protected val sourceId: UUID, protected 
             .takeIf { it == 1 } ?: throw KnowledgeGateException()
     }
 
-    protected fun mutation(eventType: String, body: CanonicalJsonObject, detail: CanonicalJsonObject, payload: CanonicalJsonObject) = CommandMutation(
-        status = 200, body = body, resourceId = sourceId, aggregateId = sourceId,
-        aggregateType = aggregateType, beforeVersion = rowVersion, afterVersion = rowVersion + 1,
-        auditReason = eventType, auditDetail = detail,
-        events = listOf(PendingEventSpec(eventType, 1, payload, rowVersion + 1)),
-    )
+    protected fun mutation(eventType: String, body: CanonicalJsonObject, detail: CanonicalJsonObject, payload: CanonicalJsonObject): CommandMutation {
+        val aggregate = AggregateReference(KNOWLEDGE_SOURCE_AGGREGATE_TYPE, sourceId)
+        return CommandMutation(
+            status = 200, body = body, resourceId = sourceId,
+            changes = listOf(AggregateChange(aggregate, rowVersion, rowVersion + 1)),
+            auditReason = eventType, auditDetail = detail,
+            events = listOf(PendingEventSpec(eventType, 1, payload, aggregate, rowVersion + 1)),
+        )
+    }
 }
 
 private class ActivationCommand(private val request: KnowledgeActivationRequest, mapper: ObjectMapper) : KnowledgeCommand(request.sourceId, mapper) {
@@ -178,7 +187,7 @@ private class ActivationCommand(private val request: KnowledgeActivationRequest,
     private lateinit var candidateManifest: String
     private lateinit var previousManifest: String
 
-    override fun lockCurrentVersion(context: CommandContext): Long {
+    override fun execute(context: CommandContext): CommandMutation {
         lockSource(context)
         val spaces = lockSpaces(context, request.candidateSpaceId, request.expectedActiveSpaceId)
         candidate = spaces[request.candidateSpaceId] ?: throw KnowledgeGateException()
@@ -198,10 +207,6 @@ private class ActivationCommand(private val request: KnowledgeActivationRequest,
         candidateManifest = canonicalManifest(context, members, true)
         previousManifest = canonicalManifest(context, members, false)
         if (candidateManifest != gate["document_manifest"]) throw KnowledgeGateException()
-        return rowVersion
-    }
-
-    override fun execute(context: CommandContext): CommandMutation {
         context.jdbc.update("UPDATE ai.embedding_space SET status = 'RETIRED' WHERE id = ? AND status = 'ACTIVE'", request.expectedActiveSpaceId)
             .takeIf { it == 1 } ?: throw KnowledgeGateException()
         context.jdbc.update("UPDATE ai.embedding_space SET status = 'ACTIVE', activated_at = statement_timestamp() WHERE id = ? AND status = 'BUILDING'", request.candidateSpaceId)
@@ -230,7 +235,7 @@ private class RollbackCommand(private val request: KnowledgeRollbackRequest, map
     private lateinit var currentSpace: Space
     private lateinit var previousSpace: Space
 
-    override fun lockCurrentVersion(context: CommandContext): Long {
+    private fun prepare(context: CommandContext) {
         lockSource(context)
         val payload = context.jdbc.queryForObject(
             """SELECT payload::text FROM audit.outbox_event WHERE aggregate_id = ?
@@ -250,7 +255,6 @@ private class RollbackCommand(private val request: KnowledgeRollbackRequest, map
         val candidate = canonicalManifest(context, trace.members, true)
         val previous = canonicalManifest(context, trace.members, false)
         if (candidate != trace.candidateManifest || previous != trace.previousManifest || currentSpace.status != "ACTIVE" || previousSpace.status != "RETIRED") throw KnowledgeGateException()
-        return rowVersion
     }
 
     private fun parseTrace(payload: String): ActivationTrace = try {
@@ -272,6 +276,7 @@ private class RollbackCommand(private val request: KnowledgeRollbackRequest, map
     } catch (_: Exception) { throw KnowledgeGateException() }
 
     override fun execute(context: CommandContext): CommandMutation {
+        prepare(context)
         context.jdbc.update("UPDATE ai.embedding_space SET status = 'RETIRED' WHERE id = ? AND status = 'ACTIVE'", trace.candidateSpaceId)
             .takeIf { it == 1 } ?: throw KnowledgeGateException()
         context.jdbc.update("UPDATE ai.embedding_space SET status = 'ACTIVE' WHERE id = ? AND status = 'RETIRED'", trace.previousSpaceId)

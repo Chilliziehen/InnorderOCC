@@ -13,67 +13,6 @@ import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.util.UUID
 
-object BootstrapIds {
-    // Reserved UUIDv7-shaped platform identities. These values are deployment-independent contracts.
-    val PACKAGE: UUID = uuid("00000000-0000-7000-8000-000000000010")
-    val PACKAGE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000011")
-    val USER_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000012")
-    val USER_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000013")
-    val ROLE_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000014")
-    val ROLE_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000015")
-    val SYSTEM_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000016")
-    val SYSTEM_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000017")
-    val ROLE_ASSIGNMENT_RELATION: UUID = uuid("00000000-0000-7000-8000-000000000002")
-    val VIEWER_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000020")
-    val OPERATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000021")
-    val ADMINISTRATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000022")
-    val RISK_RUNTIME_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000023")
-    val POLICY_BUNDLE: UUID = uuid("00000000-0000-7000-8000-000000000030")
-    val POLICY_BUNDLE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000031")
-    val POLICY_RELEASE: UUID = uuid("00000000-0000-7000-8000-000000000032")
-
-    private fun uuid(value: String): UUID = UUID.fromString(value)
-}
-
-internal object BootstrapBaseline {
-    const val manifest = """{"bootstrap":"platform-iam","version":1}"""
-    private val canonicalAssets = """
-        package|00000000-0000-7000-8000-000000000010|platform-iam|Platform IAM|Immutable platform identity and role authorization baseline|ACTIVE
-        version|00000000-0000-7000-8000-000000000011|1.0.0|$manifest
-        type|00000000-0000-7000-8000-000000000012|platform.user|User|PRINCIPAL|true
-        type-version|00000000-0000-7000-8000-000000000013|00000000-0000-7000-8000-000000000012|1|{}|{}|{}|{}
-        type|00000000-0000-7000-8000-000000000014|platform.role|Role|PRINCIPAL|true
-        type-version|00000000-0000-7000-8000-000000000015|00000000-0000-7000-8000-000000000014|1|{}|{}|{}|{}
-        type|00000000-0000-7000-8000-000000000016|platform.system|System|SYSTEM|true
-        type-version|00000000-0000-7000-8000-000000000017|00000000-0000-7000-8000-000000000016|1|{}|{}|{}|{}
-        relation|00000000-0000-7000-8000-000000000002|platform.role-assignment|00000000-0000-7000-8000-000000000012|00000000-0000-7000-8000-000000000014|MANY_TO_MANY|false|false|true|null|null
-    """.trimIndent()
-    val contentHash: String = MessageDigest.getInstance("SHA-256")
-        .digest(canonicalAssets.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
-}
-
-internal object BootstrapPolicyBaseline {
-    const val OPA_REVISION = "platform-authz-v1"
-    const val manifest = """{"forbiddenActions":[],"roleGrants":[{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-viewer-read","resourceId":"*","subjectRoleEntityKey":"role:viewer"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-operator-execute","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-operator-read","resourceId":"*","subjectRoleEntityKey":"role:operator"},{"action":"occ.admin","effect":"ALLOW","entityId":"*","id":"platform-administrator-admin","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.execute","effect":"ALLOW","entityId":"*","id":"platform-administrator-execute","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"occ.read","effect":"ALLOW","entityId":"*","id":"platform-administrator-read","resourceId":"*","subjectRoleEntityKey":"role:administrator"},{"action":"risk.escalate","effect":"ALLOW","entityId":"*","id":"platform-risk-runtime-escalate","resourceId":"*","subjectRoleEntityKey":"role:risk-runtime"},{"action":"risk.sla_breach","effect":"ALLOW","entityId":"*","id":"platform-risk-runtime-sla-breach","resourceId":"*","subjectRoleEntityKey":"role:risk-runtime"}],"version":1}"""
-    val contentHash: String = sha256(manifest)
-    val releaseHash: String = PolicyReleaseIntegrity.contentHash(
-        OPA_REVISION,
-        listOf(
-            PolicyReleaseItemIntegrity(
-                PolicyLayer.PLATFORM,
-                BootstrapIds.POLICY_BUNDLE,
-                BootstrapIds.POLICY_BUNDLE_VERSION,
-                contentHash,
-            ),
-        ),
-    )
-
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
-}
-
 @Component
 class PlatformSecurityBaseline(
     private val jdbc: JdbcTemplate,

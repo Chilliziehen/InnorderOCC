@@ -17,12 +17,12 @@ import org.springframework.context.annotation.Conditional
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.Ordered
 import org.springframework.core.type.AnnotatedTypeMetadata
-import org.springframework.core.Ordered
 import org.springframework.core.annotation.Order
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.transaction.support.TransactionTemplate
 import org.springframework.util.StringUtils
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.util.Locale
 import java.util.UUID
@@ -77,6 +77,8 @@ class BootstrapSecretCleanupException : IllegalStateException(
 
 enum class BootstrapResult { CREATED, ALREADY_INITIALIZED }
 
+internal const val PACKAGE_KEY = "platform-iam"
+
 object BootstrapIds {
     // Reserved UUIDv7-shaped platform identities. These values are deployment-independent contracts.
     val PACKAGE: UUID = uuid("00000000-0000-7000-8000-000000000010")
@@ -85,10 +87,13 @@ object BootstrapIds {
     val USER_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000013")
     val ROLE_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000014")
     val ROLE_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000015")
+    val SYSTEM_TYPE: UUID = uuid("00000000-0000-7000-8000-000000000016")
+    val SYSTEM_TYPE_VERSION: UUID = uuid("00000000-0000-7000-8000-000000000017")
     val ROLE_ASSIGNMENT_RELATION: UUID = uuid("00000000-0000-7000-8000-000000000002")
     val VIEWER_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000020")
     val OPERATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000021")
     val ADMINISTRATOR_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000022")
+    val RISK_RUNTIME_ROLE: UUID = uuid("00000000-0000-7000-8000-000000000023")
     val POLICY_BUNDLE: UUID = uuid("00000000-0000-7000-8000-000000000030")
     val POLICY_BUNDLE_VERSION_V1: UUID = uuid("00000000-0000-7000-8000-000000000031")
     val POLICY_RELEASE_V1: UUID = uuid("00000000-0000-7000-8000-000000000032")
@@ -109,6 +114,8 @@ internal object BootstrapBaseline {
         type-version|00000000-0000-7000-8000-000000000013|00000000-0000-7000-8000-000000000012|1|{}|{}|{}|{}
         type|00000000-0000-7000-8000-000000000014|platform.role|Role|PRINCIPAL|true
         type-version|00000000-0000-7000-8000-000000000015|00000000-0000-7000-8000-000000000014|1|{}|{}|{}|{}
+        type|00000000-0000-7000-8000-000000000016|platform.system|System|SYSTEM|true
+        type-version|00000000-0000-7000-8000-000000000017|00000000-0000-7000-8000-000000000016|1|{}|{}|{}|{}
         relation|00000000-0000-7000-8000-000000000002|platform.role-assignment|00000000-0000-7000-8000-000000000012|00000000-0000-7000-8000-000000000014|MANY_TO_MANY|false|false|true|null|null
     """.trimIndent()
     val contentHash: String = MessageDigest.getInstance("SHA-256")
@@ -136,7 +143,14 @@ internal object BootstrapPolicyBaseline {
         WorkflowAuthorizationRoles.processOwner.key to WorkflowAuthorizationRoles.processOwnerActions,
         WorkflowAuthorizationRoles.participant.key to WorkflowAuthorizationRoles.participantActions,
     ).flatMap { (roleKey, actions) -> actions.sorted().map { action -> grant(roleKey, action) } }
-    val manifest = """{"forbiddenActions":[],"roleGrants":[${(baselineGrants + workflowGrants).joinToString(",")}],"version":1}"""
+
+    // The risk runtime identity may only escalate and report SLA breaches.
+    private val riskRuntimeGrants = listOf(
+        grant("role:risk-runtime", "risk.escalate", "platform-risk-runtime-escalate"),
+        grant("role:risk-runtime", "risk.sla_breach", "platform-risk-runtime-sla-breach"),
+    )
+    val manifest =
+        """{"forbiddenActions":[],"roleGrants":[${(baselineGrants + workflowGrants + riskRuntimeGrants).joinToString(",")}],"version":1}"""
     val contentHash: String = PolicyReleaseIntegrity.manifestContentHash(manifest)
     val releaseHash: String = PolicyReleaseIntegrity.contentHash(
         OPA_REVISION,
