@@ -4,35 +4,35 @@ info:
   version: 0.1.0
 security:
   - bearerAuth: []
-x-command-parameters: &a2
+x-command-parameters:
   - $ref: "#/components/parameters/IdempotencyKey"
   - $ref: "#/components/parameters/CorrelationId"
-x-update-command-parameters: &a3
+x-update-command-parameters:
   - $ref: "#/components/parameters/IdempotencyKey"
   - $ref: "#/components/parameters/CorrelationId"
   - $ref: "#/components/parameters/ExpectedVersion"
-x-command-response-headers: &a1
+x-command-response-headers:
   X-Correlation-ID:
     $ref: "#/components/headers/CorrelationId"
   Idempotency-Replayed:
     $ref: "#/components/headers/IdempotencyReplayed"
-x-workflow-request-response: &a10
+x-workflow-request-response:
   $ref: "#/components/responses/WorkflowRequestError"
-x-workflow-bad-request-response: &a4
+x-workflow-bad-request-response:
   $ref: "#/components/responses/WorkflowBadRequest"
-x-workflow-unauthorized-response: &a5
+x-workflow-unauthorized-response:
   $ref: "#/components/responses/WorkflowUnauthorized"
-x-workflow-forbidden-response: &a6
+x-workflow-forbidden-response:
   $ref: "#/components/responses/WorkflowForbidden"
-x-workflow-not-found-response: &a11
+x-workflow-not-found-response:
   $ref: "#/components/responses/WorkflowNotFound"
-x-workflow-internal-response: &a7
+x-workflow-internal-response:
   $ref: "#/components/responses/WorkflowInternalError"
-x-workflow-authorization-unavailable-response: &a8
+x-workflow-authorization-unavailable-response:
   $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
-x-workflow-unavailable-response: &a14
+x-workflow-unavailable-response:
   $ref: "#/components/responses/WorkflowUnavailable"
-x-idempotency-key: &a9
+x-idempotency-key:
   name: Idempotency-Key
   in: header
   required: true
@@ -40,42 +40,42 @@ x-idempotency-key: &a9
     type: string
     minLength: 1
     maxLength: 256
-x-cohort-id: &a12
+x-cohort-id:
   name: cohortId
   in: path
   required: true
   schema:
     type: string
     format: uuid
-x-participant-id: &a13
+x-participant-id:
   name: participantId
   in: path
   required: true
   schema:
     type: string
     format: uuid
-x-process-id: &a15
+x-process-id:
   name: processId
   in: path
   required: true
   schema:
     type: string
     format: uuid
-x-task-id: &a17
+x-task-id:
   name: taskId
   in: path
   required: true
   schema:
     type: string
     format: uuid
-x-notification-id: &a18
+x-notification-id:
   name: notificationId
   in: path
   required: true
   schema:
     type: string
     format: uuid
-x-activity-key: &a16
+x-activity-key:
   name: activityKey
   in: path
   required: true
@@ -239,7 +239,11 @@ paths:
       responses:
         "201":
           description: Upload session created
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -283,7 +287,9 @@ paths:
       - $ref: "#/components/parameters/UploadSessionId"
     put:
       operationId: uploadEvidenceContent
-      parameters: *a2
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
       requestBody:
         required: true
         content:
@@ -295,7 +301,11 @@ paths:
       responses:
         "200":
           description: Terminal or observable upload result
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -343,7 +353,10 @@ paths:
       - $ref: "#/components/parameters/EvidenceId"
     post:
       operationId: submitEvidence
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -353,7 +366,11 @@ paths:
       responses:
         "200":
           description: Submitted evidence
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -399,7 +416,10 @@ paths:
           $ref: "#/components/responses/AuthorizationUnavailable"
     post:
       operationId: reviewEvidence
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -409,7 +429,11 @@ paths:
       responses:
         "201":
           description: Immutable evidence review
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -647,7 +671,10 @@ paths:
           $ref: "#/components/responses/AuthorizationUnavailable"
     post:
       operationId: actOnRisk
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -657,7 +684,11 @@ paths:
       responses:
         "201":
           description: Immutable risk action
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -727,7 +758,9 @@ paths:
           $ref: "#/components/responses/AuthorizationUnavailable"
     post:
       operationId: createRiskAdjudication
-      parameters: *a2
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
       requestBody:
         required: true
         content:
@@ -737,7 +770,11 @@ paths:
       responses:
         "201":
           description: Immutable risk adjudication
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -844,7 +881,10 @@ paths:
           $ref: "#/components/responses/AuthorizationUnavailable"
     patch:
       operationId: updateManagedResource
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -854,7 +894,11 @@ paths:
       responses:
         "200":
           description: Updated managed resource
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -900,7 +944,10 @@ paths:
           $ref: "#/components/responses/AuthorizationUnavailable"
     post:
       operationId: createResourceAvailability
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -910,7 +957,11 @@ paths:
       responses:
         "201":
           description: Immutable availability window
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -994,7 +1045,9 @@ paths:
   /api/v1/reservations:
     post:
       operationId: reserveResource
-      parameters: *a2
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
       requestBody:
         required: true
         content:
@@ -1004,7 +1057,11 @@ paths:
       responses:
         "201":
           description: Created resource reservation
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -1048,7 +1105,10 @@ paths:
       - $ref: "#/components/parameters/ReservationId"
     post:
       operationId: changeReservation
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -1058,7 +1118,11 @@ paths:
       responses:
         "200":
           description: Changed reservation
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -1080,7 +1144,10 @@ paths:
       - $ref: "#/components/parameters/ReservationId"
     post:
       operationId: cancelReservation
-      parameters: *a3
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/ExpectedVersion"
       requestBody:
         required: true
         content:
@@ -1090,7 +1157,11 @@ paths:
       responses:
         "200":
           description: Cancelled reservation
-          headers: *a1
+          headers:
+            X-Correlation-ID:
+              $ref: "#/components/headers/CorrelationId"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -1145,15 +1216,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
     post:
       operationId: createCohort
       parameters:
-        - *a9
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1170,19 +1252,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/CohortCreationConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/cohorts/{cohortId}:
     get:
       operationId: getCohort
       parameters:
-        - *a12
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: Cohort detail
@@ -1190,17 +1283,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
     patch:
       operationId: updateCohort
       parameters:
-        - *a12
-        - *a9
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1217,20 +1327,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/VersionedCommandConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/cohorts/{cohortId}/members:
     post:
       operationId: addCohortMember
       parameters:
-        - *a12
-        - *a9
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1247,19 +1374,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/VersionedCommandConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
     delete:
       operationId: removeCohortMember
       parameters:
-        - *a12
-        - *a9
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1276,20 +1420,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/VersionedCommandConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/cohorts/{cohortId}/archive:
     post:
       operationId: archiveCohort
       parameters:
-        - *a12
-        - *a9
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1306,20 +1467,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/VersionedCommandConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/cohorts/{cohortId}/owner:
     post:
       operationId: transferCohortOwner
       parameters:
-        - *a12
-        - *a9
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1336,21 +1514,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CohortDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/VersionedCommandConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/cohorts/{cohortId}/participants/{participantId}/process:
     post:
       operationId: startParticipantProcess
       parameters:
-        - *a12
-        - *a13
-        - *a9
+        - name: cohortId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: participantId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1367,14 +1567,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StartParticipantProcessResponse"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ParticipantProcessStartConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes:
     get:
       operationId: listProcesses
@@ -1423,16 +1629,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/processes/{processId}:
     get:
       operationId: getProcess
       parameters:
-        - *a15
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: Process detail
@@ -1440,17 +1656,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/processes/{processId}/progress:
     get:
       operationId: getProcessProgress
       parameters:
-        - *a15
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: Process progress
@@ -1458,17 +1685,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessProgress"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/processes/{processId}/participants:
     get:
       operationId: listProcessParticipants
       parameters:
-        - *a15
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
         - name: cursor
           in: query
           schema:
@@ -1489,17 +1727,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessParticipantPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/processes/{processId}/tasks:
     get:
       operationId: listProcessTasks
       parameters:
-        - *a15
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
         - name: cursor
           in: query
           schema:
@@ -1520,17 +1769,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessTaskPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/processes/{processId}/timeline:
     get:
       operationId: listProcessTimeline
       parameters:
-        - *a15
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
         - name: cursor
           in: query
           schema:
@@ -1551,18 +1811,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessTimelinePage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/processes/{processId}/suspend:
     post:
       operationId: suspendProcess
       parameters:
-        - *a15
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1579,20 +1856,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessCommandConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes/{processId}/resume:
     post:
       operationId: resumeProcess
       parameters:
-        - *a15
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1609,20 +1903,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessCommandConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes/{processId}/cancel:
     post:
       operationId: cancelProcess
       parameters:
-        - *a15
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1639,20 +1950,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessCommandConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes/{processId}/fail:
     post:
       operationId: failProcess
       parameters:
-        - *a15
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1669,20 +1997,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessCommandConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes/{processId}/transfer:
     post:
       operationId: transferProcess
       parameters:
-        - *a15
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1699,20 +2044,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessTransferConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes/{processId}/reconcile:
     post:
       operationId: reconcileProcess
       parameters:
-        - *a15
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1729,21 +2091,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessCommandConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/processes/{processId}/waits/{activityKey}/release:
     post:
       operationId: releaseProcessWait
       parameters:
-        - *a15
-        - *a16
-        - *a9
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: activityKey
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: ^[a-z0-9]+(?:-[a-z0-9]+)*$
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1760,14 +2146,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProcessDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/ProcessWaitReleaseConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/tasks/my-work:
     get:
       operationId: listMyWork
@@ -1820,16 +2212,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/tasks/{taskId}:
     get:
       operationId: getTask
       parameters:
-        - *a17
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
       responses:
         "200":
           description: Task detail
@@ -1837,17 +2239,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/tasks/{taskId}/history:
     get:
       operationId: listTaskHistory
       parameters:
-        - *a17
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
         - name: cursor
           in: query
           schema:
@@ -1868,17 +2281,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskHistoryPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/tasks/{taskId}/blockers:
     get:
       operationId: listTaskBlockers
       parameters:
-        - *a17
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
         - name: cursor
           in: query
           schema:
@@ -1899,18 +2323,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskBlockerPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "404": *a11
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/tasks/{taskId}/claim:
     post:
       operationId: claimTask
       parameters:
-        - *a17
-        - *a9
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1927,20 +2368,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/TaskClaimConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/tasks/{taskId}/complete:
     post:
       operationId: completeTask
       parameters:
-        - *a17
-        - *a9
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1957,21 +2415,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/TaskBlocked"
-        "500": *a7
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
         "503":
           $ref: "#/components/responses/TaskGateUnavailable"
   /api/v1/tasks/{taskId}/fail:
     post:
       operationId: failTask
       parameters:
-        - *a17
-        - *a9
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -1988,14 +2462,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskDetail"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/TaskCommandConflict"
-        "500": *a7
-        "503": *a14
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowUnavailable"
   /api/v1/me/notifications:
     get:
       operationId: listNotifications
@@ -2037,17 +2517,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotificationPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/me/notifications/{notificationId}/read:
     post:
       operationId: markNotificationRead
       parameters:
-        - *a18
-        - *a9
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       requestBody:
         required: true
         content:
@@ -2064,14 +2560,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Notification"
-        "400": *a10
-        "401": *a5
-        "403": *a6
-        "404": *a11
+        "400":
+          $ref: "#/components/responses/WorkflowRequestError"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "404":
+          $ref: "#/components/responses/WorkflowNotFound"
         "409":
           $ref: "#/components/responses/VersionedCommandConflict"
-        "500": *a7
-        "503": *a8
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/events:
     get:
       operationId: catchUpAuthorizedEvents
@@ -2126,11 +2628,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WorkflowEventPage"
-        "400": *a4
-        "401": *a5
-        "403": *a6
-        "500": *a7
-        "503": *a8
+        "400":
+          $ref: "#/components/responses/WorkflowBadRequest"
+        "401":
+          $ref: "#/components/responses/WorkflowUnauthorized"
+        "403":
+          $ref: "#/components/responses/WorkflowForbidden"
+        "500":
+          $ref: "#/components/responses/WorkflowInternalError"
+        "503":
+          $ref: "#/components/responses/WorkflowAuthorizationUnavailable"
   /api/v1/admin/ai/providers:
     get:
       operationId: listAiProviders
@@ -4693,7 +5200,7 @@ components:
           enum:
             - TEACHER
             - PARTICIPANT
-    ArchiveCohortRequest: &a19
+    ArchiveCohortRequest:
       type: object
       additionalProperties: false
       required:
@@ -4731,10 +5238,46 @@ components:
       properties:
         expectedVersion:
           $ref: "#/components/schemas/SafeVersion"
-    SuspendProcessRequest: *a19
-    ResumeProcessRequest: *a19
-    ReconcileProcessRequest: *a19
-    CancelProcessRequest: &a20
+    SuspendProcessRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expectedVersion
+        - reason
+      properties:
+        expectedVersion:
+          $ref: "#/components/schemas/SafeVersion"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    ResumeProcessRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expectedVersion
+        - reason
+      properties:
+        expectedVersion:
+          $ref: "#/components/schemas/SafeVersion"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    ReconcileProcessRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expectedVersion
+        - reason
+      properties:
+        expectedVersion:
+          $ref: "#/components/schemas/SafeVersion"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    CancelProcessRequest:
       type: object
       additionalProperties: false
       required:
@@ -4753,7 +5296,25 @@ components:
           type: string
           minLength: 1
           maxLength: 1024
-    FailProcessRequest: *a20
+    FailProcessRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expectedVersion
+        - code
+        - reason
+      properties:
+        expectedVersion:
+          $ref: "#/components/schemas/SafeVersion"
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[A-Z][A-Z0-9_]*$
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
     TransferProcessRequest:
       type: object
       additionalProperties: false
@@ -4813,7 +5374,25 @@ components:
       properties:
         expectedVersion:
           $ref: "#/components/schemas/SafeVersion"
-    FailTaskRequest: *a20
+    FailTaskRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expectedVersion
+        - code
+        - reason
+      properties:
+        expectedVersion:
+          $ref: "#/components/schemas/SafeVersion"
+        code:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[A-Z][A-Z0-9_]*$
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
     MarkNotificationReadRequest:
       type: object
       additionalProperties: false
