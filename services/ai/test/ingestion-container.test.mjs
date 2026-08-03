@@ -119,6 +119,8 @@ test("pinned MinIO quarantine and official clamd fail closed end to end", { time
       accessKeyFile: join(credentials, "access"), secretKeyFile: join(credentials, "secret"), forcePathStyle: true, allowInsecureLocalhost: true });
     const artifactBody = Buffer.from('{"generatedContent":true}');
     await stage("artifact upload", () => artifactStore.upload("run/artifact.json", artifactBody, sha256(artifactBody), new AbortController().signal));
+    assert.deepEqual(await stage("artifact retained read", () => artifactStore.readRetained("run/artifact.json", new AbortController().signal)), artifactBody);
+    await stage("artifact idempotent replay", () => artifactStore.upload("run/artifact.json", artifactBody, sha256(artifactBody), new AbortController().signal));
     const artifactKey = "trace/integration/run/artifact.json";
     const artifactHead = await stage("artifact head", () => appClient.send(new HeadObjectCommand({ Bucket: bucket, Key: artifactKey, ChecksumMode: "ENABLED" })));
     assert.equal(artifactHead.ObjectLockMode, "GOVERNANCE");

@@ -120,9 +120,42 @@ export class MinioArtifactObjectStore {
         head.ObjectLockRetainUntilDate.getTime() < retainedUntil.getTime() - ONE_YEAR_TOLERANCE_MS) throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
     } catch (error) {
       const status = typeof error === "object" && error !== null && "$metadata" in error ? (error.$metadata as { httpStatusCode?: number }).httpStatusCode : undefined;
-      if (status === 412 || (error instanceof Error && error.name === "PreconditionFailed")) throw new Error("OCC-AI-OBJECT-STORE-CONFLICT");
+      if (status === 412 || (error instanceof Error && error.name === "PreconditionFailed")) {
+        let retained: Uint8Array;
+        try { retained = await this.readRetained(objectId, signal); }
+        catch (readError) {
+          const code = typeof readError === "object" && readError !== null && "code" in readError ? String(readError.code) : "";
+          if (signal.aborted || !["ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(code)) throw readError;
+          retained = await this.readRetained(objectId, signal);
+        }
+        if (createHash("sha256").update(retained).digest("hex") === expectedHash) return;
+        throw new Error("OCC-AI-OBJECT-STORE-CONFLICT");
+      }
       if (created) await this.client.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key })).catch(() => undefined);
       throw error;
     }
+  }
+
+  async readRetained(objectId: string, signal: AbortSignal): Promise<Uint8Array> {
+    if (signal.aborted) throw new Error("OCC-AI-CANCELLED");
+    const Key = this.key(objectId);
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.config.bucket, Key, ChecksumMode: "ENABLED" }), { abortSignal: signal });
+    if (response.ContentLength === undefined || response.ContentLength < 1 || response.ContentLength > this.maxObjectBytes || response.Body === undefined || response.ChecksumSHA256 === undefined) throw new Error("OCC-AI-OBJECT-STORE-BOUNDS");
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const chunk of response.Body as AsyncIterable<Uint8Array>) {
+      size += chunk.length;
+      if (size > this.maxObjectBytes || size > response.ContentLength) throw new Error("OCC-AI-OBJECT-STORE-BOUNDS");
+      chunks.push(chunk);
+    }
+    const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    const checksum = createHash("sha256").update(bytes).digest("base64");
+    if (bytes.length !== response.ContentLength || checksum !== response.ChecksumSHA256) throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
+    const head = await this.client.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key, ChecksumMode: "ENABLED" }), { abortSignal: signal });
+    if (head.ContentLength !== bytes.length || head.ChecksumSHA256 !== checksum || head.ServerSideEncryption !== "AES256" ||
+      head.ObjectLockMode !== "GOVERNANCE" || !(head.ObjectLockRetainUntilDate instanceof Date) || head.ObjectLockRetainUntilDate.getTime() <= Date.now()) {
+      throw new Error("OCC-AI-OBJECT-STORE-INTEGRITY");
+    }
+    return bytes;
   }
 }

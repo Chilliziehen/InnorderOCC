@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 import { GUIDANCE_INPUT_JSON_SCHEMA, GUIDANCE_OUTPUT_JSON_SCHEMA } from "@innorder/contracts";
@@ -9,6 +10,7 @@ import { GUIDANCE_INPUT_JSON_SCHEMA, GUIDANCE_OUTPUT_JSON_SCHEMA } from "@innord
 import { GuidanceRunner } from "../src/guidance/guidance-runner.js";
 import { PostgresGuidanceRepository } from "../src/guidance/guidance-repository.js";
 import { buildGuidancePrompt, PARTICIPANT_GUIDANCE_SYSTEM_TEMPLATE } from "../src/guidance/prompt-builder.js";
+import { createGuidanceRecoveryEnvelope, parseGuidanceRecoveryEnvelope } from "../src/guidance/recovery-envelope.js";
 import { validateGuidanceOutput } from "../src/guidance/output-validator.js";
 import { validateRecommendationResponse, validateRecommendationSubmission } from "../src/core/core-client.js";
 import { MinioArtifactObjectStore } from "../src/object-store/minio-object-store.js";
@@ -23,6 +25,8 @@ const ids = {
   hit: "00000000-0000-4000-8000-000000000003",
   otherHit: "00000000-0000-4000-8000-000000000004",
   document: "00000000-0000-4000-8000-000000000005",
+  invocation: "00000000-0000-4000-8000-000000000011",
+  artifact: "00000000-0000-4000-8000-000000000012",
 };
 const content = "Follow the approved checklist in order.";
 const hit = {
@@ -102,6 +106,36 @@ describe("guidance output validator", () => {
   });
 });
 
+describe("guidance recovery envelope", () => {
+  const payload = { operationId: ids.run, runId: ids.run, targetEntityId: ids.document, expectedTargetVersion: 4, output };
+  const input = {
+    runId: ids.run, operationId: ids.run, invocationId: ids.invocation, payload,
+    responseHash: hash(canonical(output)), providerRequestIdHash: hash("provider-request"),
+    inputTokens: 10, outputTokens: 5, cost: "3", latencyMs: 8, classification: "INTERNAL" as const,
+    artifact: { id: ids.artifact, objectKey: `trace/${ids.run}/${ids.artifact}.json`, hash: hash("artifact") },
+  };
+
+  it("creates deterministic canonical bytes at the run and operation recovery key", () => {
+    const first = createGuidanceRecoveryEnvelope(input);
+    const second = createGuidanceRecoveryEnvelope(input);
+    expect(first.objectKey).toBe(`recovery/${ids.run}/${ids.run}.json`);
+    expect(first).toEqual(second);
+    expect(first.bytes.toString("utf8")).not.toContain("prompt");
+    expect(parseGuidanceRecoveryEnvelope(first.bytes, ids.run, ids.run)).toEqual(first.value);
+  });
+
+  it.each([
+    ["extra field", (value: Record<string, unknown>) => ({ ...value, rawProviderBody: "private" })],
+    ["operation binding", (value: Record<string, unknown>) => ({ ...value, operationId: ids.document })],
+    ["accounting", (value: Record<string, unknown>) => ({ ...value, inputTokens: -1 })],
+    ["envelope hash", (value: Record<string, unknown>) => ({ ...value, envelopeHash: hash("changed") })],
+  ])("rejects recovery envelope %s tampering", (_name, change) => {
+    const recovery = createGuidanceRecoveryEnvelope(input);
+    const changed = Buffer.from(canonical(change(JSON.parse(recovery.bytes.toString("utf8")) as Record<string, unknown>)), "utf8");
+    expect(() => parseGuidanceRecoveryEnvelope(changed, ids.run, ids.run)).toThrow("OCC-AI-RECOVERY-INVALID");
+  });
+});
+
 describe("GuidanceRunner", () => {
   const consumed = {
     runId: ids.run, operationId: ids.run, operation: "PARTICIPANT_GUIDANCE", targetEntityId: ids.document,
@@ -133,7 +167,8 @@ describe("GuidanceRunner", () => {
   function harness(overrides: Record<string, unknown> = {}) {
     const prepared = { runId: ids.run, operationId: ids.run, invocationId: "00000000-0000-4000-8000-000000000011",
       status: "PREPARED" as const, idempotencyKey: hash("recommendation-key"), payloadHash: hash(canonical({ operationId: ids.run })),
-      payload: { operationId: ids.run, runId: ids.run, targetEntityId: ids.document, expectedTargetVersion: 4, output }, attempts: 0 };
+      payload: { operationId: ids.run, runId: ids.run, targetEntityId: ids.document, expectedTargetVersion: 4, output }, attempts: 0,
+      artifact: { id: ids.artifact, objectKey: `trace/${ids.run}/${ids.artifact}.json`, hash: hash(canonical(output)) }, classification: "INTERNAL" as const };
     const repository = {
       loadConfiguration: vi.fn().mockResolvedValue(configuration), terminalResult: vi.fn().mockResolvedValue(undefined),
       transition: vi.fn().mockResolvedValue(undefined), startInvocation: vi.fn().mockResolvedValue("00000000-0000-4000-8000-000000000011"),
@@ -144,12 +179,12 @@ describe("GuidanceRunner", () => {
     const retriever = { retrieve: vi.fn().mockResolvedValue({ traceId: ids.trace, queryHash: hash("approved checklist"), hits: [hit] }) };
     const provider = { chat: vi.fn().mockResolvedValue({ output, usage: { inputTokens: 10, outputTokens: 5 },
       accounting: { costMicros: 3n, currency: "USD", estimated: false }, providerRequestIdHash: hash("provider-request") }) };
-    const artifactStore = { upload: vi.fn().mockResolvedValue(undefined) };
+    const artifactStore = { upload: vi.fn().mockResolvedValue(undefined), readRetained: vi.fn().mockRejectedValue(new Error("not found")) };
     const core = { submitRecommendation: vi.fn().mockResolvedValue({ recommendationId: "00000000-0000-4000-8000-000000000013" }) };
-    const runner = new GuidanceRunner({ repository, retriever, provider, artifactStore, core,
+    const createRunner = () => new GuidanceRunner({ repository, retriever, provider, artifactStore, core,
       invocationId: () => "00000000-0000-4000-8000-000000000011", artifactId: () => "00000000-0000-4000-8000-000000000012",
       now: () => new Date("2026-08-02T00:00:00.000Z"), ...overrides } as never);
-    return { runner, repository, retriever, provider, artifactStore, core, prepared };
+    return { runner: createRunner(), createRunner, repository, retriever, provider, artifactStore, core, prepared };
   }
 
   it("persists every required boundary before completing and submits only a generated recommendation", async () => {
@@ -167,10 +202,12 @@ describe("GuidanceRunner", () => {
     expect(h.provider.chat.mock.calls[0]?.[0].schema).toBe(configuration.agent.outputSchema);
     expect(h.repository.completeProviderAndPrepare).toHaveBeenCalledWith(expect.objectContaining({
       responseHash: hash(canonical(output)), inputTokens: 10, outputTokens: 5, cost: "3", providerRequestIdHash: hash("provider-request"),
-      payload: expect.objectContaining({ operationId: ids.run, output }), classification: "INTERNAL",
+      payload: expect.objectContaining({ operationId: ids.run, output }), classification: "INTERNAL", artifact: h.prepared.artifact,
     }), expect.any(AbortSignal));
     expect(h.artifactStore.upload).toHaveBeenCalledWith(expect.stringMatching(/^trace\//u), expect.any(Uint8Array), expect.stringMatching(/^[a-f0-9]{64}$/u), expect.any(AbortSignal));
     expect(h.repository.persistArtifact).toHaveBeenCalledWith(expect.objectContaining({ artifactKind: "TRACE", classification: "INTERNAL" }), expect.any(AbortSignal));
+    expect(h.repository.completeProviderAndPrepare).toHaveBeenCalledBefore(h.artifactStore.upload);
+    expect(h.repository.persistArtifact).toHaveBeenCalledBefore(h.core.submitRecommendation);
     expect(h.core.submitRecommendation).toHaveBeenCalledWith(expect.objectContaining({ operationId: ids.run, runId: ids.run, output }), expect.stringMatching(/^[a-f0-9]{64}$/u), expect.any(AbortSignal));
     expect(h.repository.markSubmissionDispatched).toHaveBeenCalledBefore(h.core.submitRecommendation);
     expect(h.repository.acknowledgeSubmission).toHaveBeenCalledWith(expect.objectContaining({
@@ -183,7 +220,7 @@ describe("GuidanceRunner", () => {
     const h = harness();
     h.repository.terminalResult.mockResolvedValue({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
     h.repository.loadPreparedSubmission.mockResolvedValue(h.prepared);
-    await expect(h.runner.run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
+    await expect(h.createRunner().run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
       .resolves.toEqual({ operationId: ids.run, runId: ids.run, status: "SUCCEEDED", recommendationId: "00000000-0000-4000-8000-000000000013" });
     expect(h.provider.chat).not.toHaveBeenCalled();
     expect(h.retriever.retrieve).not.toHaveBeenCalled();
@@ -198,6 +235,61 @@ describe("GuidanceRunner", () => {
     expect(h.provider.chat).toHaveBeenCalledOnce();
     expect(h.repository.finalizeInvocation).not.toHaveBeenCalled();
     expect(h.repository.transition.mock.calls.map(([call]) => call.status)).toEqual(["RUNNING"]);
+  });
+
+  it.each(["artifact upload", "artifact metadata"])("recovers %s failure after restart without another provider call", async (boundary) => {
+    const h = harness();
+    if (boundary === "artifact upload") h.artifactStore.upload.mockRejectedValueOnce(new Error("object unavailable"));
+    else h.repository.persistArtifact.mockRejectedValueOnce(new Error("metadata unavailable"));
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(h.core.submitRecommendation).not.toHaveBeenCalled();
+    h.repository.terminalResult.mockResolvedValue({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
+    h.repository.loadPreparedSubmission.mockResolvedValue(h.prepared);
+    await expect(h.createRunner().run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
+      .resolves.toMatchObject({ status: "SUCCEEDED" });
+    expect(h.provider.chat).toHaveBeenCalledOnce();
+    expect(h.core.submitRecommendation).toHaveBeenCalledOnce();
+    expect(h.artifactStore.upload).toHaveBeenLastCalledWith(h.prepared.artifact.objectKey,
+      Buffer.from(canonical(output), "utf8"), h.prepared.artifact.hash, expect.any(AbortSignal));
+  });
+
+  it.each(["database preparation", "invocation finalization"])("imports a recovery envelope after %s failure and restart", async () => {
+    const h = harness();
+    let retained: Uint8Array | undefined;
+    h.repository.completeProviderAndPrepare.mockRejectedValueOnce(new Error("database unavailable")).mockResolvedValue(h.prepared);
+    h.artifactStore.upload.mockImplementation(async (key, bytes) => { if (String(key).startsWith("recovery/")) retained = bytes; });
+    h.artifactStore.readRetained.mockImplementation(async () => {
+      if (retained === undefined) throw new Error("not found");
+      return retained;
+    });
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(retained).toBeDefined();
+    h.repository.terminalResult.mockResolvedValue({ operationId: ids.run, runId: ids.run, status: "RECONCILIATION_PENDING" });
+    h.repository.loadPreparedSubmission.mockResolvedValue(undefined);
+    await expect(h.createRunner().run({ operationId: ids.run, grant: { ...consumed, replayed: true } }, new AbortController().signal))
+      .resolves.toMatchObject({ status: "SUCCEEDED" });
+    expect(h.artifactStore.readRetained).toHaveBeenCalledWith(`recovery/${ids.run}/${ids.run}.json`, expect.any(AbortSignal));
+    expect(h.repository.completeProviderAndPrepare).toHaveBeenLastCalledWith(expect.objectContaining({
+      responseHash: hash(canonical(output)), providerRequestIdHash: hash("provider-request"), inputTokens: 10,
+      outputTokens: 5, cost: "3", artifact: h.prepared.artifact,
+    }), expect.any(AbortSignal));
+    expect(h.provider.chat).toHaveBeenCalledOnce();
+    expect(h.core.submitRecommendation).toHaveBeenCalledOnce();
+  });
+
+  it("keeps exact accounting pending when database and recovery channels both fail", async () => {
+    const h = harness();
+    h.repository.completeProviderAndPrepare.mockRejectedValue(new Error("database unavailable"));
+    h.artifactStore.upload.mockRejectedValue(new Error("object unavailable"));
+    await expect(h.runner.run({ operationId: ids.run, grant: consumed }, new AbortController().signal))
+      .rejects.toThrow("OCC-AI-RECONCILIATION-PENDING");
+    expect(h.repository.finalizeInvocation).toHaveBeenCalledWith(expect.objectContaining({
+      status: "COMPLETED", responseHash: hash(canonical(output)), providerRequestIdHash: hash("provider-request"),
+      inputTokens: 10, outputTokens: 5, cost: "3", errorCode: null,
+    }), expect.any(AbortSignal));
+    expect(h.core.submitRecommendation).not.toHaveBeenCalled();
   });
 
   it("does not replace provider accounting when cancellation races durable preparation", async () => {
@@ -383,15 +475,18 @@ describe("PostgresGuidanceRepository reconciliation", () => {
   it("lets PostgreSQL compute the JSONB payload hash and deterministic idempotency key", async () => {
     const payload = { operationId: ids.run, confidence: 1e-7 };
     const row = { run_id: ids.run, operation_id: ids.run, invocation_id: ids.hit, status: "PREPARED",
-      idempotency_key: hash("database-key"), payload_hash: hash("database-jsonb"), payload, attempts: 0 };
+      idempotency_key: hash("database-key"), payload_hash: hash("database-jsonb"), payload, attempts: 0,
+      artifact_id: ids.artifact, artifact_object_key: `trace/${ids.run}/${ids.artifact}.json`, artifact_hash: hash("artifact"), data_classification: "INTERNAL" };
     const query = vi.fn().mockResolvedValue({ rows: [row] });
     const repository = new PostgresGuidanceRepository({ query } as never);
     await expect(repository.completeProviderAndPrepare({ runId: ids.run, operationId: ids.run, invocationId: ids.hit,
       payload, responseHash: hash("response"), providerRequestIdHash: hash("request"), inputTokens: 4,
-      outputTokens: 2, cost: "3", latencyMs: 8, classification: "INTERNAL" }, new AbortController().signal))
-      .resolves.toMatchObject({ idempotencyKey: row.idempotency_key, payloadHash: row.payload_hash });
+      outputTokens: 2, cost: "3", latencyMs: 8, classification: "INTERNAL",
+      artifact: { id: ids.artifact, objectKey: row.artifact_object_key, hash: row.artifact_hash } }, new AbortController().signal))
+      .resolves.toMatchObject({ idempotencyKey: row.idempotency_key, payloadHash: row.payload_hash,
+        artifact: { id: ids.artifact, objectKey: row.artifact_object_key, hash: row.artifact_hash } });
     expect(query.mock.calls[0]?.[1]).toEqual([ids.run, ids.run, ids.hit, JSON.stringify(payload), hash("response"),
-      hash("request"), 4, 2, "3", 8, "INTERNAL"]);
+      hash("request"), 4, 2, "3", 8, "INTERNAL", ids.artifact, row.artifact_object_key, row.artifact_hash]);
   });
 
   it("maps a running governed status to reconciliation pending", async () => {
@@ -432,6 +527,43 @@ describe("guidance artifact object store", () => {
       expect(send.mock.calls[0]?.[0].input.ObjectLockRetainUntilDate.getTime()).toBeGreaterThan(Date.now() + 364 * 24 * 60 * 60 * 1000);
       await expect(MinioArtifactObjectStore.create({ endpoint: "https://minio.internal:9000", bucket: "ai-artifacts", prefix: "quarantine/guidance",
         accessKeyFile: join(root, "access"), secretKeyFile: join(root, "secret"), forcePathStyle: true, client: { send } as never })).rejects.toThrow("OCC-AI-OBJECT-STORE-CONFIG");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("reads only checksum-verified encrypted Object-Locked content", async () => {
+    const root = await mkdtemp(join(tmpdir(), "occ-guidance-recovery-"));
+    try {
+      await writeFile(join(root, "access"), "access");
+      await writeFile(join(root, "secret"), "secret");
+      const bytes = Buffer.from("abc");
+      const checksum = createHash("sha256").update(bytes).digest("base64");
+      const retainedAt = new Date(); retainedAt.setUTCFullYear(retainedAt.getUTCFullYear() + 1);
+      const send = vi.fn()
+        .mockResolvedValueOnce({ ContentLength: bytes.length, ChecksumSHA256: checksum, Body: Readable.from([bytes]) })
+        .mockResolvedValueOnce({ ContentLength: bytes.length, ChecksumSHA256: checksum, ServerSideEncryption: "AES256",
+          ObjectLockMode: "GOVERNANCE", ObjectLockRetainUntilDate: retainedAt });
+      const store = await MinioArtifactObjectStore.create({ endpoint: "https://minio.internal:9000", bucket: "ai-artifacts", prefix: "trace/guidance",
+        accessKeyFile: join(root, "access"), secretKeyFile: join(root, "secret"), forcePathStyle: true, client: { send } as never });
+      await expect(store.readRetained(`recovery/${ids.run}/${ids.run}.json`, new AbortController().signal)).resolves.toEqual(bytes);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("accepts a deterministic upload conflict only when retained bytes match", async () => {
+    const root = await mkdtemp(join(tmpdir(), "occ-guidance-recovery-"));
+    try {
+      await writeFile(join(root, "access"), "access");
+      await writeFile(join(root, "secret"), "secret");
+      const bytes = Buffer.from("same");
+      const checksum = createHash("sha256").update(bytes).digest("base64");
+      const retainedAt = new Date(); retainedAt.setUTCFullYear(retainedAt.getUTCFullYear() + 1);
+      const conflict = Object.assign(new Error("precondition"), { name: "PreconditionFailed", $metadata: { httpStatusCode: 412 } });
+      const send = vi.fn().mockRejectedValueOnce(conflict)
+        .mockResolvedValueOnce({ ContentLength: bytes.length, ChecksumSHA256: checksum, Body: Readable.from([bytes]) })
+        .mockResolvedValueOnce({ ContentLength: bytes.length, ChecksumSHA256: checksum, ServerSideEncryption: "AES256",
+          ObjectLockMode: "GOVERNANCE", ObjectLockRetainUntilDate: retainedAt });
+      const store = await MinioArtifactObjectStore.create({ endpoint: "https://minio.internal:9000", bucket: "ai-artifacts", prefix: "trace/guidance",
+        accessKeyFile: join(root, "access"), secretKeyFile: join(root, "secret"), forcePathStyle: true, client: { send } as never });
+      await expect(store.upload(`recovery/${ids.run}/${ids.run}.json`, bytes, hash("same"), new AbortController().signal)).resolves.toBeUndefined();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

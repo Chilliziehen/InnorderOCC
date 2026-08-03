@@ -7,6 +7,7 @@ import type { CoreClient } from "../core/core-client.js";
 import type { OpenAiCompatibleProvider } from "../provider/openai-compatible.js";
 import type { HybridRetriever } from "../retrieval/hybrid-retriever.js";
 import { buildGuidancePrompt } from "./prompt-builder.js";
+import { createGuidanceRecoveryEnvelope, parseGuidanceRecoveryEnvelope } from "./recovery-envelope.js";
 import type { GuidanceConfiguration, PostgresGuidanceRepository, PreparedRecommendationSubmission, TerminalGuidanceResult } from "./guidance-repository.js";
 import { validateGuidanceOutput } from "./output-validator.js";
 
@@ -30,7 +31,10 @@ export type ConsumedGuidanceGrant = Readonly<{
 type Repository = Pick<PostgresGuidanceRepository, "loadConfiguration" | "terminalResult" | "transition" | "startInvocation" |
   "finalizeInvocation" | "persistArtifact" | "loadPreparedSubmission" | "completeProviderAndPrepare" |
   "markSubmissionDispatched" | "acknowledgeSubmission">;
-type ArtifactStore = { upload(objectKey: string, bytes: Uint8Array, expectedHash: string, signal: AbortSignal): Promise<void> };
+type ArtifactStore = {
+  upload(objectKey: string, bytes: Uint8Array, expectedHash: string, signal: AbortSignal): Promise<void>;
+  readRetained(objectKey: string, signal: AbortSignal): Promise<Uint8Array>;
+};
 type Dependencies = Readonly<{
   repository: Repository;
   retriever: Pick<HybridRetriever, "retrieve">;
@@ -58,8 +62,7 @@ export class GuidanceRunner {
         const status = await this.dependencies.repository.terminalResult(grant.runId, new AbortController().signal);
         if (status === undefined) throw new Error("OCC-AI-GRANT-REPLAY");
         if (status.status !== "RECONCILIATION_PENDING") return status;
-        const retained = await this.dependencies.repository.loadPreparedSubmission(grant.runId, new AbortController().signal);
-        if (retained === undefined) throw new Error("OCC-AI-RECONCILIATION-PENDING");
+        const retained = await this.recover(grant.runId, grant.operationId);
         return await this.reconcile(retained, signal);
       }
       if (signal.aborted) throw new Error("OCC-AI-CANCELLED");
@@ -92,28 +95,37 @@ export class GuidanceRunner {
       providerResult = await this.dependencies.provider.chat({ messages: prompt.messages, schema: prompt.schema }, signal);
       const responseHash = digest(canonical(providerResult.output));
       validatedProviderResult = validateGuidanceOutput(providerResult.output, { runId: grant.runId, traceId: retrieval.traceId, hits: retrieval.hits });
-      const artifactId = this.dependencies.artifactId?.() ?? randomUUID();
-      const artifact = {
-        generatedContent: true, runId: grant.runId, traceId: retrieval.traceId, queryHash: retrieval.queryHash,
-        configuration: { agentVersionId: grant.agentVersionId, modelProfileId: grant.modelProfileId, promptVersionId: grant.promptVersionId,
-          packageVersionId: grant.packageVersionId, policyReleaseDigest: grant.policyReleaseDigest, embeddingSpaceId: grant.embeddingSpaceId,
-          promptHash: prompt.promptHash, schemaHash: prompt.schemaHash, capabilityHash: configuration.profile.capabilityHash },
-        validation: { status: "PASSED", citationCount: validatedProviderResult.citations.length }, output: validatedProviderResult,
-      };
-      const bytes = Buffer.from(canonical(artifact), "utf8");
-      const artifactHash = digest(bytes);
-      const objectKey = `trace/${grant.runId}/${artifactId}.json`;
-      await this.dependencies.artifactStore.upload(objectKey, bytes, artifactHash, signal);
-      await this.dependencies.repository.persistArtifact({ id: artifactId, runId: grant.runId, artifactKind: "TRACE", objectKey, hash: artifactHash, classification: grant.classificationCeiling }, signal);
       const payload = { operationId: grant.operationId, runId: grant.runId, targetEntityId: grant.targetEntityId,
         expectedTargetVersion: context.data.expectedTargetVersion, output: validatedProviderResult };
-      const prepared = await this.dependencies.repository.completeProviderAndPrepare({
+      const artifactId = this.dependencies.artifactId?.() ?? randomUUID();
+      const artifactBytes = Buffer.from(canonical(validatedProviderResult), "utf8");
+      const artifact = { id: artifactId, objectKey: `trace/${grant.runId}/${artifactId}.json`, hash: digest(artifactBytes) };
+      const latencyMs = Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started);
+      const recovery = createGuidanceRecoveryEnvelope({
         runId: grant.runId, operationId: grant.operationId, invocationId, payload, responseHash,
-        ...(providerResult.providerRequestIdHash === undefined ? {} : { providerRequestIdHash: providerResult.providerRequestIdHash }),
+        providerRequestIdHash: providerResult.providerRequestIdHash ?? null,
         inputTokens: providerResult.usage.inputTokens, outputTokens: providerResult.usage.outputTokens,
-        cost: providerResult.accounting.costMicros.toString(),
-        latencyMs: Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started), classification: grant.classificationCeiling,
-      }, new AbortController().signal);
+        cost: providerResult.accounting.costMicros.toString(), latencyMs, classification: grant.classificationCeiling, artifact,
+      });
+      let prepared: PreparedRecommendationSubmission;
+      try {
+        prepared = await this.dependencies.repository.completeProviderAndPrepare({
+          runId: grant.runId, operationId: grant.operationId, invocationId, payload, responseHash,
+          ...(providerResult.providerRequestIdHash === undefined ? {} : { providerRequestIdHash: providerResult.providerRequestIdHash }),
+          inputTokens: providerResult.usage.inputTokens, outputTokens: providerResult.usage.outputTokens,
+          cost: providerResult.accounting.costMicros.toString(), latencyMs, classification: grant.classificationCeiling, artifact,
+        }, new AbortController().signal);
+      } catch {
+        try {
+          await this.dependencies.artifactStore.upload(recovery.objectKey, recovery.bytes, recovery.hash, new AbortController().signal);
+        } catch {
+          await this.dependencies.repository.finalizeInvocation({ id: invocationId, status: "COMPLETED", responseHash,
+            ...(providerResult.providerRequestIdHash === undefined ? {} : { providerRequestIdHash: providerResult.providerRequestIdHash }),
+            inputTokens: providerResult.usage.inputTokens, outputTokens: providerResult.usage.outputTokens,
+            cost: providerResult.accounting.costMicros.toString(), latencyMs, errorCode: null }, new AbortController().signal).catch(() => undefined);
+        }
+        throw new Error("OCC-AI-RECONCILIATION-PENDING");
+      }
       invocationId = undefined;
       return await this.reconcile(prepared, signal);
     } catch (error) {
@@ -122,6 +134,7 @@ export class GuidanceRunner {
       if (providerResult !== undefined && invocationId !== undefined) {
         const responseHash = digest(canonical(providerResult.output));
         await this.dependencies.repository.finalizeInvocation({ id: invocationId, status: "COMPLETED", responseHash,
+          ...(providerResult.providerRequestIdHash === undefined ? {} : { providerRequestIdHash: providerResult.providerRequestIdHash }),
           inputTokens: providerResult.usage.inputTokens, outputTokens: providerResult.usage.outputTokens,
           cost: providerResult.accounting.costMicros.toString(), latencyMs: Math.max(0, (this.dependencies.now?.() ?? new Date()).getTime() - started), errorCode: null }, new AbortController().signal)
           .catch(() => { throw new Error("OCC-AI-RECONCILIATION-PENDING"); });
@@ -136,10 +149,36 @@ export class GuidanceRunner {
     }
   }
 
+  private async recover(runId: string, operationId: string): Promise<PreparedRecommendationSubmission> {
+    const durableSignal = new AbortController().signal;
+    let retained: PreparedRecommendationSubmission | undefined;
+    try { retained = await this.dependencies.repository.loadPreparedSubmission(runId, durableSignal); } catch { retained = undefined; }
+    if (retained !== undefined) return retained;
+    try {
+      const bytes = await this.dependencies.artifactStore.readRetained(`recovery/${runId}/${operationId}.json`, durableSignal);
+      const recovery = parseGuidanceRecoveryEnvelope(bytes, runId, operationId);
+      return await this.dependencies.repository.completeProviderAndPrepare({
+        runId, operationId, invocationId: recovery.invocationId, payload: recovery.payload,
+        responseHash: recovery.responseHash,
+        ...(recovery.providerRequestIdHash === null ? {} : { providerRequestIdHash: recovery.providerRequestIdHash }),
+        inputTokens: recovery.inputTokens, outputTokens: recovery.outputTokens, cost: recovery.cost,
+        latencyMs: recovery.latencyMs, classification: recovery.classification, artifact: recovery.artifact,
+      }, durableSignal);
+    } catch { throw new Error("OCC-AI-RECONCILIATION-PENDING"); }
+  }
+
   private async reconcile(submission: PreparedRecommendationSubmission, signal: AbortSignal): Promise<GuidanceRunResult> {
     if (signal.aborted) throw new Error("OCC-AI-RECONCILIATION-PENDING");
     const durableSignal = new AbortController().signal;
     try {
+      const output = submission.payload.output;
+      if (output === undefined) throw new Error();
+      const artifactBytes = Buffer.from(canonical(output), "utf8");
+      if (digest(artifactBytes) !== submission.artifact.hash) throw new Error();
+      await this.dependencies.artifactStore.upload(submission.artifact.objectKey, artifactBytes, submission.artifact.hash, durableSignal);
+      await this.dependencies.repository.persistArtifact({ id: submission.artifact.id, runId: submission.runId,
+        artifactKind: "TRACE", objectKey: submission.artifact.objectKey, hash: submission.artifact.hash,
+        classification: submission.classification }, durableSignal);
       await this.dependencies.repository.markSubmissionDispatched({ runId: submission.runId,
         idempotencyKey: submission.idempotencyKey, payloadHash: submission.payloadHash }, durableSignal);
       const coreResult = await this.dependencies.core.submitRecommendation(submission.payload, submission.idempotencyKey, durableSignal);

@@ -895,19 +895,26 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
     targetEntityId: id('000000000015'), expectedTargetVersion: 4, output: validSubmissionOutput });
   const submissionPayloadHash = execSql(`SELECT encode(pg_catalog.sha256(convert_to(('${submissionPayload}'::jsonb)::text, 'UTF8')), 'hex');`);
   const submissionInvocationId = id('000000000052');
+  const submissionArtifactId = id('000000000053');
+  const submissionArtifactKey = `trace/${id('000000000031')}/${submissionArtifactId}.json`;
   assert.equal(execAiSql(`SELECT ai.start_model_invocation('${submissionInvocationId}', '${id('000000000031')}',
     '${id('000000000008')}', 'RETRIEVE', repeat('1',64), repeat('2',64));`), submissionInvocationId);
   expectAiFailure(`SELECT * FROM ai.prepare_guidance_recommendation_submission('${id('000000000031')}', '${id('000000000031')}',
-    '${submissionInvocationId}', '{}'::jsonb, repeat('3',64), repeat('4',64), 10, 5, 3, 12, 'PUBLIC');`, /strict recommendation submission payload/iu);
+    '${submissionInvocationId}', '{}'::jsonb, repeat('3',64), repeat('4',64), 10, 5, 3, 12, 'PUBLIC',
+    '${submissionArtifactId}', '${submissionArtifactKey}', repeat('5',64));`, /strict recommendation submission payload/iu);
   const prepareSubmission = `SELECT run_id || '|' || status || '|' || attempts FROM ai.prepare_guidance_recommendation_submission(
     '${id('000000000031')}', '${id('000000000031')}', '${submissionInvocationId}',
-    '${submissionPayload}'::jsonb, repeat('3',64), repeat('4',64), 10, 5, 3, 12, 'PUBLIC');`;
+    '${submissionPayload}'::jsonb, repeat('3',64), repeat('4',64), 10, 5, 3, 12, 'PUBLIC',
+    '${submissionArtifactId}', '${submissionArtifactKey}', repeat('5',64));`;
   assert.equal(execAiSql(prepareSubmission), `${id('000000000031')}|PREPARED|0`);
   assert.equal(execAiSql(prepareSubmission), `${id('000000000031')}|PREPARED|0`);
   expectAiFailure(prepareSubmission.replace(', 10, 5, 3, 12,', ', 11, 5, 3, 12,'), /retained accounting/iu);
   expectAiFailure(prepareSubmission.replace('"generatedContent":true', '"generatedContent":false'), /strict recommendation submission payload|prepared identity/iu);
+  expectAiFailure(prepareSubmission.replace("repeat('5',64)", "repeat('6',64)"), /prepared identity/iu);
   const submissionIdempotencyKey = execSql(`SELECT idempotency_key FROM ai.recommendation_submission WHERE run_id = '${id('000000000031')}';`);
   assert.equal(execSql(`SELECT payload_hash FROM ai.recommendation_submission WHERE run_id = '${id('000000000031')}';`), submissionPayloadHash);
+  assert.equal(execSql(`SELECT artifact_id || '|' || artifact_object_key || '|' || artifact_hash FROM ai.recommendation_submission
+    WHERE run_id = '${id('000000000031')}';`), `${submissionArtifactId}|${submissionArtifactKey}|${'5'.repeat(64)}`);
   assert.equal(execSql(`SELECT response_hash || '|' || provider_request_id_hash || '|' || input_tokens || '|' || output_tokens || '|' || cost
     FROM ai.model_invocation WHERE id = '${submissionInvocationId}';`), `${'3'.repeat(64)}|${'4'.repeat(64)}|10|5|3`);
   assert.equal(execAiSql(`SELECT run_status FROM ai.get_guidance_terminal_result('${id('000000000031')}');`), 'RUNNING');
@@ -935,7 +942,8 @@ test('governed AI boundary enforces role, replay, retrieval, leases, and gates o
   const rejectedPayload = JSON.stringify({ operationId: id('000000000055'), runId: id('000000000055'),
     targetEntityId: id('000000000015'), expectedTargetVersion: 4, output: validSubmissionOutput });
   execAiSql(`SELECT * FROM ai.prepare_guidance_recommendation_submission('${id('000000000055')}', '${id('000000000055')}',
-    '${id('000000000056')}', '${rejectedPayload}'::jsonb, repeat('3',64), NULL, 7, 2, 1, 9, 'PUBLIC');`);
+    '${id('000000000056')}', '${rejectedPayload}'::jsonb, repeat('3',64), NULL, 7, 2, 1, 9, 'PUBLIC',
+    '${id('000000000057')}', 'trace/${id('000000000055')}/${id('000000000057')}.json', repeat('5',64));`);
   const rejectedKey = execSql(`SELECT idempotency_key FROM ai.recommendation_submission WHERE run_id = '${id('000000000055')}';`);
   const rejectedHash = execSql(`SELECT payload_hash FROM ai.recommendation_submission WHERE run_id = '${id('000000000055')}';`);
   assert.equal(execAiSql(`SELECT ai.fail_guidance_recommendation_submission('${id('000000000055')}', '${rejectedKey}',

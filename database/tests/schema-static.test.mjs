@@ -507,6 +507,9 @@ test('routes AI mutations through bounded functions and retains governed evidenc
   assert.match(submission, /core_recommendation_id uuid/iu);
   assert.match(submission, /core_receipt_hash text/iu);
   assert.match(submission, /attempts integer NOT NULL DEFAULT 0/iu);
+  assert.match(submission, /artifact_id uuid NOT NULL/iu);
+  assert.match(submission, /artifact_object_key text NOT NULL/iu);
+  assert.match(submission, /artifact_hash text NOT NULL[\s\S]*\^\[0-9a-f\]\{64\}\$/iu);
   assert.match(submission, /data_classification text NOT NULL/iu);
   assert.match(submission, /retention_until timestamptz NOT NULL DEFAULT \(statement_timestamp\(\) \+ interval '1 year'\)/iu);
   assert.match(submission, /legal_hold_id uuid/iu);
@@ -532,6 +535,9 @@ test('routes AI mutations through bounded functions and retains governed evidenc
   ]) assert.match(sql, new RegExp(`CREATE FUNCTION ai\\.${fn}\\(`, 'iu'), fn);
   assert.match(sql, /CREATE TRIGGER trg_recommendation_submission_lifecycle/iu);
   assert.match(sql, /UPDATE ai\.recommendation_submission[\s\S]*UPDATE ai\.ai_run[\s\S]*status = 'COMPLETED'/iu);
+  const persistArtifact = sql.match(/CREATE FUNCTION ai\.persist_run_artifact\([\s\S]*?\$\$;/iu)?.[0] ?? '';
+  assert.match(persistArtifact, /ON CONFLICT[\s\S]*DO NOTHING/iu);
+  assert.match(persistArtifact, /artifact replay conflicts with retained identity/iu);
   assert.match(sql, /GRANT SELECT ON ai\.model_provider/iu);
   assert.doesNotMatch(sql, /GRANT EXECUTE ON FUNCTION ai\.(?:record_retrieval_trace|record_retrieval_hit)\([^;]*TO innorder_ai_runtime/iu);
   assert.doesNotMatch(sql, /GRANT SELECT, INSERT(?:, UPDATE)? ON ai\.(?:knowledge_document_version|knowledge_chunk|chunk_embedding|ingestion_job|ingestion_attempt|event_consumption|model_invocation|retrieval_trace|retrieval_hit)/iu);

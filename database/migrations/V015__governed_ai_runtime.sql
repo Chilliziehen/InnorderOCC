@@ -274,6 +274,9 @@ CREATE TABLE ai.recommendation_submission (
     idempotency_key text NOT NULL CHECK (idempotency_key ~ '^[0-9a-f]{64}$'),
     payload_hash text NOT NULL CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
     payload jsonb NOT NULL CHECK (platform.is_json_object(payload) AND octet_length(payload::text) BETWEEN 2 AND 262144),
+    artifact_id uuid NOT NULL,
+    artifact_object_key text NOT NULL CHECK (octet_length(artifact_object_key) BETWEEN 1 AND 1024 AND artifact_object_key !~ '[[:cntrl:]]'),
+    artifact_hash text NOT NULL CHECK (artifact_hash ~ '^[0-9a-f]{64}$'),
     status text NOT NULL CHECK (status IN ('PREPARED', 'ACKNOWLEDGED', 'FAILED')),
     core_recommendation_id uuid,
     core_receipt_hash text CHECK (core_receipt_hash IS NULL OR core_receipt_hash ~ '^[0-9a-f]{64}$'),
@@ -1982,11 +1985,13 @@ CREATE FUNCTION ai.prepare_guidance_recommendation_submission(
     p_payload jsonb,
     p_response_hash text, p_provider_request_id_hash text,
     p_input_tokens bigint, p_output_tokens bigint, p_cost numeric,
-    p_latency_ms integer, p_data_classification text
+    p_latency_ms integer, p_data_classification text,
+    p_artifact_id uuid, p_artifact_object_key text, p_artifact_hash text
 )
 RETURNS TABLE (
     run_id uuid, operation_id uuid, invocation_id uuid, status text,
-    idempotency_key text, payload_hash text, payload jsonb, attempts integer
+    idempotency_key text, payload_hash text, payload jsonb, attempts integer,
+    artifact_id uuid, artifact_object_key text, artifact_hash text, data_classification text
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -2005,7 +2010,9 @@ BEGIN
        OR p_response_hash !~ '^[0-9a-f]{64}$'
        OR (p_provider_request_id_hash IS NOT NULL AND p_provider_request_id_hash !~ '^[0-9a-f]{64}$')
        OR p_input_tokens < 0 OR p_output_tokens < 0 OR p_cost < 0 OR p_latency_ms < 0
-       OR p_data_classification NOT IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED') THEN
+       OR p_data_classification NOT IN ('PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED')
+       OR p_artifact_id IS NULL OR p_artifact_hash !~ '^[0-9a-f]{64}$'
+       OR p_artifact_object_key <> 'trace/' || p_run_id::text || '/' || p_artifact_id::text || '.json' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid recommendation submission preparation';
     END IF;
     SELECT run.target_entity_id INTO run_target_entity_id FROM ai.ai_run run
@@ -2071,20 +2078,24 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'recommendation submission invocation does not match run';
     END IF;
     INSERT INTO ai.recommendation_submission
-        (run_id, operation_id, invocation_id, idempotency_key, payload_hash, payload, status, data_classification)
+        (run_id, operation_id, invocation_id, idempotency_key, payload_hash, payload, artifact_id,
+         artifact_object_key, artifact_hash, status, data_classification)
     VALUES (p_run_id, p_operation_id, p_invocation_id, calculated_idempotency_key, calculated_payload_hash,
-            p_payload, 'PREPARED', p_data_classification)
+            p_payload, p_artifact_id, p_artifact_object_key, p_artifact_hash, 'PREPARED', p_data_classification)
     ON CONFLICT ON CONSTRAINT recommendation_submission_pkey DO NOTHING;
     SELECT * INTO STRICT submission_row FROM ai.recommendation_submission
     WHERE recommendation_submission.run_id = p_run_id FOR UPDATE;
     IF submission_row.operation_id <> p_operation_id OR submission_row.invocation_id <> p_invocation_id
        OR submission_row.idempotency_key <> calculated_idempotency_key OR submission_row.payload_hash <> calculated_payload_hash
-       OR submission_row.payload <> p_payload OR submission_row.data_classification <> p_data_classification THEN
+       OR submission_row.payload <> p_payload OR submission_row.data_classification <> p_data_classification
+       OR submission_row.artifact_id <> p_artifact_id OR submission_row.artifact_object_key <> p_artifact_object_key
+       OR submission_row.artifact_hash <> p_artifact_hash THEN
         RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'recommendation submission replay conflicts with prepared identity';
     END IF;
     RETURN QUERY SELECT submission_row.run_id, submission_row.operation_id, submission_row.invocation_id,
         submission_row.status, submission_row.idempotency_key, submission_row.payload_hash,
-        submission_row.payload, submission_row.attempts;
+        submission_row.payload, submission_row.attempts, submission_row.artifact_id,
+        submission_row.artifact_object_key, submission_row.artifact_hash, submission_row.data_classification;
 END;
 $$;
 
@@ -2092,6 +2103,7 @@ CREATE FUNCTION ai.get_guidance_recommendation_submission(p_run_id uuid)
 RETURNS TABLE (
     run_id uuid, operation_id uuid, invocation_id uuid, status text,
     idempotency_key text, payload_hash text, payload jsonb, attempts integer,
+    artifact_id uuid, artifact_object_key text, artifact_hash text, data_classification text,
     core_recommendation_id uuid, core_receipt_hash text
 )
 LANGUAGE plpgsql
@@ -2101,7 +2113,8 @@ AS $$
 BEGIN
     RETURN QUERY SELECT submission.run_id, submission.operation_id, submission.invocation_id,
         submission.status, submission.idempotency_key, submission.payload_hash, submission.payload,
-        submission.attempts, submission.core_recommendation_id, submission.core_receipt_hash
+        submission.attempts, submission.artifact_id, submission.artifact_object_key, submission.artifact_hash,
+        submission.data_classification, submission.core_recommendation_id, submission.core_receipt_hash
     FROM ai.recommendation_submission submission
     JOIN ai.ai_run run ON run.id = submission.run_id
     JOIN authz.ai_authorization_grant grant_row ON grant_row.id = run.authorization_grant_id
@@ -2229,6 +2242,8 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $$
+DECLARE
+    artifact_row ai.ai_run_artifact%ROWTYPE;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM ai.ai_run WHERE id = p_run_id AND authorization_grant_id IS NOT NULL) THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'artifact requires a governed run';
@@ -2236,7 +2251,14 @@ BEGIN
     INSERT INTO ai.ai_run_artifact
         (id, run_id, artifact_kind, object_key, sha256, data_classification, retention_until)
     VALUES (p_id, p_run_id, p_artifact_kind, p_object_key, p_sha256,
-            p_data_classification, statement_timestamp() + interval '1 year');
+            p_data_classification, statement_timestamp() + interval '1 year')
+    ON CONFLICT (id) DO NOTHING;
+    SELECT * INTO STRICT artifact_row FROM ai.ai_run_artifact WHERE id = p_id;
+    IF artifact_row.run_id <> p_run_id OR artifact_row.artifact_kind <> p_artifact_kind
+       OR artifact_row.object_key <> p_object_key OR artifact_row.sha256 <> p_sha256
+       OR artifact_row.data_classification <> p_data_classification THEN
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'artifact replay conflicts with retained identity';
+    END IF;
     RETURN p_id;
 END;
 $$;
@@ -2841,7 +2863,7 @@ REVOKE ALL ON FUNCTION ai.claim_ingestion_jobs(text, integer, interval) FROM PUB
 REVOKE ALL ON FUNCTION ai.claim_event_consumptions(text, integer, interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text, uuid, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.get_guidance_recommendation_submission(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.mark_guidance_recommendation_dispatched(uuid, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION ai.acknowledge_guidance_recommendation(uuid, text, text, uuid, text) FROM PUBLIC;
@@ -2860,7 +2882,7 @@ GRANT EXECUTE ON FUNCTION ai.heartbeat_ingestion_job(uuid, text, interval) TO in
 GRANT EXECUTE ON FUNCTION ai.claim_event_consumptions(text, integer, interval) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.authorized_hybrid_retrieval(uuid, uuid, text, public.vector, integer, integer, integer) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.persist_retrieval_bundle(uuid, uuid, uuid, text, integer, integer, jsonb, jsonb) TO innorder_ai_runtime;
-GRANT EXECUTE ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text) TO innorder_ai_runtime;
+GRANT EXECUTE ON FUNCTION ai.prepare_guidance_recommendation_submission(uuid, uuid, uuid, jsonb, text, text, bigint, bigint, numeric, integer, text, uuid, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.get_guidance_recommendation_submission(uuid) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.mark_guidance_recommendation_dispatched(uuid, text, text) TO innorder_ai_runtime;
 GRANT EXECUTE ON FUNCTION ai.acknowledge_guidance_recommendation(uuid, text, text, uuid, text) TO innorder_ai_runtime;

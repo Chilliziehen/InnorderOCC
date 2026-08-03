@@ -21,6 +21,8 @@ export type TerminalGuidanceResult =
 export type PreparedRecommendationSubmission = Readonly<{
   runId: string; operationId: string; invocationId: string; status: "PREPARED";
   idempotencyKey: string; payloadHash: string; payload: Readonly<Record<string, unknown>>; attempts: number;
+  artifact: Readonly<{ id: string; objectKey: string; hash: string }>;
+  classification: DataClassification;
 }>;
 type Queryable = { query(text: string, values?: unknown[]): Promise<QueryResult> };
 
@@ -37,7 +39,9 @@ function prepared(row: Record<string, unknown>): PreparedRecommendationSubmissio
   if (row.status !== "PREPARED" || row.payload === null || typeof row.payload !== "object" || Array.isArray(row.payload)) throw new Error();
   return { runId: String(row.run_id), operationId: String(row.operation_id), invocationId: String(row.invocation_id),
     status: "PREPARED", idempotencyKey: String(row.idempotency_key), payloadHash: String(row.payload_hash),
-    payload: row.payload as Record<string, unknown>, attempts: Number(row.attempts) };
+    payload: row.payload as Record<string, unknown>, attempts: Number(row.attempts),
+    artifact: { id: String(row.artifact_id), objectKey: String(row.artifact_object_key), hash: String(row.artifact_hash) },
+    classification: String(row.data_classification) as DataClassification };
 }
 
 export class PostgresGuidanceRepository {
@@ -111,10 +115,10 @@ export class PostgresGuidanceRepository {
     } catch (error) { return databaseError(error); }
   }
 
-  async finalizeInvocation(input: Readonly<{ id: string; status: "COMPLETED" | "FAILED" | "CANCELLED"; responseHash: string | null; inputTokens: number; outputTokens: number; cost: string; latencyMs: number; errorCode: string | null }>, signal: AbortSignal): Promise<void> {
+  async finalizeInvocation(input: Readonly<{ id: string; status: "COMPLETED" | "FAILED" | "CANCELLED"; responseHash: string | null; providerRequestIdHash?: string; inputTokens: number; outputTokens: number; cost: string; latencyMs: number; errorCode: string | null }>, signal: AbortSignal): Promise<void> {
     abort(signal);
     try {
-      await this.database.query("SELECT ai.finalize_model_invocation($1,$2,$3,NULL,$4,$5,$6,$7,$8)", [input.id, input.status, input.responseHash, input.inputTokens, input.outputTokens, input.cost, input.latencyMs, input.errorCode]);
+      await this.database.query("SELECT ai.finalize_model_invocation($1,$2,$3,$4,$5,$6,$7,$8,$9)", [input.id, input.status, input.responseHash, input.providerRequestIdHash ?? null, input.inputTokens, input.outputTokens, input.cost, input.latencyMs, input.errorCode]);
     } catch (error) { databaseError(error); }
   }
 
@@ -135,13 +139,14 @@ export class PostgresGuidanceRepository {
     runId: string; operationId: string; invocationId: string; payload: Readonly<Record<string, unknown>>;
     responseHash: string; providerRequestIdHash?: string; inputTokens: number; outputTokens: number;
     cost: string; latencyMs: number; classification: DataClassification;
+    artifact: Readonly<{ id: string; objectKey: string; hash: string }>;
   }>, signal: AbortSignal): Promise<PreparedRecommendationSubmission> {
     abort(signal);
     try {
-      const result = await this.database.query("SELECT * FROM ai.prepare_guidance_recommendation_submission($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [
+      const result = await this.database.query("SELECT * FROM ai.prepare_guidance_recommendation_submission($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)", [
         input.runId, input.operationId, input.invocationId, JSON.stringify(input.payload),
         input.responseHash, input.providerRequestIdHash ?? null, input.inputTokens, input.outputTokens,
-        input.cost, input.latencyMs, input.classification,
+        input.cost, input.latencyMs, input.classification, input.artifact.id, input.artifact.objectKey, input.artifact.hash,
       ]);
       abort(signal);
       if (result.rows.length !== 1) throw new Error();
