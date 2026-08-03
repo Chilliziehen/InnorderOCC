@@ -323,22 +323,23 @@ class EvidenceService(
         override val action = "evidence.upload.create"
         override val entityId = request.targetEntityId
         override val resourceId = request.targetEntityId
-        override val aggregateType = "evidence-upload-session"
-        override val aggregateId = sessionId
+        override val aggregateType = EVIDENCE_AGGREGATE_TYPE
+        override val aggregateId = requestedEvidenceId
         override val changesAuthorizationFacts = false
-        private var head: EvidenceHeadRecord? = null
-        override fun lockCurrentVersion(context: CommandContext): Long? {
+        override val lockPlan = AggregateLockPlan(
+            upserted = listOf(AggregateReference(EVIDENCE_AGGREGATE_TYPE, requestedEvidenceId)),
+        )
+
+        override fun execute(context: CommandContext): CommandMutation {
             context.jdbc.queryForObject("SELECT pg_advisory_xact_lock(hashtextextended(?,1163284054)) IS NULL", Boolean::class.java,
                 "${request.targetEntityId}:${request.requirementId}:${request.slotKey}")
-            head = evidence.findHead(request.targetEntityId, request.requirementId, request.slotKey)?.let { evidence.lockHead(it.id) }
-            if ((head != null) != expectedVersionRequired) throw EvidenceUploadConflictException()
-            return head?.rowVersion
-        }
-        override fun execute(context: CommandContext): CommandMutation {
-            val current = head
+            val current = evidence.findHead(request.targetEntityId, request.requirementId, request.slotKey)
+                ?.let { evidence.lockHead(it.id) }
+            if ((current != null) != expectedVersionRequired) throw EvidenceUploadConflictException()
             val evidenceId = current?.id ?: requestedEvidenceId.also {
                 evidence.createHead(it, request.targetEntityId, request.requirementId, request.slotKey, context.metadata.principalId)
             }
+            val advanced = if (current == null) 1L else evidence.advanceHead(evidenceId).rowVersion
             val now = evidence.transactionTime()
             val record = EvidenceSessionRecord(
                 sessionId, context.metadata.principalId, request.targetEntityId, request.requirementId, evidenceId,
@@ -350,7 +351,7 @@ class EvidenceService(
             evidence.createSession(record)
             val eventId = UUID.randomUUID()
             notify(context, eventId, evidenceId, "principal:${context.metadata.principalId}", "EVIDENCE_UPLOAD_CREATED", 0)
-            return mutation(context, 201, current?.rowVersion, (current?.rowVersion ?: -1) + 1,
+            return mutation(context, 201, current?.rowVersion ?: 0, advanced,
                 "EVIDENCE_UPLOAD_CREATED", record.public(), eventId, null, sessionId)
         }
     }
@@ -364,13 +365,17 @@ class EvidenceService(
         override val action = "evidence.upload.confirm"
         override val entityId = session.targetId
         override val resourceId = session.evidenceId
-        override val aggregateType = "evidence"
+        override val aggregateType = EVIDENCE_AGGREGATE_TYPE
         override val aggregateId = session.evidenceId
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
         private lateinit var current: EvidenceHeadRecord
-        override fun lockCurrentVersion(context: CommandContext) = evidence.lockHead(session.evidenceId).also { current = it }.rowVersion
+        override val lockPlan = AggregateLockPlan(
+            existing = listOf(AggregateReference(EVIDENCE_AGGREGATE_TYPE, session.evidenceId)),
+        )
+
         override fun execute(context: CommandContext): CommandMutation {
+            current = evidence.lockHead(session.evidenceId)
             val version = evidence.confirm(session, inspected, preview, sourceCleanup)
             val updated = evidence.getHead(session.evidenceId)
             val body = ConfirmedEvidenceContentResult(
@@ -395,13 +400,17 @@ class EvidenceService(
         override val action = "evidence.upload.fail"
         override val entityId = session.targetId
         override val resourceId = session.evidenceId
-        override val aggregateType = "evidence"
+        override val aggregateType = EVIDENCE_AGGREGATE_TYPE
         override val aggregateId = session.evidenceId
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
         private lateinit var current: EvidenceHeadRecord
-        override fun lockCurrentVersion(context: CommandContext) = evidence.lockHead(session.evidenceId).also { current = it }.rowVersion
+        override val lockPlan = AggregateLockPlan(
+            existing = listOf(AggregateReference(EVIDENCE_AGGREGATE_TYPE, session.evidenceId)),
+        )
+
         override fun execute(context: CommandContext): CommandMutation {
+            current = evidence.lockHead(session.evidenceId)
             evidence.fail(session.id, failureCode, evidence.transactionTime().plus(ORPHAN_GRACE), quarantineStored)
             if (immutableStored) evidence.recordOrphan(session.id, session.immutableKey, evidence.transactionTime().plus(ORPHAN_GRACE))
             val updated = evidence.recordFailureOnHead(session.evidenceId)
@@ -417,13 +426,17 @@ class EvidenceService(
         override val action = "evidence.submit"
         override val entityId = id
         override val resourceId = id
-        override val aggregateType = "evidence"
+        override val aggregateType = EVIDENCE_AGGREGATE_TYPE
         override val aggregateId = id
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
         private lateinit var current: EvidenceHeadRecord
-        override fun lockCurrentVersion(context: CommandContext) = evidence.lockHead(id).also { current = it }.rowVersion
+        override val lockPlan = AggregateLockPlan(
+            existing = listOf(AggregateReference(EVIDENCE_AGGREGATE_TYPE, id)),
+        )
+
         override fun execute(context: CommandContext): CommandMutation {
+            current = evidence.lockHead(id)
             if (current.state != EvidenceState.PENDING || current.currentVersion != request.evidenceVersion) throw EvidenceSubmitConflictException()
             evidence.submit(id, request.evidenceVersion)
             val updated = evidence.getHead(id)
@@ -439,18 +452,19 @@ class EvidenceService(
         override val action = "evidence.review"
         override val entityId = id
         override val resourceId = id
-        override val aggregateType = "evidence"
+        override val aggregateType = EVIDENCE_AGGREGATE_TYPE
         override val aggregateId = id
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
         private lateinit var current: EvidenceHeadRecord
-        override fun lockCurrentVersion(context: CommandContext): Long {
+        override val lockPlan = AggregateLockPlan(
+            existing = listOf(AggregateReference(EVIDENCE_AGGREGATE_TYPE, id)),
+        )
+
+        override fun execute(context: CommandContext): CommandMutation {
             val initial = evidence.getHead(id)
             evidence.lockRequirementHeads(initial.targetId, initial.requirementId)
             current = evidence.lockHead(id)
-            return current.rowVersion
-        }
-        override fun execute(context: CommandContext): CommandMutation {
             if (current.currentVersion != request.evidenceVersion) throw EvidenceReviewConflictException()
             val policy = evidence.requirement(current.requirementId).policy
             val conditionallyAccepted = request.decision == EvidenceReviewOutcome.CONDITIONAL && policy.conditionalAdvancement
@@ -510,10 +524,12 @@ class EvidenceService(
             decision?.let { put("decision", it.name) }
             if (type == "EVIDENCE_UPLOAD_FAILED" && reason != null) put("reasonCode", reason)
         })
+        val aggregate = AggregateReference(context.descriptor.aggregateType, context.descriptor.aggregateId)
         return CommandMutation(
-            status, canonical(bodyValue), context.descriptor.resourceId, context.descriptor.aggregateId,
-            context.descriptor.aggregateType, before, after, reason, canonical(mapOf("eventType" to type, "eventId" to eventId.toString())),
-            listOf(PendingEventSpec(type, 1, payload, after)),
+            status, canonical(bodyValue), context.descriptor.resourceId,
+            listOf(AggregateChange(aggregate, before ?: 0, after)),
+            reason, canonical(mapOf("eventType" to type, "eventId" to eventId.toString())),
+            listOf(PendingEventSpec(type, 1, payload, aggregate, after)),
         )
     }
 

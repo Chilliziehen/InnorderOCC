@@ -18,3 +18,4 @@ BEGIN;
 COMMIT;
 \ir migrations/V015__cohort_api_lifecycle.sql
 \ir migrations/V016__governed_ai_runtime.sql
+\ir migrations/V017__risk_command_aggregates.sql

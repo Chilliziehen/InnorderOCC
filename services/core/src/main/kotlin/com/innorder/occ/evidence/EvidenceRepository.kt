@@ -81,10 +81,17 @@ class EvidenceRepository(private val jdbc: JdbcOperations) {
         if (inserted != 1) throw InvalidEvidenceRequirementException()
         jdbc.update(
             """INSERT INTO occ.evidence
-               (id, business_object_id, requirement_id, state, created_by, target_entity_id, slot_key)
-               VALUES (?, ?, ?, 'PENDING', ?, ?, ?)""",
+               (id, business_object_id, requirement_id, state, created_by, target_entity_id, slot_key, row_version)
+               VALUES (?, ?, ?, 'PENDING', ?, ?, ?, 1)""",
             id, targetId, requirementId, actorId, targetId, slotKey,
         )
+    }
+
+    // Opening an upload session changes the evidence aggregate, so its row
+    // version advances through the shared touch trigger.
+    fun advanceHead(id: UUID): EvidenceHeadRecord {
+        check(jdbc.update("UPDATE occ.evidence SET state = state WHERE id = ?", id) == 1)
+        return getHead(id)
     }
 
     fun createSession(record: EvidenceSessionRecord) {

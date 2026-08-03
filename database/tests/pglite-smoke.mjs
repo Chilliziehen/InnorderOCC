@@ -52,6 +52,7 @@ const migrations = [
   'V014__evidence_risk_resource.sql',
   'V015__cohort_api_lifecycle.sql',
   'V016__governed_ai_runtime.sql',
+  'V017__risk_command_aggregates.sql',
 ];
 const appliedMigrations = [];
 
@@ -82,6 +83,7 @@ const stagedUpgradeMigrations = new Set([
   'V014__evidence_risk_resource.sql',
   'V015__cohort_api_lifecycle.sql',
   'V016__governed_ai_runtime.sql',
+  'V017__risk_command_aggregates.sql',
 ]);
 for (const migration of migrations.filter((name) => !stagedUpgradeMigrations.has(name))) {
   await applyMigration(migration);
@@ -695,6 +697,7 @@ assert.deepEqual(workflowSchema.rows, [{
 }], 'V013 workflow objects must exist after migration application');
 console.log('verified applied migration list and V013 workflow objects');
 await applyMigration('V016__governed_ai_runtime.sql');
+await applyMigration('V017__risk_command_aggregates.sql');
 
 await db.exec(`
   INSERT INTO ai.model_provider

@@ -25,6 +25,7 @@ import com.innorder.occ.authz.PolicyLayer
 import com.innorder.occ.authz.PolicyDecisionClient
 import com.innorder.occ.authz.OpaClientException
 import com.innorder.occ.command.AuditRepository
+import com.innorder.occ.command.AggregateLockRegistry
 import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.CommandMetadata
 import com.innorder.occ.command.CommandResult
@@ -92,6 +93,11 @@ class RiskServiceIntegrationTest {
             IdempotencyRepository(runtimeJdbc),
             AuditRepository(runtimeJdbc),
             OutboxRepository(runtimeJdbc),
+            AggregateLockRegistry(listOf(
+                riskAggregateLockResolver(),
+                riskOccurrenceCommandAggregateLockResolver(),
+                riskAdjudicationAggregateLockResolver(),
+            )),
             runtimeJdbc,
         )
         repository = RiskRepository(runtimeJdbc)
@@ -967,6 +973,7 @@ class RiskServiceIntegrationTest {
                     "risk-test-grant", PolicyLayer.PLATFORM, POLICY_RELEASE, GrantEffect.ALLOW,
                     request.action, request.principalId.toString(), request.entityId.toString(), request.resourceId.toString(),
                 )) else emptyList(),
+                emptyList(),
                 POLICY_RELEASE,
                 "platform-authz-v1",
                 mapOf(request.entityId to 0, request.resourceId to 0),

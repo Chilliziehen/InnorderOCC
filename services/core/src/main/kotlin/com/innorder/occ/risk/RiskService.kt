@@ -10,6 +10,9 @@ import com.innorder.occ.authz.AuthorizationDeniedException
 import com.innorder.occ.authz.AuthorizationAvailabilityException
 import com.innorder.occ.authz.AuthorizationRequest
 import com.innorder.occ.authz.AuthorizationService
+import com.innorder.occ.command.AggregateChange
+import com.innorder.occ.command.AggregateLockPlan
+import com.innorder.occ.command.AggregateReference
 import com.innorder.occ.command.AuthorizedCommand
 import com.innorder.occ.command.CanonicalJsonObject
 import com.innorder.occ.command.CommandContext
@@ -323,32 +326,32 @@ class RiskService(
         override val action = "risk.create"
         override val entityId = decision.targetEntityId
         override val resourceId = decision.targetEntityId
-        override val aggregateType = "risk-occurrence-command"
+        override val aggregateType = RISK_OCCURRENCE_COMMAND_AGGREGATE_TYPE
         override val aggregateId = commandId
         override val expectedVersionRequired = false
         override val changesAuthorizationFacts = false
-        private var existing: RiskRecord? = null
-
-        override fun lockCurrentVersion(context: CommandContext): Long? {
-            risks.lockOccurrenceIdentity(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
-            existing = risks.lockByOccurrence(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
-            return null
-        }
+        override val lockPlan = AggregateLockPlan(
+            created = listOf(AggregateReference(RISK_OCCURRENCE_COMMAND_AGGREGATE_TYPE, commandId)),
+        )
 
         override fun execute(context: CommandContext): CommandMutation {
+            risks.lockOccurrenceIdentity(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
+            val existing = risks.lockByOccurrence(decision.ruleDefinitionId, decision.targetEntityId, decision.occurrenceKey)
             existing?.let { risk ->
+                risks.recordOccurrenceCommand(commandId, decision, risk.id, observedExisting = true)
                 return mutation(
-                    context, 200, commandId, null, 0, "risk.occurrence_observed",
+                    context, 200, commandId, 0, 1, "risk.occurrence_observed",
                     mapOf(
                         "riskId" to risk.id.toString(), "targetEntityId" to risk.targetEntityId.toString(),
                         "severity" to risk.severity.name, "state" to risk.state.name, "version" to risk.rowVersion,
                     ),
                     null,
-                    aggregateType = "risk-occurrence-command",
+                    aggregateType = RISK_OCCURRENCE_COMMAND_AGGREGATE_TYPE,
                 )
             }
             val owner = risks.resolveOwner(decision.ruleDefinitionId, decision.targetEntityId, decision.ownerRelationship)
             risks.create(riskId, decision, owner)
+            risks.recordOccurrenceCommand(commandId, decision, riskId, observedExisting = false)
             val eventId = UUID.randomUUID()
             notifications.emit(RiskNotificationIntent(
                 eventId, context.metadata.principalId, context.metadata.correlationId, context.transactionId,
@@ -356,11 +359,11 @@ class RiskService(
                 mapOf("riskId" to riskId.toString(), "severity" to decision.severity.name, "dueAt" to decision.dueAt.toString()),
             ))
             return mutation(
-                context, 201, commandId, null, 0, "risk.opened",
+                context, 201, commandId, 0, 1, "risk.opened",
                 mapOf("riskId" to riskId.toString(), "targetEntityId" to decision.targetEntityId.toString(),
                     "severity" to decision.severity.name, "state" to RiskState.OPEN.name, "dueAt" to decision.dueAt.toString()),
                 null,
-                aggregateType = "risk-occurrence-command",
+                aggregateType = RISK_OCCURRENCE_COMMAND_AGGREGATE_TYPE,
             )
         }
     }
@@ -378,19 +381,18 @@ class RiskService(
         override val action = if (type == RiskActionType.SLA_BREACHED) "risk.sla_breach" else "risk.${type.name.lowercase()}"
         override val entityId = id
         override val resourceId = id
-        override val aggregateType = "risk"
+        override val aggregateType = RISK_AGGREGATE_TYPE
         override val aggregateId = id
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
+        override val lockPlan = AggregateLockPlan(
+            existing = listOf(AggregateReference(RISK_AGGREGATE_TYPE, id)),
+        )
         private lateinit var current: RiskRecord
 
-        override fun lockCurrentVersion(context: CommandContext): Long {
+        override fun execute(context: CommandContext): CommandMutation {
             current = risks.lock(id)
             if (current.state in TERMINAL_STATES) throw TerminalRiskException()
-            return current.rowVersion
-        }
-
-        override fun execute(context: CommandContext): CommandMutation {
             validateTransition(current, type)
             if (type == RiskActionType.ASSIGNED && ownerRelationshipId == null) throw InvalidRiskActionException()
             if (ownerRelationshipId != null && !risks.ownerBelongsToTarget(ownerRelationshipId, current.targetEntityId)) {
@@ -448,32 +450,31 @@ class RiskService(
         override val resourceId: UUID,
     ) : AuthorizedCommand {
         override val action = "risk.adjudicate"
-        override val aggregateType = "risk-adjudication"
+        override val aggregateType = RISK_ADJUDICATION_AGGREGATE_TYPE
         override val aggregateId = id
         override val expectedVersionRequired = true
         override val changesAuthorizationFacts = false
-        private var prior: RiskAdjudicationRecord? = null
+        override val lockPlan = AggregateLockPlan(
+            upserted = listOf(AggregateReference(RISK_ADJUDICATION_AGGREGATE_TYPE, id)),
+        )
 
-        override fun lockCurrentVersion(context: CommandContext): Long {
+        override fun execute(context: CommandContext): CommandMutation {
             risks.lockAdjudicationIdentity(request.knownEventKey, request.targetEntityId)
             val linkedRisk = request.riskId?.let(risks::lock)
             if (linkedRisk != null && linkedRisk.targetEntityId != request.targetEntityId) {
                 throw InvalidRiskActionException()
             }
-            prior = risks.latestAdjudication(request.knownEventKey, request.targetEntityId, lock = true)
-            return prior?.version?.toLong() ?: 0
-        }
-
-        override fun execute(context: CommandContext): CommandMutation {
+            val prior = risks.latestAdjudication(request.knownEventKey, request.targetEntityId, lock = true)
             val adjudicationId = risks.appendAdjudication(context.metadata.principalId, request, prior)
             val after = (prior?.version ?: 0).toLong() + 1
+            risks.upsertAdjudicationSeries(id, request.knownEventKey, request.targetEntityId, after)
             return mutation(
                 context, 201, id, after - 1, after, "risk.adjudicated",
                 mapOf("adjudicationId" to adjudicationId.toString(), "knownEventKey" to request.knownEventKey,
                     "targetEntityId" to request.targetEntityId.toString(), "outcome" to request.outcome.name,
                     "version" to after),
                 request.reason,
-                aggregateType = "risk-adjudication",
+                aggregateType = RISK_ADJUDICATION_AGGREGATE_TYPE,
             )
         }
     }
@@ -495,10 +496,12 @@ class RiskService(
         aggregateType: String = "risk",
     ): CommandMutation {
         val payload = json(fields)
+        val aggregate = AggregateReference(aggregateType, aggregateId)
         return CommandMutation(
-            status, payload, context.descriptor.resourceId, aggregateId, aggregateType, before, after,
+            status, payload, context.descriptor.resourceId,
+            listOf(AggregateChange(aggregate, before ?: 0, after)),
             reason, json(mapOf("eventType" to eventType)),
-            listOf(PendingEventSpec(eventType, 1, payload, after)),
+            listOf(PendingEventSpec(eventType, 1, payload, aggregate, after)),
         )
     }
 

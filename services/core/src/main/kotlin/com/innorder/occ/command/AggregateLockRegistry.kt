@@ -16,9 +16,18 @@ data class AggregateReference(
 class AggregateLockPlan(
     existing: List<AggregateReference> = emptyList(),
     created: List<AggregateReference> = emptyList(),
+    // Aggregates whose first command creates the row and whose later commands
+    // advance it. The row's presence decides which case applies, under the same
+    // advisory lock that serializes concurrent first writers.
+    upserted: List<AggregateReference> = emptyList(),
 ) {
     val existing: List<AggregateReference> = Collections.unmodifiableList(existing.toList())
     val created: List<AggregateReference> = Collections.unmodifiableList(created.toList())
+    val upserted: List<AggregateReference> = Collections.unmodifiableList(upserted.toList())
+
+    internal val all: List<AggregateReference> = Collections.unmodifiableList(
+        this.existing + this.created + this.upserted,
+    )
 }
 
 class AggregateLockResolver(
@@ -43,18 +52,20 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
 
     internal fun validate(plan: AggregateLockPlan?, primary: AggregateReference) {
         if (plan == null) throw InvalidCommandRequestException()
-        val all = plan.existing + plan.created
-        if (all.isEmpty() || all.toSet().size != all.size || plan.existing.toSet().intersect(plan.created.toSet()).isNotEmpty() ||
+        val all = plan.all
+        if (all.isEmpty() || all.toSet().size != all.size ||
             all.count { it == primary } != 1 || all.any { !valid(it) || it.type !in resolversByType }
         ) throw InvalidCommandRequestException()
     }
 
     internal fun acquire(jdbc: JdbcOperations, plan: AggregateLockPlan): AcquiredAggregateLocks {
         val existing = plan.existing.toSet()
-        val ordered = (plan.existing + plan.created).sortedWith(
+        val upserted = plan.upserted.toSet()
+        val ordered = plan.all.sortedWith(
             compareBy<AggregateReference>({ resolversByType.getValue(it.type).order }, { it.id.toString() }, { it.type }),
         )
         val versions = linkedMapOf<AggregateReference, Long>()
+        val created = plan.created.toMutableSet()
         ordered.forEach { reference ->
             if (reference in existing) {
                 val version = resolversByType.getValue(reference.type).lock(jdbc, reference.id)
@@ -67,14 +78,20 @@ class AggregateLockRegistry(resolvers: List<AggregateLockResolver>) {
                     { _, _ -> Unit },
                     advisoryLockKey(reference),
                 )
-                if (resolversByType.getValue(reference.type).lock(jdbc, reference.id) != null) {
+                val version = resolversByType.getValue(reference.type).lock(jdbc, reference.id)
+                if (reference in upserted && version != null) {
+                    if (version !in 0..CommandExecutor.MAX_SAFE_INTEGER) throw InvalidCommandRequestException()
+                    versions[reference] = version
+                } else if (version != null) {
                     throw InvalidCommandRequestException()
+                } else {
+                    created.add(reference)
                 }
             }
         }
         return AcquiredAggregateLocks(
             Collections.unmodifiableMap(versions),
-            Collections.unmodifiableSet(plan.created.toSet()),
+            Collections.unmodifiableSet(created),
         )
     }
 

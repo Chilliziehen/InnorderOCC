@@ -17,6 +17,7 @@ import com.innorder.occ.authz.DecisionAuditLog
 import com.innorder.occ.authz.DecisionLogEntry
 import com.innorder.occ.authz.PolicyLayer
 import com.innorder.occ.command.AuditRepository
+import com.innorder.occ.command.AggregateLockRegistry
 import com.innorder.occ.command.CommandExecutor
 import com.innorder.occ.command.CommandMetadata
 import com.innorder.occ.command.IdempotencyRepository
@@ -86,7 +87,8 @@ class KnowledgeCommandIntegrationTest {
         val executor = CommandExecutor(
             DataSourceTransactionManager(jdbc.dataSource!!), authorization,
             AuthorizationRevisionLockRepository(jdbc), IdempotencyRepository(jdbc), AuditRepository(jdbc),
-            OutboxRepository(jdbc), jdbc,
+            OutboxRepository(jdbc),
+            AggregateLockRegistry(listOf(knowledgeSourceAggregateLockResolver())), jdbc,
         )
         service = KnowledgeCommandService(executor)
     }
@@ -262,7 +264,7 @@ class KnowledgeCommandIntegrationTest {
             return AuthorizationSnapshot(
                 1, request.requestId, 1, mapOf(PolicyLayer.PLATFORM to RELEASE_ID),
                 AuthorizationPrincipal(request.principalId, true), AuthorizationEntity(request.entityId), request.action,
-                AuthorizationResource(request.resourceId, true), request.context, emptyList(), emptyList(), RELEASE_ID,
+                AuthorizationResource(request.resourceId, true), request.context, emptyList(), emptyList(), emptyList(), RELEASE_ID,
                 "knowledge-v1", mapOf(request.entityId to 7), "a".repeat(64),
             )
         }

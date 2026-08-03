@@ -65,7 +65,8 @@ class EvidenceServiceIntegrationTest {
         if (!this::repository.isInitialized) repository = EvidenceRepository(runtimeJdbc)
         val executor = CommandExecutor(
             transactionManager, authorizationService, AuthorizationRevisionLockRepository(runtimeJdbc),
-            IdempotencyRepository(runtimeJdbc), AuditRepository(runtimeJdbc), OutboxRepository(runtimeJdbc), runtimeJdbc,
+            IdempotencyRepository(runtimeJdbc), AuditRepository(runtimeJdbc), OutboxRepository(runtimeJdbc),
+            AggregateLockRegistry(listOf(evidenceAggregateLockResolver())), runtimeJdbc,
         )
         return EvidenceService(
             repository, executor, authorizationService,
@@ -738,6 +739,7 @@ class EvidenceServiceIntegrationTest {
                 "evidence-test", PolicyLayer.PLATFORM, POLICY_RELEASE, GrantEffect.ALLOW, request.action,
                 request.principalId.toString(), request.entityId.toString(), request.resourceId.toString(),
             )),
+            emptyList(),
             POLICY_RELEASE, "platform-authz-v1", mapOf(request.entityId to 0, request.resourceId to 0), "0".repeat(64),
         )
     }

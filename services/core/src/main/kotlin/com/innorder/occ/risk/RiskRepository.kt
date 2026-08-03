@@ -240,6 +240,38 @@ class RiskRepository(private val jdbc: JdbcOperations) {
             ::adjudication, knownEventKey, targetEntityId,
         ).singleOrNull()
 
+    fun recordOccurrenceCommand(
+        commandId: UUID,
+        decision: RiskDecision,
+        riskId: UUID,
+        observedExisting: Boolean,
+    ) {
+        jdbc.update(
+            """INSERT INTO occ.risk_occurrence_command
+               (id, rule_definition_id, target_entity_id, occurrence_key, risk_id, observed_existing)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            commandId, decision.ruleDefinitionId, decision.targetEntityId,
+            decision.occurrenceKey, riskId, observedExisting,
+        )
+    }
+
+    fun upsertAdjudicationSeries(seriesId: UUID, knownEventKey: String, targetEntityId: UUID, nextVersion: Long) {
+        val updated = jdbc.update(
+            """UPDATE occ.risk_adjudication_series
+               SET row_version = ?, updated_at = transaction_timestamp()
+               WHERE id = ?""",
+            nextVersion, seriesId,
+        )
+        if (updated == 0) {
+            jdbc.update(
+                """INSERT INTO occ.risk_adjudication_series
+                   (id, known_event_key, target_entity_id, row_version)
+                   VALUES (?, ?, ?, ?)""",
+                seriesId, knownEventKey, targetEntityId, nextVersion,
+            )
+        }
+    }
+
     fun lockAdjudicationIdentity(knownEventKey: String, targetEntityId: UUID) {
         advisoryLock("${knownEventKey.length}:$knownEventKey:$targetEntityId", 1380537171)
     }

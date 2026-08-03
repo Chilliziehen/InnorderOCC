@@ -40,6 +40,7 @@ const migrations = [
   'V014__evidence_risk_resource.sql',
   'V015__cohort_api_lifecycle.sql',
   'V016__governed_ai_runtime.sql',
+  'V017__risk_command_aggregates.sql',
 ];
 const frozenMigrationDigests = {
   'V001__bootstrap.sql': '5bfe3250f881a3321a8f900f98477dd733ed14d6ef54d1ddc566c68254102b27',
@@ -74,16 +75,17 @@ test('keeps published V001 through V012 migration content immutable', () => {
   }
 });
 
-test('V013 through V016 follow V012 and V013 owns workflow authorization revisions', () => {
+test('V013 through V017 follow V012 and V013 owns workflow authorization revisions', () => {
   const migrationNames = readdirSync(root)
     .filter((name) => /^V\d+__.*\.sql$/.test(name))
     .sort();
-  assert.deepEqual(migrationNames.slice(-5), [
+  assert.deepEqual(migrationNames.slice(-6), [
     'V012__outbox_publisher_lifecycle.sql',
     'V013__process_task_workflow.sql',
     'V014__evidence_risk_resource.sql',
     'V015__cohort_api_lifecycle.sql',
     'V016__governed_ai_runtime.sql',
+    'V017__risk_command_aggregates.sql',
   ]);
 
   const sql = readMigration('V013__process_task_workflow.sql');
@@ -118,6 +120,7 @@ test('registers every post-V012 migration in each database schema entrypoint', (
     'V014__evidence_risk_resource.sql',
     'V015__cohort_api_lifecycle.sql',
     'V016__governed_ai_runtime.sql',
+  'V017__risk_command_aggregates.sql',
   ];
   const entrypoint = readFileSync(fileURLToPath(new URL('../innorder_occ_full_schema.sql', import.meta.url)), 'utf8');
   const pgliteSmoke = readFileSync(pgliteSmokePath, 'utf8');
@@ -135,7 +138,7 @@ test('registers every post-V012 migration in each database schema entrypoint', (
     entrypointCursor = entrypointAt;
     smokeCursor = smokeAt;
   }
-  assert.doesNotMatch(entrypoint, /V017__/u);
+  assert.doesNotMatch(entrypoint, /V018__/u);
   assert.match(pgliteSmoke, /appliedMigrations\.push\(migration\)/u);
   assert.match(pgliteSmoke, /assert\.deepEqual\(appliedMigrations, migrations/u);
   for (const table of ['occ.cohort', 'occ.task_gate_provider_state', 'occ.task_review_projection_fact', 'occ.notification']) {
