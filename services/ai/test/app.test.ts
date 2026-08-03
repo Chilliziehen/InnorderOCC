@@ -183,6 +183,12 @@ describe("configuration", () => {
       logLevel: "info",
       port: 3100,
       version: "dev",
+      businessEnabled: false,
+      databasePoolSize: 10,
+      ingestionEnabled: false,
+      parserTimeoutMs: 60_000,
+      parserPollMs: 25,
+      parserHeartbeatMaxAgeMs: 10_000,
     });
   });
 

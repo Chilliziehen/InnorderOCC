@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { cohortManageableMemberRoleSchema, cohortStatusSchema } from "./cohort.js";
+import { sha256Schema, stableAiErrorCodeSchema } from "./governed-ai.js";
 import { blockerCodeSchema } from "./task.js";
 import { unicodeBoundedStringSchema } from "./unicode.js";
 import {
@@ -245,3 +246,86 @@ export const workflowEventSchema = z.unknown().transform((value, context) => {
 });
 
 export type WorkflowEvent = z.infer<typeof workflowEventSchema>;
+export const knowledgeIngestionRequestedPayloadSchema = z
+  .object({
+    operationId: uuidSchema,
+    ingestionJobId: uuidSchema,
+    sourceId: uuidSchema,
+    documentId: uuidSchema,
+    candidateEmbeddingSpaceId: uuidSchema,
+    sourceVersion: z.string().min(1).max(256),
+    sourceObjectHash: sha256Schema,
+  })
+  .strict();
+
+export const aiGuidanceRequestedPayloadSchema = z
+  .object({
+    operationId: uuidSchema,
+  })
+  .strict();
+
+export const aiRecommendationProposedPayloadSchema = z
+  .object({
+    operationId: uuidSchema,
+    recommendationId: uuidSchema,
+    runId: uuidSchema,
+  })
+  .strict();
+
+export const aiOperationDeadLetteredPayloadSchema = z
+  .object({
+    operationId: uuidSchema,
+    failedEventId: uuidSchema,
+    failedEventType: z.string().min(1).max(EVENT_TYPE_MAX_LENGTH),
+    attempts: z.number().int().min(1).max(100),
+    errorCode: stableAiErrorCodeSchema,
+  })
+  .strict();
+
+const versionedEventSchema = <
+  Type extends string,
+  AggregateType extends string,
+  Payload extends z.ZodType,
+>(type: Type, aggregateType: AggregateType, payload: Payload) =>
+  z
+    .object({
+      ...eventEnvelopeSchema.shape,
+      type: z.literal(type),
+      schemaVersion: z.literal(1),
+      aggregateType: z.literal(aggregateType),
+      payload,
+    })
+    .strict();
+
+export const knowledgeIngestionRequestedEventSchema = versionedEventSchema(
+  "knowledge.ingestion-requested.v1",
+  "KnowledgeDocument",
+  knowledgeIngestionRequestedPayloadSchema,
+);
+export const aiGuidanceRequestedEventSchema = versionedEventSchema(
+  "ai.guidance-requested.v1",
+  "AiGuidanceOperation",
+  aiGuidanceRequestedPayloadSchema,
+);
+export const aiRecommendationProposedEventSchema = versionedEventSchema(
+  "ai.recommendation-proposed.v1",
+  "AiRecommendation",
+  aiRecommendationProposedPayloadSchema,
+);
+export const aiOperationDeadLetteredEventSchema = versionedEventSchema(
+  "ai.operation-dead-lettered.v1",
+  "AiGuidanceOperation",
+  aiOperationDeadLetteredPayloadSchema,
+);
+export const governedAiEventSchema = z.discriminatedUnion("type", [
+  knowledgeIngestionRequestedEventSchema,
+  aiGuidanceRequestedEventSchema,
+  aiRecommendationProposedEventSchema,
+  aiOperationDeadLetteredEventSchema,
+]);
+
+export type KnowledgeIngestionRequestedPayload = z.infer<typeof knowledgeIngestionRequestedPayloadSchema>;
+export type AiGuidanceRequestedPayload = z.infer<typeof aiGuidanceRequestedPayloadSchema>;
+export type AiRecommendationProposedPayload = z.infer<typeof aiRecommendationProposedPayloadSchema>;
+export type AiOperationDeadLetteredPayload = z.infer<typeof aiOperationDeadLetteredPayloadSchema>;
+export type GovernedAiEvent = z.infer<typeof governedAiEventSchema>;

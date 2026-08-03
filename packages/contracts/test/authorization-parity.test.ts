@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -108,10 +108,10 @@ describeWithOpa("authorization Zod/OPA parity", () => {
   });
 
   for (const fixture of fixtures.valid) {
-    it(`accepts and evaluates: ${fixture.name}`, () => {
+    it(`accepts and evaluates: ${fixture.name}`, async () => {
       const input = materialize(fixture);
       expect(authorizationInputSchema.parse(input)).toEqual(input);
-      const decision = evaluateWithOpa(input);
+      const decision = await evaluateWithOpa(input);
       expect(() => authorizationDecisionSchema.parse(decision)).not.toThrow();
       expect(decision).toMatchObject({
         opaRevision: input.opaRevision,
@@ -119,20 +119,20 @@ describeWithOpa("authorization Zod/OPA parity", () => {
         authorizationRevision: input.authorizationRevision,
         releases: input.releases,
       });
-    });
+    }, OPA_INTEGRATION_TIMEOUT_MS);
   }
 
   for (const fixture of fixtures.invalid) {
-    it(`fails closed identically: ${fixture.name}`, () => {
+    it(`fails closed identically: ${fixture.name}`, async () => {
       const input = materialize(fixture);
       expect(() => authorizationInputSchema.parse(input)).toThrow();
-      expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
-    });
+      expect(await evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
+    }, OPA_INTEGRATION_TIMEOUT_MS);
   }
 
   it("fails closed when the expected OPA runtime revision differs", () => {
     const input = { ...fixtures.baseInput, opaRevision: "platform-authz-v1" };
     expect(authorizationInputSchema.parse(input)).toEqual(input);
-    expect(evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
-  });
+    expect(await evaluateWithOpa(input)).toEqual(canonicalInvalidDecision);
+  }, OPA_INTEGRATION_TIMEOUT_MS);
 });

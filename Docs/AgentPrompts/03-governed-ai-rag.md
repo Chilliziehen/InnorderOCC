@@ -8,7 +8,7 @@ You have full delegated decision authority. Use specification/planning, TDD, sys
 
 Scope:
 
-- Dedicated least-privilege AI database identity/runtime boundary; reserve migration `V015__governed_ai_runtime.sql` and do not edit prior migrations.
+- Dedicated least-privilege AI database identity/runtime boundary; reserve migration `V016__governed_ai_runtime.sql` and do not edit prior migrations.
 - mTLS or the approved short-lived service identity between Core and AI; end-user tokens rejected by AI.
 - One OpenAI-compatible chat/embedding adapter with exact-origin egress policy, DNS/rebinding/private-address controls, no cross-origin redirects, file-backed credentials, capability probing, timeouts, cancellation, rate limits, cost/token accounting, and sanitized telemetry.
 - Knowledge upload/ingestion quarantine, deterministic parsing/chunking, hashes, resumable jobs, embeddings, BUILDING/ACTIVE cutover, coverage/security/quality gates and rollback.

@@ -53,6 +53,7 @@ Compose 从 `infra/compose/.env` 插值，九个必填变量使用 `${VAR:?messa
 | PostgreSQL admin 密码 | `postgres_admin_password` | `postgres` | `/run/secrets/postgres_admin_password` |
 | PostgreSQL Flyway 密码 | `postgres_flyway_password` | `postgres`、`core` | 初始化文件；`spring.flyway.password` |
 | PostgreSQL runtime 密码 | `postgres_runtime_password` | `postgres`、`core` | 初始化文件；`spring.datasource.password` |
+| PostgreSQL AI runtime 密码 | `postgres_ai_runtime_password` | `postgres` | 初始化文件；主机路径为 `AI_DATABASE_PASSWORD_FILE` |
 | Redis 密码 | `redis_password` | `redis`、`core` | Redis 文件；`spring.data.redis.password` |
 | MinIO root 用户名 | `minio_root_user` | `minio`、`minio-init` | `/run/secrets/minio_root_user` |
 | MinIO root 密码 | `minio_root_password` | `minio`、`minio-init` | `/run/secrets/minio_root_password` |
@@ -61,7 +62,7 @@ Compose 从 `infra/compose/.env` 插值，九个必填变量使用 `${VAR:?messa
 
 唯一性规则：
 
-- 三个 PostgreSQL 密码必须两两不同；初始化脚本会强制检查。
+- 四个 PostgreSQL 密码必须两两不同；初始化脚本会强制检查。
 - MinIO root 用户名与应用用户名必须不同。
 - MinIO root 密码与应用密码必须不同。
 - 运维基线要求九个值全部独立，禁止跨 cursor、PostgreSQL、Redis 和 MinIO 复用。

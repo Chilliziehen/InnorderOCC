@@ -1,9 +1,13 @@
 CREATE ROLE innorder_runtime LOGIN PASSWORD 'runtime-test-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE innorder_runtime SET search_path TO flowable, pg_catalog;
+CREATE ROLE innorder_ai_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+ALTER ROLE innorder_ai_runtime SET search_path TO pg_catalog;
 CREATE ROLE innorder_flyway LOGIN PASSWORD 'flyway-test-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT innorder_runtime TO innorder_flyway;
+GRANT innorder_ai_runtime TO innorder_flyway;
 REVOKE ALL ON DATABASE innorder_occ FROM PUBLIC;
 GRANT CONNECT ON DATABASE innorder_occ TO innorder_runtime;
+GRANT CONNECT ON DATABASE innorder_occ TO innorder_ai_runtime;
 GRANT CONNECT, TEMPORARY, CREATE ON DATABASE innorder_occ TO innorder_flyway;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO innorder_flyway;

@@ -17,3 +17,4 @@ BEGIN;
 \ir migrations/V014__evidence_risk_resource.sql
 COMMIT;
 \ir migrations/V015__cohort_api_lifecycle.sql
+\ir migrations/V016__governed_ai_runtime.sql

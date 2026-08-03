@@ -149,7 +149,7 @@ async function main() {
 
   const opa = requiredOpa ?? findOpa();
   if (opa) {
-    console.log(`[verify] real OPA checks enabled with ${opa}`);
+    console.log("[verify] real OPA checks enabled");
   } else {
     console.log("[verify] OPA binary unavailable; running static Rego contracts");
   }
@@ -162,12 +162,15 @@ async function main() {
   await run("database static contracts", npm, ["run", "test:database"]);
 
   if (testsOnly) {
-    await run("Core Kotlin tests", gradle, [":services:core:test", "--dependency-verification", "strict"]);
+    await run("Core Kotlin tests", gradle, [
+      ":services:core:test", "--dependency-verification", "strict", "-PexcludeStrictAuthz=true",
+    ]);
     return;
   }
 
   if (extended) {
     await runPglite();
+    if (full) await run("real PostgreSQL governed AI integration", process.execPath, ["--test", "database/tests/postgresql-governed-ai.test.mjs"]);
     await run("npm high-severity vulnerability audit", npm, [
       "audit", "--audit-level", "high", "--registry", "https://registry.npmjs.org", "--cache", npmAuditCache,
     ]);
@@ -176,9 +179,16 @@ async function main() {
     ]);
   }
 
-  await run("Core Gradle build and tests", gradle, [":services:core:build", "--dependency-verification", "strict"]);
+  await run("Core Gradle build and tests", gradle, [
+    ":services:core:build", "--dependency-verification", "strict", "-PexcludeStrictAuthz=true",
+  ]);
   await run("TypeScript workspace typechecks", npm, ["run", "typecheck", "--workspaces", "--if-present"]);
   await run("AI service build", npm, ["run", "build", "--workspace", "@innorder/ai-service"]);
+  if (full) {
+    await run("parser sandbox container integration", process.execPath, ["--test", "services/ai/test/parser-container.test.mjs"]);
+    await run("parser Compose runtime integration", process.execPath, ["--test", "services/ai/test/parser-compose-container.test.mjs"]);
+    await run("MinIO and ClamAV ingestion integration", process.execPath, ["--test", "services/ai/test/ingestion-container.test.mjs"]);
+  }
   await run("Electron package build", npm, ["run", "build", "--workspace", "@innorder/desktop"]);
 
   if (extended && process.platform === "win32") {
@@ -186,6 +196,7 @@ async function main() {
   }
 
   if (full) {
+    if (dryRun) console.log("[verify] strict environment keys: OPA_PATH, INNORDER_STRICT_AUTHZ_TESTS");
     await run("strict Core authorization and real OPA integration", gradle, [
       ":services:core:test",
       "--tests", "com.innorder.occ.PlatformSecurityKernelIntegrationTest",

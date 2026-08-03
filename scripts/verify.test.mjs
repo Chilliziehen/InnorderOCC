@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -118,7 +118,43 @@ test("full verification audits official npm provenance and enforces strict Gradl
   assert.match(result.stdout, /OutboxPublisherIntegrationTest/u);
   assert.match(result.stdout, /KafkaOutboxEventSenderProtocolIntegrationTest/u);
   assert.match(result.stdout, /strict Core authorization and real OPA integration/u);
+  assert.match(result.stdout, /real PostgreSQL governed AI integration/u);
+  assert.match(result.stdout, /database\/tests\/postgresql-governed-ai\.test\.mjs/u);
+  assert.match(result.stdout, /services\/ai\/test\/parser-compose-container\.test\.mjs/u);
   assert.match(result.stdout, /enforce Docker integration JUnit results/u);
+});
+
+test("quick verification excludes the strict OPA integration gate", () => {
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--dry-run"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /gradlew(?:\.bat)? :services:core:build --dependency-verification strict -PexcludeStrictAuthz=true/u,
+  );
+  assert.doesNotMatch(result.stdout, /database\/tests\/postgresql-governed-ai\.test\.mjs/u);
+});
+
+test("full verification runs the strict OPA test and prints only strict environment key names", () => {
+  const opaSecret = "C:\\secret\\opa-value.exe";
+  const strictSecret = "strict-secret-value";
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--full", "--dry-run"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+    env: { ...process.env, OPA_PATH: opaSecret, INNORDER_STRICT_AUTHZ_TESTS: strictSecret },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /strict Core authorization and real OPA integration[\s\S]*--tests com\.innorder\.occ\.PlatformSecurityKernelIntegrationTest/u,
+  );
+  assert.match(result.stdout, /strict environment keys: OPA_PATH, INNORDER_STRICT_AUTHZ_TESTS/u);
+  assert.doesNotMatch(result.stdout, new RegExp(opaSecret.replaceAll("\\", "\\\\"), "u"));
+  assert.doesNotMatch(result.stdout, new RegExp(strictSecret, "u"));
 });
 
 async function fakeTool(t, cwd, name, exitCode, output = name.startsWith("opa-available") ? "Version: 1.5.1" : "") {
@@ -131,6 +167,33 @@ async function fakeTool(t, cwd, name, exitCode, output = name.startsWith("opa-av
   t.after(() => rm(path, { force: true }));
   return path;
 }
+
+async function fakeNpmStoppingBeforeGradle(t, cwd) {
+  const path = join(cwd, process.platform === "win32" ? "npm.cmd" : "npm");
+  const content = process.platform === "win32"
+    ? '@echo off\r\nif "%~1 %~2"=="run test:database" exit /b 19\r\nexit /b 0\r\n'
+    : '#!/bin/sh\n[ "$1 $2" = "run test:database" ] && exit 19\nexit 0\n';
+  await writeFile(path, content, "utf8");
+  if (process.platform !== "win32") await chmod(path, 0o755);
+  t.after(() => rm(path, { force: true }));
+  return path;
+}
+
+test("real OPA status logging does not disclose the configured executable path", async (t) => {
+  const cwd = await temporaryToolCwd(t);
+  const opa = await fakeTool(t, cwd, "opa-available-secret-sentinel", 0);
+  await fakeNpmStoppingBeforeGradle(t, cwd);
+
+  const result = spawnSync(process.execPath, ["scripts/verify.mjs", "--tests"], {
+    cwd: fileURLToPath(new URL("../", import.meta.url)),
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${cwd}${delimiter}${process.env.PATH ?? ""}`, OPA_PATH: opa },
+  });
+
+  assert.equal(result.status, 19, result.stderr);
+  assert.match(result.stdout, /real OPA checks enabled/u);
+  assert.doesNotMatch(result.stdout, /opa-available-secret-sentinel/u);
+});
 
 function runStrictFull(environment) {
   return spawnSync(process.execPath, ["scripts/verify.mjs", "--full"], {

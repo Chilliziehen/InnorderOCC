@@ -33,7 +33,7 @@ if [ "$root_user" = "$app_user" ] || [ "$root_password" = "$app_password" ]; the
 fi
 
 mc alias set local http://minio:9000 "$root_user" "$root_password"
-mc mb --ignore-existing "local/$MINIO_BUCKET"
+mc mb --with-lock --ignore-existing "local/$MINIO_BUCKET"
 
 cat > /tmp/occ-policy.json <<EOF
 {
@@ -46,7 +46,7 @@ cat > /tmp/occ-policy.json <<EOF
     },
     {
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:PutObjectRetention", "s3:GetObjectRetention"],
       "Resource": ["arn:aws:s3:::$MINIO_BUCKET/*"]
     }
   ]

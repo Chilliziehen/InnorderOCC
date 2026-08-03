@@ -1,0 +1,8 @@
+**
+!services/
+!services/ai/
+!services/ai/dist/
+!services/ai/dist/**
+!services/ai/parser-runtime/
+!services/ai/parser-runtime/package.json
+!services/ai/parser-runtime/package-lock.json

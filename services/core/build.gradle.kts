@@ -93,6 +93,12 @@ tasks.withType<Test>().configureEach {
     systemProperty("innorder.fullIntegration", fullEvidenceIntegration.get())
 }
 
+tasks.test {
+    if (providers.gradleProperty("excludeStrictAuthz").getOrElse("false").toBoolean()) {
+        exclude("**/PlatformSecurityKernelIntegrationTest.class")
+    }
+}
+
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21

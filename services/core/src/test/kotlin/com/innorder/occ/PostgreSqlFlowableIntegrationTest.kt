@@ -170,7 +170,7 @@ class PostgreSqlFlowableIntegrationTest(
             .containsExactly("innorder_flyway")
         // Agent 06 must reconcile this exact list to V001-V015 after merging reserved V013 and V015.
         assertThat(flywayJdbc.queryForList("SELECT version::integer FROM flyway_schema_history WHERE success ORDER BY installed_rank", Int::class.java))
-            .containsExactlyElementsOf((1..15).toList())
+            .containsExactlyElementsOf((1..16).toList())
         assertThat(flywayJdbc.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = 'iam' AND table_name = 'user_account' ORDER BY ordinal_position",
             String::class.java,

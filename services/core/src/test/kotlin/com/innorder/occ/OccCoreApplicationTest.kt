@@ -35,6 +35,9 @@ class OccCoreApplicationTest(
     fun `application enables bounded graceful shutdown`() {
         assertThat(environment.getProperty("server.shutdown")).isEqualTo("graceful")
         assertThat(environment.getProperty("spring.lifecycle.timeout-per-shutdown-phase")).isEqualTo("30s")
+        assertThat(environment.getProperty("server.ssl.enabled")).isEqualTo("false")
+        assertThat(environment.getProperty("server.ssl.enabled-protocols")).isEqualTo("TLSv1.3")
+        assertThat(environment.getProperty("server.ssl.client-auth")).isEqualTo("want")
     }
 
     @Test

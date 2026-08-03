@@ -101,6 +101,28 @@ export {
   workflowEventTypeSchema,
 } from "./events.js";
 export type { EventEnvelope, WorkflowEvent, WorkflowEventType } from "./events.js";
+export * from "./governed-ai.js";
+
+export {
+  aiGuidanceRequestedEventSchema,
+  aiGuidanceRequestedPayloadSchema,
+  aiOperationDeadLetteredEventSchema,
+  aiOperationDeadLetteredPayloadSchema,
+  aiRecommendationProposedEventSchema,
+  aiRecommendationProposedPayloadSchema,
+  eventEnvelopeSchema,
+  governedAiEventSchema,
+  knowledgeIngestionRequestedEventSchema,
+  knowledgeIngestionRequestedPayloadSchema,
+} from "./events.js";
+export type {
+  AiGuidanceRequestedPayload,
+  AiOperationDeadLetteredPayload,
+  AiRecommendationProposedPayload,
+  EventEnvelope,
+  GovernedAiEvent,
+  KnowledgeIngestionRequestedPayload,
+} from "./events.js";
 
 export {
   authorizationDecisionSchema,

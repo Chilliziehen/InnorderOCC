@@ -27,6 +27,12 @@ if (runtimeRole.rows.length !== 1 || runtimeRole.rows[0].rolcanlogin !== false) 
   throw new Error('runtime role bootstrap must be idempotent and create a NOLOGIN role');
 }
 console.log('passed idempotent NOLOGIN runtime role bootstrap');
+const aiRuntimeRole = await db.query(
+  "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'innorder_ai_runtime'",
+);
+if (aiRuntimeRole.rows.length !== 1 || aiRuntimeRole.rows[0].rolcanlogin !== false) {
+  throw new Error('AI runtime role bootstrap must be idempotent and create a NOLOGIN role');
+}
 
 const migrationDir = resolve('database/migrations');
 const migrations = [
@@ -45,6 +51,7 @@ const migrations = [
   'V013__process_task_workflow.sql',
   'V014__evidence_risk_resource.sql',
   'V015__cohort_api_lifecycle.sql',
+  'V016__governed_ai_runtime.sql',
 ];
 const appliedMigrations = [];
 
@@ -55,6 +62,12 @@ async function applyMigration(migration) {
       /CREATE EXTENSION IF NOT EXISTS vector;/i,
       'CREATE DOMAIN vector AS double precision[];',
     );
+  }
+  if (migration === 'V016__governed_ai_runtime.sql') {
+    sql = sql
+      .replace(/\(1 - \(embedding\.embedding OPERATOR\(public\.<=>\) p_query_embedding\)\)::double precision/g,
+        '1::double precision')
+      .replace(/embedding\.embedding OPERATOR\(public\.<=>\) p_query_embedding/g, 'chunk.id::text');
   }
   await db.exec(sql);
   appliedMigrations.push(migration);
@@ -68,6 +81,7 @@ const stagedUpgradeMigrations = new Set([
   'V013__process_task_workflow.sql',
   'V014__evidence_risk_resource.sql',
   'V015__cohort_api_lifecycle.sql',
+  'V016__governed_ai_runtime.sql',
 ]);
 for (const migration of migrations.filter((name) => !stagedUpgradeMigrations.has(name))) {
   await applyMigration(migration);
@@ -680,6 +694,114 @@ assert.deepEqual(workflowSchema.rows, [{
   notification: true,
 }], 'V013 workflow objects must exist after migration application');
 console.log('verified applied migration list and V013 workflow objects');
+await applyMigration('V016__governed_ai_runtime.sql');
+
+await db.exec(`
+  INSERT INTO ai.model_provider
+    (id, provider_type, base_url, secret_ref, capabilities, data_policy, state)
+  VALUES ('90000000-0000-7000-8000-000000000005', 'TEST', 'https://invalid.test',
+          'test-secret', '{}'::jsonb, '{}'::jsonb, 'ACTIVE');
+  INSERT INTO ai.model_profile
+    (id, provider_id, model_key, purpose, parameters, capability_snapshot, timeout_ms,
+     rate_limit, cost_rule, state)
+  VALUES ('90000000-0000-7000-8000-000000000040', '90000000-0000-7000-8000-000000000005',
+          'versioned-model', 'CHAT', '{}'::jsonb, '{}'::jsonb, 1000, '{}'::jsonb, '{}'::jsonb, 'ACTIVE');
+`);
+const profileUpdate = await db.query(`
+  UPDATE ai.model_profile
+  SET timeout_ms = 2000
+  WHERE id = '90000000-0000-7000-8000-000000000040' AND row_version = 0
+  RETURNING row_version::text, updated_at > created_at AS timestamp_advanced
+`);
+if (profileUpdate.rows.length !== 1
+    || profileUpdate.rows[0].row_version !== '1'
+    || !profileUpdate.rows[0].timestamp_advanced) {
+  throw new Error('model profile expected-version update did not advance exactly once');
+}
+const staleProfileUpdate = await db.query(`
+  UPDATE ai.model_profile
+  SET timeout_ms = 3000
+  WHERE id = '90000000-0000-7000-8000-000000000040' AND row_version = 0
+  RETURNING id
+`);
+const persistedProfile = await db.query(`
+  SELECT timeout_ms, row_version::text
+  FROM ai.model_profile
+  WHERE id = '90000000-0000-7000-8000-000000000040'
+`);
+if (staleProfileUpdate.rows.length !== 0
+    || persistedProfile.rows.length !== 1
+    || persistedProfile.rows[0].timeout_ms !== 2000
+    || persistedProfile.rows[0].row_version !== '1') {
+  throw new Error('stale model profile expected version did not conflict');
+}
+console.log('passed model profile optimistic version coverage');
+
+for (const relation of [
+  'authz.ai_authorization_grant',
+  'authz.ai_authorized_document',
+  'ai.ingestion_job',
+  'ai.ingestion_attempt',
+  'ai.event_consumption',
+  'ai.model_invocation',
+  'ai.retrieval_trace',
+  'ai.retrieval_hit',
+  'ai.embedding_space_gate_result',
+  'ai.embedding_space_gate_evaluation',
+  'ai.embedding_space_gate_case_evidence',
+  'ai.retention_policy',
+]) {
+  const result = await db.query('SELECT to_regclass($1) IS NOT NULL AS present', [relation]);
+  if (!result.rows[0]?.present) throw new Error(`${relation} is missing after V015`);
+}
+for (const routine of [
+  'authz.consume_ai_authorization_grant',
+  'ai.claim_ingestion_jobs',
+  'ai.claim_event_consumptions',
+  'ai.authorized_hybrid_retrieval',
+  'ai.persist_ingestion_document_version',
+  'ai.persist_ingestion_chunk_embedding',
+  'ai.checkpoint_ingestion_attempt',
+  'ai.finalize_ingestion_job',
+  'ai.register_event_consumption',
+  'ai.finalize_event_consumption',
+  'ai.transition_ai_run',
+  'ai.start_model_invocation',
+  'ai.finalize_model_invocation',
+  'ai.persist_run_artifact',
+  'ai.record_retrieval_trace',
+  'ai.record_retrieval_hit',
+  'ai.begin_embedding_space_gate',
+  'ai.record_embedding_gate_case',
+  'ai.finalize_embedding_space_gate',
+  'ai.cleanup_expired_run_artifacts',
+]) {
+  const result = await db.query(`
+    SELECT count(*)::integer AS count
+    FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname || '.' || p.proname = $1
+      AND p.prosecdef
+      AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']
+  `, [routine]);
+  if (result.rows[0]?.count !== 1) throw new Error(`${routine} is not a hardened SECURITY DEFINER function`);
+}
+console.log('passed V015 governed AI contracts');
+
+const provenanceColumns = await db.query(`
+  SELECT table_name, column_name
+  FROM information_schema.columns
+  WHERE table_schema = 'ai'
+    AND ((table_name = 'ingestion_job' AND column_name IN
+      ('source_object_hash', 'normalized_content_hash', 'parser_version', 'chunker_version'))
+      OR (table_name = 'model_invocation' AND column_name = 'provider_request_id_hash'))
+`);
+if (provenanceColumns.rows.length !== 5) throw new Error('V015 provenance columns are incomplete');
+const rawProviderColumn = await db.query(`
+  SELECT count(*)::integer AS count FROM information_schema.columns
+  WHERE table_schema = 'ai' AND table_name = 'model_invocation' AND column_name = 'provider_request_id'
+`);
+if (rawProviderColumn.rows[0]?.count !== 0) throw new Error('raw provider request ID column must not exist');
 
 await db.exec(`UPDATE audit.idempotency_record
                SET state = 'COMPLETED', response_status = 200, response_digest = repeat('e', 64)

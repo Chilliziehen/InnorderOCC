@@ -13,6 +13,8 @@ services:
     secrets:
       - source: postgres_admin_password
         target: postgres_admin_password
+      - source: postgres_ai_runtime_password
+        target: postgres_ai_runtime_password
       - source: postgres_flyway_password
         target: postgres_flyway_password
       - source: postgres_runtime_password
@@ -143,6 +145,55 @@ services:
     networks: [backend]
     restart: unless-stopped
 
+  parser-volume-init:
+    image: alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c
+    user: "0:0"
+    command: ["/bin/sh", "-ec", "chown -R 1000:1000 /parser/input /parser/requests /parser/output"]
+    volumes:
+      - parser-input:/parser/input
+      - parser-requests:/parser/requests
+      - parser-output:/parser/output
+    networks: [backend]
+    restart: "no"
+
+  parser:
+    build:
+      context: ../..
+      dockerfile: services/ai/parser.Dockerfile
+    environment:
+      PARSER_EXECUTION_TIMEOUT_MS: 60000
+      PARSER_INPUT_ROOT: /parser/input
+      PARSER_MAX_OLD_GENERATION_MB: 256
+      PARSER_MAX_RESULT_BYTES: 16777216
+      PARSER_OUTPUT_ROOT: /parser/output
+      PARSER_POLL_MS: 25
+      PARSER_REQUEST_ROOT: /parser/requests
+    depends_on:
+      parser-volume-init:
+        condition: service_completed_successfully
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m"]
+    user: node
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./parser-seccomp.json
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 64
+    volumes:
+      - parser-input:/parser/input:ro
+      - parser-requests:/parser/requests
+      - parser-output:/parser/output
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('fs').stat('/parser/output/.parser-heartbeat.json',(e,s)=>process.exit(e||Date.now()-s.mtimeMs>10000?1:0))"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    restart: unless-stopped
+
   ai:
     build:
       context: ../..
@@ -152,7 +203,23 @@ services:
       HOST: 0.0.0.0
       LOG_LEVEL: ${AI_LOG_LEVEL:-info}
       PORT: 3100
+      AI_INGESTION_ENABLED: "true"
+      AI_PARSER_INPUT_ROOT: /parser/input
+      AI_PARSER_REQUEST_ROOT: /parser/requests
+      AI_PARSER_OUTPUT_ROOT: /parser/output
+      AI_PARSER_TIMEOUT_MS: 60000
+      AI_PARSER_POLL_MS: 25
+      AI_PARSER_HEARTBEAT_MAX_AGE_MS: 10000
       npm_package_version: ${APP_VERSION:-0.1.0}
+    depends_on:
+      parser:
+        condition: service_healthy
+      parser-volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - parser-input:/parser/input
+      - parser-requests:/parser/requests
+      - parser-output:/parser/output
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s
@@ -275,6 +342,9 @@ volumes:
   kafka-data:
   redis-data:
   minio-data:
+  parser-input:
+  parser-output:
+  parser-requests:
 
 networks:
   backend:
@@ -287,6 +357,8 @@ secrets:
     file: ${CURSOR_HMAC_KEY_FILE:?Set CURSOR_HMAC_KEY_FILE}
   postgres_admin_password:
     file: ${POSTGRES_ADMIN_PASSWORD_FILE:?Set POSTGRES_ADMIN_PASSWORD_FILE}
+  postgres_ai_runtime_password:
+    file: ${AI_DATABASE_PASSWORD_FILE:?Set AI_DATABASE_PASSWORD_FILE}
   postgres_flyway_password:
     file: ${POSTGRES_FLYWAY_PASSWORD_FILE:?Set POSTGRES_FLYWAY_PASSWORD_FILE}
   postgres_runtime_password:

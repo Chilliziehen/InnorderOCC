@@ -118,7 +118,7 @@ class BootstrapAdministratorStartupIntegrationTest {
                 .run(*arguments(postgres)).use {
                     assertThat(ready).isTrue()
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                        .isEqualTo(15)
+                        .isEqualTo(16)
                     assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java))
                         .isEqualTo(1)
                     assertThat(jdbc.queryForObject(
@@ -151,7 +151,7 @@ class BootstrapAdministratorStartupIntegrationTest {
 
             assertThat(ready).isFalse()
             assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history", Long::class.java))
-                .isEqualTo(15)
+                .isEqualTo(16)
             assertThat(jdbc.queryForObject("SELECT count(*) FROM iam.user_account", Long::class.java)).isZero()
             assertThat(jdbc.queryForObject(
                 "SELECT count(*) FROM catalog.package_version WHERE id = ? AND status = 'PUBLISHED'",
