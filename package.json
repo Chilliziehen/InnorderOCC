@@ -32,7 +32,8 @@
     "deploy:preflight": "node scripts/deploy/preflight.mjs",
     "deploy:up": "node scripts/deploy/deploy.mjs",
     "deploy:backup": "node scripts/deploy/backup.mjs",
-    "release": "node scripts/deploy/release.mjs"
+    "release": "node scripts/deploy/release.mjs",
+    "menu": "node scripts/build-menu.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.4",
